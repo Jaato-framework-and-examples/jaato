@@ -55,13 +55,15 @@
  * the hidden set (the ``scrub_secret_env`` ``!NAME`` idiom), which is
  * removed again by unhiding it a second time (back to default-hidden).
  */
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
 import { downloadFromPanel, servesDownloads } from "@/app/downloads";
 import { getClient } from "@/sdk/connection";
 import { imageMimeFor, isMarkdownPath } from "@/protocol/workspacePaths";
+import { isLogPath } from "@/protocol/logParse";
+import { languageForPath } from "@/protocol/codeLanguages";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
@@ -234,9 +236,24 @@ const MAX_VIEWER_BYTES = 512 * 1024;
  * bytes are held in memory and decoded by the browser.
  */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+/**
+ * Logs get the largest cap: a session log is read from its end, and the
+ * text cap would send every long-running session's log to "use download".
+ * The log view virtualises its rows, so the size costs a parse and memory,
+ * not layout.  The daemon's fetch is whole-file (no range), so this is
+ * also what one ``follow`` re-fetch moves.
+ */
+const MAX_LOG_BYTES = 20 * 1024 * 1024;
+
+/** The largest file the viewer decodes as text, by kind. */
+function textCapFor(path: string): number {
+  return isLogPath(path) ? MAX_LOG_BYTES : MAX_VIEWER_BYTES;
+}
 
 const MarkdownView = lazy(() => import("./MarkdownView"));
 const ImageView = lazy(() => import("./ImageView"));
+const LogView = lazy(() => import("./LogView"));
+const CodeView = lazy(() => import("./CodeView"));
 
 /**
  * What the content viewer is showing.  ``back`` is the trail of files the
@@ -284,13 +301,38 @@ const VIEW_BTN = "link text-[11px]";
  * ``ImageView``, zoomable, with ``expand`` giving it the taller area.  A
  * relative image in a markdown document, and a mermaid diagram, open here
  * as images too, with ``back`` to the document.
+ *
+ * A log (``isLogPath``) is shown by the lazily-loaded ``LogView``, one row
+ * per entry with filters and search; ``raw`` switches to the text.  Its
+ * ``follow`` re-fetches the file (``onReload``) each time the daemon
+ * reports it changed -- the ``workspaceSeqs`` entry for this path moves --
+ * so a running session's log can be watched as it grows.  Following stops
+ * when another file is opened.
+ *
+ * A source file (``languageForPath``) is syntax-highlighted by the
+ * lazily-loaded ``CodeView``, with line numbers; any other text is shown
+ * as it is.
  */
-function FileContentViewer({ state, onClose, onOpen, onBack, onOpenDiagram }: { state: ViewerState; onClose: () => void; onOpen: (path: string) => void; onBack: () => void; onOpenDiagram: (label: string, data: Uint8Array, mime: string) => void }) {
+function FileContentViewer({ state, onClose, onOpen, onBack, onOpenDiagram, onReload }: { state: ViewerState; onClose: () => void; onOpen: (path: string) => void; onBack: () => void; onOpenDiagram: (label: string, data: Uint8Array, mime: string) => void; onReload: () => void }) {
   const markdown = isMarkdownPath(state.path);
+  const log = isLogPath(state.path);
   const [raw, setRaw] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [follow, setFollow] = useState(false);
   const height = expanded ? "max-h-[75vh]" : "max-h-64";
-  const rendered = markdown && !raw && state.status === "text";
+  const rendered = (markdown || log) && !raw && state.status === "text";
+  const code = !markdown && !log && languageForPath(state.path) !== null;
+  useEffect(() => { setFollow(false); }, [state.path]);
+  // A change the daemon reported for this file, while following: fetch it again.
+  const seq = useJaato((s) => s.workspaceSeqs[state.path]);
+  const lastSeq = useRef(seq);
+  useEffect(() => {
+    if (seq === lastSeq.current) return;
+    lastSeq.current = seq;
+    if (follow && log) onReload();
+    // ``onReload`` is recreated every render and reads nothing stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seq, follow, log]);
   return (
     <div className="mb-2.5 border hairline" data-testid="file-viewer">
       <div className="flex items-center gap-2 px-2 py-1.5 border-b hairline">
@@ -303,6 +345,11 @@ function FileContentViewer({ state, onClose, onOpen, onBack, onOpenDiagram }: { 
             {raw ? "rendered" : "raw"}
           </button>
         )}
+        {log && state.status === "text" && (
+          <button type="button" className={VIEW_BTN} onClick={() => setRaw((r) => !r)} aria-pressed={raw} title={raw ? "Show one row per log entry" : "Show the log as written"}>
+            {raw ? "entries" : "raw"}
+          </button>
+        )}
         {(state.status === "text" || state.status === "image") && (
           <button type="button" className={VIEW_BTN} onClick={() => setExpanded((e) => !e)} aria-pressed={expanded}>{expanded ? "shrink" : "expand"}</button>
         )}
@@ -312,7 +359,12 @@ function FileContentViewer({ state, onClose, onOpen, onBack, onOpenDiagram }: { 
       {state.status === "loading" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Loading…</div>}
       {state.status === "error" && <div className="px-2 py-2 text-[12px] text-error" role="alert">{state.error}</div>}
       {state.status === "binary" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Binary or oversized -- use download.</div>}
-      {rendered && (
+      {rendered && log && (
+        <Suspense fallback={<div className="px-2 py-2 text-[12px] text-text-muted italic">Loading viewer…</div>}>
+          <LogView key={state.path} text={state.text ?? ""} heightClass={expanded ? "h-[75vh]" : "h-64"} follow={follow} onFollowChange={setFollow} onReload={onReload} />
+        </Suspense>
+      )}
+      {rendered && markdown && (
         <div className={`px-3 py-2 ${height} overflow-auto`}>
           <Suspense fallback={<div className="text-[12px] text-text-muted italic">Rendering…</div>}>
             <MarkdownView key={state.path} source={state.text ?? ""} path={state.path} fetchFile={fetchWorkspaceBytes} onOpen={onOpen} onOpenDiagram={onOpenDiagram} />
@@ -324,7 +376,12 @@ function FileContentViewer({ state, onClose, onOpen, onBack, onOpenDiagram }: { 
           <ImageView key={state.path} data={state.data} mime={state.mime ?? "application/octet-stream"} label={state.path} heightClass={expanded ? "!h-[75vh]" : "!h-64"} />
         </Suspense>
       )}
-      {state.status === "text" && !rendered && (
+      {state.status === "text" && !rendered && code && (
+        <Suspense fallback={<div className="px-2 py-2 text-[12px] text-text-muted italic">Loading viewer…</div>}>
+          <CodeView key={state.path} text={state.text ?? ""} path={state.path} heightClass={height} />
+        </Suspense>
+      )}
+      {state.status === "text" && !rendered && !code && (
         <pre className={`m-0 px-2 py-2 text-[11.5px] font-mono whitespace-pre-wrap break-words ${height} overflow-auto`}>{state.text}</pre>
       )}
     </div>
@@ -391,12 +448,26 @@ export function WorkspacePanel() {
           setViewer(data.byteLength > MAX_IMAGE_BYTES ? { path, status: "binary", back } : { path, status: "image", data, mime, back });
           return;
         }
-        if (data.byteLength > MAX_VIEWER_BYTES) { setViewer({ path, status: "binary", back }); return; }
+        if (data.byteLength > textCapFor(path)) { setViewer({ path, status: "binary", back }); return; }
         const text = decodeAsText(data);
         setViewer(text == null ? { path, status: "binary", back } : { path, status: "text", text, back });
       } catch (err) {
         setViewer({ path, status: "error", error: err instanceof Error ? err.message : String(err), back });
       }
+    })();
+  };
+  // The same file again, in place: no "Loading…" in between, and dropped
+  // if the viewer has moved on to another file by the time it arrives.
+  // What a log's ``follow`` and ``reload`` use.
+  const refreshFile = (path: string) => {
+    void (async () => {
+      try {
+        const { event, data } = await getClient().fetchWorkspaceFile(path);
+        if (!event.ok || !data || data.byteLength > textCapFor(path)) return;
+        const text = decodeAsText(data);
+        if (text == null) return;
+        setViewer((v) => (v && v.path === path && v.status === "text" && v.text !== text ? { ...v, text } : v));
+      } catch { /* keep what is shown */ }
     })();
   };
   // A tool row's ``view`` (``viewWorkspaceFile``) asks from outside the
@@ -428,7 +499,7 @@ export function WorkspacePanel() {
       {notice && (
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
-      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} onOpen={followLink} onBack={goBack} onOpenDiagram={openDiagram} />}
+      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} onOpen={followLink} onBack={goBack} onOpenDiagram={openDiagram} onReload={() => refreshFile(viewer.path)} />}
       <ResetBar total={total} isReset={isReset} />
       {total === 0 ? (
         <div className="text-xs text-text-muted italic">

@@ -353,6 +353,35 @@ const MOCK_DOCS: Record<string, string> = {
   "docs/ARCH.md": "# Architecture\n\n![the chart](chart.png)\n\n```mermaid\ngraph TD\n  Client --> Daemon\n  Daemon --> Runner\n```\n\n![build badge](https://img.example/badge.svg)\n",
 };
 
+/** One line of the daemon's session-log format, at ``second`` past 07:38:00. */
+function mockLogLine(second: number, level: string, logger: string, message: string): string {
+  const m = String(Math.floor(second / 60)).padStart(2, "0");
+  const sec = String(second % 60).padStart(2, "0");
+  return `2026-09-27 07:${38 + Number(m)}:${sec},${String((second * 37) % 1000).padStart(3, "0")} [${level}] ${logger}: ${message}`;
+}
+
+/**
+ * A session log and a JSON file for the Files viewer's log and code views
+ * (the ``write a session log`` scenario); ``append to the log`` grows the
+ * log, as a running session does.  Mutable, so ``answerFileFetch`` serves
+ * the current text.
+ */
+const MOCK_TEXT: Record<string, string> = {
+  "logs/session.log": [
+    ...Array.from({ length: 240 }, (_, i) => i % 3 === 0
+      ? mockLogLine(i, "INFO", "jaato_server.server.session_manager", `turn ${i} started`)
+      : mockLogLine(i, "DEBUG", "jaato_server.server.runner.rpc", `[RPC_DIAG] daemon DISPATCHED id=${i} method=session.send_message`)),
+    mockLogLine(241, "WARNING", "jaato_server.shared.plugins.gc", "context at 85% of the window"),
+    mockLogLine(242, "ERROR", "jaato_server.server.core", "turn failed: provider refused the request"),
+    "Traceback (most recent call last):",
+    '  File "core.py", line 812, in model_thread',
+    "ValueError: provider refused the request",
+    mockLogLine(243, "INFO", "jaato_server.server.session_manager", "session idle"),
+    "",
+  ].join("\n"),
+  "data/config.json": '{\n  "name": "demo",\n  "retries": 3,\n  "enabled": true\n}\n',
+};
+
 /**
  * ``workspace.file.fetch`` (protocol 1.20), with the daemon's rules
  * (``server/workspace_download.py``): a path that climbs out is
@@ -372,7 +401,7 @@ function answerFileFetch(c: Client, ev: Record<string, unknown>): void {
   if (name === ".env") { answer({ ok: false, path, category: "credential", error: `${path} holds credentials and cannot be downloaded` }); return; }
   const status = monitorFor(c).files.get(path)?.status;
   if (!status || status === "deleted") { answer({ ok: false, path, category: "not_found", error: `no file at ${path}` }); return; }
-  const data = MOCK_BINARY[path] ?? Buffer.from(MOCK_DOCS[path] ?? `mock content of ${path}\n`);
+  const data = MOCK_BINARY[path] ?? Buffer.from(MOCK_TEXT[path] ?? MOCK_DOCS[path] ?? `mock content of ${path}\n`);
   answer({ ok: true, path, name, size: data.length, mime_type: name.endsWith(".txt") ? "text/plain" : "application/octet-stream" });
   if (!metadataOnly && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
 }
@@ -564,6 +593,13 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "writeNewFile", call_id: chartId, success: true, duration_seconds: 0.02, show_output: false, path: "docs/chart.png" });
     emitWorkspaceChanges(c, [...Object.keys(MOCK_DOCS), ...Object.keys(MOCK_BINARY)].map((path) => ({ path, status: "created" })));
     await stream(c, agentId, "Wrote the docs.");
+  } else if (lower.includes("write a session log")) {
+    emitWorkspaceChanges(c, Object.keys(MOCK_TEXT).map((path) => ({ path, status: "created" })));
+    await stream(c, agentId, "Wrote the log.");
+  } else if (lower.includes("append to the log")) {
+    MOCK_TEXT["logs/session.log"] += mockLogLine(299, "ERROR", "jaato_server.server.core", "a late failure appended") + "\n";
+    emitWorkspaceChanges(c, [{ path: "logs/session.log", status: "modified" }]);
+    await stream(c, agentId, "Appended.");
   } else if (lower.includes("diag refuse")) {
     // Arms the owner-gate refusal for the NEXT ``session.diagnostics``
     // check, so the panel's refusal rendering is exercised against the
