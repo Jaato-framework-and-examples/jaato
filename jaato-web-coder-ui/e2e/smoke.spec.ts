@@ -1755,3 +1755,63 @@ test("image viewer: a written image opens zoomable from its tool row, and a diag
   await viewer.getByRole("button", { name: "Back to docs/ARCH.md" }).click();
   await expect(viewer.getByRole("heading", { name: "Architecture" })).toBeVisible();
 });
+
+test("log viewer: a session log is shown as entries, filtered, searched, and followed as it grows", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("write a session log");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Wrote the log.")).toBeVisible();
+  await page.getByRole("button", { name: "Open Files" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await panel.getByRole("button", { name: "View logs/session.log", exact: true }).click();
+
+  const viewer = panel.getByTestId("file-viewer");
+  const log = viewer.getByTestId("log-view");
+  await expect(log).toHaveAttribute("data-format", "python");
+  await expect(log.getByTestId("log-shown")).toHaveText("243 entries");
+  // Opened at the end, like tail: the last entries are on screen, and the
+  // traceback folds into the entry that logged it.
+  const failure = log.getByTestId("log-entry").filter({ hasText: "turn failed" });
+  await expect(failure).toBeVisible();
+  await expect(failure.getByLabel("3 more lines")).toBeVisible();
+  await failure.getByRole("button").first().click();
+  await expect(failure.getByText("ValueError: provider refused the request")).toBeVisible();
+
+  // Hiding DEBUG drops the [RPC_DIAG] noise; the unlevelled count stays honest.
+  await log.getByRole("button", { name: /^DEBUG 160$/ }).click();
+  await expect(log.getByTestId("log-shown")).toHaveText("83 of 243 entries");
+
+  // Search jumps between matches and counts them.
+  await log.getByRole("searchbox", { name: "Search the log" }).fill("turn 3");
+  await expect(log.getByTestId("log-match-count")).toHaveText("1/5");
+  await log.getByRole("button", { name: "Next match" }).click();
+  await expect(log.getByTestId("log-match-count")).toHaveText("2/5");
+
+  // Following re-fetches the file when the daemon reports it changed.
+  await log.getByRole("button", { name: "follow" }).click();
+  await composer(page).fill("append to the log");
+  await composer(page).press("Enter");
+  await expect(log.getByText("a late failure appended")).toBeVisible();
+  await expect(log.getByTestId("log-shown")).toHaveText("84 of 244 entries");
+
+  // raw shows the file as written.
+  await viewer.getByRole("button", { name: "raw" }).click();
+  await expect(viewer.getByTestId("log-view")).toHaveCount(0);
+  await viewer.getByRole("button", { name: "entries" }).click();
+  await expect(viewer.getByTestId("log-view")).toBeVisible();
+});
+
+test("code viewer: a JSON file is syntax-highlighted with line numbers", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("write a session log");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Wrote the log.")).toBeVisible();
+  await page.getByRole("button", { name: "Open Files" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await panel.getByRole("button", { name: "View data/config.json", exact: true }).click();
+  const code = panel.getByTestId("code-view");
+  await expect(code).toHaveAttribute("data-language", "json");
+  await expect(code.getByText("json · 5 lines")).toBeVisible();
+  await expect(code.locator(".hljs-number")).toHaveText("3");
+  await expect(code.locator(".hljs-literal")).toHaveText("true");
+});

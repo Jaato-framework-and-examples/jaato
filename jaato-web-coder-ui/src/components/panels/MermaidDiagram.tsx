@@ -56,11 +56,6 @@ export function naturalWidthOf(svg: string): number | null {
 }
 
 /**
- * ``onOpen``, when given, makes the diagram a button that hands its SVG to
- * the viewer's image mode, where it can be zoomed -- a large diagram is
- * unreadable at the panel's width.
- */
-/**
  * The SVG with an explicit size, for the image viewer.  Mermaid writes
  * ``width="100%"`` on the root, which leaves an image with no natural
  * size -- it is then laid out to whatever box holds it, and the viewer's
@@ -80,6 +75,11 @@ export function sizedSvg(svg: string): string {
   });
 }
 
+/**
+ * ``onOpen``, when given, makes the diagram a button that hands its SVG to
+ * the viewer's image mode, where it can be zoomed -- a large diagram is
+ * unreadable at the panel's width.
+ */
 export function MermaidDiagram({ source, onOpen }: { source: string; onOpen?: (svg: string) => void }) {
   const dark = useJaato((s) => isDarkTheme(s.ui.theme));
   const [state, setState] = useState<State>({ status: "rendering" });

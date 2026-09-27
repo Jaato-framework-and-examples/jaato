@@ -7,10 +7,11 @@
  * It exists instead of ``rehype-highlight`` for one reason: that plugin
  * imports lowlight's whole ``common`` language pack at module level, so the
  * lazily-loaded markdown chunk carried ~37 grammars whichever ones it was
- * told to register.  Here the grammars are the ones listed below and no
- * others.
+ * told to register.  Here the grammars are the ones ``highlighter.ts``
+ * lists and no others.
  *
- * Only a ``pre > code`` carrying ``language-<name>`` for a registered name
+ * The grammars live in ``highlighter.ts``, shared with the Files viewer's
+ * ``CodeView``.  Only a ``pre > code`` carrying ``language-<name>`` for a registered name
  * (or one of its aliases -- ``sh``, ``py``, ``ts``, ``yml``, ``html``,
  * ``toml``, ...) is highlighted, and nothing is auto-detected: a fence
  * with no language, or one not listed, stays plain monospace.  Guessing
@@ -19,26 +20,7 @@
  * client's ``tok-*`` palette.
  */
 import type { Element, ElementContent, Root, RootContent } from "hast";
-import { createLowlight } from "lowlight";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import diff from "highlight.js/lib/languages/diff";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import go from "highlight.js/lib/languages/go";
-import ini from "highlight.js/lib/languages/ini";
-import java from "highlight.js/lib/languages/java";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import shell from "highlight.js/lib/languages/shell";
-import sql from "highlight.js/lib/languages/sql";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
-
-const lowlight = createLowlight({ bash, css, diff, dockerfile, go, ini, java, javascript, json, markdown, python, rust, shell, sql, typescript, xml, yaml });
+import { lowlight } from "./highlighter";
 
 function textOf(node: ElementContent): string {
   if (node.type === "text") return node.value;
