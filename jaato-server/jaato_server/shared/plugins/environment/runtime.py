@@ -162,7 +162,11 @@ def _venv_report(venv_path: Optional[str]) -> Dict[str, Any]:
 
 
 def subprocess_report(cli_plugin: Any) -> Dict[str, Any]:
-    """PATH, HOME, XDG_* and the tool-venv from ``cli``'s own env builder."""
+    """PATH, HOME, TMPDIR, XDG_* and the tool-venv from ``cli``'s env builder.
+
+    ``tmpdir`` is the session's own temp directory; in a confined session it
+    is the only writable place under ``/tmp`` (#1361).
+    """
     try:
         env, venv_path = cli_plugin._build_subprocess_env()
     except Exception as exc:  # e.g. a relative workspace_venv, no workspace
@@ -171,6 +175,7 @@ def subprocess_report(cli_plugin: Any) -> Dict[str, Any]:
     return {
         "path": [p for p in path.split(os.pathsep) if p],
         "home": env.get("HOME"),
+        "tmpdir": env.get("TMPDIR"),
         "xdg": {k: env[k] for k in _XDG_KEYS if k in env},
         "virtual_env": env.get("VIRTUAL_ENV"),
         "tool_venv": _venv_report(venv_path),
@@ -268,6 +273,7 @@ def _subprocess_lines(block: Dict[str, Any]) -> List[Tuple[str, str]]:
     return [
         ("path", f"{len(block['path'])} entries: " + os.pathsep.join(block["path"])),
         ("home", block.get("home") or "unset"),
+        ("tmpdir", block.get("tmpdir") or "unset"),
         ("tool_venv", venv["interpreter"] if venv["configured"] else "not configured"),
     ]
 

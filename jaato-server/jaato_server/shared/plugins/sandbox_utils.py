@@ -32,6 +32,8 @@ Key feature: /tmp Access
 ========================
 The /tmp directory is allowed by default for sandboxed tools to support
 temporary file operations. This can be disabled via the allow_tmp parameter.
+A confined runner narrows it to the session's own tmpdir, the one directory
+its AppArmor profile grants under /tmp (#1361; see narrow_temp_roots).
 
 Key feature: POSIX pseudo-devices
 =================================
@@ -86,8 +88,43 @@ def _default_temp_paths() -> list:
     return ["/tmp", resolved]
 
 
-# System temp directories that are allowed by default
+# System temp directories that are allowed by default.  A confined runner
+# narrows this to its own session tmpdir: see narrow_temp_roots.
 SYSTEM_TEMP_PATHS = _default_temp_paths()
+
+
+def narrow_temp_roots(root: str) -> None:
+    """Allow ``root`` as the only temp directory from now on (#1361).
+
+    The default roots admit the whole of ``/tmp``, and a confined runner's
+    AppArmor profile grants only its session tmpdir under
+    ``/tmp/jaato-<confinement_id>/`` (#1171).  So ``cat > /tmp/x`` passed
+    the ``cli`` pre-flight and the file tools' check, and then failed in
+    the kernel with ``Permission denied``, which reads as a broken
+    machine rather than a boundary.  The runner calls this with the
+    directory it pinned, so the application-layer check and the kernel
+    agree.  Opening all of ``/tmp`` in the profile instead would expose
+    every session's temp files to every other session.
+
+    Reassigns the module global rather than mutating the list, because
+    :func:`is_under_temp_path` reads the global on every call and tests
+    substitute it with ``monkeypatch``.
+
+    Args:
+        root: The session tmpdir the runner pinned ``tempfile`` to.
+    """
+    global SYSTEM_TEMP_PATHS
+    SYSTEM_TEMP_PATHS = [root]
+
+
+def restore_temp_roots() -> None:
+    """Undo :func:`narrow_temp_roots`: allow ``/tmp`` and ``gettempdir()``.
+
+    Called by an unconfined runner's bootstrap, so the allowance in force
+    never depends on what an earlier session in the same process set.
+    """
+    global SYSTEM_TEMP_PATHS
+    SYSTEM_TEMP_PATHS = _default_temp_paths()
 
 # Standard POSIX pseudo-devices, allowed regardless of workspace_root.
 #

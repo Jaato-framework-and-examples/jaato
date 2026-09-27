@@ -121,14 +121,42 @@ def framework_dists() -> Tuple[str, ...]:
 
 # ----------------------------------------------------------------- distributions
 
+def _source_version(pyproject: Path) -> Tuple[Optional[str], Optional[str]]:
+    """``(version, None)`` from a source ``pyproject.toml``, or ``(None, why)``.
+
+    A confined session may stat an editable install's source and still be
+    refused the read, and an unconfined one may meet a directory it cannot
+    search (#1360).  Either is "source version unknown", never a traceback:
+    ``jaato-doctor`` calls this first thing, and a diagnostic that crashes on
+    the environment it is asked to diagnose answers nothing.  ``why`` is the
+    reason the version could not be read; a file that is absent, or that
+    names no version, is not unreadable and returns ``(None, None)``.
+    """
+    try:
+        if not pyproject.is_file():
+            return None, None
+        text = pyproject.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return None, exc.strerror or type(exc).__name__
+    for line in text.splitlines():
+        t = line.strip()
+        if t.startswith("version") and "=" in t:
+            return t.split("=", 1)[1].strip().strip('"\''), None
+    return None, None
+
+
 def dist_state(name: str) -> Dict[str, Any]:
     """Installed version, whether it is editable, and the SOURCE version if so.
 
     The last is the whole point: an editable install's metadata is a snapshot
     taken at install time, and the tree underneath it keeps moving.
+    ``source_unreadable`` carries the reason when the source exists and its
+    ``pyproject.toml`` could not be read, so a caller can say the skew was
+    not checked rather than report it absent.
     """
     out: Dict[str, Any] = {"name": name, "installed": None, "editable": False,
-                           "source": None, "source_version": None, "skew": False}
+                           "source": None, "source_version": None,
+                           "source_unreadable": None, "skew": False}
     try:
         out["installed"] = version(name)
         d = distribution(name)
@@ -146,13 +174,8 @@ def dist_state(name: str) -> Dict[str, Any]:
             out["editable"] = True
             out["source"] = str(src) if src else None
             if src:
-                pp = src / "pyproject.toml"
-                if pp.is_file():
-                    for line in pp.read_text(encoding="utf-8", errors="replace").splitlines():
-                        t = line.strip()
-                        if t.startswith("version") and "=" in t:
-                            out["source_version"] = t.split("=", 1)[1].strip().strip('"\'')
-                            break
+                out["source_version"], out["source_unreadable"] = (
+                    _source_version(src / "pyproject.toml"))
     sv, iv = out["source_version"], out["installed"]
     out["skew"] = bool(sv and iv and sv != iv)
     return out
@@ -903,6 +926,10 @@ def _render_framework(d: Dict[str, Any]) -> str:
         if dist["skew"]:
             lines.append(f"  {'':16} !! SKEW: metadata says {dist['installed']}, "
                          f"the source tree says {dist['source_version']}")
+        elif dist.get("source_unreadable"):
+            lines.append(f"  {'':16} source version unknown: pyproject.toml "
+                         f"could not be read ({dist['source_unreadable']}), "
+                         f"so skew was not checked")
     if d["missing"]:
         lines += ["", f"  not installed: {', '.join(d['missing'])}"]
     if any(x["skew"] for x in d["distributions"]):

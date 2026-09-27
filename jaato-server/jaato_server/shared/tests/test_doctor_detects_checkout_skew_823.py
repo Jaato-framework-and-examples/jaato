@@ -56,9 +56,9 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-sdk/jaato_sdk/doctor.py",
-        find="""    checks += check_home_match(info)
-    checks += check_checkout_skew(info)""",
-        replace="""    checks += check_home_match(info)""",
+        find="""    checks += _guarded(lambda: check_home_match(info))
+    checks += _guarded(lambda: check_checkout_skew(info))""",
+        replace="""    checks += _guarded(lambda: check_home_match(info))""",
         test="test_the_preflight_run_actually_includes_the_skew_check",
         because="the check existing and never being run",
     ),

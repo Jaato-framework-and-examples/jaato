@@ -786,13 +786,26 @@ def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
     profile the runner is actually wearing, and the directory itself was
     created daemon-side before either spawn branch.
 
+    A confined runner also narrows ``sandbox_utils``' temp allowance to
+    this directory, so ``cli`` and the file tools refuse the rest of
+    ``/tmp`` before the kernel does (#1361).
+
     An unconfined runner (no ``profile_name``) keeps the pre-#1171
-    ``/tmp/jaato-<session_id>``.
+    ``/tmp/jaato-<session_id>`` and the whole-``/tmp`` allowance.
     """
     path = session_tmpdir(
         envelope.session_id,
         confinement_id_from_profile_name(envelope.profile_name or ""),
     )
+
+    # The profile grants this directory and nothing else under /tmp, so
+    # the pre-flight and the file tools must not allow more (#1361).
+    # Before the mkdir below: the grant holds whether or not it succeeds.
+    from jaato_server.shared.plugins import sandbox_utils
+    if envelope.profile_name:
+        sandbox_utils.narrow_temp_roots(path)
+    else:
+        sandbox_utils.restore_temp_roots()
 
     # ``tempfile`` does not CREATE ``tempdir`` -- it fails on use.  The
     # daemon makes this directory before either spawn branch, and a
