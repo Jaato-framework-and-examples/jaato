@@ -83,8 +83,9 @@ def note_lifecycle(session: Any, event: Any) -> bool:
     """Mark or clear ``session``'s finished state from one routed event.
 
     Args:
-        session: A session record with ``ended_at`` / ``end_reason``
-            attributes and an ``is_dirty`` flag.
+        session: A session record; ``ended_at`` / ``end_reason`` /
+            ``is_dirty`` are written on it, and read with ``getattr`` so a
+            record that predates them is treated as unfinished.
         event: The event being routed to it.
 
     Returns:
@@ -98,7 +99,10 @@ def note_lifecycle(session: Any, event: Any) -> bool:
         session.end_reason = reason
         session.is_dirty = True
         return True
-    if session.ended_at is None:
+    # ``getattr``: a duck-typed record (a test double, an out-of-tree
+    # session) that never finished has no such attribute, and routing an
+    # event to it must not raise.
+    if getattr(session, "ended_at", None) is None:
         return False
     server = getattr(session, "server", None)
     main = getattr(server, "_main_agent_id", None) or "main"
