@@ -5232,8 +5232,11 @@ class OutputBuffer:
                     elif j > 0 and line.is_turn_start:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append(wrapped_line, style=self._style("muted", "dim"))
-            elif line.source == "enrichment":
-                # Enrichment notifications - render dimmed with proper wrapping
+            elif line.source in ("enrichment", "child"):
+                # Enrichment notifications - render dimmed with proper wrapping.
+                # ``child`` is a subagent's report to this agent (the server's
+                # ``shared.subagent_report``): the agent's to read, not the
+                # user's turn, so it is dimmed the same way.
                 # The formatter pre-aligns continuation lines, so we wrap each line
                 wrapped = wrap_text(line.text)
                 for j, wrapped_line in enumerate(wrapped):

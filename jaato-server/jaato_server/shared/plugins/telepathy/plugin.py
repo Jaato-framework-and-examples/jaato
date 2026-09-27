@@ -262,8 +262,14 @@ class TelepathyPlugin:
                 )
             }
 
-        formatted_context = self._format_shared_context(files, findings, notes)
         agent_id = getattr(session, '_agent_id', 'unknown')
+        # The report header every CHILD message carries
+        # (``shared.subagent_report``): it is what tells a client this is
+        # a subagent reporting to its parent, not the user's turn.
+        formatted_context = (
+            f"[SUBAGENT agent_id={agent_id} event=CONTEXT_SHARED]\n"
+            + self._format_shared_context(files, findings, notes)
+        )
 
         try:
             # Use same pattern as subagent communication: inject if

@@ -59,6 +59,9 @@ from jaato_server.shared.dynamic_instructions import DynamicInstructionsError
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from jaato_server.shared.instruction_token_cache import InstructionTokenCache
 from jaato_server.shared.message_queue import SourceType
+from jaato_server.shared.subagent_report import (
+    SUBAGENT_REPORT_ORIGIN, SUBAGENT_REPORT_SOURCE, is_subagent_report,
+)
 from jaato_server.shared.plugins.clarification.attachments import (
     validate_answer_attachments,
 )
@@ -2833,7 +2836,12 @@ class JaatoServer:
         if unit.kind != "tools":
             mode = "append" if (unit.kind == "model"
                                 and unit.group == previous_group) else "write"
-            emit(AgentOutputEvent(agent_id=agent_id, source=unit.kind,
+            # A subagent's report replays as it is echoed live, not as the
+            # user's turn (``shared.subagent_report``).
+            source = (SUBAGENT_REPORT_SOURCE
+                      if getattr(unit, "origin", "") == SUBAGENT_REPORT_ORIGIN
+                      else unit.kind)
+            emit(AgentOutputEvent(agent_id=agent_id, source=source,
                                   text=unit.text, mode=mode))
             return
         for t in unit.tools:
@@ -2847,6 +2855,31 @@ class JaatoServer:
                 agent_id=agent_id, tool_name=t["tool_name"],
                 call_id=t["call_id"], success=t["success"] is not False,
             ))
+
+    def _echo_subagent_report(self, text: str) -> None:
+        """Show a subagent's report to clients as a report, as it arrives.
+
+        A report reaches this agent as a continuation turn, and the daemon
+        starts that turn with no echo, so a client had no sign of it until
+        it re-attached and the replay drew it as the user's own message.
+        It is echoed here with ``source="child"`` so a client can show it
+        collapsed, apart from the user's turns (``shared.subagent_report``).
+
+        A batch that does not begin with a report holds a person's queued
+        message first and is not echoed: this path never echoed those, and
+        drawing it as a report would hide what they said.
+
+        Args:
+            text: The continuation text the runner handed over.
+        """
+        if not is_subagent_report(text):
+            return
+        self.emit(AgentOutputEvent(
+            agent_id=self._main_agent_id,
+            source=SUBAGENT_REPORT_SOURCE,
+            text=text,
+            mode="write",
+        ))
 
     def _emit_clear_stale_requests(self, emit: EventCallback) -> None:
         """Emit "resolved" events to clear stale pending requests on clients.
@@ -6196,6 +6229,7 @@ class JaatoServer:
                     child_messages = payload.get("child_messages", "") or ""
                     if not child_messages:
                         return
+                    server._echo_subagent_report(child_messages)
                     if not server._model_running:
                         # Normal path: parent is idle between turns.
                         server._trace(

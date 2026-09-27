@@ -4,16 +4,18 @@
  * tinted plate with a steel rule on its left, right-aligned, with its
  * turn number in the gutter; a model's prose runs at 15px on a 74ch
  * measure; reasoning is one collapsed line by default; a tool call is a
- * row or one of the two folds (``ToolGroupView``); a banner is a
+ * row or one of the two folds (``ToolGroupView``); a note meant for the
+ * agent (a subagent's report, a plan line) is one collapsed line; a banner is a
  * full-width notice; a system note is quiet text in the colour of what
  * it says.
  */
 import { memo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useJaato } from "@/store/store";
-import type { AssistantTextItem, BannerItem, SystemNoteItem, ThinkingItem, TranscriptItem, UserMessageItem } from "@/store/transcript";
+import type { AssistantTextItem, BannerItem, CollapsedNoteItem, SystemNoteItem, ThinkingItem, TranscriptItem, UserMessageItem } from "@/store/transcript";
 import { firstSentence, thinkingElapsedSeconds } from "@/store/transcript";
 import { agentNameMap, resolveAgentIdsInText } from "@/protocol/agentNames";
+import { collapsedSummary } from "@/protocol/agentNotes";
 import { JMarkup } from "./JMarkup";
 import { ToolGroupView } from "./ToolGroupView";
 
@@ -113,6 +115,36 @@ const SystemNoteView = memo(function SystemNoteView({ item }: { item: SystemNote
   );
 });
 
+/**
+ * Output meant for the agent (``protocol/agentNotes.ts``), one collapsed
+ * line by default: a subagent's reports, or the plan reporter's lines.
+ * The agent reads these; if the user needs to know something from one,
+ * the agent says so.  Expanding shows every text of the run, in order.
+ */
+const CollapsedNoteView = memo(function CollapsedNoteView({ item }: { item: CollapsedNoteItem }) {
+  const [expanded, setExpanded] = useState(false);
+  const names = useJaato(useShallow((s) => agentNameMap(s.agents)));
+  const summary = collapsedSummary(item.source, item.texts, names);
+  return (
+    <div className="py-1" data-testid="collapsed-note" data-source={item.source}>
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-1.5 max-w-full text-[12px] text-text-muted hover:text-steel"
+        aria-expanded={expanded}
+      >
+        <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+        <span className="truncate">{summary}</span>
+      </button>
+      {expanded && (
+        <div className="mt-1 ml-4 pl-2.5 border-l-2 hairline text-[12.5px] text-text-muted whitespace-pre-wrap break-words space-y-2">
+          {item.texts.map((t, i) => <div key={i}>{resolveAgentIdsInText(t, names)}</div>)}
+        </div>
+      )}
+    </div>
+  );
+});
+
 const BannerView = memo(function BannerView({ item }: { item: BannerItem }) {
   return (
     <div className={`my-1 px-3 py-1.5 border hairline text-[13px] whitespace-pre-wrap ${styleClass(item.style)}`} role="alert">
@@ -127,6 +159,7 @@ export function BlockView({ item }: { item: TranscriptItem }) {
     case "thinking": return <ThinkingBlockView item={item} />;
     case "assistantText": return <AssistantTextView item={item} />;
     case "toolGroup": return <ToolGroupView group={item} />;
+    case "collapsedNote": return <CollapsedNoteView item={item} />;
     case "banner": return <BannerView item={item} />;
     case "systemNote": return <SystemNoteView item={item} />;
   }

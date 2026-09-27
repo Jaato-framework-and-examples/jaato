@@ -665,6 +665,10 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     await stream(c, agentId, `Delegating to a researcher subagent (id: ${subId})…\n`);
     await stream(c, subId, "# Research notes\n\nLooking into the question. Found **three** relevant sources.\n");
     send(c, { type: "agent.completed", agent_id: subId, summary: "done" });
+    // The report reaches the parent as a continuation, echoed with
+    // ``source: "child"`` (the daemon's ``_echo_subagent_report``).
+    send(c, { type: "agent.output", agent_id: agentId, source: "child", mode: "write",
+      text: `[SUBAGENT agent_id=${subId} event=COMPLETED]\nFound three relevant sources.` });
     await stream(c, agentId, "\nThe subagent finished; see its tab.");
   } else if (lower.includes("permit")) {
     // The runner-tier wire (the default path): the daemon's PromptOperatorHandler
@@ -826,6 +830,8 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
       { step_id: "2", sequence: 2, content: "Read README.md", status: "in_progress" },
       { step_id: "3", sequence: 3, content: "Summarise", status: "pending" },
     ] });
+    // The plan reporter's own line (source ``plan``), as the daemon forwards it.
+    send(c, { type: "agent.output", agent_id: agentId, source: "plan", mode: "write", text: "Plan created: Task plan" });
     await stream(c, agentId, "Listed the directory; there are **4** entries.");
   } else if (lower.includes("code")) {
     await stream(c, agentId, CODE_REPLY, 10);
