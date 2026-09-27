@@ -665,6 +665,10 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     await stream(c, agentId, `Delegating to a researcher subagent (id: ${subId})…\n`);
     await stream(c, subId, "# Research notes\n\nLooking into the question. Found **three** relevant sources.\n");
     send(c, { type: "agent.completed", agent_id: subId, summary: "done" });
+    // The report reaches the parent as a continuation, echoed with
+    // ``source: "child"`` (the daemon's ``_echo_subagent_report``).
+    send(c, { type: "agent.output", agent_id: agentId, source: "child", mode: "write",
+      text: `[SUBAGENT agent_id=${subId} event=COMPLETED]\nFound three relevant sources.` });
     await stream(c, agentId, "\nThe subagent finished; see its tab.");
   } else if (lower.includes("permit")) {
     // The runner-tier wire (the default path): the daemon's PromptOperatorHandler
@@ -774,7 +778,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "cli_based_tool", tool_args: { command: "npm test" }, call_id: callId });
     for (const line of ["> vitest run", " ✓ src/app.test.ts (12 tests)", " RUN  src/slow.test.ts"]) {
-      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line + "\n" });
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line });
     }
     await new Promise<void>((r) => c.pending.set("hang", () => r()));
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "cli_based_tool", call_id: callId, success: false, duration_seconds: 1.2 });
@@ -810,14 +814,14 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "false" }, call_id: callId });
     await sleep(80);
-    send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: "boom\n" });
+    send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: "boom" });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "run_command", call_id: callId, success: false, is_error_result: true, error_message: "exit status 1", duration_seconds: 0.08 });
     await stream(c, agentId, "The command failed; see the tool block.");
   } else if (lower.includes("tool")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "ls -la", cwd: "/work" }, call_id: callId });
     for (const line of ["total 12", "drwxr-xr-x  3 u u 4096 .", "-rw-r--r--  1 u u  120 README.md", "-rw-r--r--  1 u u 2048 app.py"]) {
-      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line + "\n" });
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line });
       await sleep(60);
     }
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "run_command", call_id: callId, success: true, duration_seconds: 0.31, show_output: true });
@@ -826,6 +830,8 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
       { step_id: "2", sequence: 2, content: "Read README.md", status: "in_progress" },
       { step_id: "3", sequence: 3, content: "Summarise", status: "pending" },
     ] });
+    // The plan reporter's own line (source ``plan``), as the daemon forwards it.
+    send(c, { type: "agent.output", agent_id: agentId, source: "plan", mode: "write", text: "Plan created: 3 steps" });
     await stream(c, agentId, "Listed the directory; there are **4** entries.");
   } else if (lower.includes("code")) {
     await stream(c, agentId, CODE_REPLY, 10);

@@ -26,6 +26,22 @@ describe("reduce — streaming output", () => {
 });
 
 describe("reduce — tool lifecycle", () => {
+  it("keeps a command's lines apart: the cli streams each line without its newline", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "tool.call_start", agent_id: "main", tool_name: "cli_based_tool", tool_args: { command: "ls" }, call_id: "cl" })]);
+    d([
+      ev({ type: "tool.output", agent_id: "main", call_id: "cl", chunk: "ENTITIES" }),
+      ev({ type: "tool.output", agent_id: "main", call_id: "cl", chunk: "  daemon" }),
+      ev({ type: "tool.output", agent_id: "main", call_id: "cl", chunk: "" }),
+      ev({ type: "tool.output", agent_id: "main", call_id: "cl", chunk: '<nb-row type="stdout" label="">\n42\n</nb-row>\n' }),
+    ]);
+    const t = useJaato.getState().blocks[MAIN_AGENT]![0]!;
+    if (t.kind !== "tool") throw new Error();
+    expect(t.output).toBe('ENTITIES\n  daemon\n<nb-row type="stdout" label="">\n42\n</nb-row>\n');
+    // The running call opened the live popup; ``resetSessionState`` keeps UI state.
+    useJaato.setState((st) => ({ ui: { ...st.ui, popupCallId: null } }));
+  });
+
   it("tracks a call from start through output to end, by call_id", () => {
     const d = useJaato.getState().dispatch;
     d([ev({ type: "tool.call_start", agent_id: "main", tool_name: "run", tool_args: { cmd: "ls" }, call_id: "c1" })]);

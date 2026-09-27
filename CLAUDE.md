@@ -860,6 +860,53 @@ request ids, so it still has nothing to replay. Guard:
 `server/tests/test_a_pending_prompt_reaches_a_reattached_client.py`, four
 reversions; `history.test.ts`.
 
+### Output Meant for the Agent, Shown Collapsed
+
+Two kinds of output reach the chat for the AGENT to read, not the user:
+a subagent's reports to its parent, and the plan reporter's lines
+(`Plan created: ...`), which the rail's Plan section already shows. If the
+user needs to know something from either, the agent says so.
+
+The plan lines already carried their own source (`plan`). The subagent
+reports did not reach a client marked at all. The parent's queue tags them
+`SourceType.CHILD`, but:
+
+| Path | Before | Now |
+|---|---|---|
+| live | the report became a continuation turn the daemon started with no echo, so no client saw it | `JaatoServer._echo_subagent_report` emits it with `source="child"` |
+| paged replay | a `user` unit, drawn as the user's own bubble | the unit carries `origin: "subagent"` (still `kind: "user"`, so an older client draws it as before) |
+| full replay (TUI) | `source="user"` | `source="child"` |
+
+`jaato_server/shared/subagent_report.py` is the one rule for all three. It
+reads the `[SUBAGENT agent_id=` marker, because stored history has no
+source type. Every CHILD `inject_prompt` must start with it:
+`test_subagent_reports_are_marked.py` scans the tree and fails otherwise,
+which is how `share_context` (telepathy) gained an
+`event=CONTEXT_SHARED` header. A batch that starts with a person's queued
+message is shown as theirs, whole. A user who types the marker gets their
+message drawn as a report; the model sees the same text either way.
+
+The web client folds consecutive `child` or `plan` blocks into one
+`collapsedNote` transcript item (`protocol/agentNotes.ts`): one line
+naming the subagent as its tab does, with its event, and a click to
+expand. It takes no `T<n>`. The TUI dims `child` lines like enrichment
+notes.
+
+### A Tool-Output Chunk Is a Line
+
+`ToolOutputEvent.chunk` from the cli plugin is one LINE with its newline
+stripped (`subprocess_runner` calls `on_stdout_line(line.rstrip('\n\r'))`).
+The TUI re-adds a newline per chunk (`append_tool_output`); the web store
+joined chunks bare, so a command's output ran together into one
+paragraph, and its mock sent `line + "\n"`, which is not the daemon's
+shape. The store now adds the newline unless the chunk already ends with
+one (a notebook row does), and the mock sends bare lines.
+
+The collapsed `exec` row's trailing-lines preview now shows only while
+the call runs. A finished call shows nothing until expanded, and output
+carrying `<nb-row>` markup gets no preview at all: a tail of it is cut
+markup and drew as raw tags. Guard: `ToolBlockView.test.tsx`.
+
 ### Session Revive (waking a persisted session)
 
 A session woken from disk — `session.wake`, a reattach, anything reaching

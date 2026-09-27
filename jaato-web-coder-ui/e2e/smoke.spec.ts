@@ -447,6 +447,25 @@ test("one name everywhere (#1304 §4): the parent's own text resolves the raw su
   await expect(page.getByText(/sub-[0-9a-f]{6}/)).toHaveCount(0);
 });
 
+test("a subagent's report and the plan reporter's line show collapsed, not as the user's turn", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("subagent");
+  await composer(page).press("Enter");
+  const report = page.locator('[data-testid="collapsed-note"][data-source="child"]');
+  await expect(report).toBeVisible();
+  // One line, naming the subagent as its tab does; the body stays hidden.
+  await expect(report.getByRole("button")).toHaveText(/Subagent · researcher completed · Found three relevant sources\./);
+  await expect(report.getByRole("button")).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByText("[SUBAGENT agent_id=", { exact: false })).toHaveCount(0);
+  await report.getByRole("button").click();
+  await expect(report.getByText(/\[SUBAGENT agent_id=researcher event=COMPLETED\]/)).toBeVisible();
+
+  await composer(page).fill("tool");
+  await composer(page).press("Enter");
+  const plan = page.locator('[data-testid="collapsed-note"][data-source="plan"]');
+  await expect(plan.getByRole("button")).toHaveText(/Plan · Plan created: 3 steps/);
+});
+
 test("a stalled agent shows amber on its tab and a parent-transcript banner; Cancel stops exactly that agent (#1304 §3, §4)", async ({ page }) => {
   // The real 30s-300s range (``store/phase.ts``) is re-enforced INSIDE
   // ``stalled()`` itself, defensively, so a test cannot shortcut it by

@@ -66,6 +66,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from jaato_server.shared.plugins.code_block_formatter.plugin import open_fence
+from jaato_server.shared.subagent_report import (
+    SUBAGENT_REPORT_ORIGIN, is_subagent_report,
+)
 
 #: Default page budget, in rendered lines.  About two tall screens: enough
 #: that a first page usually holds the last exchange whole, small enough
@@ -106,6 +109,11 @@ class ReplayUnit:
         tools: For ``tools`` units, one dict per call:
             ``{call_id, tool_name, tool_args, tool_class, success}``.
         lines: Rendered line estimate; what the page budget counts.
+        origin: For a ``user`` unit, ``"subagent"`` when the message is a
+            subagent's report to this agent rather than a person's turn
+            (``shared.subagent_report``), so a client can show it
+            collapsed; ``""`` otherwise.  Not part of the digest, so a
+            cursor names the same unit whichever way it is classified.
     """
 
     kind: str
@@ -115,6 +123,7 @@ class ReplayUnit:
     turn: int = -1
     tools: List[Dict[str, Any]] = field(default_factory=list)
     lines: int = 1
+    origin: str = ""
 
     @property
     def digest(self) -> str:
@@ -146,6 +155,8 @@ class ReplayUnit:
             d["tools"] = [dict(t) for t in self.tools]
         else:
             d["text"] = self.text
+        if self.origin:
+            d["origin"] = self.origin
         return d
 
 
@@ -243,7 +254,9 @@ def _user_unit(msg: Any, group: str, turn: int) -> Optional[ReplayUnit]:
     if not text.strip():
         return None
     return ReplayUnit(kind="user", text=text, raw=text, group=group,
-                      turn=turn, lines=_count_lines(text))
+                      turn=turn, lines=_count_lines(text),
+                      origin=(SUBAGENT_REPORT_ORIGIN
+                              if is_subagent_report(text) else ""))
 
 
 def _render(seg: str, format_text: Optional[Callable[[str], str]]) -> str:

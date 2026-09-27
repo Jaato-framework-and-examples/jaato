@@ -3,7 +3,7 @@
  * ``blocks[agentId]`` (plus the id→name map, ``toolIdNames``) that folds
  * the raw, one-event-per-row block list into the six shapes a reader
  * actually wants -- ``UserMessage``, ``Thinking``, ``AssistantText``,
- * ``ToolGroup``, ``Banner`` and ``SystemNote``.  The reducer and the wire
+ * ``ToolGroup``, ``CollapsedNote``, ``Banner`` and ``SystemNote``.  The reducer and the wire
  * protocol are untouched: this reads ``OutputBlock[]`` exactly as
  * ``store.ts`` already produces it and invents nothing the daemon did not
  * say.
@@ -13,6 +13,7 @@
  */
 import type { OutputBlock, ToolBlock } from "./types";
 import { resolveToolClass, type ToolClass } from "@/protocol/toolClass";
+import { COLLAPSED_SOURCES } from "@/protocol/agentNotes";
 
 export interface UserMessageItem {
   kind: "userMessage";
@@ -70,6 +71,21 @@ export interface ToolGroupItem {
   label?: string;
 }
 
+/**
+ * Output meant for the AGENT, shown as one collapsed line
+ * (``protocol/agentNotes.ts``): a subagent's reports (``source: "child"``)
+ * or the plan reporter's lines (``source: "plan"``).  Consecutive blocks
+ * of one source fold into one item; ``texts`` keeps each, in order.
+ * Not a user turn: it takes no ``T<n>``.
+ */
+export interface CollapsedNoteItem {
+  kind: "collapsedNote";
+  id: string;
+  agentId: string;
+  source: string;
+  texts: string[];
+}
+
 export interface BannerItem {
   kind: "banner";
   id: string;
@@ -93,6 +109,7 @@ export type TranscriptItem =
   | ThinkingItem
   | AssistantTextItem
   | ToolGroupItem
+  | CollapsedNoteItem
   | BannerItem
   | SystemNoteItem;
 
@@ -262,6 +279,15 @@ export function buildTranscript(
       }
       if (b.source === "model") {
         items.push({ kind: "assistantText", id: b.id, agentId: b.agentId, text: b.text });
+        return;
+      }
+      if (COLLAPSED_SOURCES.has(b.source)) {
+        const prev = items[items.length - 1];
+        if (prev && prev.kind === "collapsedNote" && prev.source === b.source) {
+          items[items.length - 1] = { ...prev, texts: [...prev.texts, b.text] };
+        } else {
+          items.push({ kind: "collapsedNote", id: b.id, agentId: b.agentId, source: b.source, texts: [b.text] });
+        }
         return;
       }
       items.push({ kind: "systemNote", id: b.id, agentId: b.agentId, text: b.text, style: "info", source: b.source });
