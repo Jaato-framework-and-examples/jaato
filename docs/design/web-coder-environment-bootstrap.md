@@ -1,6 +1,20 @@
 # Web coder environment bootstrap: toolchains, LSP and repo knowledge
 
-Status: **proposed**. Nothing here is built.
+Status: **phases 1–4 built; phase 0 (a confined host) and phase 5 (a shared
+cache) open.** What was built, and where it departed from this text:
+
+| Piece | Where | Departure |
+|---|---|---|
+| hide idle LSP tools (§8.1) | framework, #1345 | — |
+| the `runtime` aspect (§8.2) | framework, #1346 | — |
+| root `AGENTS.md` pointer (§8.3) | framework, #1347 | — |
+| managed files per type (§6) | `jaato-web-coder-server/src/managed-files.ts` | adds a `generated` flag: a derived file (a server table, the manifest) is refreshed when its content differs, where a shipped one keeps the same-version no-op |
+| detection, repo-guidance pointer, install, managed files, routes (§4, §5, §7, §9) | `jaato-web-coder-server/src/environment/` | basedpyright gets its own venv under `.home/.local/share/jaato-lsp/` rather than the tool-venv (§5): the runner creates that venv lazily, and it is the model's to change; typescript-language-server is started through the linked `node`, because its entry script is not under a `bin/` the template grants; Rust is not offered (rustup keeps its homes outside mise, and its proxies need `RUSTUP_HOME` at run time) |
+| ownership (§11) | an EMPTY `workspace.app_write` over the bind channel | no new daemon verb: the daemon checks ownership before anything else and writes nothing for an empty request |
+| the clone-time chip, the rail's Toolchains section, the mid-session `not found` chip (§9) | `jaato-web-coder-ui` | — |
+
+Nothing here has been run against an enforcing AppArmor kernel; phase 0 is
+still the proof that mise's binaries run in a confined session.
 
 A workspace the web coder creates starts with Python and little else. There
 is no Node, Go, Rust or JVM, no language server attached, and no knowledge of
@@ -265,6 +279,15 @@ Three pieces help every client, not only the web coder:
    as §7, produced by the framework for any workspace whose root holds one.
    The web coder's version covers cloned subdirectories; this covers the TUI
    user in their own repo. If the framework does it, the BFF skips the root.
+
+   **Built (#1347).** `shared/repo_guidance.py` adds the line to the `disk`
+   base layer when the workspace root holds `AGENTS.md`, `CLAUDE.md`,
+   `CONTRIBUTING.md`, `.github/copilot-instructions.md` or `.cursor/rules`,
+   naming them and never including their contents. It works in the other
+   direction too: a root name the managed `30-repo-guidance.md` already
+   lists (`` `AGENTS.md` ``) is skipped, so the BFF may keep listing the root
+   and there is still one pointer. `suppress_base_instructions: {disk: true}`
+   drops it.
 
 **A related idea, not part of this design:** explain a denial when it
 happens. When a command fails with `Permission denied`, neither an

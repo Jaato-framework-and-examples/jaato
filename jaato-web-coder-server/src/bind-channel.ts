@@ -151,6 +151,25 @@ export class BindChannel {
     return { status: String(ev.status ?? "unknown"), env, files, detail: typeof ev.detail === "string" ? ev.detail : undefined };
   }
 
+  /**
+   * Whether ``user`` of this application owns ``workspace`` on the daemon.
+   * An EMPTY ``workspace.app_write`` is the probe: the daemon checks the
+   * ownership before anything else and writes nothing for an empty request,
+   * so ``ok`` means owned and ``not_found`` means not (an unknown path and
+   * another user's workspace answer alike).  ``null`` when the daemon could
+   * not be asked at all (channel down, a daemon below protocol 1.30), which
+   * a caller about to install software must treat as a refusal.
+   */
+  async owns(user: string, workspace: string): Promise<boolean | null> {
+    if (!this.canWriteWorkspaces()) return null;
+    let ans: WorkspaceWriteAnswer;
+    try { ans = await this.writeWorkspace(user, workspace, { env: {}, files: [] }); }
+    catch { return null; }
+    if (ans.status === "ok") return true;
+    if (ans.status === "not_found") return false;
+    return null;
+  }
+
   private _onEvent(ev: Record<string, unknown>): void {
     const type = ev.type;
     if (

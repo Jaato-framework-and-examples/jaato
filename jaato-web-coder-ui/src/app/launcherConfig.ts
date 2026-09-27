@@ -58,6 +58,8 @@ export interface LauncherConfig {
    * entry navigates here to connect an account.
    */
   githubLoginUrl?: string;
+  /** The backend's environment bootstrap API (``app/environment.ts``); absent = no toolchain chips. */
+  environmentUrl?: string;
   autoConnect?: boolean;
 }
 
@@ -75,6 +77,7 @@ export function parseLauncherConfig(raw: unknown): LauncherConfig {
   if (typeof o.notesUrl === "string" && o.notesUrl) out.notesUrl = o.notesUrl;
   if (typeof o.githubUrl === "string" && o.githubUrl) out.githubUrl = o.githubUrl;
   if (typeof o.githubLoginUrl === "string" && o.githubLoginUrl) out.githubLoginUrl = o.githubLoginUrl;
+  if (typeof o.environmentUrl === "string" && o.environmentUrl) out.environmentUrl = o.environmentUrl;
   if (typeof o.autoConnect === "boolean") out.autoConnect = o.autoConnect;
   return out;
 }

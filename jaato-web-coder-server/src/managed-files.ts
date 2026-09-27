@@ -41,6 +41,25 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+/**
+ * How the ownership marker is spelled, per file type:
+ *
+ * | Format | Marker | For |
+ * |---|---|---|
+ * | ``html`` (default) | ``<!-- jaato-managed: <id> vN — … -->`` on the first line | Markdown instruction files |
+ * | ``hash`` | ``# jaato-managed: <id> vN — …`` on the first line | TOML, shell, ``.gitconfig``-style files |
+ * | ``json`` | a top-level ``"_jaato_managed": "<id> vN"`` key | ``.lsp.json``, the environment manifest |
+ *
+ * JSON has no comments, so its marker is a key the reader of the file
+ * ignores (the ``lsp`` plugin reads only ``languageServers``).  A JSON body
+ * that does not parse, or parses to something other than an object, carries
+ * no marker: it is the user's file.
+ */
+export type ManagedFormat = "html" | "hash" | "json";
+
+/** The key a JSON managed file carries its marker under. */
+export const JSON_MARKER_KEY = "_jaato_managed";
+
 /** A file the application owns in a workspace: a relative path, a marker id, a version and the body (marker excluded). */
 export interface ManagedFile {
   /** Workspace-relative path, e.g. ``.jaato/instructions/40-github.md``.  Never absolute, never ``..``-bearing. */
@@ -49,13 +68,26 @@ export interface ManagedFile {
   markerId: string;
   /** A monotonically increasing integer; bumped when the shipped {@link ManagedFile.body} changes. */
   version: number;
-  /** The file's content WITHOUT the marker line; {@link managedContent} prepends the marker. */
+  /**
+   * The file's content WITHOUT the marker; {@link managedContent} adds it.
+   * For ``json``, a JSON OBJECT text; the marker key is inserted first.
+   */
   body: string;
+  /** How the marker is spelled; default ``html``. */
+  format?: ManagedFormat;
+  /**
+   * The body is DATA the application derives (a server table, a manifest),
+   * not shipped prose: a marked copy is refreshed whenever its content
+   * differs, not only when the version changes.  A shipped file (``false``,
+   * the default) keeps the §5 rule: same version is a no-op, so an edit made
+   * with the marker left in place survives until the next version bump.
+   */
+  generated?: boolean;
 }
 
 /** What {@link writeManagedFile} did, so a caller can surface a skip / overwrite and never claim a silent write. */
 export type ManagedWriteOutcome =
-  | { path: string; action: "written"; reason: "absent" | "version-changed"; previousVersion?: number }
+  | { path: string; action: "written"; reason: "absent" | "version-changed" | "content-changed"; previousVersion?: number }
   | { path: string; action: "unchanged" }
   | { path: string; action: "skipped-user-file" }
   | { path: string; action: "error"; message: string };
@@ -71,30 +103,51 @@ export type ManagedRemoveOutcome =
 export type AtomicWrite = (path: string, body: string, mode: number) => void;
 
 /** The exact marker line for ``markerId`` at ``version`` — the first line of a managed file. */
-export function managedMarker(markerId: string, version: number): string {
+export function managedMarker(markerId: string, version: number, format: ManagedFormat = "html"): string {
+  if (format === "hash") return `# jaato-managed: ${markerId} v${version} — delete this line to keep your own edits`;
+  if (format === "json") return `${markerId} v${version}`;
   return `<!-- jaato-managed: ${markerId} v${version} — delete this line to keep your own edits -->`;
 }
 
-/** The full on-disk content: the marker line, then the body (a trailing newline is ensured). */
+/** The full on-disk content: the marker, then the body (a trailing newline is ensured). */
 export function managedContent(file: ManagedFile): string {
+  const format = file.format ?? "html";
+  if (format === "json") {
+    const parsed = JSON.parse(file.body) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`managed file ${file.relativePath}: a json body must be an object`);
+    }
+    const rest = { ...(parsed as Record<string, unknown>) };
+    delete rest[JSON_MARKER_KEY];
+    return `${JSON.stringify({ [JSON_MARKER_KEY]: managedMarker(file.markerId, file.version, "json"), ...rest }, null, 2)}\n`;
+  }
   const body = file.body.endsWith("\n") ? file.body : `${file.body}\n`;
-  return `${managedMarker(file.markerId, file.version)}\n${body}`;
+  return `${managedMarker(file.markerId, file.version, format)}\n${body}`;
 }
 
 // The marker on the FIRST line: ``jaato-managed: <id> v<n>`` followed by anything.
 const MARKER_RE = /^<!--\s*jaato-managed:\s*(\S+)\s+v(\d+)\b.*-->\s*$/;
+const HASH_MARKER_RE = /^#\s*jaato-managed:\s*(\S+)\s+v(\d+)\b/;
+const JSON_MARKER_RE = /^(\S+)\s+v(\d+)$/;
 
 /** Parse a managed marker from a line, or ``null`` when the line is not one of ours. */
-export function parseMarker(line: string): { markerId: string; version: number } | null {
-  const m = MARKER_RE.exec(line.trim());
+export function parseMarker(line: string, format: ManagedFormat = "html"): { markerId: string; version: number } | null {
+  const m = (format === "hash" ? HASH_MARKER_RE : format === "json" ? JSON_MARKER_RE : MARKER_RE).exec(line.trim());
   if (!m) return null;
   return { markerId: m[1]!, version: Number(m[2]) };
 }
 
-/** The marker on the file's first line, or ``null`` — the ownership question, asked of an existing body. */
-function ownerMarker(body: string): { markerId: string; version: number } | null {
+/** The marker an existing body carries, or ``null`` — the ownership question, asked of an existing body. */
+export function ownerMarker(body: string, format: ManagedFormat = "html"): { markerId: string; version: number } | null {
+  if (format === "json") {
+    let parsed: unknown;
+    try { parsed = JSON.parse(body); } catch { return null; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const v = (parsed as Record<string, unknown>)[JSON_MARKER_KEY];
+    return typeof v === "string" ? parseMarker(v, "json") : null;
+  }
   const nl = body.indexOf("\n");
-  return parseMarker(nl === -1 ? body : body.slice(0, nl));
+  return parseMarker(nl === -1 ? body : body.slice(0, nl), format);
 }
 
 /**
@@ -113,17 +166,18 @@ export function writeManagedFile(
   try {
     if (existsSync(dest)) {
       const current = readFileSync(dest, "utf8");
-      const marker = ownerMarker(current);
+      const marker = ownerMarker(current, file.format);
       if (!marker || marker.markerId !== file.markerId) {
         // The user replaced our file (deleted the marker, or it was never
         // ours).  Their file, left as-is — never a silent skip.
         return { path: file.relativePath, action: "skipped-user-file" };
       }
-      if (marker.version === file.version) {
+      if (marker.version === file.version && (!file.generated || current === managedContent(file))) {
         return { path: file.relativePath, action: "unchanged" };
       }
       mkdirSync(dirname(dest), { recursive: true });
       write(dest, managedContent(file), 0o644);
+      if (marker.version === file.version) return { path: file.relativePath, action: "written", reason: "content-changed" };
       return { path: file.relativePath, action: "written", reason: "version-changed", previousVersion: marker.version };
     }
     mkdirSync(dirname(dest), { recursive: true });
@@ -150,7 +204,7 @@ export function removeManagedFile(
   const dest = join(workspaceDir, file.relativePath);
   try {
     if (!existsSync(dest)) return { path: file.relativePath, action: "absent" };
-    const marker = ownerMarker(readFileSync(dest, "utf8"));
+    const marker = ownerMarker(readFileSync(dest, "utf8"), file.format);
     if (!marker || marker.markerId !== file.markerId) {
       return { path: file.relativePath, action: "skipped-user-file" };
     }

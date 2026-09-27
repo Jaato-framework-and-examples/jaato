@@ -24,6 +24,7 @@ import { faultFromError, type SessionFault } from "@/protocol/sessionFault";
 import { clampStallThreshold, DEFAULT_STALL_THRESHOLD_MS } from "@/store/phase";
 import type { RailPanelId } from "@/store/railSplits";
 import type { SessionNote } from "@/app/notes";
+import { notFoundCommand, toolForCommand } from "@/app/environment";
 
 /**
  * What the note editor says about the last save, rendered in the section's
@@ -105,6 +106,12 @@ export interface JaatoState {
    * ``githubLoginUrl``), or ``null``.  The settings entry navigates here.
    */
   githubLoginUrl: string | null;
+  /**
+   * The sign-in backend's environment bootstrap API (``config.json``'s
+   * ``environmentUrl``, ``app/environment.ts``), or ``null``.  Its presence
+   * is the gate on the Toolchains rail section and the clone-time chips.
+   */
+  environmentUrl: string | null;
   /**
    * The notes THIS person has written, by session id.  Not part of
    * ``emptySessionState``: a note outlives the session being attached,
@@ -275,6 +282,13 @@ export interface JaatoState {
    * that DOES come up (a fresh ``SESSION_INFO``) or by ``resetSessionState``.
    */
   sessionFault: SessionFault | null;
+  /**
+   * A command the last shell run could not find, when a toolchain this page
+   * knows provides it (``app/environment.ts``, #1344 phase 4): the rail's
+   * Toolchains section shows it as a chip.  Set from a finished tool call's
+   * output; cleared by binding, dismissing, or a new session.
+   */
+  environmentHint: { command: string; tool: string } | null;
   /** The rail's Memories section (#1232, ``app/memories.ts``). */
   memories: MemoriesState;
   /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
@@ -343,6 +357,8 @@ export interface JaatoState {
   setCredentialsUrl: (url: string | null) => void;
   setNotesUrl: (url: string | null) => void;
   setGithubUrls: (urls: { githubUrl: string | null; githubLoginUrl: string | null }) => void;
+  setEnvironmentUrl: (url: string | null) => void;
+  setEnvironmentHint: (hint: { command: string; tool: string } | null) => void;
   /** Replace the whole set, from one listing. */
   setNotes: (notes: SessionNote[]) => void;
   /** Upsert one, or drop it when ``null`` (an emptied note is a forgotten one). */
@@ -471,6 +487,7 @@ const emptySessionState = () => ({
   exitChoice: null as ExitChoice | null,
   paletteOpen: false,
   sessionFault: null as SessionFault | null,
+  environmentHint: null as { command: string; tool: string } | null,
   memories: emptyMemories(),
   diagnostics: emptyDiagnostics(),
   lastEventAt: {} as Record<string, number>,
@@ -597,6 +614,23 @@ function updateTool(s: JaatoState, callId: string | undefined | null, agentHint:
   list[hit.index] = fn(list[hit.index] as ToolBlock);
   setBlocks(s, hit.agentId, list);
   return true;
+}
+
+/**
+ * A failed shell call whose output says ``<name>: command not found``, for a
+ * name a known toolchain provides, becomes the rail's toolchain hint
+ * (#1344 phase 4).  Only a proposal: nothing is installed until the person
+ * accepts it.
+ */
+function noteMissingCommand(s: JaatoState, callId: string | undefined, agentHint: string): void {
+  const hit = findTool(s, callId, agentHint);
+  if (!hit) return;
+  const t = s.blocks[hit.agentId]?.[hit.index] as ToolBlock | undefined;
+  if (!t) return;
+  // The tail is enough: the shell's complaint is the last thing it printed.
+  const command = notFoundCommand(`${t.output.slice(-8000)}\n${t.errorMessage ?? ""}`);
+  const tool = command ? toolForCommand(command) : null;
+  if (command && tool) s.environmentHint = { command, tool };
 }
 
 function upsertPermission(s: JaatoState, ev: AnyEvent, inputMode: boolean): void {
@@ -829,6 +863,9 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           },
         ]);
       }
+      // A shell reports a missing command in its output with exit 127, which
+      // the cli tool returns as a RESULT, not a failed call: every end is looked at.
+      if (s.environmentUrl) noteMissingCommand(s, ev.call_id as string | undefined, agentId);
       if (s.ui.popupCallId && s.ui.popupCallId === ev.call_id && !ev.continuation_id) {
         s.ui = { ...s.ui, popupCallId: null };
       }
@@ -1358,6 +1395,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   notesUrl: null,
   githubUrl: null,
   githubLoginUrl: null,
+  environmentUrl: null,
   notes: {},
   noteStatus: {},
   backend: null,
@@ -1384,6 +1422,8 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setCredentialsUrl: (credentialsUrl) => set({ credentialsUrl }),
   setNotesUrl: (notesUrl) => set({ notesUrl }),
   setGithubUrls: ({ githubUrl, githubLoginUrl }) => set({ githubUrl, githubLoginUrl }),
+  setEnvironmentUrl: (environmentUrl) => set({ environmentUrl }),
+  setEnvironmentHint: (environmentHint) => set({ environmentHint }),
   setNotes: (list) => set({ notes: Object.fromEntries(list.map((n) => [n.sessionId, n])) }),
   setNote: (sessionId, note) =>
     set((st) => {

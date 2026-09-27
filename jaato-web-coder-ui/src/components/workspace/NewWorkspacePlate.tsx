@@ -14,6 +14,12 @@
  *     delete workspace" until everything is checked out, then "Open
  *     session picker".
  *
+ * Once every repository is checked out, and the backend offers the
+ * environment bootstrap, the plate also shows ``EnvironmentPanel`` in its
+ * clone-time mode: the clones are scanned for toolchain markers, the
+ * repository-guidance pointer is written, and what was found is PROPOSED --
+ * nothing is installed without a click (#1344).
+ *
  * The order of the requests is load-bearing: the workspace is created,
  * then the user's default GitHub account is bound to it (which writes
  * ``GH_TOKEN=app://github`` into its ``.env``), and only then is the clone
@@ -24,6 +30,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Plate } from "@/components/layout/Plate";
 import { RepoPicker, type PickedRepo } from "./RepoPicker";
+import { EnvironmentPanel } from "./EnvironmentPanel";
+import { useJaato } from "@/store/store";
 import { autoBindDefaultGitHubAccount, githubApi } from "@/app/github";
 import { cloneIntoWorkspace, createWorkspace, deleteWorkspace } from "@/sdk/connection";
 import { applyCloneProgress, CLONE_GLYPH, cloneStatusLine, validWorkspaceName, type CloneRow } from "@/protocol/workspaces";
@@ -127,6 +135,8 @@ export function NewWorkspacePlate({ githubUrl, onCreated, onOpen, onNotice }: {
   const [picked, setPicked] = useState<PickedRepo[]>([]);
   const [phase, setPhase] = useState<"form" | "progress">("form");
   const [created, setCreated] = useState("");
+  const [createdPath, setCreatedPath] = useState("");
+  const environmentUrl = useJaato((st) => st.environmentUrl);
   const [rows, setRows] = useState<CloneRow[]>([]);
   const [busy, setBusy] = useState(false);
   const unsubs = useRef<Array<() => void>>([]);
@@ -163,6 +173,7 @@ export function NewWorkspacePlate({ githubUrl, onCreated, onOpen, onNotice }: {
       if (picked.length === 0) { onOpen(n); return; }
       const batch = queuedRows(picked);
       setCreated(n);
+      setCreatedPath(info.path ?? "");
       setRows(batch);
       setPhase("progress");
       clone(n, batch);
@@ -202,7 +213,17 @@ export function NewWorkspacePlate({ githubUrl, onCreated, onOpen, onNotice }: {
   return (
     <Plate className="w-full max-w-[920px] flex flex-col" aria-label="New workspace" data-testid="new-workspace">
       {phase === "progress" ? (
-        <CloneProgress name={created} rows={rows} onRetry={retry} onRemove={remove} onCancel={() => { void cancel(); }} onOpen={ready ? () => onOpen(created) : undefined} busy={busy} />
+        <>
+          <CloneProgress name={created} rows={rows} onRetry={retry} onRemove={remove} onCancel={() => { void cancel(); }} onOpen={ready ? () => onOpen(created) : undefined} busy={busy} />
+          {/* The clone-time chip (#1344): once everything is checked out, scan the clones for
+              toolchain markers and write the repository-guidance pointer. Only proposes. */}
+          {ready && environmentUrl && createdPath && (
+            <div className="border-t hairline">
+              <div className="px-5 pt-3.5"><span className="kicker tracking-[0.16em]">Toolchains</span></div>
+              <EnvironmentPanel url={environmentUrl} workspace={createdPath} scan />
+            </div>
+          )}
+        </>
       ) : (
         <form onSubmit={submit} className="flex flex-col">
           <div className="px-5 py-3.5 border-b hairline"><span className="kicker tracking-[0.16em]">New workspace</span></div>

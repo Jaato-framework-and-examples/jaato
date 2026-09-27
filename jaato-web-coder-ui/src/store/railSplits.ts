@@ -1,6 +1,6 @@
 /**
  * How the rail's open sections (Plan, Budget, Files, Sessions, Memories,
- * Diagnostics) share its height, and the per-browser memory of it.
+ * Diagnostics, Toolchains) share its height, and the per-browser memory of it.
  *
  * A section's size is a **weight**, not a pixel count: the open sections'
  * weights are normalised to fractions of the rail's flexible height at render
@@ -17,11 +17,11 @@
  * others don't move), ``resetPair`` levels a pair, and ``sharesFor`` is the one
  * place open/close redistribution happens.
  */
-export const RAIL_SECTION_IDS = ["plan", "budget", "files", "sessions", "memories", "diagnostics"] as const;
+export const RAIL_SECTION_IDS = ["plan", "budget", "files", "sessions", "memories", "diagnostics", "environment"] as const;
 export type RailSectionId = (typeof RAIL_SECTION_IDS)[number];
 
 /**
- * The same six ids, as the 56px icon rail names them (#1304 §5).  A
+ * The same seven ids, as the 56px icon rail names them (#1304 §5).  A
  * separate alias rather than a rename: this module is about how OPEN
  * sections share height, which still applies -- Plan pinned beside
  * whichever panel the icon rail selected -- while ``RailPanelId`` is read

@@ -636,11 +636,46 @@ class JaatoRuntime:
         same runtime sees the same base layer (it's framework config,
         not per-session state), so loading once and sharing keeps memory
         flat across N sessions.
+
+        The value ends with the repository-guidance pointer when the
+        workspace root holds one (#1347, :meth:`_append_repo_guidance_pointer`),
+        which is what makes that line part of the ``disk`` piece.
         """
         if not self._base_loaded:
             self._load_base_system_instructions()
+            self._append_repo_guidance_pointer()
             self._base_loaded = True
         return self._base_system_instructions
+
+    def _append_repo_guidance_pointer(self) -> None:
+        """Append the repository-guidance pointer to the base layer (#1347).
+
+        When the workspace root holds ``AGENTS.md``, ``CLAUDE.md``,
+        ``CONTRIBUTING.md``, ``.github/copilot-instructions.md`` or
+        ``.cursor/rules``, one line naming them joins the ``disk`` base
+        layer -- so ``suppress_base_instructions: true`` / ``{disk: true}``
+        drops it with ``.jaato/instructions/``, and the instruction budget
+        counts it as BASE.  The files are never read (see
+        ``shared/repo_guidance.py``).  A name a managed repo-guidance file
+        in the workspace's or ``config_root``'s ``instructions/`` already
+        lists is skipped.  Best effort: nothing here may fail a session.
+        """
+        from jaato_server.shared.repo_guidance import repo_guidance_pointer
+        try:
+            root = self._workspace_path or Path.cwd()
+            dirs = [Path(root) / ".jaato" / "instructions"]
+            if self._config_root:
+                dirs.append(
+                    Path(self._config_root).expanduser().resolve() / "instructions"
+                )
+            pointer = repo_guidance_pointer(root, instructions_dirs=dirs)
+        except Exception:  # noqa: BLE001 -- a pointer is a hint, never a failure
+            logger.debug("repo-guidance pointer skipped", exc_info=True)
+            return
+        if not pointer:
+            return
+        base = self._base_system_instructions
+        self._base_system_instructions = f"{base}\n\n{pointer}" if base else pointer
 
     def _load_base_system_instructions(self) -> None:
         """Load base system instructions from .jaato/instructions/ folders.
