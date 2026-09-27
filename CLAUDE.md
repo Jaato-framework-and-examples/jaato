@@ -5664,6 +5664,84 @@ which stays readable for any pid because CPython's `close_fds` path
 enumerates it at every subprocess spawn and AppArmor has no rule form for
 "my own pid only".
 
+### A Credential a Tool Printed (#1215)
+
+The scrub above removes secret NAMES from what a subprocess inherits. It
+cannot stop a command reading a value out of a file and printing it, and the
+obvious file is in the workspace: `config.update` writes the provider key
+into `<workspace>/.env`. `cat .env` passes containment, as it should. A
+web-client screenshot of a live `cli_based_tool` popup showed a key that then
+had to be rotated. Once printed, the value reached every client, the model's
+history (replayed on every later request), the session record and the traces,
+verbatim.
+
+`jaato_server/shared/secret_redaction.py` redacts by VALUE: the exact secrets
+the runner holds are replaced with `‹redacted:NAME›` wherever they appear in
+text on the way out. No heuristic for "things that look like keys".
+
+| Secret set | Source |
+|---|---|
+| session-env values whose name matches the scrub patterns | `DEFAULT_SECRET_ENV_PATTERNS` plus every positive glob in `plugin_configs.<cli\|interactive_shell\|mcp>.scrub_secret_env` |
+| the provider credential | `plugin_configs.<provider>.api_key` / `oauth_token`, and `_api_key` / `_oauth_token` / `_token` on every provider `JaatoRuntime.create_provider` builds |
+| stored credentials | secret-named leaves of `*_auth.json` in the config root, `<workspace>/.jaato/` and `~/.jaato/` |
+
+**Exemptions and grants do not subtract.** `!GH_TOKEN`, `none` and the #1228
+`app://` grants decide what a subprocess may INHERIT. What it may PRINT is a
+different question, so a granted `GH_TOKEN` stays in `gh`'s environment and
+is still redacted if `gh` echoes it.
+
+**Two seams, because history lives in the runner:**
+
+| Seam | Covers |
+|---|---|
+| `ToolExecutor.execute`'s return, after the result transformers | what enters history, so the model, every later request and the provider trace |
+| `RunnerRPC._write`, for every stream, event and response frame | every client (`ToolOutputEvent` chunks, `AgentOutputEvent` text, `tool_call_start` arguments), the session record (history crosses in `agent_history_updated` and `session.get_history`), daemon-side traces and telemetry |
+
+Runner→daemon REQUESTS are not redacted. They are forwarded tool calls whose
+results come back through the first seam.
+
+**Split chunks are caught.** Model output streams token by token and a
+command's output is read in buffers, so a value usually arrives in pieces.
+`StreamCarry` holds back only a suffix that could still be the start of a
+secret, and releases it on the next chunk, before that call's
+`tool_call_end`, when a stream frame starts a new block, or before the call's
+response.
+
+Lifecycle: built at `session.bootstrap` step 1b, right after the env is
+applied and before any tool runs. Rebuilt on `session.reload_env` before the
+provider is. A credential noted from an earlier provider stays in the set,
+which errs toward redacting. Process-wide, like the #1228 grant: a daemon or
+an embedded client never configures one, so every call is a no-op there.
+
+Rules:
+
+- **A floor of 12 characters.** A `*_TOKEN` set to `true` would otherwise
+  mangle every `true` in all output. A value under the floor is named, never
+  shown, in one WARNING per name per process.
+- **Binary is untouched.** `bytes`, `data_b64` and the `data` of a
+  `{mime_type, data}` dict are skipped, because rewriting base64 corrupts a
+  payload rather than protecting it.
+- **`.env` reads are not denied.** The agent legitimately edits `.env`, and a
+  rule keyed on a filename is bypassed by `cp .env x && cat x`.
+
+**Stated limits:**
+
+- An encoded form (base64, URL-encoding, hex) is not caught.
+- A value the model re-types differently (spaced out, reversed, partly
+  quoted) is not caught.
+- A session served in-process (the embedded client, a daemon-local session)
+  has no runner and no redactor.
+- A long, non-secret value under a secret-looking name (a path in
+  `*_TOKEN`) is redacted too. That is the safe direction.
+
+Not done here: keeping the literal key out of the model-readable `.env` in
+the first place (a `pass://`-style reference from the web client's
+credential store). That is the wider exposure and wants its own change.
+
+Guard: `jaato_server/server/tests/test_a_printed_credential_is_redacted_1215.py`,
+five reversions. It drives the real `cli` plugin through the real
+`ToolExecutor`, and a real `RunnerRPC` over a socketpair.
+
 ### Two Principals on One Socket
 
 `EventSink.get_client_user` returned a hardcoded `None` on IPC, with the
