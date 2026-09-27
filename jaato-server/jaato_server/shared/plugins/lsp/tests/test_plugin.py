@@ -441,6 +441,9 @@ class TestLSPToolPluginBasics:
 
     def test_system_instructions(self):
         plugin = LSPToolPlugin()
+        # A server must be configured: with none, the section is withheld
+        # along with the tools it names (#1345).
+        plugin._profile_config = {"languageServers": {"python": {"command": "pylsp"}}}
         instructions = plugin.get_system_instructions()
 
         assert instructions is not None
@@ -1148,6 +1151,7 @@ class TestSystemInstructions:
 
     def test_system_instructions_mention_refactoring(self):
         plugin = LSPToolPlugin()
+        plugin._profile_config = {"languageServers": {"python": {"command": "pylsp"}}}
         instructions = plugin.get_system_instructions()
 
         assert "Refactoring tools" in instructions

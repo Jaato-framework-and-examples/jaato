@@ -140,6 +140,27 @@ MSG_RELOAD_CONFIG = 'reload_config'
 # pushed to response_queue (the sender doesn't wait).
 MSG_RETRY_AUTOCONNECT = 'retry_autoconnect'
 
+# The model-facing tools this plugin exposes.  ``is_tool_visible`` hides
+# exactly these while no language server is configured (#1345); the user
+# command ``lsp`` is not a tool and stays available.  Kept equal to the
+# names ``get_tool_schemas`` returns by
+# ``test_lsp_tools_hide_without_a_server_1345``.
+LSP_TOOL_NAMES = frozenset({
+    'lsp_goto_definition',
+    'lsp_find_references',
+    'lsp_hover',
+    'lsp_get_diagnostics',
+    'lsp_document_symbols',
+    'lsp_workspace_symbols',
+    'lsp_rename_symbol',
+    'lsp_get_code_actions',
+    'lsp_apply_code_action',
+})
+
+# ``_config_signature`` before any file-arm load: never equal to a real
+# signature, so the first visibility check resolves the table.
+_UNLOADED = object()
+
 # Log levels
 LOG_INFO = 'INFO'
 LOG_DEBUG = 'DEBUG'
@@ -492,6 +513,11 @@ class LSPToolPlugin(RunnerForwardingMixin):
         # `_language_servers_from_profile` for the rule and why raw.
         self._profile_config: Optional[Dict[str, Any]] = None
         self._config_cache: Dict[str, Any] = {}
+        # What the `.lsp.json` candidates looked like (path, mtime, size)
+        # when `_config_cache` was last loaded from them.  Compared by
+        # `_has_configured_servers` so a file written mid-session is
+        # picked up on the next turn without re-parsing on every call.
+        self._config_signature: Any = _UNLOADED
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
         # atexit backstop: reap jdtls when THIS (slot/runner) process exits.
@@ -1854,6 +1880,16 @@ class LSPToolPlugin(RunnerForwardingMixin):
         })
 
     def get_system_instructions(self) -> Optional[str]:
+        """The LSP section of the system prompt, or ``None`` with no server.
+
+        The section names the ``lsp_*`` tools and promises automatic
+        diagnostics, so it is withheld while `is_tool_visible` hides
+        those tools (#1345).  It is read when the session assembles its
+        prompt; a `.lsp.json` that appears later brings the tools back
+        through ``list_tools`` but does not re-render the prompt.
+        """
+        if not self._has_configured_servers():
+            return None
         return """## CODE VALIDATION / LINTING (AUTOMATIC + MANUAL)
 
 **AUTOMATIC DIAGNOSTICS**: When you use file-writing tools (updateFile, writeNewFile),
@@ -2923,14 +2959,10 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             )
             return
 
-        # Build search paths - custom path takes priority
-        paths = []
-        if self._custom_config_path:
-            paths.append(self._custom_config_path)
-        # Use workspace_path if set; skip workspace-relative path otherwise
-        if self._workspace_path:
-            paths.append(os.path.join(self._workspace_path, '.lsp.json'))
-        paths.append(os.path.expanduser('~/.lsp.json'))
+        paths = self._config_search_paths()
+        # Recorded BEFORE reading, so a write racing this load changes
+        # the signature again and is picked up by the next check.
+        self._config_signature = self._config_file_signature(paths)
 
         for path in paths:
             if os.path.exists(path):
@@ -2956,6 +2988,90 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 self._write_config_debug_entry(path)
                 return
         self._config_cache = {}
+
+    def _config_search_paths(self) -> List[str]:
+        """The `.lsp.json` candidates, in the order `_load_config_cache` tries them.
+
+        The custom ``config_path`` first, then ``<workspace>/.lsp.json``
+        (only when a workspace is set), then ``~/.lsp.json``.
+        """
+        paths = []
+        if self._custom_config_path:
+            paths.append(self._custom_config_path)
+        if self._workspace_path:
+            paths.append(os.path.join(self._workspace_path, '.lsp.json'))
+        paths.append(os.path.expanduser('~/.lsp.json'))
+        return paths
+
+    @staticmethod
+    def _config_file_signature(paths: List[str]) -> tuple:
+        """``(path, mtime_ns, size)`` per candidate; ``None`` stats if absent.
+
+        A ``stat`` per candidate and no parse, because it runs on every
+        provider call (via `is_tool_visible`).
+        """
+        signature = []
+        for path in paths:
+            try:
+                st = os.stat(path)
+                signature.append((path, st.st_mtime_ns, st.st_size))
+            except OSError:
+                signature.append((path, None, None))
+        return tuple(signature)
+
+    def _has_configured_servers(self) -> bool:
+        """True when the RESOLVED server table names at least one server.
+
+        Configured, not connected: a server that failed to start still
+        counts, so its tools stay visible and the model can report the
+        failure.  A profile-declared table (``languageServers`` present)
+        is the whole answer and no file is consulted.  Otherwise the
+        `.lsp.json` candidates are re-stat'ed; when they changed since
+        the last load (a web coder writing a managed `.lsp.json` at bind
+        time, #1344) the table is reloaded, and a table that now names
+        servers gets the same connect retry `set_workspace_path` sends.
+        """
+        if self._profile_config is not None:
+            return self._table_has_servers(self._profile_config)
+        signature = self._config_file_signature(self._config_search_paths())
+        if signature != self._config_signature:
+            self._load_config_cache(force=True)
+            has_servers = self._table_has_servers(self._config_cache)
+            if has_servers and self._initialized and self._request_queue is not None:
+                self._trace(
+                    "config files changed: dispatching MSG_RETRY_AUTOCONNECT"
+                )
+                self._request_queue.put((MSG_RETRY_AUTOCONNECT, {}))
+            return has_servers
+        return self._table_has_servers(self._config_cache)
+
+    @staticmethod
+    def _table_has_servers(table: Any) -> bool:
+        """True when ``table`` is a mapping whose ``languageServers`` is non-empty."""
+        if not isinstance(table, dict):
+            return False
+        servers = table.get('languageServers')
+        return isinstance(servers, dict) and len(servers) > 0
+
+    def is_tool_visible(self, tool_name: str) -> bool:
+        """Per-turn visibility predicate (#1345).
+
+        Hides this plugin's tools while no language server is configured
+        — from the provider's tool array and from ``list_tools`` /
+        ``get_tool_schemas``, which share one filter
+        (``jaato_server.shared.tool_visibility``).  Every call on such a
+        workspace would answer "No LSP servers configured", so offering
+        the tools only spends the model's calls.  Re-evaluated on every
+        call, so a `.lsp.json` that appears mid-session shows the tools
+        on the next turn.
+
+        The answer is the plugin INSTANCE's resolved table, which is the
+        table the tools themselves would use; it reads no per-session
+        state.  Names this plugin does not own return ``True``.
+        """
+        if tool_name not in LSP_TOOL_NAMES:
+            return True
+        return self._has_configured_servers()
 
     def _write_config_debug_entry(self, source: str) -> None:
         """Record where the server table came from, and what is in it.
