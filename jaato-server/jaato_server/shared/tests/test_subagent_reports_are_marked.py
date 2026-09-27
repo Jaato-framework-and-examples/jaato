@@ -84,11 +84,18 @@ def _leading_text(node: ast.AST, func: Optional[ast.AST]) -> Optional[str]:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _leading_text(node.left, func)
     if isinstance(node, ast.Name) and func is not None:
-        for sub in ast.walk(func):
-            if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
-                    and isinstance(sub.targets[0], ast.Name)
-                    and sub.targets[0].id == node.id):
-                return _leading_text(sub.value, None)
+        assigned = _assignment_to(node.id, func)
+        return _leading_text(assigned, None) if assigned is not None else None
+    return None
+
+
+def _assignment_to(name: str, func: ast.AST) -> Optional[ast.AST]:
+    """The value a single-target assignment to ``name`` in ``func`` binds."""
+    for sub in ast.walk(func):
+        if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
+                and isinstance(sub.targets[0], ast.Name)
+                and sub.targets[0].id == name):
+            return sub.value
     return None
 
 
