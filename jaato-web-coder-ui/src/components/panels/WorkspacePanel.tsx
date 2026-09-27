@@ -54,6 +54,15 @@
  * own via the same hide/unhide button, spelled as a ``!id`` exemption in
  * the hidden set (the ``scrub_secret_env`` ``!NAME`` idiom), which is
  * removed again by unhiding it a second time (back to default-hidden).
+ *
+ * **An exemption on a directory covers what is under it.**  Unhiding
+ * ``.jaato/`` (the row's button, or the footer's ``show .jaato/``) writes
+ * ``!.jaato/``, and every entry beneath it is shown too -- an agent that
+ * writes profiles, personas or schemas as part of its task produces them
+ * there, and the person has to be able to see and open them.  Before this
+ * the exemption matched only the directory's own row, so ``.jaato/`` came
+ * back with nothing in it once "show hidden" was off.  An explicit hide
+ * beneath it (``.jaato/sessions/``) still wins.
  */
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useJaato } from "@/store/store";
@@ -109,7 +118,20 @@ export function isDefaultHidden(id: string): boolean {
 export function effectiveHidden(id: string, hidden: readonly string[]): boolean {
   if (hidden.includes(`!${id}`)) return false;
   if (isHidden(id, hidden)) return true;
-  return isDefaultHidden(id);
+  return isDefaultHidden(id) && !isExempted(id, hidden);
+}
+
+/** True when a ``!dir/`` exemption covers ``id`` (a directory exemption reaches its subtree). */
+export function isExempted(id: string, hidden: readonly string[]): boolean {
+  return hidden.some((h) => h.startsWith("!") && (h.slice(1) === id || (h.endsWith("/") && id.startsWith(h.slice(1)))));
+}
+
+/** Files under the default-hidden ``.jaato/``, and whether the whole directory is shown. */
+export function jaatoFiles(files: Record<string, string>, hidden: readonly string[]): { count: number; shown: boolean } {
+  return {
+    count: Object.keys(files).filter(isDefaultHidden).length,
+    shown: hidden.includes(`!${DEFAULT_HIDDEN_ROOT}`),
+  };
 }
 
 /**
@@ -123,7 +145,8 @@ export function effectiveHidden(id: string, hidden: readonly string[]): boolean 
 export function hideToggleId(id: string, hidden: readonly string[]): string {
   if (hidden.includes(`!${id}`)) return `!${id}`;
   if (hidden.includes(id)) return id;
-  if (isDefaultHidden(id)) return `!${id}`;
+  // Under a shown ``.jaato/`` the entry is visible, so the toggle HIDES it.
+  if (isDefaultHidden(id) && !isExempted(id, hidden)) return `!${id}`;
   return id;
 }
 
@@ -435,6 +458,8 @@ export function WorkspacePanel() {
   const tree = useMemo(() => build(files), [files]);
   const total = Object.keys(files).length;
   const hiddenCount = useMemo(() => countHiddenFiles(files, hidden), [files, hidden]);
+  const jaato = useMemo(() => jaatoFiles(files, hidden), [files, hidden]);
+  const toggleHidden = useJaato((s) => s.toggleWorkspaceHidden);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
 
   const openFile = (path: string, back: string[] = []) => {
@@ -508,9 +533,19 @@ export function WorkspacePanel() {
       ) : (
         <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} onOpenFile={(p) => openFile(p)} />
       )}
+      {jaato.count > 0 && (
+        // Its own control: ``.jaato/`` is hidden by default, not by anyone's
+        // choice, and what an agent writes there (profiles, personas,
+        // schemas) is often the work itself.
+        <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
+          <span className="font-mono">.jaato/</span>
+          <span>{jaato.count} file{jaato.count === 1 ? "" : "s"}{jaato.shown ? "" : " hidden"}</span>
+          <button type="button" className="link" onClick={() => toggleHidden(`!${DEFAULT_HIDDEN_ROOT}`)}>{jaato.shown ? "hide .jaato/" : "show .jaato/"}</button>
+        </div>
+      )}
       {hiddenCount > 0 && (
         <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
-          <span>{hiddenCount} hidden{showHidden ? "" : ", including .jaato/"}</span>
+          <span>{hiddenCount} hidden</span>
           <button type="button" className="link" onClick={toggleShowHidden}>{showHidden ? "hide hidden" : "show hidden"}</button>
         </div>
       )}
