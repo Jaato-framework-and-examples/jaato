@@ -464,8 +464,9 @@ export class JaatoClient {
     // fires attachSession(sessionId) on every RECONNECTING →
     // CONNECTED transition (i.e. after a successful reconnect, not
     // on the initial connect — sessionId is null at that point).
-    // The server then replays buffered events from the session
-    // journal so the consumer doesn't have to wire this manually.
+    // The server then answers the attach with the session's state and
+    // conversation so far (see ``attachSession``), so the consumer
+    // doesn't have to wire this manually.
     if (this._recovery.autoReattachSessionId) {
       let sawReconnecting = false;
       this.onStatus((status) => {
@@ -1013,11 +1014,20 @@ export class JaatoClient {
   /**
    * Attach to an existing session.
    *
-   * After successful attach, the server replays buffered events
-   * from the session journal (per the WS reconnect contract) so
-   * the client picks up where it left off.  Combined with the
-   * reconnect state-machine, this is the building block for
-   * "survive a network blip" workflows.
+   * The server answers with the session's current state -- its
+   * agents and their status -- and the conversation so
+   * far, rebuilt from the session's stored HISTORY.  How the
+   * conversation arrives is the client's choice
+   * (``PresentationContext.history_replay``, protocol 1.28):
+   * ``"full"`` replays it as output events, oldest first (the default
+   * for every client type but chat); ``"paged"`` sends only the most
+   * recent page as a ``HistoryPageEvent``, with older pages fetched via
+   * {@link requestHistoryPage}; ``"none"`` sends none of it (the chat
+   * default).  It is NOT a replay of the events this client missed
+   * while disconnected: output streamed mid-turn reaches the history
+   * only when its turn completes.  Combined with the reconnect
+   * state-machine, this is the building block for "survive a network
+   * blip" workflows.
    *
    * Mirror of Python ``IPCClient.attach_session``.
    *

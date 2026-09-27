@@ -1921,6 +1921,19 @@ class IPCClient:
     async def attach_session(self, session_id: str) -> bool:
         """Attach to an existing session.
 
+        The daemon answers with the session's current state -- its agents and
+        their status -- and the conversation so far,
+        rebuilt from the session's stored history.  How the conversation
+        arrives is this client's choice (``PresentationContext.
+        history_replay``, protocol 1.28): ``"full"`` replays it as output
+        events, oldest first (the default for every client type but
+        chat); ``"paged"`` sends only the most recent page as a
+        ``HistoryPageEvent``, older pages via
+        :meth:`request_history_page`; ``"none"`` sends none of it (the
+        chat default).  It is not a replay of the events missed while
+        disconnected: output streamed mid-turn reaches the history only
+        when its turn completes.
+
         Args:
             session_id: The session to attach to.
 
