@@ -32,11 +32,14 @@ class EnvironmentPlugin(RunnerForwardingMixin):
     """Plugin that provides environment awareness tools.
 
     Supports querying both external environment (OS, shell, architecture)
-    and internal context (token usage, GC thresholds) when a session is set.
+    and internal context (token usage, GC thresholds) when a session is set,
+    and what the session can run (``runtime``: confinement, the subprocess
+    PATH cli builds, the tool-venv and bound toolchains; see ``runtime.py``).
     """
 
     VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context",
-                     "consumption", "session", "datetime", "network", "all"]
+                     "consumption", "session", "datetime", "network", "runtime",
+                     "all"]
 
     @property
     def name(self) -> str:
@@ -55,6 +58,9 @@ class EnvironmentPlugin(RunnerForwardingMixin):
 
     def __init__(self):
         self._workspace_path: Optional[str] = None
+        # The registry, for the session's own ``cli`` instance: the
+        # ``runtime`` aspect reports the PATH cli builds (#1346).
+        self._plugin_registry: Any = None
         # Custom aspects registered by daemon extensions at runtime.
         # See ``register_aspect()`` for the protocol.
         self._custom_aspects: Dict[str, Any] = {}
@@ -95,6 +101,14 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             path: Absolute path to the workspace root directory.
         """
         self._workspace_path = path
+
+    def set_plugin_registry(self, registry: Any) -> None:
+        """Receive the plugin registry (auto-wired by ``expose_tool``).
+
+        Used only by the ``runtime`` aspect, to reach the session's own
+        ``cli`` plugin instance and ask it for the environment it builds.
+        """
+        self._plugin_registry = registry
 
     def set_session(self, session: 'JaatoSession') -> None:
         """Receive session reference for context usage queries.
@@ -158,7 +172,9 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             "get_environment": self._get_environment,
         })
 
-    def _builtin_aspect_builders(self, detail: str) -> Dict[str, Any]:
+    def _builtin_aspect_builders(
+        self, detail: str, in_all: bool = False,
+    ) -> Dict[str, Any]:
         """Built-in aspect name -> the zero-argument builder for it.
 
         A table rather than an ``if/elif`` chain so that adding an aspect
@@ -175,6 +191,8 @@ class EnvironmentPlugin(RunnerForwardingMixin):
                 that takes it.  Passed in rather than read from the
                 instance because it is per-CALL state and this plugin
                 instance is shared across a session's threads.
+            in_all: True when the builders serve ``aspect="all"``, where
+                ``runtime`` reports one line per field (#1346).
         """
         return {
             "os": self._get_os_info,
@@ -187,6 +205,7 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             "session": self._get_session_info,
             "datetime": self._get_datetime_info,
             "network": self._get_network_info,
+            "runtime": lambda: self._get_runtime_info(summary=in_all),
         }
 
     def _get_environment(self, args: Dict[str, Any]) -> str:
@@ -222,7 +241,8 @@ class EnvironmentPlugin(RunnerForwardingMixin):
         # for when it wants the OS name.  The breakdown is one
         # aspect="consumption", detail="full" away.
         builders = self._builtin_aspect_builders(
-            DETAIL_SUMMARY if aspect == "all" else detail)
+            DETAIL_SUMMARY if aspect == "all" else detail,
+            in_all=aspect == "all")
 
         if aspect == "all":
             # Custom aspects registered by extensions are excluded from
@@ -504,6 +524,26 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             }
         return self._session.get_consumption(detail)
 
+    def _get_runtime_info(self, summary: bool = False) -> Dict[str, Any]:
+        """What this session can actually run (#1346).
+
+        Confinement tier and grants, the subprocess ``PATH`` / ``HOME`` /
+        ``XDG_*`` / tool-venv exactly as ``cli`` builds them, and bound
+        toolchains.  See :mod:`.runtime` for where each field comes from.
+
+        Args:
+            summary: True under ``aspect="all"``: one line per field, so
+                the eager default stays small (the ``consumption`` rule).
+                A direct ``aspect="runtime"`` query gets the full report;
+                ``detail`` does not apply to it.
+        """
+        from .runtime import runtime_report, runtime_summary
+        report = runtime_report(
+            self._plugin_registry, self._session, self._workspace_path)
+        if summary:
+            return runtime_summary(report)
+        return report
+
     def _get_session_info(self) -> Dict[str, Any]:
         """Get session identifier and agent information.
 
@@ -666,6 +706,11 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             "'session' = current session identifier and agent info, ",
             "'datetime' = current date, time, timezone, and UTC offset, ",
             "'network' = proxy settings, proxy authentication, SSL/TLS config, and no-proxy rules, ",
+            "'runtime' = what you can actually RUN: the AppArmor confinement "
+            "tier, its exec scope and the exec roots it grants, the PATH, "
+            "HOME, XDG dirs and tool-venv your cli commands run with, and "
+            "bound toolchains.  Ask this before concluding a command is "
+            "blocked or missing, ",
         ]
 
         # Append custom aspect descriptions
