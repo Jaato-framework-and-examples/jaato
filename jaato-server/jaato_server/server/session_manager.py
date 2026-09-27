@@ -58,6 +58,7 @@ from jaato_server.shared.runtime_limits import RuntimeLimits, apply_isolated_def
 from jaato_server.shared.session_envelope import BootstrapEnvelope
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from .awaiting import awaiting_of
+from .session_finished import note_lifecycle as note_session_lifecycle
 from .diagnostics_verbs import DIAGNOSTICS_REQUEST_TYPES
 from .memory_verbs import MEMORY_REQUEST_TYPES
 from .core import JaatoServer
@@ -588,6 +589,11 @@ class RuntimeSessionInfo:
     #: ``profile_name``, or the persisted record's for a cold row.  ``None``
     #: for a profile-less session (and records written before 2.3).
     profile_name: Optional[str] = None
+    #: When and why this session FINISHED (record 2.11, protocol 1.29) --
+    #: see :mod:`server.session_finished`.  ``None`` for a session that has
+    #: not finished, loaded or cold.
+    ended_at: Optional[str] = None
+    end_reason: Optional[str] = None
 
 
 def session_picker_fields(info: Any) -> Dict[str, Any]:
@@ -606,6 +612,10 @@ def session_picker_fields(info: Any) -> Dict[str, Any]:
         "last_activity": getattr(info, "last_activity", ""),
         "is_processing": bool(getattr(info, "is_processing", False)),
         "created_at": getattr(info, "created_at", ""),
+        # Protocol 1.29: a FINISHED session (server.session_finished).
+        # ``None`` on both for a session that has not finished.
+        "ended_at": getattr(info, "ended_at", None),
+        "end_reason": getattr(info, "end_reason", None),
     }
 
 
@@ -661,6 +671,12 @@ class Session:
     #: profiled session's override lives in its profile snapshot).
     model_override_env: Optional[Dict[str, str]] = None
     created_by: Optional[str] = None  # Authenticated user who created the session
+    #: When and why this session FINISHED (record 2.11).  Written by
+    #: :func:`server.session_finished.note_lifecycle` from the events routed
+    #: to it -- set by a finishing ``SessionTerminatedEvent``, cleared when a
+    #: turn starts again -- and persisted by ``_save_session``.
+    ended_at: Optional[str] = None
+    end_reason: Optional[str] = None
     #: Workspace-sandboxing posture, PERSISTED in the session record.
     #: ``"apparmor"`` (a profile the kernel is ENFORCING), ``"apparmor-complain"``
     #: (a profile loaded under ``JAATO_APPARMOR_COMPLAIN`` — the kernel logs
@@ -6880,6 +6896,11 @@ class SessionManager:
                 # Handle turn tracking for interrupted tool recovery
                 self._handle_turn_tracking_event(session, event)
 
+                # A finishing terminal marks the session FINISHED, a turn
+                # starting clears it.  Before the cascade policy below,
+                # whose unload saves the (now dirty) record.
+                note_session_lifecycle(session, event)
+
                 # Cascade budget: deplete the cid pool from this turn's spend.
                 self._accumulate_cascade_budget(session, event)
 
@@ -12613,6 +12634,8 @@ class SessionManager:
             provisioned=state.metadata.get('provisioned', False),
             model_override_env=state.metadata.get('model_override_env'),
             created_by=getattr(state, "created_by", None),  # 2.9+ (#859)
+            ended_at=getattr(state, "ended_at", None),  # 2.11+
+            end_reason=getattr(state, "end_reason", None),
             # 2.10+ (#812): the LAST KNOWN runner, restored as STALE.  After
             # a reload the pid named belonged to a previous process
             # lifetime, so it is evidence about what ran this session and
@@ -13247,6 +13270,9 @@ class SessionManager:
                     budget_exhausted_reason=budget_exhausted_reason,
                     interrupted_turn=session.interrupted_turn,  # For recovery on restart
                     workspace_files=workspace_files,
+                    # 2.11+: a finished session stays finished across a save.
+                    ended_at=session.ended_at,
+                    end_reason=session.end_reason,
                 )
 
                 self._session_plugin.save(state, storage_dir=storage_dir)
@@ -14591,6 +14617,8 @@ class SessionManager:
                     workspace_path=info.workspace_path,
                     inbox_pending=self._inbox_pending_count(info.session_id, wp),
                     profile_name=getattr(info, "profile_name", None),
+                    ended_at=getattr(info, "ended_at", None),
+                    end_reason=getattr(info, "end_reason", None),
                 )
 
         # Overlay in-memory sessions (have more current info)
@@ -14631,6 +14659,8 @@ class SessionManager:
                     inbox_pending=self._inbox_pending_count(
                         session.session_id, session.workspace_path),
                     profile_name=getattr(session.server, "profile_name", None),
+                    ended_at=session.ended_at,
+                    end_reason=session.end_reason,
                 )
 
         # Sort by last activity

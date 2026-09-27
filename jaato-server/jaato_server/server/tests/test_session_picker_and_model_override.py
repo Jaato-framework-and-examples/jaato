@@ -54,6 +54,9 @@ def test_picker_fields_carry_profile_activity_and_processing():
         "last_activity": "2026-09-02T00:00:00+00:00",
         "is_processing": True,
         "created_at": "2026-09-01T00:00:00+00:00",
+        # Protocol 1.29: a session that has not finished says so with None.
+        "ended_at": None,
+        "end_reason": None,
     }
 
 
@@ -64,7 +67,8 @@ def test_a_profile_less_row_says_empty_string_not_none():
 def test_a_duck_typed_row_gets_defaults_rather_than_raising():
     fields = session_picker_fields(SimpleNamespace(session_id="x"))
     assert fields == {"profile": "", "last_activity": "",
-                      "is_processing": False, "created_at": ""}
+                      "is_processing": False, "created_at": "",
+                      "ended_at": None, "end_reason": None}
 
 
 def test_session_list_rows_carry_the_picker_keys():

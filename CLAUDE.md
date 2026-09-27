@@ -7084,6 +7084,49 @@ had no forget at all. `deleted` and `missing` both mean the session is gone
 and both forget; `refused` and `silent` change nothing, which is what makes
 those two the load-bearing cases in the guard.
 
+### A Session You Ended, Kept (protocol 1.29)
+
+The web client's End sent `session.delete`, so a session a person chose to
+end was gone, and nothing on any record said a session had ended at all:
+`session.end` stopped it and emitted a `SessionTerminatedEvent` that left no
+trace, and a restart made it an ordinary sleeping session.
+
+`server/session_finished.py` is the rule. A session is **finished** when a
+`SessionTerminatedEvent` names one of `FINISHED_REASONS`:
+
+| Reason | Means |
+|---|---|
+| `client_request` / `stopped` | the person ended it (`session.end`), idle or mid-turn |
+| `natural` | its agent completed (`signal_completion`) |
+| `budget_exhausted` | its `budget_control` ceiling stopped it |
+
+`error` is not finished (a failed session is the one a person must look at
+again), nor are `cascade_cancelled` and the operator / wall-clock stops.
+
+| Piece | Where |
+|---|---|
+| the mark | `Session.ended_at` / `end_reason`, set by `note_lifecycle` in `SessionManager._emit_to_session` (before the cascade policy, whose unload saves the now-dirty record) |
+| the record | `SessionState.ended_at` / `end_reason`, **record 2.11**, also on `SessionInfo` so a cold row carries it |
+| the listing | `ended_at` / `end_reason` on every session row, through `session_picker_fields` (`session.list` and the `SessionInfoEvent` snapshot) |
+| the reopen | the main agent going `active` clears the mark. Attaching does not: reading a finished session keeps it finished, sending it a message does not |
+
+The mark is not saved on its own; it rides the saves that already happen
+(unload, the turn-end save, daemon shutdown), because an async save racing an
+unload would find `_runner_rpc` gone and write an empty history.
+
+**The web client.** The session picker has a fifth column, **Finished**
+(newest ended first, a card saying *ended by you* / *completed* / *stopped by
+its budget* and when, **Reopen** = attach, Discard = delete). Against a 1.29
+daemon End is `session.end` (`app/sessionEnd.ts`, waits for the terminal with
+a 4 s grace) and keeps the note; below 1.29 End still deletes, since an ended
+session there would read as a sleeping one. `MIN_SESSION_FINISH_PROTOCOL` in
+the TS SDK. Stated cost: after End the connection stays attached to the
+finished session until it attaches elsewhere or disconnects, so it stays
+loaded until then (plus the unload grace).
+
+Guard: `server/tests/test_a_finished_session_says_so.py`, four reversions;
+`SessionBoard.test.tsx`, `sessionEnd.test.ts`, two e2e cases.
+
 ### A Key Typed Once Per Workspace
 
 The web client's configure form asked for the provider's API key on every

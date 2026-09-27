@@ -20,6 +20,11 @@
  *   never touches the tree it ran in), so the list is where the person
  *   picks it, or another, again.  On a single-workspace daemon there is
  *   no list, and End disconnects like Detach.
+ * - **End keeps the session, on a daemon that can say so.**  From protocol
+ *   1.29 End is ``session.end`` and the session is listed under Finished
+ *   in the session picker (``sessionEnd.ts``); deleting it is the
+ *   picker's Discard.  Below 1.29 an ended session would read as an
+ *   ordinary sleeping one, so End deletes there, as it always did.
  * - **End waits for the daemon's word before leaving.**  ``session.delete``
  *   is answered by a ``system.message`` naming the outcome, and leaving
  *   before it arrives would report a deletion nobody has confirmed.  A
@@ -35,6 +40,7 @@ import { anyBusy } from "@/store/phase";
 import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { markExited } from "./exitIntent";
 import { deleteSession } from "./sessionDelete";
+import { endSession as endAndKeep, finishSupported } from "./sessionEnd";
 
 /**
  * The options the TUI offers, in its order, for a session with a turn in
@@ -42,13 +48,17 @@ import { deleteSession } from "./sessionDelete";
  * own words; ``r`` is the last option either way so Tab from the
  * default (``c`` or ``d``) reaches the refusals in the same order.
  */
-export function exitOptions(running: boolean): ExitOption[] {
+export function exitOptions(running: boolean, keepsFinished: boolean = finishSupported()): ExitOption[] {
   const detach: ExitOption = running
     ? { key: "d", label: "Detach", description: "The task continues in the background; reconnect later" }
     : { key: "d", label: "Detach", description: "Keep the session on the daemon; reconnect later" };
-  const end: ExitOption = running
-    ? { key: "e", label: "End session", description: "Cancel the task and delete the session" }
-    : { key: "e", label: "End session", description: "Delete the session from the daemon" };
+  const end: ExitOption = keepsFinished
+    ? running
+      ? { key: "e", label: "End session", description: "Cancel the task and end the session; it stays listed under Finished" }
+      : { key: "e", label: "End session", description: "End the session; it stays listed under Finished" }
+    : running
+      ? { key: "e", label: "End session", description: "Cancel the task and delete the session" }
+      : { key: "e", label: "End session", description: "Delete the session from the daemon" };
   const back: ExitOption = { key: "r", label: "Return", description: "Return to the session" };
   return running
     ? [{ key: "c", label: "Cancel task and exit", description: "Stop the turn, keep the session on the daemon" }, detach, end, back]
@@ -103,13 +113,26 @@ async function detach(): Promise<void> {
 }
 
 /**
- * The TUI's [e]: stop a running turn, delete the session, and leave — to
- * the workspace list where there is one, else the connect screen.
+ * The TUI's [e]: end the session and leave — to the workspace list where
+ * there is one, else the connect screen.  On a 1.29 daemon the session is
+ * ended and kept (listed under Finished); below it, deleted.
  */
 async function endSession(running: boolean): Promise<void> {
   const st = useJaato.getState();
   const sessionId = st.sessionId;
   if (!sessionId || !isConnected()) return detach();
+  if (finishSupported()) {
+    // ``session.end`` cancels a running turn itself (reason ``stopped``).
+    const answer = await endAndKeep(sessionId);
+    const fresh = useJaato.getState();
+    if (answer.kind === "silent") {
+      fresh.addSystemBlock(fresh.selectedAgentId, "The daemon did not confirm the end.", "warning");
+    }
+    fresh.resetSessionState();
+    if (endDestination(fresh.workspace.mode) === "connect") return detach();
+    fresh.setScreen("workspaces");
+    return;
+  }
   if (running) {
     try { await getClient().stop(); } catch { /* deletion still proceeds */ }
   }

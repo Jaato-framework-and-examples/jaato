@@ -1,10 +1,14 @@
 /**
- * Columns 1–3 of the session picker (design 2a): the workspace's existing
- * sessions by state -- Waiting on you, Awake, Sleeping -- as cards.
+ * Columns 1–4 of the session picker (design 2a): the workspace's existing
+ * sessions by state -- Waiting on you, Awake, Sleeping, Finished -- as cards.
  *
  * Every session is ATTACHED to; there is no "Resume".  Attaching to a
  * sleeping session is what wakes it, which the column's hint says so the
- * verb does not have to.
+ * verb does not have to.  A FINISHED session (protocol 1.29: ended by the
+ * person, completed by its agent, or stopped by its budget) is reopened
+ * the same way -- attaching shows its transcript, and it leaves Finished
+ * only when a turn starts in it, which is the daemon's rule, not the
+ * card's.
  *
  * Discard is inline, never a modal: the card's footer turns into a pale red
  * strip naming what is lost for THAT state (an open prompt cancelled,
@@ -19,7 +23,8 @@ import { deleteSession, isGone } from "@/app/sessionDelete";
 import { ensureSessions } from "@/app/actions";
 import { noteFirstLine } from "@/app/notes";
 import { useJaato } from "@/store/store";
-import { sessionBoard, type SessionColumn, type SessionSummary } from "@/protocol/sessions";
+import { endReasonLabel, sessionBoard, type SessionColumn, type SessionSummary } from "@/protocol/sessions";
+import { formatAgo } from "@/protocol/gc";
 import { awaitingLabel } from "@/components/panels/SessionsPanel";
 import { NoteEditor } from "@/components/panels/NoteEditor";
 
@@ -36,6 +41,7 @@ export const BOARD_COLUMNS: ColumnSpec[] = [
   { id: "waiting", title: "Waiting on you", hint: "A prompt is open", tone: "text-warning", rule: "border-warning" },
   { id: "awake", title: "Awake", hint: "Loaded in the daemon", tone: "text-success", rule: "border-success" },
   { id: "sleeping", title: "Sleeping", hint: "Saved on disk; attaching wakes it", tone: "text-text-muted", rule: "border-[color:var(--c-divider)]" },
+  { id: "finished", title: "Finished", hint: "Ended, completed or out of budget; a new message reopens it", tone: "text-text-muted", rule: "border-[color:var(--c-divider)]" },
 ];
 
 /** The coloured state line of a card. */
@@ -45,6 +51,10 @@ export function stateLine(s: SessionSummary, col: SessionColumn, now: number = D
     const clients = s.clientCount === 1 ? "1 client attached" : s.clientCount > 1 ? `${s.clientCount} clients attached` : "no client attached";
     return `awake · ${s.isProcessing ? "working · " : ""}${clients}`;
   }
+  if (col === "finished") {
+    const at = s.endedAt ? Date.parse(s.endedAt) : NaN;
+    return `${endReasonLabel(s.endReason)}${Number.isFinite(at) ? ` · ${formatAgo(at, now)}` : ""}`;
+  }
   return "sleeping · on disk";
 }
 
@@ -52,6 +62,7 @@ export function stateLine(s: SessionSummary, col: SessionColumn, now: number = D
 export function discardMessage(id: string, col: SessionColumn): string {
   if (col === "waiting") return `Stop and discard ${id}? Its open prompt is cancelled and the saved history is deleted.`;
   if (col === "awake") return `Stop and discard ${id}? Any running work stops and the saved history is deleted.`;
+  if (col === "finished") return `Delete ${id} and its saved history? It leaves Finished for good.`;
   return `Delete ${id} and its saved history?`;
 }
 
@@ -105,10 +116,10 @@ function SessionCard({ sess, col, tone, confirming, onConfirm, onAttach }: {
           <button
             type="button"
             onClick={() => onAttach(sess.id)}
-            aria-label={`Attach session ${sess.id}`}
-            className={`flex-1 text-left px-3.5 py-2 chrome chrome-sm hover:bg-tint ${col === "sleeping" ? "text-text-muted" : "text-steel"}`}
+            aria-label={`${col === "finished" ? "Reopen" : "Attach"} session ${sess.id}`}
+            className={`flex-1 text-left px-3.5 py-2 chrome chrome-sm hover:bg-tint ${col === "sleeping" || col === "finished" ? "text-text-muted" : "text-steel"}`}
           >
-            Attach <span aria-hidden="true">→</span>
+            {col === "finished" ? "Reopen" : "Attach"} <span aria-hidden="true">→</span>
           </button>
           <button
             type="button"
@@ -146,8 +157,8 @@ export function ColumnHeader({ title, count, tone, rule }: { title: string; coun
 }
 
 /**
- * The three session columns.  Rendered as grid children of the picker's
- * four-column body (the New session column is the fourth), so each column
+ * The four session columns.  Rendered as grid children of the picker's
+ * five-column body (the New session column is the fifth), so each column
  * carries its own left rule rather than the grid drawing them.
  */
 export function SessionBoard({ sessions, onAttach }: { sessions: SessionSummary[]; onAttach: (id: string) => void }) {

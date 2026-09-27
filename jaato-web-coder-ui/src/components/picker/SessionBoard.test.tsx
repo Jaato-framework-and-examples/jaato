@@ -76,3 +76,31 @@ describe("stateLine", () => {
     expect(stateLine(sessions[2]!, "sleeping")).toBe("sleeping · on disk");
   });
 });
+
+describe("the Finished column (protocol 1.29)", () => {
+  const now = Date.parse("2026-09-27T12:00:00Z");
+  const finished: SessionSummary[] = [
+    ...sessions,
+    // Still loaded (the unload grace after End): finished outranks awake.
+    { ...base, id: "20260927_101500", endedAt: "2026-09-27T11:58:00Z", endReason: "client_request" },
+    { ...base, id: "20260926_080000", isLoaded: false, clientCount: 0, endedAt: "2026-09-27T09:00:00Z", endReason: "budget_exhausted" },
+  ];
+
+  it("lists ended sessions newest first, out of Awake and Sleeping, and reopens by attaching", () => {
+    const onAttach = vi.fn();
+    render(<SessionBoard sessions={finished} onAttach={onAttach} />);
+    const region = screen.getByRole("region", { name: "Finished" });
+    const ids = within(region).getAllByTestId("session-card").map((c) => c.getAttribute("data-session"));
+    expect(ids).toEqual(["20260927_101500", "20260926_080000"]);
+    expect(within(screen.getByRole("region", { name: "Awake" })).queryByText("20260927_101500")).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Sleeping" })).queryByText("20260926_080000")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reopen session 20260926_080000" }));
+    expect(onAttach).toHaveBeenCalledWith("20260926_080000");
+  });
+
+  it("says why and when it ended", () => {
+    expect(stateLine(finished[3]!, "finished", now)).toBe("ended by you · 2 min ago");
+    expect(stateLine(finished[4]!, "finished", now)).toBe("stopped by its budget · 3 h ago");
+    expect(stateLine({ ...base, id: "x", endReason: "natural" }, "finished", now)).toBe("completed");
+  });
+});

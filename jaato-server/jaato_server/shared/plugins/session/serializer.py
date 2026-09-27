@@ -570,7 +570,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # 2.10: runner_identity -- which PROCESS is (or last was) executing
         # this session, so a session an operator can see is one they can act
         # on (issue #812).
-        'version': '2.10',
+        # 2.11: ended_at / end_reason -- a session the person ended, the
+        # agent completed or the budget stopped is FINISHED, and says so
+        # (server.session_finished).
+        'version': '2.11',
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -616,6 +619,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'runner_identity': state.runner_identity,
         'interrupted_turn': state.interrupted_turn,
         'session_state': state.session_state,
+        # 2.11+.  Fixed key list: a field added to the dataclass alone never
+        # reaches disk.
+        'ended_at': state.ended_at,
+        'end_reason': state.end_reason,
     }
 
 
@@ -669,6 +676,8 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         runner_identity=data.get('runner_identity'),  # None on pre-2.10
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),
+        ended_at=data.get('ended_at'),  # None on pre-2.11 records
+        end_reason=data.get('end_reason'),
     )
 
 
@@ -697,6 +706,9 @@ def serialize_session_info(state: SessionState) -> Dict[str, Any]:
         # The group predicate's other half (server.session_groups): a cold
         # session answers "do we share an owner" off the listing.
         'created_by': state.created_by,
+        # A cold FINISHED session is listed as finished (2.11).
+        'ended_at': state.ended_at,
+        'end_reason': state.end_reason,
     }
 
 
@@ -723,4 +735,6 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
         # that need the model resolve via the profile registry.
         profile_name=data.get('profile_name'),
         workspace_path=data.get('workspace_path'),
+        ended_at=data.get('ended_at'),  # None on pre-2.11 records
+        end_reason=data.get('end_reason'),
     )

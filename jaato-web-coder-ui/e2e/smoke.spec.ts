@@ -1043,7 +1043,7 @@ test("with a turn in flight the question offers Cancel task and exit first, and 
   await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
 });
 
-test("End session deletes the session and, in workspace mode, lands on the workspace list with the workspace still there", async ({ page }) => {
+test("End session ends the session and, in workspace mode, lands on the workspace list with the workspace still there", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
   await page.getByRole("button", { name: "Connect" }).click();
@@ -1060,6 +1060,42 @@ test("End session deletes the session and, in workspace mode, lands on the works
   await expect(page.getByRole("button", { name: "Open workspace project-b" })).toBeVisible();
   // ``exact``: the list's own way out is "Disconnect", which a substring match would count.
   await expect(page.getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
+});
+
+test("an ended session is listed under Finished, and reopening it is attaching", async ({ page }) => {
+  // Protocol 1.29: End no longer deletes.  The daemon marks the session
+  // finished and keeps it, so the picker can show it again.
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  await page.getByLabel("Provider", { exact: true }).selectOption("anthropic");
+  await page.getByLabel("Model", { exact: true }).fill("claude-sonnet-4");
+  await page.getByRole("button", { name: /Start session/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: EXIT }).click();
+  const plate = page.getByRole("group", { name: "Exit options" });
+  await expect(plate.getByText("End the session; it stays listed under Finished")).toBeVisible();
+  await plate.getByRole("button", { name: /End session/ }).click();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  const finished = page.getByRole("region", { name: "Finished" });
+  // Newest ended first.  The mock daemon is shared by the whole run, so an
+  // earlier test's ended session may sit below this one.
+  const newest = finished.getByTestId("session-card").first();
+  await expect(newest.getByText(/^ended by you · just now/)).toBeVisible();
+  await newest.getByRole("button", { name: /^Reopen session / }).click();
+  await expect(composer(page)).toBeVisible();
+});
+
+test("a session the daemon records as completed is listed under Finished", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  const finished = page.getByRole("region", { name: "Finished" });
+  await expect(finished.getByText("20260912_110000")).toBeVisible();
+  await expect(finished.getByText(/^completed · /)).toBeVisible();
+  await expect(page.getByRole("region", { name: "Sleeping" }).getByText("20260912_110000")).toHaveCount(0);
 });
 
 test("End session on a single-workspace daemon disconnects like Detach", async ({ page }) => {
