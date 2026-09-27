@@ -23,9 +23,13 @@
  *   downloads the current file instead -- no workspace diff viewer
  *   exists yet (see ``protocol/toolPreview.ts``'s own docstring).
  * - ``exec``: the command itself as the row's title (rather than a
- *   generic argument summary) and, while collapsed, a trailing-lines
- *   preview of its output with a "Copy output" action that copies the
- *   WHOLE accumulated output, not just the preview.
+ *   generic argument summary) and, while the call RUNS and the row is
+ *   collapsed, a trailing-lines preview of its output, with a "Copy
+ *   output" action that copies the WHOLE accumulated output.  A finished
+ *   call shows no preview: collapsed means collapsed, and the output is a
+ *   click away.  Output carrying server markup (a notebook cell's
+ *   ``<nb-row>``s) gets no preview either -- a tail of it is cut markup,
+ *   which drew as raw tags; it renders in full when the row is expanded.
  *
  * The caller (``ToolGroupView``, for a ``"row"``-mode group) already
  * knows the class from the resolved display name and passes it in;
@@ -137,7 +141,9 @@ export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: {
   const serverDiff = cls === "write" && block.diff ? splitServerDiff(block.diff) : null;
   const diff = !serverDiff && cls === "write" ? diffPreviewForCall(displayName, resolvedArgs) : null;
   const hasDiffPreview = !!diff && (diff.diffLines !== null || diff.text !== null);
-  const execTail = cls === "exec" && block.output && !block.expanded ? execOutputPreview(block.output) : null;
+  const execTail = cls === "exec" && running && block.output && !block.expanded && !hasServerMarkup(block.output)
+    ? execOutputPreview(block.output)
+    : null;
   const title = cls === "exec" ? execTitle(displayName, resolvedArgs) : null;
   const copyOutput = (e: MouseEvent) => { e.stopPropagation(); navigator.clipboard?.writeText(block.output).catch(() => undefined); };
 

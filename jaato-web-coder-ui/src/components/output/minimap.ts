@@ -191,6 +191,12 @@ export function layoutItem(item: TranscriptItem, width: number, measure: Measure
       }
       return { bars, height: lh + 12, card: false };
     }
+    case "collapsedNote": {
+      // Its one collapsed line, as the pane draws it.
+      const first = item.texts[0]?.split("\n").find((l) => l.trim()) ?? item.source;
+      const r = wrapWords(first, { x0: 18, y0: 4, maxWidth: width - 18, ...FONTS.note, tone: "muted", nowrap: true }, measure);
+      return { bars: r.bars, height: r.bottom + 4, card: false };
+    }
     case "banner":
     case "systemNote": {
       const pad = item.kind === "banner" ? 12 : 0;
@@ -211,6 +217,8 @@ export function layoutSignature(item: TranscriptItem, width: number): string {
     case "banner":
     case "systemNote":
       return `${item.id}|${width}|${item.text.length}`;
+    case "collapsedNote":
+      return `${item.id}|${width}|${item.texts.length}|${item.texts[0]?.length ?? 0}`;
   }
 }
 

@@ -17,6 +17,7 @@
  * ``name`` and ``result`` (``response`` is tolerated for older daemons).
  */
 import type { OutputBlock, ToolBlock } from "@/store/types";
+import { SUBAGENT_REPORT_ORIGIN } from "./agentNotes";
 
 type Part = Record<string, unknown>;
 type Msg = { role?: string; parts?: Part[] };
@@ -115,6 +116,8 @@ export interface HistoryUnit {
   turn?: number;
   text?: string;
   tools?: Array<Record<string, unknown>>;
+  /** ``"subagent"`` on a ``user`` unit that is a subagent's report, not the user's turn. */
+  origin?: string;
 }
 
 /**
@@ -135,7 +138,10 @@ export function historyPageBlocks(units: unknown, agentId: string, nextId: () =>
     const group = String(u.group ?? "");
     const text = typeof u.text === "string" ? u.text : "";
     const prev = out[out.length - 1];
-    if (kind === "user") {
+    if (kind === "user" && u.origin === SUBAGENT_REPORT_ORIGIN) {
+      // A subagent's report, not the user's turn: drawn as the live echo is.
+      out.push({ id: nextId(), kind: "text", agentId, source: "child", text });
+    } else if (kind === "user") {
       out.push({ id: nextId(), kind: "user", agentId, text, echoed: true });
     } else if (kind === "model" || kind === "thinking") {
       if (kind === "model" && prev && prev.kind === "text" && prev.source === "model" && group && group === lastGroup) {
