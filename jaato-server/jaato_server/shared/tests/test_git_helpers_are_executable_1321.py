@@ -44,35 +44,35 @@ _AA = "jaato-server/jaato_server/server/apparmor.py"
 REVERSIONS = [
     Reversion(
         target=_AA,
-        find="""  /bin/**              ix,
+        find="""  /bin/**              r,
   # git's own helpers (v36, #1321): git-remote-https & co. live on git's
   # exec path, not on PATH, and ``/usr/lib/**`` below is ``rm`` only.
   /usr/lib/git-core/*      ix,
   /usr/libexec/git-core/*  ix,
 """,
-        replace="""  /bin/**              ix,
+        replace="""  /bin/**              r,
 """,
         test="test_the_base_body_can_exec_git_helpers",
         because="the base body cannot exec git-remote-https",
     ),
     Reversion(
         target=_AA,
-        find="""    /bin/**              ix,
+        find="""    /bin/**              r,
     /usr/lib/git-core/*      ix,
     /usr/libexec/git-core/*  ix,
 """,
-        replace="""    /bin/**              ix,
+        replace="""    /bin/**              r,
 """,
         test="test_tool_hat_can_exec_git_helpers",
         because="tool_hat cannot exec git-remote-https",
     ),
     Reversion(
         target=_AA,
-        find='''                "    /bin/**              ix,\\n"
+        find='''                "    /bin/**              r,\\n"
                 "    /usr/lib/git-core/*      ix,\\n"
-                "    /usr/libexec/git-core/*  ix,"
+                "    /usr/libexec/git-core/*  ix,\\n"
 ''',
-        replace='''                "    /bin/**              ix,"
+        replace='''                "    /bin/**              r,\\n"
 ''',
         test="test_an_unscoped_child_can_exec_git_helpers",
         because="cli's //child cannot exec git-remote-https",
