@@ -266,6 +266,15 @@ Three pieces help every client, not only the web coder:
    The web coder's version covers cloned subdirectories; this covers the TUI
    user in their own repo. If the framework does it, the BFF skips the root.
 
+   **Built (#1347).** `shared/repo_guidance.py` adds the line to the `disk`
+   base layer when the workspace root holds `AGENTS.md`, `CLAUDE.md`,
+   `CONTRIBUTING.md`, `.github/copilot-instructions.md` or `.cursor/rules`,
+   naming them and never including their contents. It works in the other
+   direction too: a root name the managed `30-repo-guidance.md` already
+   lists (`` `AGENTS.md` ``) is skipped, so the BFF may keep listing the root
+   and there is still one pointer. `suppress_base_instructions: {disk: true}`
+   drops it.
+
 **A related idea, not part of this design:** explain a denial when it
 happens. When a command fails with `Permission denied`, neither an
 instruction file nor the `runtime` aspect connects that failure to the
