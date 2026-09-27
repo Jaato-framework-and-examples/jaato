@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatHistoryListing, historyBlocks } from "./history";
+import { formatHistoryListing, historyBlocks, historyPageBlocks } from "./history";
+import type { ToolBlock } from "@/store/types";
 
 const HISTORY = [
   { role: "user", parts: [{ type: "text", text: "list the files" }] },
@@ -33,5 +34,28 @@ describe("history listing", () => {
     expect(text).toContain("[Function Response: cli_based_tool]");
     expect(text).toContain("--- Turn 1: 15 tokens (in: 10, out: 5) ---");
     expect(formatHistoryListing([], [])).toBe("No conversation history.");
+  });
+});
+
+describe("historyPageBlocks: a call the session is still inside", () => {
+  let n = 0;
+  const id = () => `b${++n}`;
+  const units = [
+    { kind: "user", text: "set it up" },
+    { kind: "tools", tools: [{ call_id: "c0", tool_name: "cli", success: true }] },
+    { kind: "tools", tools: [{ call_id: "c1", tool_name: "request_clarification", success: null }] },
+  ];
+
+  it("is drawn running at the end of the newest page, so it does not read as answered", () => {
+    const blocks = historyPageBlocks(units, "main", id, false, true) as ToolBlock[];
+    const tools = blocks.filter((b) => b.kind === "tool");
+    expect(tools.map((b) => [b.callId, b.status])).toEqual([["c0", "success"], ["c1", "running"]]);
+  });
+
+  it("stays drawn as finished on an older page, or anywhere but the end", () => {
+    const older = historyPageBlocks(units, "main", id, false, false) as ToolBlock[];
+    expect(older.filter((b) => b.kind === "tool").map((b) => b.status)).toEqual(["success", "success"]);
+    const notLast = historyPageBlocks([...units, { kind: "model", text: "ok" }], "main", id, false, true) as ToolBlock[];
+    expect(notLast.filter((b) => b.kind === "tool").map((b) => b.status)).toEqual(["success", "success"]);
   });
 });

@@ -836,6 +836,30 @@ case against the shipped default formatter pipeline and the standalone WS
 dispatch), `jaato_sdk/tests/test_history_page_client.py`, the web client's
 `app/historyPaging.test.ts`, and the e2e scroll-back case.
 
+### A Prompt Nobody Attached Could Answer
+
+A client that attached while the session was blocked on a permission ASK or
+a `request_clarification` (a reconnect, a second tab, a return from the
+picker) saw the call in the transcript and no way to answer it. On the
+runner path the two relays (`PromptOperatorHandler`,
+`ClarificationRelayHandler`) emitted the prompt events once, to whoever was
+attached, and kept only the futures, so `emit_current_state` had nothing to
+replay. The web client then drew the unanswered call with a check, because
+the paged replay drew `success: null` as success.
+
+| Piece | Change |
+|---|---|
+| the relays | keep the events each prompt was announced with while its future is pending (`pending_events()`), dropped with the future |
+| the attach | `JaatoServer._replay_pending_prompts` re-sends them LAST in `emit_current_state`, after the stale clear. A client that already holds a prompt keys it by `request_id`, so a second copy changes nothing |
+| the stale clear | `_emit_clear_stale_requests` also asks the relays, so a recovered session no longer clears a prompt that is really pending (it read only the daemon-local ids, which the runner path never sets) |
+| the web replay | a call with no result at the very end of the NEWEST page is drawn `running`; its live end finishes it. Elsewhere `success: null` is still drawn as finished |
+
+Any attached client may answer: the relays resolve by `request_id` alone.
+Not covered: the daemon-local path (embedded, standalone WS) keeps only the
+request ids, so it still has nothing to replay. Guard:
+`server/tests/test_a_pending_prompt_reaches_a_reattached_client.py`, four
+reversions; `history.test.ts`.
+
 ### Output Meant for the Agent, Shown Collapsed
 
 Two kinds of output reach the chat for the AGENT to read, not the user:
