@@ -5,10 +5,10 @@ name: "Publish @jaato/web-coder-server to npm"
 # checkout links with `file:` for development. The publish job builds
 # against those links, then rewrites the manifest to the siblings' caret
 # ranges (scripts/prepare-publish.mjs) and REFUSES to publish unless both
-# of those versions are already on npm — so the order is SDK, then UI,
-# then this (docs/design/web-server-bff.md §9), enforced rather than
-# remembered.  A STAGED sibling is not on npm yet: each one has to be
-# approved by a maintainer before the next workflow's gate opens.
+# of those versions are already on npm — so this goes after the SDK and
+# the UI, which have no order between them (docs/design/web-server-bff.md
+# §9), enforced rather than remembered.  A STAGED sibling is not on npm
+# yet: both have to be approved by a maintainer before this gate opens.
 #
 # Same npm-side setup as the others: the stage-only @jaato org token in
 # the repo's `npm-sdk` environment as NPM_TOKEN; this run stages too, and
