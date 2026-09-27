@@ -1103,7 +1103,10 @@ class ToolExecutor:
             status = plugin.get_status(task_id)
             if status.value not in ('pending', 'running'):
                 return status.value
-            if cancel_token is not None and cancel_token.is_cancelled():
+            # ``is_cancelled`` is a PROPERTY.  Calling it raised TypeError on
+            # every poll, which the caller read as "the background start
+            # failed" and answered by running the tool a second time (#1338).
+            if cancel_token is not None and cancel_token.is_cancelled:
                 try:
                     plugin.cancel(task_id)
                 except Exception as exc:
@@ -1340,6 +1343,14 @@ class ToolExecutor:
         The wait honours the thread's cancel token, so a stop request is
         not held for the (much longer) no-reader deadline.
 
+        **A tool runs at most once here.**  Synchronous fallback is taken
+        only when ``start_background`` itself fails, because then nothing
+        has run.  Any failure after the start is reported as the call's
+        error and the tool is NOT re-run: it is already running and may
+        already have had its effect.  Before #1338 one ``except`` covered
+        both, so an error while waiting ran every backgroundable call
+        (every ``cli_based_tool`` call, in practice) twice.
+
         Args:
             name: Tool name.
             args: Arguments dict.
@@ -1363,67 +1374,120 @@ class ToolExecutor:
             # Fall back to sync execution if no executor found
             return self._execute_sync(name, args)
 
+        # Start as background task immediately - this uses the streaming
+        # executor which captures output incrementally.
+        # Pass the current output callback explicitly for thread-safety
+        # (in parallel execution, the callback is in thread-local, not instance).
+        #
+        # Only THIS step may fall back to synchronous execution: until it
+        # returns a handle, nothing has run.  Once it has, the tool is
+        # running, and running it again is never a recovery (#1338).
         try:
-            # Start as background task immediately - this uses the streaming
-            # executor which captures output incrementally.
-            # Pass the current output callback explicitly for thread-safety
-            # (in parallel execution, the callback is in thread-local, not instance).
-            current_output_cb = self.get_tool_output_callback()
             handle = plugin.start_background(
                 name, args, executor_fn=executor_fn,
-                output_callback=current_output_cb,
+                output_callback=self.get_tool_output_callback(),
             )
-            task_id = handle.task_id
-
-            # A receipt is only worth issuing if something in this session
-            # accepts one.  With no reader, sit on the task far longer and
-            # try to return its real output instead (#804).
-            reader = self._background_reader_tool()
-            wait_for = threshold if reader else self._no_reader_deadline(threshold)
-
-            settled = self._wait_for_background_task(plugin, task_id, wait_for)
-            if settled is not None:
-                task_result = plugin.get_result(task_id)
-                result = task_result.result
-                if permission_meta and isinstance(result, dict):
-                    result['_permission'] = permission_meta
-                if task_result.status.value != 'completed':
-                    return False, result or {
-                        'error': task_result.error
-                                 or f'Task {task_result.status.value}'
-                    }
-                return True, result
-
-            # Task outlived the wait window - register done callback for UI completion
-            if self._task_done_callback and hasattr(plugin, 'set_task_done_callback'):
-                plugin.set_task_done_callback(task_id, self._task_done_callback)
-
-            ok, result = self._build_backgrounded_result(
-                task_id, handle, threshold, reader, wait_for
-            )
-
-            # Inject permission metadata
-            if permission_meta:
-                result['_permission'] = permission_meta
-
-            # Record auto-background event
-            if self._ledger:
-                self._ledger._record('auto-background', {
-                    'tool': name,
-                    'task_id': task_id,
-                    'threshold': threshold,
-                    'waited_seconds': wait_for,
-                    'background_reader_available': reader is not None,
-                })
-
-            return ok, result
-
         except Exception as e:
-            # If start_background fails, fall back to sync execution
+            logger.warning(
+                f"Auto-background start failed for {name} ({e}); running it "
+                f"synchronously instead."
+            )
             try:
                 return self._execute_sync(name, args)
             except Exception as inner_e:
                 return False, {'error': f'Background start failed: {e}, sync fallback failed: {inner_e}'}
+
+        try:
+            return self._await_background_task(
+                name, plugin, handle, threshold, permission_meta,
+            )
+        except Exception as e:
+            # The task is already running and may already have had its
+            # effect.  Report the failure to wait on it; do not re-run it.
+            logger.warning(
+                f"Waiting on background task {handle.task_id} ({name}) failed: "
+                f"{e}.  The task was started and is not re-executed."
+            )
+            return False, {
+                'error': (
+                    f"{name} was started (task {handle.task_id}) but its "
+                    f"result could not be collected: {e}.  It may still be "
+                    f"running or may already have completed; it was not "
+                    f"run a second time."
+                ),
+                'task_id': handle.task_id,
+            }
+
+    def _await_background_task(
+        self,
+        name: str,
+        plugin: 'BackgroundCapable',
+        handle: 'TaskHandle',
+        threshold: float,
+        permission_meta: Optional[Dict[str, Any]],
+    ) -> Tuple[bool, Any]:
+        """Wait on a started background task and build the call's result.
+
+        The half of :meth:`_execute_with_auto_background` that runs after
+        ``start_background`` has returned.  Split out so the caller can tell
+        a failure to START (nothing ran; synchronous fallback is safe) from
+        a failure while WAITING (the tool is running; re-running it would
+        execute it twice, #1338).
+
+        Args:
+            name: Tool name.
+            plugin: The BackgroundCapable plugin that owns the task.
+            handle: The handle ``start_background`` returned.
+            threshold: The plugin's auto-background threshold, in seconds.
+            permission_meta: Optional permission metadata to inject.
+
+        Returns:
+            Tuple of (success, result), as :meth:`_execute_with_auto_background`.
+        """
+        task_id = handle.task_id
+
+        # A receipt is only worth issuing if something in this session
+        # accepts one.  With no reader, sit on the task far longer and
+        # try to return its real output instead (#804).
+        reader = self._background_reader_tool()
+        wait_for = threshold if reader else self._no_reader_deadline(threshold)
+
+        settled = self._wait_for_background_task(plugin, task_id, wait_for)
+        if settled is not None:
+            task_result = plugin.get_result(task_id)
+            result = task_result.result
+            if permission_meta and isinstance(result, dict):
+                result['_permission'] = permission_meta
+            if task_result.status.value != 'completed':
+                return False, result or {
+                    'error': task_result.error
+                             or f'Task {task_result.status.value}'
+                }
+            return True, result
+
+        # Task outlived the wait window - register done callback for UI completion
+        if self._task_done_callback and hasattr(plugin, 'set_task_done_callback'):
+            plugin.set_task_done_callback(task_id, self._task_done_callback)
+
+        ok, result = self._build_backgrounded_result(
+            task_id, handle, threshold, reader, wait_for
+        )
+
+        # Inject permission metadata
+        if permission_meta:
+            result['_permission'] = permission_meta
+
+        # Record auto-background event
+        if self._ledger:
+            self._ledger._record('auto-background', {
+                'tool': name,
+                'task_id': task_id,
+                'threshold': threshold,
+                'waited_seconds': wait_for,
+                'background_reader_available': reader is not None,
+            })
+
+        return ok, result
 
     def execute(
         self,

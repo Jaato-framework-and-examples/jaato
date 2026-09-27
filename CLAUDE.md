@@ -8606,6 +8606,33 @@ gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
 
+### A Command That Ran Twice (#1338)
+
+From 3 September until this fix, almost every `cli_based_tool` call ran its
+command **twice, concurrently**. `ToolExecutor._execute_with_auto_background`
+starts a BackgroundCapable tool as a background task and polls it. The poll
+called `cancel_token.is_cancelled()`, but `CancelToken.is_cancelled` is a
+property, so every poll raised `TypeError`. One `except` covered both the
+start and the wait, read the error as "the background start failed", and ran
+the tool again through `_execute_sync` while the first copy was still running.
+Every session passes a cancel token, so no real call escaped it. The
+auto-background tests never passed one, which is why none of them caught it.
+
+What it cost: every side effect happened twice (`git commit`, `rm`,
+`pip install`, a POST). Clients got both outputs interleaved. And the two
+copies ran in different environments, because the synchronous path drops the
+workspace HOME (#1339). One copy wrote into the daemon's HOME, and a git probe
+reported two contradictory failures from a single call.
+
+| Change | Where |
+|---|---|
+| read the property, not call it | `_wait_for_background_task` |
+| only a failed `start_background` falls back to a synchronous run; a failure after the start is the call's error, with the `task_id`, and the tool is not re-run | `_execute_with_auto_background`, which now delegates the wait to `_await_background_task` |
+
+Guard: `jaato_server/shared/tests/test_a_tool_runs_once_1338.py`, three
+reversions. Every test passes a real `CancelToken`, and one drives the real
+cli plugin and counts the lines its command appends to a file.
+
 ### A Failure While Reporting a Failure, Discarded (#1077)
 
 The daemon's model thread wound its turn down inside a `finally` holding

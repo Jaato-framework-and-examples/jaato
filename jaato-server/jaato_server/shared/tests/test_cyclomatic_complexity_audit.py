@@ -203,7 +203,6 @@ BASELINE: Dict[str, int] = {
     # 73 -> 57: the permission gate moved out into check_permission_only so
     # the streaming route could share it rather than run unchecked (#797).
     "jaato-server/jaato_server/shared/ai_tool_runner.py::ToolExecutor._execute_impl": 57,
-    "jaato-server/jaato_server/shared/ai_tool_runner.py::ToolExecutor._execute_with_auto_background": 16,
     "jaato-server/jaato_server/shared/change_tools.py::changed_lines_tool": 24,
     "jaato-server/jaato_server/shared/client_commands.py::parse_user_input": 24,
     "jaato-server/jaato_server/shared/completion_processors.py::invoke_processors": 18,
