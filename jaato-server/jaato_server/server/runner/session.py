@@ -600,6 +600,26 @@ def _configure_runtime_plugins(
 _PRISTINE_ENVIRON: Optional[Dict[str, str]] = None
 
 
+def _install_confinement_grants(envelope: SessionInitEnvelope) -> None:
+    """Install the session's ``//child`` grants for the ``cli`` denial hint (#1348).
+
+    Every bootstrap replaces them, so a pool slot never explains a refusal
+    with the grants of the session before.  An unconfined session (empty
+    ``profile_name``) installs none, whatever the envelope carries: no
+    profile refused anything it ran.
+    """
+    from jaato_server.shared.confinement_grants import set_confinement_grants
+
+    wire = getattr(envelope, "confinement_grants", None)
+    installed = set_confinement_grants(wire if envelope.profile_name else None)
+    if installed is not None:
+        logger.info(
+            "runner-session bootstrap: confinement grants installed "
+            "(profile=%s exec_scope=%s rules=%d)",
+            installed.profile_name, installed.exec_scope, len(installed.rules),
+        )
+
+
 def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]:
     """Apply ``envelope.session_env`` to the runner's ``os.environ``.
 
@@ -1378,6 +1398,8 @@ def bootstrap_session(
     # #1215: build the output redactor from the same env, before any
     # plugin runs a tool that could print a value out of it.
     _configure_output_redaction(envelope, resolved_session_env)
+    # #1348: this session's //child grants, replacing the last session's.
+    _install_confinement_grants(envelope)
     if resolved_session_env:
         logger.info(
             "runner-session bootstrap: applied %d session env keys "

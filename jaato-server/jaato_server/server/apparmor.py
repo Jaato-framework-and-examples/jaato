@@ -1488,7 +1488,8 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 
         logger.info("Loaded AppArmor profile %s", profile_name)
         self._record_grants(session_id, render_id, profile_name,
-                            requested_fragments, plugin_rules, composition)
+                            requested_fragments, plugin_rules, composition,
+                            profile_content)
         return True
 
     def _record_grants(
@@ -1499,13 +1500,19 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         requested_fragments: Optional[List[str]],
         plugin_rules: Optional[List[str]],
         composition: Dict[str, Any],
+        profile_content: str = "",
     ) -> None:
-        """Record what the profile just loaded grants, for diagnostics (#1326).
+        """Record what the profile just loaded grants (#1326, #1348).
 
         Keyed by the confinement id the session's runner identity carries.
         Only after a successful load, so a record never describes a profile
-        the kernel refused.
+        the kernel refused.  ``child_rules`` are the rule lines of the
+        rendered ``//child`` body, where the commands the model runs execute;
+        :func:`envelope_grants` hands them to the runner so a refused command
+        can be explained (#1348).
         """
+        from jaato_server.shared.confinement_grants import profile_body_rules
+
         by_plugin = getattr(plugin_rules, "by_plugin", None)
         if by_plugin is None:
             by_plugin = {"(unattributed)": list(plugin_rules)} if plugin_rules else {}
@@ -1525,6 +1532,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
                 for name, rules in sorted(by_plugin.items()) if rules
             ],
             "refs_dir": str(self._refs_dir(session_id)),
+            "child_rules": profile_body_rules(profile_content, "child"),
         })
 
     # ──────────────────────────────────────────────────────────────────
@@ -3509,6 +3517,9 @@ def recorded_grants(confinement_id: Optional[str]) -> Optional[Dict[str, Any]]:
     if stored is None:
         return None
     record = copy.deepcopy(stored)
+    # The runner's copy (#1348); the diagnostics wire shows fragments and
+    # plugin rules, and does not grow by a whole rendered body.
+    record.pop("child_rules", None)
     references: List[Dict[str, Any]] = []
     refs_dir = record.pop("refs_dir", None)
     if refs_dir:
@@ -3526,6 +3537,26 @@ def recorded_grants(confinement_id: Optional[str]) -> Optional[Dict[str, Any]]:
             references.append({"ref_id": entry.name, "rules": _rule_lines(body)})
     record["references"] = references
     return record
+
+
+def envelope_grants(profile_name: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The part of *profile_name*'s record the runner needs, or ``None`` (#1348).
+
+    ``SessionInitEnvelope.confinement_grants``: the exec scope and the rule
+    lines of the ``//child`` body.  Fragment files, tiers and the refs
+    directory stay daemon-side; the runner matches paths, nothing more.
+    ``None`` for an unconfined session and for a boundary with no record
+    (a daemon restart, or a record written before ``child_rules`` existed).
+    """
+    if not profile_name:
+        return None
+    with _GRANT_RECORDS_LOCK:
+        stored = _GRANT_RECORDS.get(profile_name)
+        rules = list(stored.get("child_rules") or []) if stored else []
+        scope = stored.get("exec_scope") if stored else None
+    if not rules:
+        return None
+    return {"profile_name": profile_name, "exec_scope": scope, "rules": rules}
 
 
 def resolve_plugin_apparmor_rules(

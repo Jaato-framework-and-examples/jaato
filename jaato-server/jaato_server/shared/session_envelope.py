@@ -126,6 +126,11 @@ def _optional_positive_int(value: Any) -> Optional[int]:
     return parsed if parsed > 0 else None
 
 
+def _optional_dict(value: Any) -> Optional[Dict[str, Any]]:
+    """*value* when it is a dict, else ``None`` (a malformed field means absent)."""
+    return value if isinstance(value, dict) else None
+
+
 def _optional_limits_dict(value: Any) -> Optional[Dict[str, Any]]:
     """A wire ``runtime_limits`` mapping, or ``None`` when unusable (v7).
 
@@ -448,6 +453,16 @@ class SessionInitEnvelope:
     # default = grant nothing, which is what an older daemon's envelope
     # means; same-build daemon+runner so no schema_version bump.
     granted_env_names: List[str] = field(default_factory=list)
+    # #1348: what the session's ``//child`` AppArmor profile grants --
+    # ``{"profile_name", "exec_scope", "rules": [rule lines]}`` from the
+    # daemon's grant record (``apparmor.envelope_grants``).  The runner
+    # installs it (``confinement_grants.set_confinement_grants``) so ``cli``
+    # can say a ``Permission denied`` came from the profile, naming the
+    # resolved path.  Static per session: reference grants added later are
+    # not in it, and a hint is never given where one could apply.  ``None``
+    # = unconfined, or no record (a daemon restart); an older daemon's
+    # envelope means the same, so no schema_version bump.
+    confinement_grants: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -528,6 +543,7 @@ class SessionInitEnvelope:
             # #1253: the confinement invariant, carried to the runner gate.
             "confinement_required": self.confinement_required,
             "granted_env_names": list(self.granted_env_names),
+            "confinement_grants": self.confinement_grants,
         }
 
     @classmethod
@@ -609,6 +625,7 @@ class SessionInitEnvelope:
             # with the gate inert, exactly as before this field existed.
             confinement_required=bool(d.get("confinement_required", False)),
             granted_env_names=env_name_list(d.get("granted_env_names")),
+            confinement_grants=_optional_dict(d.get("confinement_grants")),
         )
 
 

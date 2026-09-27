@@ -1246,7 +1246,28 @@ def build_session_envelope(
         # the runner exempts exactly these from the cli / interactive_shell
         # scrub.  ``getattr`` because a test server may carry no accessor.
         granted_env_names=_granted_env_names_of(server),
+        # #1348: the //child grants, so a refused command can name its cause.
+        confinement_grants=_confinement_grants_of(profile_name),
     )
+
+
+def _confinement_grants_of(profile_name: str) -> Optional[Dict[str, Any]]:
+    """``apparmor.envelope_grants(profile_name)``, or ``None`` if it fails.
+
+    A helper for the same reason as :func:`_granted_env_names_of`.  A
+    missing record means no hint, never a refused bootstrap.
+    """
+    if not profile_name:
+        return None
+    try:
+        from jaato_server.server.apparmor import envelope_grants
+        return envelope_grants(profile_name)
+    except Exception:  # noqa: BLE001 -- no grants means no hint, nothing worse
+        logger.warning(
+            "could not read the AppArmor grant record for %s", profile_name,
+            exc_info=True,
+        )
+        return None
 
 
 def _granted_env_names_of(server: Any) -> List[str]:
