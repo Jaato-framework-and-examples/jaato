@@ -463,7 +463,7 @@ test("a subagent's report and the plan reporter's line show collapsed, not as th
   await composer(page).fill("tool");
   await composer(page).press("Enter");
   const plan = page.locator('[data-testid="collapsed-note"][data-source="plan"]');
-  await expect(plan.getByRole("button")).toHaveText(/Plan · Plan created: Task plan/);
+  await expect(plan.getByRole("button")).toHaveText(/Plan · Plan created: 3 steps/);
 });
 
 test("a stalled agent shows amber on its tab and a parent-transcript banner; Cancel stops exactly that agent (#1304 §3, §4)", async ({ page }) => {

@@ -863,9 +863,16 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         break;
       }
 
+      // A chunk is a LINE.  ``subprocess_runner`` strips each line's newline
+      // before the cli plugin streams it, and the TUI re-adds one per chunk
+      // (``append_tool_output``: "re-add newline stripped by CLI plugin").
+      // Joined bare, a command's lines ran together into one paragraph.  A
+      // producer that already ends its chunk with a newline (a notebook row)
+      // gets none added.
+      const line = chunk && !chunk.endsWith("\n") ? `${chunk}\n` : chunk;
       const applied = updateTool(s, callId, agentId, (t) => ({
         ...t,
-        output: chunk ? t.output + chunk : t.output,
+        output: line ? t.output + line : t.output,
         media: mediaItem ? [...t.media, mediaItem] : t.media,
       }));
       if (applied && chunk && s.ui.popupCallId == null) {

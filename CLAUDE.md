@@ -868,6 +868,21 @@ naming the subagent as its tab does, with its event, and a click to
 expand. It takes no `T<n>`. The TUI dims `child` lines like enrichment
 notes.
 
+### A Tool-Output Chunk Is a Line
+
+`ToolOutputEvent.chunk` from the cli plugin is one LINE with its newline
+stripped (`subprocess_runner` calls `on_stdout_line(line.rstrip('\n\r'))`).
+The TUI re-adds a newline per chunk (`append_tool_output`); the web store
+joined chunks bare, so a command's output ran together into one
+paragraph, and its mock sent `line + "\n"`, which is not the daemon's
+shape. The store now adds the newline unless the chunk already ends with
+one (a notebook row does), and the mock sends bare lines.
+
+The collapsed `exec` row's trailing-lines preview now shows only while
+the call runs. A finished call shows nothing until expanded, and output
+carrying `<nb-row>` markup gets no preview at all: a tail of it is cut
+markup and drew as raw tags. Guard: `ToolBlockView.test.tsx`.
+
 ### Session Revive (waking a persisted session)
 
 A session woken from disk — `session.wake`, a reattach, anything reaching
