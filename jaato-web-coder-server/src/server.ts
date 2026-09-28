@@ -62,7 +62,7 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
       clientId: gh.clientId, clientSecret: gh.clientSecret,
       oauthBaseUrl: gh.oauthBaseUrl, apiBaseUrl: gh.apiBaseUrl, noreplyDomain: gh.noreplyDomain,
     });
-    const svc = new GitHubService({ store, api, reloader: bind, workspaceRoot: gh.workspaceRoot, workspaceWriter: bind, log });
+    const svc = new GitHubService({ store, api, reloader: bind, workspaceRoot: gh.workspaceRoot, workspaceWriter: bind, appSlug: gh.appSlug, webBaseUrl: gh.oauthBaseUrl, log });
     github = svc;
     bind.attachSecretResolver(svc.resolveSecret);
     const via = gh.workspaceRoot

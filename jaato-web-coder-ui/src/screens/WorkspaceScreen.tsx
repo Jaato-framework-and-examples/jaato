@@ -28,6 +28,8 @@ import { Plate } from "@/components/layout/Plate";
 import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
 import { GitHubAccountPicker } from "@/components/workspace/GitHubAccountPicker";
 import { GitHubConnect } from "@/components/workspace/GitHubConnect";
+import { ReachNote } from "@/components/workspace/RepoPicker";
+import { githubApi, type RepoListing } from "@/app/github";
 import { deleteWorkspace, requestWorkspaceList, selectWorkspace, updateConfig } from "@/sdk/connection";
 import { DeletePanel } from "@/components/workspace/DeletePanel";
 import { CloneProgress, NewWorkspacePlate, queuedRows, startClone } from "@/components/workspace/NewWorkspacePlate";
@@ -195,6 +197,35 @@ function SourcesPlate({ w, onClose }: { w: WorkspaceInfo; onClose: () => void })
   );
 }
 
+/**
+ * For each bound workspace (by absolute path), the repo listing of the
+ * account it is bound to -- what the App lets that workspace's sessions
+ * write to.  An unbound workspace gets no entry: its sessions have no
+ * GH_TOKEN at all, which is a different problem.  Best-effort: any failure
+ * (no account connected, GitHub unreachable) leaves the map empty, and
+ * nothing is claimed.
+ */
+function useBoundListings(githubUrl: string | null | undefined, reload: number): Map<string, RepoListing> {
+  const [byPath, setByPath] = useState<Map<string, RepoListing>>(new Map());
+  useEffect(() => {
+    if (!githubUrl) return;
+    let live = true;
+    const api = githubApi(githubUrl);
+    (async () => {
+      const bindings = await api.listBindings();
+      const byAccount = new Map<string, RepoListing>();
+      for (const id of new Set(bindings.map((b) => b.accountId))) {
+        try { byAccount.set(id, await api.listRepos(id)); } catch { /* unknown: claim nothing */ }
+      }
+      const m = new Map<string, RepoListing>();
+      for (const b of bindings) { const l = byAccount.get(b.accountId); if (l) m.set(b.workspace, l); }
+      if (live) setByPath(m);
+    })().catch(() => undefined);
+    return () => { live = false; };
+  }, [githubUrl, reload]);
+  return byPath;
+}
+
 export function WorkspaceScreen() {
   const ws = useJaato((s) => s.workspace);
   const setScreen = useJaato((s) => s.setScreen);
@@ -207,6 +238,7 @@ export function WorkspaceScreen() {
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [showGithub, setShowGithub] = useState(false);
   const [githubReload, setGithubReload] = useState(0);
+  const boundListings = useBoundListings(githubUrl, githubReload);
 
   useEffect(() => { requestWorkspaceList().catch(() => undefined); }, []);
 
@@ -296,7 +328,12 @@ export function WorkspaceScreen() {
                       <td className={`${TD} align-top`}>
                         {sources.length === 0
                           ? <span className="text-text-muted">— empty</span>
-                          : sources.map((src) => <div key={src.path} className="[overflow-wrap:anywhere]">{breakable(formatSource(src))}</div>)}
+                          : sources.map((src) => (
+                            <div key={src.path} className="[overflow-wrap:anywhere]">
+                              {breakable(formatSource(src))}
+                              {src.forge === "github" && src.repo && w.path && <div><ReachNote listing={boundListings.get(w.path)} repo={src.repo} /></div>}
+                            </div>
+                          ))}
                       </td>
                       <td className={`${TD} align-top text-text-muted whitespace-nowrap`}>{when(w.last_accessed)}</td>
                       <td className={`${TD} align-top text-right whitespace-nowrap`}>

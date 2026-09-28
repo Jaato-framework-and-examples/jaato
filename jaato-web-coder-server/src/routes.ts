@@ -23,6 +23,7 @@
  * | ``/api/github/bindings`` | GET | the user's ``(workspace -> accountId)`` bindings, for the configure form to prefill |
  * | ``/api/github/default`` | POST | ``{id}`` — make one account the default (same-origin only) |
  * | ``/api/github/disconnect`` | POST | ``{id}`` — delete + revoke a grant and reload the user's sessions (same-origin only) |
+ * | ``/api/github/search`` | GET | ``?q=owner/partial`` — repo autocomplete over GitHub search, each hit with ``appCanWrite`` |
  * | ``/api/github/bind`` | POST | ``{workspace, account_id\|null}`` — bind/clear an account on a workspace (same-origin only) |
  * | ``/api/environment?workspace=`` | GET | the operator's allow-list, this user's declines, and the toolchain offer's content (the page stages it) |
  * | ``/api/environment/decline`` | POST | ``{workspace, tool}`` — "not now" for a proposal (same-origin only) |
@@ -289,6 +290,10 @@ export function createRouter(deps: RouterDeps): Handler {
       if (rest.length === 1 && rest[0] === "repos" && method === "GET") {
         const url = new URL(req.url ?? "/", config.publicUrl);
         return json(res, 200, await github.listRepos(s.sub, url.searchParams.get("account")));
+      }
+      if (rest.length === 1 && rest[0] === "search" && method === "GET") {
+        const url = new URL(req.url ?? "/", config.publicUrl);
+        return json(res, 200, await github.searchRepos(s.sub, url.searchParams.get("q") ?? "", url.searchParams.get("account")));
       }
       if (rest.length === 1 && rest[0] === "branches" && method === "GET") {
         const url = new URL(req.url ?? "/", config.publicUrl);

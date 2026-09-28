@@ -7433,6 +7433,26 @@ in the TS SDK. Guard:
 `server/tests/test_an_application_writes_its_reference_through_the_daemon.py`,
 five reversions.
 
+### A Repository the App Could Clone and Not Write To
+
+The token a bound workspace's sessions get is a GitHub App **user-to-server**
+token: it can write (push, create a branch, open a pull request) only to a
+repository an installation of the App covers. The repo picker let a user type
+any `owner/repo`, and a public one cloned anonymously, so a workspace bound to
+an organisation's repository the App was never installed on looked fine until
+the first push failed.
+
+| Piece | Where |
+|---|---|
+| the listing says where the App is installed (`installedOn`), whether it is complete (`truncated`: a cap, or a live installation that failed to list) and where to install it (`installUrl`, from `github.app_slug` or the installations' `app_slug`) | `GitHubService.listRepos` |
+| `/api/github/search?q=owner/partial` autocompletes through GitHub search, each hit with `appCanWrite` (`null` when the listing cannot say) | `GitHubService.searchRepos` |
+| one rule, `appReach`: a repository absent from a COMPLETE listing is not writable; "install on the owner" vs "add it to the installation" | `jaato-web-coder-ui/src/app/github.ts` |
+| the picker marks a hit `App not installed` and warns under a picked one, with the install link; the Workspaces table warns under each GitHub source of a bound workspace | `RepoPicker.tsx`, `WorkspaceScreen.tsx` |
+
+A stored installation GitHub no longer reports is not asked and does not make
+the listing incomplete. Nothing is claimed when coverage is unknown. Guards:
+`test/github.test.ts`, `RepoPicker.test.tsx`.
+
 ### A Key Typed Once Per Workspace
 
 The web client's configure form asked for the provider's API key on every

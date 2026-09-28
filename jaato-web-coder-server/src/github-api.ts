@@ -32,6 +32,8 @@
  * - ``listInstallationRepos`` — ``GET {api}/user/installations/{id}/repositories``
  *   (paginated) under the user's access token: the repositories one App
  *   installation lets this user reach, for the *New workspace* picker.
+ * - ``searchRepos`` — ``GET {api}/search/repositories`` (first page): the
+ *   repo picker's autocomplete beyond the App's installations.
  * - ``listBranches`` — ``GET {api}/repos/{owner}/{repo}/branches`` (paginated),
  *   for the branch chooser beside each picked repository.
  *
@@ -70,6 +72,8 @@ export interface GitHubTokenSet {
 export interface GitHubInstallation {
   id: number;
   account: string;
+  /** The App's URL slug (``github.com/apps/<slug>``), as ``/user/installations`` reports it. */
+  appSlug?: string;
 }
 
 /** The non-secret identity behind an access token. */
@@ -108,6 +112,12 @@ export interface GitHubApi {
    * {@link GitHubApiError}; a 401 is {@link GitHubGrantRevoked}.
    */
   listInstallationRepos(accessToken: string, installationId: number, maxItems: number): Promise<GitHubRepo[]>;
+  /**
+   * Repositories matching a GitHub search query (``/search/repositories``),
+   * first page only, at most ``maxItems``: every repository the token's user
+   * can SEE, which is wider than what the App can write to.
+   */
+  searchRepos(accessToken: string, query: string, maxItems: number): Promise<GitHubRepo[]>;
   /** Branch names of ``owner/repo``, following pagination up to ``maxItems``. */
   listBranches(accessToken: string, owner: string, repo: string, maxItems: number): Promise<string[]>;
   /** The git host to seed into ``.gitconfig`` (``github.com`` or the GHE host). */
@@ -250,7 +260,9 @@ export class HttpGitHubApi implements GitHubApi {
           const r = raw as Record<string, unknown>;
           const account = r.account as Record<string, unknown> | undefined;
           const acct = account && typeof account.login === "string" ? account.login : "";
-          return typeof r.id === "number" ? { id: r.id, account: acct } : null;
+          if (typeof r.id !== "number") return null;
+          const slug = typeof r.app_slug === "string" && r.app_slug ? { appSlug: r.app_slug } : {};
+          return { id: r.id, account: acct, ...slug };
         })
         .filter((x): x is GitHubInstallation => x !== null);
     } catch (e) {
@@ -294,19 +306,14 @@ export class HttpGitHubApi implements GitHubApi {
     const path = `/user/installations/${encodeURIComponent(String(installationId))}/repositories?per_page=100`;
     return this._getPaged(accessToken, path, maxItems, (body) => {
       const arr = Array.isArray((body as Record<string, unknown>)?.repositories) ? (body as { repositories: unknown[] }).repositories : [];
-      return arr
-        .map((raw): GitHubRepo | null => {
-          const r = raw as Record<string, unknown>;
-          if (typeof r.full_name !== "string" || !r.full_name) return null;
-          return {
-            fullName: r.full_name,
-            private: r.private === true,
-            defaultBranch: typeof r.default_branch === "string" && r.default_branch ? r.default_branch : "main",
-            pushedAt: typeof r.pushed_at === "string" && r.pushed_at ? r.pushed_at : undefined,
-          };
-        })
-        .filter((x): x is GitHubRepo => x !== null);
+      return repoItems(arr);
     });
+  }
+
+  async searchRepos(accessToken: string, query: string, maxItems: number): Promise<GitHubRepo[]> {
+    const n = Math.max(1, Math.min(100, maxItems));
+    const body = (await this._get(accessToken, `/search/repositories?q=${encodeURIComponent(query)}&per_page=${n}`)) as Record<string, unknown>;
+    return repoItems(Array.isArray(body?.items) ? body.items : []).slice(0, n);
   }
 
   listBranches(accessToken: string, owner: string, repo: string, maxItems: number): Promise<string[]> {
@@ -316,6 +323,22 @@ export class HttpGitHubApi implements GitHubApi {
         .map((raw) => (raw as Record<string, unknown>).name)
         .filter((n): n is string => typeof n === "string" && n.length > 0));
   }
+}
+
+/** GitHub repository objects as the non-secret {@link GitHubRepo} a picker shows. */
+function repoItems(arr: unknown[]): GitHubRepo[] {
+  return arr
+    .map((raw): GitHubRepo | null => {
+      const r = raw as Record<string, unknown>;
+      if (typeof r.full_name !== "string" || !r.full_name) return null;
+      return {
+        fullName: r.full_name,
+        private: r.private === true,
+        defaultBranch: typeof r.default_branch === "string" && r.default_branch ? r.default_branch : "main",
+        pushedAt: typeof r.pushed_at === "string" && r.pushed_at ? r.pushed_at : undefined,
+      };
+    })
+    .filter((x): x is GitHubRepo => x !== null);
 }
 
 /** The ``rel="next"`` URL of a GitHub ``Link`` header, or ``null``. */
