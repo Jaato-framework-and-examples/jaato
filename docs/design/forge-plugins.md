@@ -4,9 +4,11 @@
 per-user GitHub integration ([Per-User GitHub Credentials](per-user-github-credentials.md),
 #1225–#1228, and [GitHub Workspace Guidance](github-workspace-guidance.md),
 #1240) so that GitLab, Gitea/Forgejo and similar forges can be added without
-copying it. It is **application work, not daemon work**: everything here lives
-in `jaato-web-coder-server` (the BFF) and `jaato-web-coder-ui`. No change
-under `jaato-server/` is required.
+copying it. It is **application work**: almost everything here lives in
+`jaato-web-coder-server` (the BFF) and `jaato-web-coder-ui`. The daemon needs
+one small change, a wider file allow-list for `workspace.app_write` (§7.2).
+An optional runner plugin, in the style of the toolchains work (#1344), is
+§2.1.
 
 ## 1. The problem
 
@@ -57,8 +59,76 @@ already generic:
   exact name, not by `GH_TOKEN`, so `GITLAB_TOKEN=app://gitlab` reaches `glab`
   with no profile change.
 
-So no daemon change is needed. One small follow-up is optional: the
-`validate` / `explain` checks that mention `GH_TOKEN` by name (§9).
+So the credential path needs no daemon change. Two follow-ups do: the
+`workspace.app_write` allow-list (§7.2), and, optionally, the `validate` /
+`explain` checks that mention `GH_TOKEN` by name (§9).
+
+### 2.1 Where each piece runs, after the toolchains work (#1344)
+
+Toolchain support landed across three components: the page, the BFF, and an
+out-of-tree runner plugin (`jaato-web-coder-server/plugin/`,
+`web_coder_toolchains`). See [Web coder environment
+bootstrap](web-coder-environment-bootstrap.md). It moved work out of the BFF
+for two reasons:
+
+- the BFF may run as an account that cannot read or write the daemon's
+  workspaces;
+- installing software is an action on the workspace, and should run as the
+  session's account under its confinement.
+
+Forges do not need the same split. Their central job is holding a
+credential, and the BFF must keep doing that. Applied to forges, the three
+components divide as follows:
+
+| Piece | Runs in | Why |
+|---|---|---|
+| grants, refresh lock, OAuth, `secret.resolve` | BFF | the token must never be held by code the model can reach, and the grant belongs to the web user, not to a session |
+| the binding (`.env` reference, `.gitconfig`, guidance file) | BFF, written **through the daemon** (`workspace.app_write`, protocol 1.30) | the reference must be on disk before any session exists. Cascade stages, `session.wake` and revived sessions spawn without the page, and resolve `app://` at spawn |
+| ownership check on bind | BFF, asking the daemon | reuse `WorkspaceOwnership` from `environment/service.ts` (an empty `workspace.app_write` over the user's identity). The toolchains design (§11) noted that GitHub bind lacks this check; the host fixes it for every forge at once |
+| noticing a forge failure mid-session | optional runner plugin | only the runner sees tool results (below) |
+| connect and bind UI, chips | page | as for GitHub today |
+
+Three lessons from #1344 change this design:
+
+1. **The BFF writes no workspace file directly.** GitHub already falls back to
+   `workspace.app_write` when the BFF cannot reach the workspace. The host
+   uses that verb as its **only** write path, so there is one set of rules
+   and the daemon enforces them: the `.env` value must be an `app://`
+   reference, paths are allow-listed, symlinks are resolved, and marker
+   ownership is checked. The composed `.gitconfig` in §7.2 needs more than
+   the one file the allow-list names today, which is the daemon change
+   mentioned above.
+2. **Do not route the binding through a page-staged file.** Toolchains carry
+   their policy to the runner as `.jaato/toolchain-offer.json`, staged by the
+   page, because an install only makes sense inside a session. A forge
+   binding must work with no page and no session, so it stays on the
+   daemon-mediated write.
+3. **A runner plugin is how a failure becomes a chip.** The toolchains
+   plugin enriches `cli`, `interactive_shell` and `notebook` results that
+   show `command not found`. It adds a line for the model and a
+   `client_notice` (protocol 1.31) that the page turns into a Bind chip. The
+   forge equivalent is optional and comes last (§12, step 7): a small
+   `web_coder_forges` plugin, or a section of the toolchains plugin, that
+   recognises:
+   - `glab` / `gh` / `git` authentication failures (`HTTP 401`, `Bad
+     credentials`, `could not read Username`) on a host the operator offers;
+   - a push to a host with no binding.
+
+   It emits `client_notice(kind="forge_offer")` with the host. The page then
+   offers "Connect GitLab for this workspace", or "Reconnect" when the grant
+   was revoked. The plugin holds no secret. It needs the list of offered
+   hosts, which is non-secret policy and can use the toolchains pattern: the
+   page stages it as `.jaato/forge-offer.json`. A workspace with no such file
+   gets no hints.
+
+**The forge CLIs are toolchains.** `glab` and a Gitea/Forgejo CLI (`tea`,
+`fj`) are usually not on the host. The runner cannot install them, but the
+toolchains plugin can. It installs into `.home` through mise, where the
+confined session may already run them. Adding them to that plugin's
+`TOOLCHAINS` catalog is simpler than having forge plugins install anything.
+The forge guidance file then needs no "if the CLI is missing" branch; a
+missing CLI surfaces as the toolchain chip. *Verify* that mise's registry
+resolves `glab` and `tea` with checksums before listing them.
 
 ## 3. What the host owns, and what a plugin owns
 
@@ -70,9 +140,10 @@ the disk, or decides who may do what:
   concurrent resolves never rotate each other's refresh token away;
 - the OAuth `state` round-trip and CSRF check;
 - the bindings, and the ownership checks on them;
-- every write into a workspace: `.env` lines, the composed `.gitconfig`,
-  managed instruction files, with the existing containment rule
-  (`workspace_root`, symlinks resolved);
+- every write into a workspace (`.env` lines, the composed `.gitconfig`,
+  managed instruction files), sent through the daemon's `workspace.app_write`
+  (§2.1), which enforces containment, the reference-only `.env` rule and
+  marker ownership;
 - dispatching `secret.resolve`, and sending `secret.reload` after a bind,
   unbind or disconnect;
 - the HTTP routes and what the launcher config advertises.
@@ -238,7 +309,7 @@ the file from **all** bindings of that workspace every time one changes:
 	name = Alice Example
 	email = 12345+alice@users.noreply.github.com
 [includeIf "hasconfig:remote.*.url:https://gitlab.corp.example/**"]
-	path = .gitconfig.gitlab-corp
+	path = .gitconfig.d/gitlab-corp
 
 [include]
 	path = .gitconfig.local
@@ -251,7 +322,7 @@ the file from **all** bindings of that workspace every time one changes:
   the variable.
 - **Commit identity.** A commit's author should match the forge it is pushed
   to. The first bound instance supplies the default `[user]`; every other
-  instance gets a small `.gitconfig.<id>` with its own `[user]`, selected by
+  instance gets a small `.gitconfig.d/<id>` with its own `[user]`, selected by
   `includeIf "hasconfig:remote.*.url:..."`, which chooses by the repository's
   remote. That condition needs git 2.36 or newer; with an older git, commits
   use the default identity. (Measured here: git 2.43.)
@@ -259,6 +330,12 @@ the file from **all** bindings of that workspace every time one changes:
   go in `.gitconfig.local`, which the composed file includes. This is the
   same marker-and-skip rule `managed-files.ts` applies: if the user removed
   the marker, the host leaves the file alone and says so in the bind result.
+- **The daemon change.** `workspace_app_write.allowed_file_path` accepts
+  `.home/.gitconfig` and nothing else under `.home`. It must also accept
+  `.home/.gitconfig.d/<id>` (one level, the id's character set). These files
+  are written with `managed_by`, like the guidance files, and the `#` marker
+  form needs to be recognised beside the HTML-comment one. `.gitconfig.local`
+  stays user-only: the verb never writes it, and git skips a missing include.
 
 ### 7.3 Guidance files
 
@@ -374,20 +451,25 @@ Each step leaves the product working and is reviewable on its own.
 1. **Extract the host, GitHub as the only plugin.** Move the store, lock,
    `resolveSecret`, `bind`, workspace writes and routes into generic host
    code; turn `github-api.ts` and `github-guidance.ts` into the `github`
-   plugin. The config still accepts `github:`. Existing tests must pass
+   plugin. Writes go through `workspace.app_write` only, and bind gains the
+   `WorkspaceOwnership` check (§2.1). The ownership check is the one visible
+   change: a user can no longer bind to a workspace they do not own. The config still accepts `github:`. Existing tests must pass
    unchanged, and a new test drives the bind channel's dispatcher with an
    unknown name. No visible behaviour change.
 2. **Instances and the `forges:` config.** Add the list, per-instance
    stores, id-based routes with the GitHub aliases, and the launcher
    `forges` field. The UI switches to the list.
-3. **Composed `.gitconfig`.** Replace `renderGitConfig` with the composer
-   in §7.2, including the `.gitconfig.local` include and the
+3. **Composed `.gitconfig`.** Widen the `workspace.app_write` allow-list
+   (daemon, with a protocol bump the BFF checks before relying on it), then
+   replace `renderGitConfig` with the composer in §7.2, including the `.gitconfig.local` include and the
    `hasconfig` identity switch. Test with two fake forges bound to one
    workspace, unbinding each in turn.
 4. **The `gitlab` plugin**, with its guidance file. Test the refresh lock
    against a fake that rotates the refresh token on every call.
 5. **The `oauth-forge` plugin** for Gitea/Forgejo, configured by endpoints.
 6. Optional: generalise the `GH_TOKEN` checks in `validate` / `explain`.
+7. Optional: the runner side (§2.1). Add `glab` / `tea` to the toolchains
+   catalog, and add the `forge_offer` enrichment plus its page chip.
 
 ## 13. Open questions
 
