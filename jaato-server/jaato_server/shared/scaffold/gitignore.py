@@ -167,6 +167,17 @@ STATE_PROBES: Tuple[Tuple[str, str], ...] = (
     ("openrouter_auth.json", "a STORED PROVIDER CREDENTIAL"),
 )
 
+#: Workspace-root scratch the framework writes OUTSIDE ``.jaato/``, which
+#: ``.jaato/*`` therefore does not cover: the private ``/tmp`` (#1381) is
+#: ``<ws>/.tmp``, bound over ``/tmp`` in a confined runner's namespace.
+#: Each carries its own ``*`` gitignore when the daemon creates it; this
+#: line covers a checkout where it was created before that, or by hand.
+#: ``(rule, probe, what)``: the rule appended, a file ``assess`` probes
+#: relative to the workspace root, and what it holds.
+WORKSPACE_SCRATCH: Tuple[Tuple[str, str, str], ...] = (
+    ("/.tmp/", ".tmp/scratch", "the private /tmp (<ws>/.tmp, #1381)"),
+)
+
 #: The line that un-excludes ``.jaato/`` itself (see the module docstring).
 REINCLUDE_DIR = "!.jaato/"
 
@@ -193,11 +204,13 @@ def rule_lines() -> List[str]:
     ``!.jaato/`` first, so a wholesale ``.jaato/`` or ``.*`` rule earlier in
     the file stops excluding the directory; then ``.jaato/*``; then one
     re-include per authored entry; then the ``__pycache__`` rule, which
-    must come AFTER ``!.jaato/scripts/`` re-included its parent.
+    must come AFTER ``!.jaato/scripts/`` re-included its parent; then the
+    workspace-root scratch directories (:data:`WORKSPACE_SCRATCH`).
     """
     return ([REINCLUDE_DIR, IGNORE_CHILDREN]
             + [f"!.jaato/{e.path}" for e in AUTHORED]
-            + [IGNORE_PYCACHE])
+            + [IGNORE_PYCACHE]
+            + [rule for rule, _, _ in WORKSPACE_SCRATCH])
 
 
 def render_block() -> str:
@@ -256,17 +269,22 @@ class Assessment:
             ignores.  Every entry when ``dir_excluded``.
         unignored_state: ``(probe, what)`` pairs from :data:`STATE_PROBES`
             the file does NOT ignore.  Every probe when there is no file.
+        unignored_scratch: ``(probe, what)`` pairs from
+            :data:`WORKSPACE_SCRATCH` (relative to the workspace root) the
+            file does NOT ignore (#1381).
     """
 
     exists: bool
     dir_excluded: bool
     hidden_authored: Tuple[str, ...]
     unignored_state: Tuple[Tuple[str, str], ...]
+    unignored_scratch: Tuple[Tuple[str, str], ...] = ()
 
     @property
     def clean(self) -> bool:
         """Nothing to report: assets committable, state ignored."""
-        return not self.hidden_authored and not self.unignored_state
+        return not (self.hidden_authored or self.unignored_state
+                    or self.unignored_scratch)
 
 
 def _probe_file(entry: AuthoredEntry) -> str:
@@ -290,7 +308,7 @@ def assess(workspace: Path) -> Assessment:
     ws = Path(workspace)
     exists = (ws / ".gitignore").is_file()
     if not exists:
-        return Assessment(False, False, (), STATE_PROBES)
+        return Assessment(False, False, (), STATE_PROBES, _all_scratch())
     parser = GitignoreParser(ws, include_defaults=False)
     jaato = ws / ".jaato"
     dir_excluded = parser.is_ignored(jaato)
@@ -301,4 +319,11 @@ def assess(workspace: Path) -> Assessment:
                        if parser.is_ignored(jaato / _probe_file(e)))
     unignored = tuple((probe, what) for probe, what in STATE_PROBES
                       if not parser.is_ignored(jaato / probe))
-    return Assessment(True, dir_excluded, hidden, unignored)
+    scratch = tuple(pair for pair in _all_scratch()
+                    if not parser.is_ignored(ws / pair[0]))
+    return Assessment(True, dir_excluded, hidden, unignored, scratch)
+
+
+def _all_scratch() -> Tuple[Tuple[str, str], ...]:
+    """Every :data:`WORKSPACE_SCRATCH` probe as a ``(probe, what)`` pair."""
+    return tuple((probe, what) for _, probe, what in WORKSPACE_SCRATCH)

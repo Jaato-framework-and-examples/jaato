@@ -165,7 +165,9 @@ def subprocess_report(cli_plugin: Any) -> Dict[str, Any]:
     """PATH, HOME, TMPDIR, XDG_* and the tool-venv from ``cli``'s env builder.
 
     ``tmpdir`` is the session's own temp directory; in a confined session it
-    is the only writable place under ``/tmp`` (#1361).
+    is the only writable place under ``/tmp`` (#1361) -- unless the session
+    has a private ``/tmp`` (#1381, :func:`private_tmp_report`), where it is
+    ``/tmp`` itself and all of it is writable.
     """
     try:
         env, venv_path = cli_plugin._build_subprocess_env()
@@ -179,6 +181,28 @@ def subprocess_report(cli_plugin: Any) -> Dict[str, Any]:
         "xdg": {k: env[k] for k in _XDG_KEYS if k in env},
         "virtual_env": env.get("VIRTUAL_ENV"),
         "tool_venv": _venv_report(venv_path),
+    }
+
+
+def private_tmp_report() -> Dict[str, Any]:
+    """Whether ``/tmp`` is this workspace's own ``.tmp`` (#1381).
+
+    Read from this process's mount namespace (device + inode), not from the
+    envelope, so it never claims a private ``/tmp`` the task does not see.
+    """
+    from jaato_server.shared.private_tmp import describe
+    private, backing = describe()
+    if not private:
+        return {
+            "private": False,
+            "note": "/tmp is the host's; in a confined session only $TMPDIR "
+                    "under it is writable",
+        }
+    return {
+        "private": True,
+        "backing_dir": backing,
+        "note": "/tmp and /var/tmp are this workspace's own directory, "
+                "shared by its sessions and invisible to other workspaces",
     }
 
 
@@ -248,6 +272,7 @@ def runtime_report(
     else:
         report["subprocess"] = subprocess_report(cli)
         workspace = workspace or getattr(cli, "_workspace_root", None)
+    report["private_tmp"] = private_tmp_report()
     report["toolchains"] = toolchains_report(workspace)
     return report
 
@@ -278,10 +303,17 @@ def _subprocess_lines(block: Dict[str, Any]) -> List[Tuple[str, str]]:
     ]
 
 
+def _private_tmp_line(block: Dict[str, Any]) -> str:
+    if block.get("private"):
+        return f"yes ({block.get('backing_dir')} bound over /tmp, /var/tmp)"
+    return "no"
+
+
 def runtime_summary(report: Dict[str, Any]) -> Dict[str, str]:
     """One line per field, for ``aspect="all"``."""
     lines = {"confinement": _confinement_line(report["confinement"])}
     lines.update(_subprocess_lines(report["subprocess"]))
+    lines["private_tmp"] = _private_tmp_line(report.get("private_tmp") or {})
     chains = report["toolchains"]
     lines["toolchains"] = chains["status"]
     lines["detail"] = "get_environment(aspect='runtime') for the full report"

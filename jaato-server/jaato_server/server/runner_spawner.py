@@ -29,6 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+# Imported at module scope, never in the forked child: an import after
+# fork() in a threaded daemon can block on a lock another thread held.
+from jaato_server.shared.private_tmp import PrivateTmpError, enter_private_tmp
 from jaato_server.server.confinement_id import (
     confinement_id_from_profile_name, session_tmpdir,
 )
@@ -78,6 +81,33 @@ class SpawnedRunner:
     pool_slot: "Any" = None  # Optional[server.runner_pool.PoolSlot]
 
 
+#: Exit status of a forked child that could not set up the private ``/tmp``
+#: its profile expects (#1381).  Distinct from the generic pre-exec 127 so
+#: the cause is attributable from the status alone.
+PRIVATE_TMP_EXIT_CODE = 126
+
+
+def _enter_private_tmp_in_child(private_tmp_dir: Optional[str]) -> None:
+    """Enter the private ``/tmp`` in a forked child, or exit (#1381).
+
+    Runs between ``fork()`` and ``exec()``, where raising would land in the
+    generic ``os._exit(127)``.  A private-``/tmp`` failure is named on the
+    child's stderr first and exits with :data:`PRIVATE_TMP_EXIT_CODE`: the
+    runner must not start without the namespace its profile's ``/tmp``
+    grant assumes.  No-op for ``None``.
+    """
+    try:
+        enter_private_tmp(private_tmp_dir)
+    except PrivateTmpError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to start -- private /tmp "
+                f"({private_tmp_dir}) could not be set up: {exc} (#1381)\n"
+            ).encode())
+        finally:
+            os._exit(PRIVATE_TMP_EXIT_CODE)
+
+
 class RunnerSpawner:
     """Forks ``python -m server.runner`` once per top-level session.
 
@@ -104,6 +134,7 @@ class RunnerSpawner:
         tool_timeout_seconds: Optional[float] = None,
         disable_confine: bool = False,
         cgroup_attach: Optional[Callable[[], None]] = None,
+        private_tmp_dir: Optional[str] = None,
     ) -> SpawnedRunner:
         """Fork+exec a runner; return the daemon-side handle.
 
@@ -135,6 +166,14 @@ class RunnerSpawner:
                 kernel contract.  ``None`` means no cgroup attach
                 (the runner inherits the daemon's cgroup) — used
                 for IPC sessions and for hosts without cgroup v2.
+            private_tmp_dir: #1381 -- ``<ws>/.tmp`` to bind over ``/tmp``
+                and ``/var/tmp`` in a new mount namespace, in the forked
+                child before ``exec`` (so before ``runner/__main__``
+                confines).  A child that cannot set it up exits with
+                :data:`PRIVATE_TMP_EXIT_CODE` after writing the reason to
+                its stderr, so the runner never starts under a ``/tmp``
+                grant that would reach the host's ``/tmp``.  ``None`` = no
+                private ``/tmp``.
 
         Raises:
             DaemonConfinementError: daemon thread is confined at the
@@ -209,6 +248,7 @@ class RunnerSpawner:
                 # integration tests pin the contract).
                 if cgroup_attach is not None:
                     cgroup_attach()
+                _enter_private_tmp_in_child(private_tmp_dir)
                 self._exec_runner(child_sock, parent_sock, log_path, env)
             except BaseException:  # noqa: BLE001 — child must never return
                 # Any failure pre-exec lands us here.  os._exit(127) so

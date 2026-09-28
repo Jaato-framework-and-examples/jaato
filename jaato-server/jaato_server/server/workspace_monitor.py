@@ -48,6 +48,7 @@ from watchdog.observers import Observer
 from jaato_server.shared.utils.gitignore import GitignoreParser
 from jaato_server.shared.plugins.workspace_home import DEFAULT_WORKSPACE_HOME
 from jaato_server.shared.plugins.workspace_venv import DEFAULT_WORKSPACE_VENV
+from jaato_server.shared.private_tmp import DEFAULT_PRIVATE_TMP_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +64,13 @@ logger = logging.getLogger(__name__)
 # #1274: the managed-default tool venv holds thousands of files after one
 # ``pip install``; it is the interpreter's, not the user's project.  Same
 # treatment and same caveat as the home: a custom venv path is not hidden.
+# #1381: the private /tmp (``<ws>/.tmp``) is scratch the sessions write
+# through ``/tmp``, not the user's project.  Its name is fixed, so there is
+# no custom-name caveat.
 _WORKSPACE_HOME_IGNORE = (
     f"{DEFAULT_WORKSPACE_HOME}/",
     f"{DEFAULT_WORKSPACE_VENV}/",
+    f"{DEFAULT_PRIVATE_TMP_DIR}/",
 )
 
 # How long (seconds) to wait after the last filesystem event before flushing

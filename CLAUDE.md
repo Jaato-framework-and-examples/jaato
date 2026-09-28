@@ -2780,6 +2780,81 @@ after each test.
 Guards: `test_doctor_survives_an_unreadable_source_1360.py` and
 `test_tmp_allowance_matches_the_profile_1361.py`, six reversions.
 
+### A /tmp the Model Could Not Write, Made the Workspace's Own (#1381, step 1)
+
+Models write to `/tmp` whatever the prompt says. A confined profile
+granted only the session tmpdir under it (#1171), so every habitual
+`/tmp/x` was a refused call, and a kernel refusal is a bare `EACCES` the
+model misreads ("/tmp is read-only"). #1361 taught the model `$TMPDIR`; it
+did not remove the failed first attempt.
+
+**A confined runner of a daemon-managed workspace now gets a private
+`/tmp`**, systemd `PrivateTmp=`-style: before it confines, it unshares a
+mount namespace (mounts made private) and binds `<ws>/.tmp` over `/tmp`
+and `/var/tmp`. Every process the session starts inherits it (`cli`,
+`interactive_shell`, the notebook kernel, `pip`, static binaries), and the
+host's `/tmp` (the daemon socket, other sessions' temp dirs) is not visible
+from the session at all.
+
+| Piece | Where |
+|---|---|
+| the decision (managed workspace = on, user checkout = opt-in via `plugin_configs.cli.private_tmp`, non-root daemon or a workspace under `/tmp` = off with one WARNING) | `shared/private_tmp.py::resolve_private_tmp`, called only on the confined provisioning path (`runner_spawn.resolve_session_private_tmp` from the WS pre-init hook and the IPC `_provision_apparmor_for_session`), and stashed on the server |
+| the grant | template **v39**: base, `tool_hat` and `//child` gain `/tmp/** rwkl` and `/var/tmp/** rwkl` ONLY when rendered with `private_tmp_dir`; the body names the directory, so it is part of the confinement id and so of the slot key |
+| cold spawn | `runner_spawner._enter_private_tmp_in_child`, in the forked child before `exec` (before `runner/__main__` confines); a failure writes the cause to stderr and exits `126` |
+| pool slot | `bootstrap_session` step **1b2** (`_enter_private_tmp`), before step 1c confines, on the main thread |
+| the envelope | `SessionInitEnvelope.private_tmp_dir` (absolute; no schema bump: an older daemon renders no grant) |
+| `TMPDIR` / cli allowance | `_pin_session_tmpdir`: `TMPDIR=/tmp`, `sandbox_utils.set_temp_roots(["/tmp", "/var/tmp"])` |
+| housekeeping | Files panel ignores `.tmp/`; `new gitignore` adds `/.tmp/`, `validate` reports `gitignore_leaks_scratch`; `get_environment(aspect="runtime")` reports `private_tmp`; the cli description and containment refusal say where scratch goes |
+
+Rules the implementation holds to:
+
+- **Fail closed.** The `/tmp` grant exists only for a boundary whose runner
+  refuses to start without the namespace (`BootstrapError` stage
+  `private_tmp`, the #1033 `RunnerBootstrapFailed` refusal). It never runs
+  under a `/tmp/** rw` grant against the host's `/tmp`.
+- **Only a confined runner enters one.** `session_private_tmp` answers
+  `None` for an empty `profile_name`, so an unconfined pool slot never
+  carries a namespace into another workspace's session.
+- **The slot key needs no new field.** A confined slot cannot mount again
+  (every body denies `mount` and `sys_admin`), and the profile name it is
+  keyed on is derived from a body that names the bound directory. A reused
+  slot of the same boundary finds `/tmp` already bound and does nothing.
+- **Threads.** A mount namespace is per task, like a label (#1023). A
+  thread created before the unshare is also still unconfined after 1c,
+  which `verify_thread_confinement` already refuses, so the label check
+  covers the namespace.
+- **Mock-safe and old-manager-safe.** The kwarg reaches `provision_profile`
+  / `confinement_id_for_boundary` only when the feature is on
+  (`private_tmp_kwargs`), and only a real string path is ever mounted.
+
+Stated costs:
+
+- **Cleanup: never, like `/tmp` on a long-lived host.** `.tmp/` is shared
+  by every session of the boundary and survives them; its size counts
+  against the workspace. It is removed with the workspace.
+- **No exec from `/tmp`**, as none from the workspace, so
+  `gcc -o /tmp/a.out && /tmp/a.out` still fails.
+- **Non-root daemons get nothing** (no unprivileged user namespace in step
+  1), and an unconfined session keeps the host `/tmp`.
+- **The isolated sub-runner** is spawned by the daemon in the host
+  namespace and keeps its `/tmp/jaato-*` grants; its body is unchanged.
+- **`/tmp/.gitignore`** (the `*` file keeping `.tmp/` out of git) is
+  visible inside the namespace.
+- **Not verified on an enforcing AppArmor kernel.** CI has none; the guard
+  checks rendering, the refusal paths and the slot key, and one test really
+  unshares and binds in a subprocess (skipped where the host refuses
+  `CAP_SYS_ADMIN`). To check on one: AppArmor judges accesses through the
+  bind by the in-namespace path and the rendered grants hold; the
+  fail-closed path refuses; a pool slot keeps its namespace across sessions
+  of the same boundary, and the 1b2-before-1c ordering holds on a slot.
+
+Step 2 (a spawner process owning the model's view of `/etc`, the home and
+`/var`, so the runner keeps the host view and the credentials) is a
+separate design in the issue.
+
+Guard: `jaato_server/shared/tests/test_private_tmp_1381.py`, seven
+reversions.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are

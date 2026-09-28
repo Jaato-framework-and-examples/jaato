@@ -463,6 +463,15 @@ class SessionInitEnvelope:
     # = unconfined, or no record (a daemon restart); an older daemon's
     # envelope means the same, so no schema_version bump.
     confinement_grants: Optional[Dict[str, Any]] = None
+    # #1381: the ``<ws>/.tmp`` this confined runner binds over ``/tmp`` and
+    # ``/var/tmp`` in its own mount namespace, BEFORE step 1c confines it.
+    # Set only for a boundary whose profile was rendered with the ``/tmp``
+    # grants (``shared.private_tmp.resolve_private_tmp``); the runner
+    # refuses to bootstrap when it cannot set the namespace up, so the
+    # grant never meets the host's ``/tmp``.  Absolute.  ``None`` = no
+    # private ``/tmp`` -- also what an older daemon's envelope means (and
+    # an older daemon renders no ``/tmp`` grant), so no schema_version bump.
+    private_tmp_dir: Optional[str] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -494,6 +503,8 @@ class SessionInitEnvelope:
             self.workspace_path, field="workspace_path", origin=_origin)
         require_absolute_path(
             self.config_root, field="config_root", origin=_origin)
+        require_absolute_path(
+            self.private_tmp_dir, field="private_tmp_dir", origin=_origin)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-friendly dict for the wire.
@@ -544,6 +555,7 @@ class SessionInitEnvelope:
             "confinement_required": self.confinement_required,
             "granted_env_names": list(self.granted_env_names),
             "confinement_grants": self.confinement_grants,
+            "private_tmp_dir": self.private_tmp_dir,
         }
 
     @classmethod
@@ -626,6 +638,7 @@ class SessionInitEnvelope:
             confinement_required=bool(d.get("confinement_required", False)),
             granted_env_names=env_name_list(d.get("granted_env_names")),
             confinement_grants=_optional_dict(d.get("confinement_grants")),
+            private_tmp_dir=_optional_str(d.get("private_tmp_dir")),
         )
 
 

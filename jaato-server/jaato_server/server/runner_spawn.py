@@ -61,6 +61,9 @@ from jaato_server.shared.plugins.workspace_home import (
     ensure_workspace_home_dir, inject_workspace_home,
 )
 from jaato_server.shared.utils.errors import exc_message
+from jaato_server.shared.private_tmp import (
+    ensure_private_tmp_dir, resolve_private_tmp,
+)
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
@@ -122,6 +125,65 @@ def _ensure_session_tmpdir(session_id: str, profile_name: Optional[str]) -> None
             "(%s: %s) — the runner will fail its tempfile probe",
             path, type(exc).__name__, exc,
         )
+
+
+def resolve_session_private_tmp(
+    server: Any,
+    workspace_path: Optional[str],
+    managed_workspace_root: Optional[str],
+) -> Optional[str]:
+    """Decide this CONFINED session's private ``/tmp`` and stash it (#1381).
+
+    Called on the confined provisioning path only (the WS pre-init hook and
+    the IPC ``_provision_apparmor_for_session``), before the profile is
+    rendered: the answer changes the rendered body and so the confinement
+    id.  Stashed on the server as ``_private_tmp_dir`` so the spawn, the
+    cold-spawn pre-exec and the envelope all read the value the profile was
+    rendered with, rather than deciding it a second time.
+
+    Returns:
+        ``<ws>/.tmp`` when the session gets a private ``/tmp``, else ``None``.
+    """
+    value = resolve_private_tmp(
+        getattr(server, "_profile", None), workspace_path, managed_workspace_root,
+    )
+    server._private_tmp_dir = value
+    return value
+
+
+def private_tmp_kwargs(private_tmp_dir: Optional[str]) -> Dict[str, str]:
+    """``{"private_tmp_dir": v}`` when set, else ``{}`` (#1381).
+
+    Splatted into ``provision_profile`` / ``confinement_id_for_boundary``
+    so a session WITHOUT a private ``/tmp`` calls them exactly as before --
+    a test double or an out-of-tree manager that predates the keyword keeps
+    working for every session that does not use the feature.
+    """
+    return {"private_tmp_dir": private_tmp_dir} if private_tmp_dir else {}
+
+
+def session_private_tmp(server: Any, profile_name: Optional[str]) -> Optional[str]:
+    """The private ``/tmp`` this runner must enter, or ``None`` (#1381).
+
+    Only a CONFINED runner gets one: the namespace exists to make the
+    profile's ``/tmp`` grant safe, and an unconfined runner has none.  So an
+    empty ``profile_name`` (unconfined, or provisioning downgraded to soft)
+    answers ``None`` whatever was stashed, which also keeps an unconfined
+    pool slot free of a namespace another workspace would inherit.
+    """
+    if not profile_name:
+        return None
+    return stashed_private_tmp(server)
+
+
+def stashed_private_tmp(server: Any) -> Optional[str]:
+    """The value :func:`resolve_session_private_tmp` stashed, or ``None``.
+
+    ``isinstance`` rather than truthiness: a test double's attribute is a
+    mock, and only a real path may reach a render, the envelope or a mount.
+    """
+    value = getattr(server, "_private_tmp_dir", None)
+    return value if isinstance(value, str) and value else None
 
 
 def spawn_session_runner(
@@ -279,6 +341,12 @@ def spawn_session_runner(
         workspace_path,
         managed_workspace_root,
     )
+    # ----- The workspace's private /tmp, before either branch (#1381) -----
+    # Same seam and reason: ``<ws>/.tmp`` must exist before the cold-spawn
+    # child or the pool slot binds it over ``/tmp``.  No-op when the session
+    # has no private /tmp.  A failure is logged; the runner then refuses to
+    # start, naming the missing directory.
+    ensure_private_tmp_dir(session_private_tmp(server, profile_name))
 
     # ----- Pool routing (pool PR 4 + 5a) -----
     # Pool-served path is gated to sessions that:
@@ -521,6 +589,9 @@ def _cold_spawn_runner(
         tool_timeout_seconds=tool_timeout_seconds,
         disable_confine=disable_confine,
         cgroup_attach=cgroup_attach,
+        # #1381: entered in the forked child before exec, i.e. before
+        # ``runner/__main__`` confines itself.
+        private_tmp_dir=session_private_tmp(server, profile_name),
     )
 
 
@@ -1248,6 +1319,8 @@ def build_session_envelope(
         granted_env_names=_granted_env_names_of(server),
         # #1348: the //child grants, so a refused command can name its cause.
         confinement_grants=_confinement_grants_of(profile_name),
+        # #1381: the <ws>/.tmp the profile's /tmp grant was rendered for.
+        private_tmp_dir=session_private_tmp(server, profile_name),
     )
 
 
