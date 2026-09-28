@@ -7,6 +7,7 @@
 | ``.lsp.json`` | ``"_jaato_managed": "lsp v1"`` | the ``lsp`` plugin (it reads only ``languageServers``) |
 | ``.home/.mavenrc`` | ``# jaato-managed: mavenrc v1`` | Maven's ``mvn`` script (and ``./mvnw``), while Java or Maven is bound |
 | ``.home/.config/go/env`` | ``# jaato-managed: goenv v1`` | the go command (``go env``), while Go is bound |
+| each checkout's ``.git/info/exclude`` | a ``# >>> jaato-managed: toolchains v1`` ... ``# <<<`` block | git: the bound toolchains' build output, from vendored gitignore templates (:mod:`.ignores`, :mod:`.templates`) |
 
 ``environment.json`` is the record: the bound toolchains, the proposals the
 last scan found, the repository guidance files, and the current or last job.
@@ -26,6 +27,7 @@ import os
 import secrets
 from typing import Any, Dict, List, Optional
 
+from .ignores import write_excludes
 from .catalog import GOENV_PATH, GOTMP_DIR, LSP_CONFIG_PATH, MANIFEST_PATH, MAVENRC_PATH, MISE_CONFIG_PATH, TOOLCHAINS, VERSION_RE
 
 MARKER_KEY = "_jaato_managed"
@@ -159,7 +161,10 @@ def _toml_string(v: str) -> str:
 
 
 def write_derived(workspace: str, m: Dict[str, Any]) -> List[str]:
-    """Rewrite the mise config, ``.lsp.json`` and ``.mavenrc`` from the manifest; returns a note per file left alone."""
+    """Rewrite the mise config, ``.lsp.json``, ``.mavenrc``, the Go env and the git excludes from the manifest.
+
+    Returns a note per file left alone.
+    """
     notes: List[str] = []
     chains = sorted(m.get("toolchains") or [], key=lambda t: t["tool"])
 
@@ -210,4 +215,6 @@ def write_derived(workspace: str, m: Dict[str, Any]) -> List[str]:
         atomic_write(rc_path, MAVENRC_BODY)
     elif owned:
         os.unlink(rc_path)
+
+    notes += write_excludes(workspace, m)
     return notes

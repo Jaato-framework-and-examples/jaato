@@ -17,3 +17,6 @@ web_coder_toolchains = "jaato_web_coder_toolchains:create_plugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["jaato_web_coder_toolchains"]
+# The vendored gitignore templates are data files inside the package; declare
+# them explicitly so a *.gitignore-suffix heuristic never drops them.
+artifacts = ["jaato_web_coder_toolchains/gitignore_templates/*"]
