@@ -69,6 +69,11 @@ journalctl -u jaato-web-coder-server -f     # "issuer … discovered", "bind cha
 Both units run in the foreground (`Type=simple`); the daemon is started
 **without** `--daemon`, which would double-fork and fight systemd.
 
+The daemon's unit sets `KillMode=mixed`. Keep it if you write your own unit:
+with systemd's default, a stop sends SIGTERM to the daemon and its runner
+processes together, the runners exit first, and every session still loaded
+loses its final save (`Failed to save session …: RunnerRPCClient is closed`).
+
 With an `environment:` block (toolchains), also install the
 `web_coder_toolchains` plugin, its AppArmor fragment and `mise` for the
 daemon before starting it:
