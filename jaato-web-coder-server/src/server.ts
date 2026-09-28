@@ -94,7 +94,7 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
     log(`environment bootstrap enabled under ${env.workspaceRoot}: ${offered.length ? offered.join(" ") : "no toolchain allowed yet (environment.tools / environment.lsp are empty)"}`);
     if (env.lsp.jdtls && env.tools.java?.length) {
       // #806: the daemon does not reap a language server at session end.  Say what that costs here.
-      log(`WARNING: jdtls is enabled. A language server outlives its session until its runner slot exits (jaato #806), so each workspace's jdtls may hold up to -Xmx${env.jdtls.maxHeap} plus JVM overhead after the session that started it. Set environment.jdtls_max_heap to bound it.`);
+      log(`WARNING: jdtls is enabled. A language server outlives its session until its runner slot exits (jaato #806), so each workspace's jdtls may hold up to -Xmx${env.jdtls.maxHeap} plus JVM overhead after the session that started it. Set environment.lsp.jdtls.max_heap to bound it.`);
     }
   } else {
     log("environment bootstrap not configured (no environment: block)");

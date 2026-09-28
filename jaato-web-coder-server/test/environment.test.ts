@@ -446,11 +446,33 @@ describe("config: the environment block", () => {
     assert.throws(() => parseEnvironment({ tools: {} }, "/"), ConfigError);
     assert.throws(() => parseEnvironment({ workspace_root: "/w", tools: { rust: ["1"] } }, "/"), /not a toolchain/);
     assert.throws(() => parseEnvironment({ workspace_root: "/w", tools: { node: ["22; rm -rf /"] } }, "/"), /not a version/);
-    assert.throws(() => parseEnvironment({ workspace_root: "/w", lsp: { "typescript-language-server": "4" } }, "/"), /typescript_version is required/);
+    assert.throws(() => parseEnvironment({ workspace_root: "/w", lsp: { "typescript-language-server": "4" } }, "/"), /typescript-language-server\.typescript is required/);
     assert.deepEqual(e.jdtls, { runtime: "21", maxHeap: "1G" });
-    const j = parseEnvironment({ workspace_root: "/w", tools: { java: ["temurin-21"], maven: ["3.9.9"] }, lsp: { jdtls: "1.40.0" }, jdtls_java: 25, jdtls_max_heap: "2G", jdtls_mirror: "https://mirror.example/jdtls" }, "/")!;
+  });
+
+  test("a server's settings live under its lsp entry; a toolchain's under its tools entry", () => {
+    const j = parseEnvironment({
+      workspace_root: "/w",
+      tools: { java: { versions: ["temurin-21", 17] }, maven: ["3.9.9"], gradle: "8.10" },
+      lsp: { gopls: "v0.20.0", "typescript-language-server": { version: "4.4.0", typescript: "5.9.3" }, jdtls: { version: "1.40.0", java: 25, max_heap: "2G", mirror: "https://mirror.example/jdtls" } },
+    }, "/")!;
+    assert.deepEqual(j.tools, { java: ["temurin-21", "17"], maven: ["3.9.9"], gradle: ["8.10"] });
+    assert.deepEqual(j.lsp, { gopls: "v0.20.0", "typescript-language-server": "4.4.0", jdtls: "1.40.0" });
+    assert.equal(j.typescriptVersion, "5.9.3");
     assert.deepEqual(j.jdtls, { runtime: "25", maxHeap: "2G", mirror: "https://mirror.example/jdtls" });
-    assert.throws(() => parseEnvironment({ workspace_root: "/w", jdtls_max_heap: "lots" }, "/"), /heap size/);
-    assert.throws(() => parseEnvironment({ workspace_root: "/w", jdtls_mirror: "http://mirror.example" }, "/"), /https/);
+    // The short form and the long form mean the same thing.
+    assert.deepEqual(parseEnvironment({ workspace_root: "/w", lsp: { jdtls: { version: "1.40.0" } } }, "/")!.jdtls, { runtime: "21", maxHeap: "1G" });
+    assert.deepEqual(parseEnvironment({ workspace_root: "/w", tools: { node: { versions: ["22"] } } }, "/")!.tools, parseEnvironment({ workspace_root: "/w", tools: { node: ["22"] } }, "/")!.tools);
+
+    const bad = (x: Record<string, unknown>) => () => parseEnvironment({ workspace_root: "/w", ...x }, "/");
+    assert.throws(bad({ lsp: { jdtls: { version: "1.40.0", max_heap: "lots" } } }), /lsp\.jdtls\.max_heap: 'lots' is not a JVM heap size/);
+    assert.throws(bad({ lsp: { jdtls: { version: "1.40.0", mirror: "http://mirror.example" } } }), /https/);
+    assert.throws(bad({ lsp: { jdtls: { java: "21" } } }), /lsp\.jdtls\.version is required/);
+    assert.throws(bad({ lsp: { gopls: { version: "v0.20.0", typescript: "5" } } }), /lsp\.gopls\.typescript: unknown key \(one of version\)/);
+    assert.throws(bad({ tools: { node: { versions: ["22"], mirror: "x" } } }), /tools\.node\.mirror: unknown key/);
+    assert.throws(bad({ tools: { node: { version: "22" } } }), /tools\.node\.version: unknown key/);
+    // The flat keys are refused with where they went, not silently ignored.
+    assert.throws(bad({ typescript_version: "5.9.3" }), /typescript_version has moved to environment\.lsp\.typescript-language-server\.typescript/);
+    assert.throws(bad({ jdtls_max_heap: "2G" }), /jdtls_max_heap has moved to environment\.lsp\.jdtls\.max_heap/);
   });
 });

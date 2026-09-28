@@ -11,7 +11,7 @@
  *   ``~/.cargo`` homes outside mise's data directory, and its proxies need
  *   ``RUSTUP_HOME`` at run time, which nothing in a session sets.  Java is
  *   here although #806 (language servers are never reaped) is open: jdtls
- *   is started with a bounded heap (``environment.jdtls_max_heap``) so
+ *   is started with a bounded heap (``environment.lsp.jdtls.max_heap``) so
  *   each unreaped server costs a known amount, and the operator is told
  *   so at startup.
  * - {@link LANGUAGE_SERVERS}: one server per toolchain, and how to install
@@ -79,7 +79,7 @@ export const LANGUAGE_SERVERS: Record<ServerId, ServerSpec> = {
   jdtls: { id: "jdtls", language: "java", needs: "java" },
 };
 
-/** Where jdtls milestones are downloaded from, unless ``environment.jdtls_mirror`` names another. */
+/** Where jdtls milestones are downloaded from, unless ``environment.lsp.jdtls.mirror`` names another. */
 export const JDTLS_MIRROR = "https://download.eclipse.org/jdtls/milestones";
 
 /** Where a language server this bootstrap installed lives, under the workspace. */

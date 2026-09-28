@@ -1936,7 +1936,7 @@ an `environment:` block; design and departures in
 Toolchains: Node, Go, Bun, Python (basedpyright only), Java, Maven and
 Gradle. Java ships although #806 is open: jdtls is a checksum-verified
 Eclipse milestone started with `java -jar` on its own mise JDK, heap capped
-by `environment.jdtls_max_heap`, `-data` at `${jdtlsStateRoot}` (which the
+by `environment.lsp.jdtls.max_heap`, `-data` at `${jdtlsStateRoot}` (which the
 lsp plugin grants `rw` from `.lsp.json`), and the BFF warns at startup. The
 JDK needs what the template does not give `.home` (`m` on its `.so` files,
 `ix` on `lib/jspawnhelper`), so the BFF owns a fragment in

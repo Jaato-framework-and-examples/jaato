@@ -110,7 +110,7 @@ refused, not read):
 | `github.noreply_domain` | optional: the commit-email domain seeded into `.gitconfig` (default `users.noreply.github.com`) |
 | `environment.workspace_root` | optional block, **required key**: the root managed workspaces live under. The toolchain routes install into a workspace, so THIS server must reach it; the daemon does not install on its behalf. Absent block = off: `config.json` names no `environmentUrl` and the page shows no toolchain chips |
 | `environment.tools` | the operator's allow-list: toolchain → versions, e.g. `node: ["22", "20"]`, `go: ["1.23"]`, `bun: ["1.2"]`. Only `node`, `go` and `bun` can be listed (Rust and Java are not supported, see below). A major-only entry installs mise's latest of that line at bind time; list an exact version to pin it |
-| `environment.lsp` | pinned language-server versions: `basedpyright` (also what makes the `python` toolchain bindable), `typescript-language-server` (needs `typescript_version`), `gopls` (e.g. `v0.20.0`). An unpinned server is never installed |
+| `environment.lsp` | pinned language-server versions: `basedpyright` (also what makes the `python` toolchain bindable), `typescript-language-server` (needs `typescript`), `gopls` (e.g. `v0.20.0`), `jdtls`. Each entry is a version, or a mapping `{version, ...}` carrying that server's own keys. An unpinned server is never installed |
 | `environment.mise`, `python` | the binaries used to install (default `mise` / `python3` on `PATH`) |
 | `environment.paranoid` | `true` sets `MISE_PARANOID=1` for installs (stricter verification; default `false`, mise's own checksum verification still applies) |
 | `environment.install_timeout` | per-step deadline (default `15m`) |
@@ -181,18 +181,21 @@ environment:
   tools:
     node: ["22", "20"]
     go: ["1.23"]
-    java: ["21", "temurin-17"]   # any mise java spelling
+    java:                        # long form: {versions: [...]}
+      versions: ["21", "temurin-17"]   # any mise java spelling
     maven: ["3.9.9"]
     gradle: ["8.10"]
   lsp:
-    basedpyright: "1.31.6"
-    typescript-language-server: "4.4.0"
+    basedpyright: "1.31.6"       # short form: just the version
     gopls: "v0.20.0"
-    jdtls: "1.40.0"              # an Eclipse milestone
-  typescript_version: "5.9.3"
-  jdtls_java: "21"               # the JDK that RUNS jdtls (default 21)
-  jdtls_max_heap: 1G             # -Xmx for jdtls (default 1G); see #806 below
-  # jdtls_mirror: https://...    # default https://download.eclipse.org/jdtls/milestones
+    typescript-language-server:  # long form: the version and this server's own keys
+      version: "4.4.0"
+      typescript: "5.9.3"        # required: the typescript installed beside it
+    jdtls:
+      version: "1.40.0"          # an Eclipse milestone
+      java: "21"                 # the JDK that RUNS jdtls (default 21)
+      max_heap: 1G               # -Xmx (default 1G); see #806 below
+      # mirror: https://...      # default https://download.eclipse.org/jdtls/milestones
 ```
 
 A bind runs, as THIS process and never inside a confined session:
@@ -209,8 +212,13 @@ A bind runs, as THIS process and never inside a confined session:
    `.home/.local/share/jaato-lsp/` (not the model's tool-venv, which may not
    exist yet and is the model's to change), typescript-language-server with
    the linked `npm` (started through the linked `node`, so its `.mjs` entry is
-   read rather than exec'd), gopls with `GOBIN=.home/.local/bin`;
-4. four managed files: `.jaato/environment.json` (read by
+   read rather than exec'd), gopls with `GOBIN=.home/.local/bin`, jdtls as a
+   milestone checked against the `.sha256` published beside it and started
+   with `java -jar` on its own mise JDK (`lsp.jdtls.java`, installed but not
+   linked), its heap capped at `lsp.jdtls.max_heap` and its `-data` at the
+   framework's `${jdtlsStateRoot}` (a sibling of the workspace: Eclipse
+   refuses a `-data` inside an imported project);
+4. five managed files: `.jaato/environment.json` (read by
    `get_environment(aspect="runtime")`), `.home/.config/mise/config.toml`,
    `.lsp.json` (read by the `lsp` plugin, whose tools appear once a server is
    configured, #1345), `.jaato/instructions/45-environment.md`, and the AppArmor
@@ -232,7 +240,7 @@ as a pattern (`*`, `[`, `{`, …) gets no rule, and the job says so.
 
 **jdtls and #806.** The daemon does not reap a language server at session
 end; it lives until its runner slot exits. With `lsp.jdtls` set this server
-logs a WARNING at startup saying so, and `jdtls_max_heap` bounds what each
+logs a WARNING at startup saying so, and `lsp.jdtls.max_heap` bounds what each
 one left behind can hold (plus the JVM's own overhead). Two sessions in one
 workspace share a `${jdtlsStateRoot}`, so the second jdtls finds it locked.
 The state directory is outside the workspace and is not removed with it.

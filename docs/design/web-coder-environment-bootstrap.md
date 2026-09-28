@@ -338,7 +338,7 @@ A detection never installs anything by itself.
   route has the same gap is worth checking separately.
 - **jdtls and memory.** A Java language server uses gigabytes, and #806
   (servers never reaped) is still open. Java ships anyway: jdtls runs with a
-  capped heap (`environment.jdtls_max_heap`, default 1G), and the BFF warns
+  capped heap (`environment.lsp.jdtls.max_heap`, default 1G), and the BFF warns
   at startup that each one outlives its session until the runner slot exits.
   Fixing #806 removes the warning, not the cap.
 - **`proxy` mode and a BFF on another host.** Everything here assumes the
