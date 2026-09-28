@@ -36,6 +36,8 @@ _XDG_KEYS = (
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
+    # a JVM ignores $HOME, so Gradle needs its own redirect
+    "GRADLE_USER_HOME",
 )
 
 
@@ -57,6 +59,7 @@ def test_apply_home_to_env_redirects_home_and_xdg():
     # XDG dirs are subdirectories, matching the spec's own defaults, so a
     # tool writing config and cache does not collide them onto one dir.
     assert env["XDG_CONFIG_HOME"] == os.path.join("/ws/.home", ".config")
+    assert env["GRADLE_USER_HOME"] == os.path.join("/ws/.home", ".gradle")
 
 
 def test_resolve_home_path_mirrors_workspace_venv_rules():
@@ -77,6 +80,7 @@ def test_cli_command_sees_workspace_home_runner_home_unchanged(tmp_path, monkeyp
 
     monkeypatch.setenv("HOME", "/runner/home")
     monkeypatch.setenv("XDG_CONFIG_HOME", "/runner/home/.config")
+    monkeypatch.setenv("GRADLE_USER_HOME", "/runner/home/.gradle")
     ws = str(tmp_path)
     home = os.path.join(os.path.realpath(ws), ".home")
 

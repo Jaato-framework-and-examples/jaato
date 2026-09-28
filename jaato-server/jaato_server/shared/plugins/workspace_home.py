@@ -95,7 +95,7 @@ def resolve_home_path(
 def apply_home_to_env(
     env: MutableMapping[str, str], home_path: str,
 ) -> None:
-    """Point ``HOME`` and the XDG base dirs at ``home_path`` in ``env``.
+    """Point ``HOME``, the XDG base dirs and ``GRADLE_USER_HOME`` at ``home_path`` in ``env``.
 
     The XDG variables are set to subdirectories under the home, matching the
     XDG base-directory spec's own defaults relative to ``HOME``.  Setting
@@ -115,6 +115,13 @@ def apply_home_to_env(
     env["XDG_CACHE_HOME"] = os.path.join(home_path, ".cache")
     env["XDG_DATA_HOME"] = os.path.join(home_path, ".local", "share")
     env["XDG_STATE_HOME"] = os.path.join(home_path, ".local", "state")
+    # Gradle's user home (caches, wrapper distributions, daemon registry)
+    # defaults to ``${user.home}/.gradle``, and a JVM takes ``user.home``
+    # from the ACCOUNT, not from ``$HOME``, so redirecting HOME does not move
+    # it: a confined session's ``gradle`` / ``./gradlew`` tried to write the
+    # account's ``~/.gradle``.  ``GRADLE_USER_HOME`` is the one setting both
+    # the launcher and the wrapper read.  Overwritten for the XDG reason.
+    env["GRADLE_USER_HOME"] = os.path.join(home_path, ".gradle")
     # #1273: ``uv tool install``, ``pipx`` and ``pip install --user`` put the
     # programs they install in ``~/.local/bin``.  With HOME redirected that is
     # ``<home>/.local/bin``, which was on nobody's PATH, so a tool installed
