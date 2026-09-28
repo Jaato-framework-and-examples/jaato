@@ -14,8 +14,10 @@
  * | ``.lsp.json`` | ``"_jaato_managed"`` key | the ``lsp`` plugin (it reads only ``languageServers``) |
  * | ``.jaato/instructions/45-environment.md`` | HTML comment | every session's system prompt |
  * | ``.jaato/apparmor-fragments/jaato-environment.rules`` | ``#`` comment | the daemon, when it renders a session's AppArmor profile |
+ * | ``.jaato/toolchain-offer.json`` | ``"_jaato_managed"`` key | the ``toolchain_offer`` enrichment plugin, in the runner |
  *
- * All five are *generated* managed files: refreshed whenever their content
+ * The first five follow the bindings; the offer also follows the operator's
+ * allow-list, so it is rewritten on every status read too.  All are *generated* managed files: refreshed whenever their content
  * differs, and never written over a copy whose marker the user removed.
  */
 import { readFileSync } from "node:fs";
@@ -30,8 +32,10 @@ import {
   MARKER_APPARMOR,
   MARKER_ENVIRONMENT,
   MARKER_LSP,
+  MARKER_TOOLCHAIN_OFFER,
   MARKER_TOOLCHAINS,
   MISE_CONFIG_PATH,
+  TOOLCHAIN_OFFER_PATH,
   TOOLCHAINS,
   isToolId,
   type ServerId,
@@ -183,4 +187,31 @@ export function apparmorFragmentFile(m: Manifest, workspace: string, notes: stri
 
 export function apparmorFragmentIdentity(): ManagedFile {
   return { relativePath: APPARMOR_FRAGMENT_PATH, markerId: MARKER_APPARMOR, version: MANIFEST_VERSION, body: "", format: "hash", generated: true };
+}
+
+/** Version of the offer's shape; the plugin gives no hint for one it does not know. */
+export const TOOLCHAIN_OFFER_SCHEMA = 1;
+
+/**
+ * The offer: every toolchain the operator allows, its versions, the commands
+ * that suggest it (from {@link TOOLCHAINS}, the one command table), and the
+ * version bound here or ``null``.  ``null`` when nothing is allowed (the file
+ * is then removed).  Structured data only: the file is in the workspace,
+ * where the model can write, so the plugin validates every field and builds
+ * the sentence itself.
+ */
+export function toolchainOfferFile(allowed: Array<{ tool: ToolId; label: string; versions: string[] }>, m: Manifest): ManagedFile | null {
+  if (allowed.length === 0) return null;
+  const bound = new Map(m.toolchains.map((t) => [t.tool, t.version]));
+  const body = JSON.stringify({
+    schema: TOOLCHAIN_OFFER_SCHEMA,
+    toolchains: allowed.map((a) => ({
+      tool: a.tool, label: a.label, versions: a.versions, commands: TOOLCHAINS[a.tool].commands, bound: bound.get(a.tool) ?? null,
+    })),
+  });
+  return { relativePath: TOOLCHAIN_OFFER_PATH, markerId: MARKER_TOOLCHAIN_OFFER, version: MANIFEST_VERSION, body, format: "json", generated: true };
+}
+
+export function toolchainOfferIdentity(): ManagedFile {
+  return { relativePath: TOOLCHAIN_OFFER_PATH, markerId: MARKER_TOOLCHAIN_OFFER, version: MANIFEST_VERSION, body: "{}", format: "json", generated: true };
 }

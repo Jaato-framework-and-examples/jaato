@@ -1931,7 +1931,8 @@ an `environment:` block; design and departures in
 | install: `mise install` with every mise dir under `.home`, a clean env, `MISE_CEILING_PATHS` so a repo's `mise.toml` cannot choose downloads; relative links into `.home/.local/bin`; the pinned server | `src/environment/installer.ts` |
 | the five managed files (`.jaato/environment.json` for the `runtime` aspect, the mise config, `.lsp.json` for #1345, `45-environment.md`, and the workspace-tier AppArmor fragment `jaato-environment.rules`) and the `30-repo-guidance.md` pointer | `src/environment/files.ts`, `guidance.ts` |
 | operator allow-list of pinned versions; one job per workspace; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30), refused when it cannot answer | `src/environment/service.ts`, `src/config.ts`, `BindChannel.owns` |
-| the clone-time chip, the rail's Toolchains section, the mid-session `command not found` chip | `jaato-web-coder-ui/src/components/workspace/EnvironmentPanel.tsx`, `app/environment.ts` |
+| the clone-time chip, the rail's Toolchains section | `jaato-web-coder-ui/src/components/workspace/EnvironmentPanel.tsx`, `app/environment.ts` |
+| the mid-session hint: the backend writes `.jaato/toolchain-offer.json` (allowed toolchains, their commands, what is bound; data only); the out-of-tree `toolchain_offer` enrichment plugin reads it in the runner, appends a hint to a `cli` / `interactive_shell` / `notebook` result naming a missing command, and sends `tool.result_enriched`, which is the page's only source for the chip | `jaato-web-coder-server/plugin/` (installed into the daemon's venv, `INSTALL.md`), `files.ts` `toolchainOfferFile`, `store.ts` `noteToolchainOffer`; one fixture pins the file from both sides |
 
 Toolchains: Node, Go, Bun, Python (basedpyright only), Java, Maven and
 Gradle. Java ships although #806 is open: jdtls is a checksum-verified
@@ -3751,6 +3752,35 @@ Three properties follow, each attached to a way the old path went wrong:
 
 Nested payloads are deliberately not rendered into the view — handing an
 enricher a whole structured result is what the two traits above are for.
+
+### What an Enrichment Plugin Found, Told to the Client (protocol 1.31)
+
+Enrichment rewrites the result the MODEL reads. A client saw none of it
+except the formatted `source="enrichment"` line, which has no fields to key
+on, so a client that wanted to act on a plugin's finding had to detect the
+same thing again. A plugin now returns, in its enrichment metadata,
+
+```python
+{"client_notice": {"kind": "toolchain_offer", "data": {"command": "javac", "tool": "java"}}}
+```
+
+(or a list of them), and the client receives `ToolResultEnrichedEvent`
+`{agent_id, call_id, tool_name, plugin, kind, data}` after that call's
+`tool.call_end`.
+
+| Piece | Where |
+|---|---|
+| what is well-formed: `kind` `[a-z][a-z0-9_]{0,63}`, `data` a JSON object of at most 4 KiB; anything else dropped with a WARNING naming the plugin | `shared/enrichment_notice.py` |
+| the call site, on both result shapes, after enrichment | `JaatoSession._emit_enrichment_client_notices`, from `_build_tool_result` |
+| the hook, optional (looked up with `getattr`) | `AgentUIHooks.on_tool_result_enriched` |
+| runner path: a `tool_result_enriched` notification; daemon: a `_PURE_NOTIFICATION_EVENTS` builder | `runner/rpc.py` shim, `server/core.py` |
+
+The framework never interprets `kind` or `data`. A client matches the kinds
+it knows and ignores the rest; an older client does not know the event type,
+logs it and continues, so nothing is refused. The first user is the web
+coder's `toolchain_offer` plugin (#1344). Guard:
+`shared/tests/test_an_enrichment_notice_reaches_the_client.py`, three
+reversions.
 
 ### A Guard That Only Binds When Nothing Needs Bounding
 

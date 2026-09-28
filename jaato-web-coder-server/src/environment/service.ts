@@ -33,7 +33,7 @@ import { LOCAL_BIN, MISE_DATA_DIR, TOOLCHAINS, TOOL_IDS, matchToolVersion, type 
 import { detectWorkspace } from "./detect.js";
 import {
   apparmorFragmentFile, apparmorFragmentIdentity, environmentInstructionsFile, environmentInstructionsIdentity, lspConfigFile, lspConfigIdentity,
-  manifestFile, miseConfigFile, pinnedServer, readManifest, type BoundToolchain, type Manifest,
+  manifestFile, miseConfigFile, pinnedServer, readManifest, toolchainOfferFile, toolchainOfferIdentity, type BoundToolchain, type Manifest,
 } from "./files.js";
 import { findRepoGuidance, repoGuidanceFile, repoGuidanceIdentity } from "./guidance.js";
 import { InstallCancelled, Installer, spawnRunner, unlinkBinaries, type JdtlsOptions, type ProcessRunner } from "./installer.js";
@@ -176,6 +176,8 @@ export class EnvironmentService {
   private _status(sub: string, real: string, workspace: string): EnvironmentStatus {
     const manifest = readManifest(real);
     const allowed = this.allowedTools();
+    // The offer follows the allow-list as well as the bindings, so every read refreshes it (a no-op when unchanged).
+    this._writeOffer(real, manifest);
     const declined = this.o.store.declined(sub, workspace);
     const bound = new Set(manifest.toolchains.map((t) => t.tool));
     const proposals: Proposal[] = [];
@@ -285,7 +287,15 @@ export class EnvironmentService {
     put(apparmorFragmentFile(manifest, real, notes), apparmorFragmentIdentity());
     if (manifest.toolchains.length) put(manifestFile(manifest), manifestFile(manifest));
     else put(null, manifestFile(manifest));
+    this._writeOffer(real, manifest);
     return notes;
+  }
+
+  /** Rewrite (or remove) ``.jaato/toolchain-offer.json``; a failure is logged, never raised: the offer is a convenience. */
+  private _writeOffer(real: string, manifest: Manifest): void {
+    const file = toolchainOfferFile(this.allowedTools(), manifest);
+    const outcome = file ? writeManagedFile(real, file, atomicWrite, this._log) : removeManagedFile(real, toolchainOfferIdentity(), this._log);
+    if (outcome.action === "error") this._log(`environment: could not write the toolchain offer in ${real}: ${(outcome as Extract<ManagedWriteOutcome, { action: "error" }>).message}`);
   }
 
   /** Remove a binding: its links, its server's binaries, and its entry in the managed files.  The installed data is kept. */

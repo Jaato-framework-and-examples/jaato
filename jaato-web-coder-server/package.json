@@ -27,6 +27,10 @@
     "dist",
     "bin",
     "deploy",
+    "plugin/pyproject.toml",
+    "plugin/README.md",
+    "plugin/INSTALL.md",
+    "plugin/jaato_toolchain_offer/*.py",
     "README.md"
   ],
   "scripts": {

@@ -347,6 +347,49 @@ describe("EnvironmentService", () => {
     assert.ok(!existsSync(join(ws, ".lsp.json")));
   });
 
+  test("the toolchain offer: what the operator allows, the commands from the catalog, and what is bound", async () => {
+    const { root, ws } = workspaceRoot();
+    const svc = service(root, fakeRunner().run);
+    const read = () => JSON.parse(readFileSync(join(ws, ".jaato/toolchain-offer.json"), "utf8"));
+
+    // A status read writes it, before anything is bound.
+    await svc.status("sub", "alice", ws);
+    const first = read();
+    assert.equal(first._jaato_managed, "toolchain-offer v1");
+    assert.equal(first.schema, 1);
+    const java = first.toolchains.find((t: { tool: string }) => t.tool === "java");
+    assert.deepEqual(java, { tool: "java", label: "Java", versions: ["21", "temurin-17"], commands: ["java", "javac", "jar", "jshell", "javadoc", "jlink", "jpackage", "keytool"], bound: null });
+    assert.deepEqual(first.toolchains.map((t: { tool: string }) => t.tool), ["python", "node", "go", "java", "maven", "gradle"], "only what the operator allows, in catalog order");
+    assert.ok(!("hint" in java) && !Object.values(java).some((v) => typeof v === "string" && v.includes(" ")), "data only: no sentences");
+
+    // A bind records the version; an unbind clears it.
+    await svc.waitFor((await svc.bind("sub", "alice", ws, "go", "1.23")).id);
+    assert.equal(read().toolchains.find((t: { tool: string }) => t.tool === "go").bound, "1.23");
+    await svc.unbind("sub", "alice", ws, "go");
+    assert.equal(read().toolchains.find((t: { tool: string }) => t.tool === "go").bound, null);
+
+    // A server that allows nothing removes it.
+    const none = new EnvironmentService({
+      workspaceRoot: root, tools: {}, lsp: {}, mise: "/usr/bin/mise", python: "python3", paranoid: false, installTimeoutMs: 1000,
+      store: new FileEnvironmentStore(join(root, "..", `state-${Math.random()}.json`)), ownership: owner(true), run: fakeRunner().run,
+    });
+    await none.status("sub", "alice", ws);
+    assert.ok(!existsSync(join(ws, ".jaato/toolchain-offer.json")));
+  });
+
+  test("the toolchain offer is exactly what the plugin's fixture says it reads", async () => {
+    // plugin/tests/fixtures/toolchain-offer.json is also read by the Python plugin's tests: one contract, two sides.
+    const { root, ws } = workspaceRoot();
+    const svc = new EnvironmentService({
+      workspaceRoot: root, tools: { node: ["22", "20"], java: ["21", "temurin-17"], maven: ["3.9.9"] }, lsp: {},
+      mise: "/usr/bin/mise", python: "python3", paranoid: false, installTimeoutMs: 1000,
+      store: new FileEnvironmentStore(join(root, "..", `state-${Math.random()}.json`)), ownership: owner(true), run: fakeRunner().run,
+    });
+    await svc.status("sub", "alice", ws);
+    const fixture = readFileSync(new URL("../plugin/tests/fixtures/toolchain-offer.json", import.meta.url), "utf8");
+    assert.deepEqual(JSON.parse(readFileSync(join(ws, ".jaato/toolchain-offer.json"), "utf8")), JSON.parse(fixture));
+  });
+
   test("a directory AppArmor would read as a pattern gets no rule, and the job says so", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "jwcs-env-")));
     const ws = join(root, "ws[1]");

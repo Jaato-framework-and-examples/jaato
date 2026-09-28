@@ -11,7 +11,7 @@ cache) open.** What was built, and where it departed from this text:
 | managed files per type (§6) | `jaato-web-coder-server/src/managed-files.ts` | adds a `generated` flag: a derived file (a server table, the manifest) is refreshed when its content differs, where a shipped one keeps the same-version no-op |
 | detection, repo-guidance pointer, install, managed files, routes (§4, §5, §7, §9) | `jaato-web-coder-server/src/environment/` | basedpyright gets its own venv under `.home/.local/share/jaato-lsp/` rather than the tool-venv (§5): the runner creates that venv lazily, and it is the model's to change; typescript-language-server is started through the linked `node`, because its entry script is not under a `bin/` the template grants; Rust is not offered (rustup keeps its homes outside mise, and its proxies need `RUSTUP_HOME` at run time) |
 | ownership (§11) | an EMPTY `workspace.app_write` over the bind channel | no new daemon verb: the daemon checks ownership before anything else and writes nothing for an empty request |
-| the clone-time chip, the rail's Toolchains section, the mid-session `not found` chip (§9) | `jaato-web-coder-ui` | — |
+| the clone-time chip, the rail's Toolchains section, the mid-session `not found` chip (§9) | `jaato-web-coder-ui`; the chip is fed by the `toolchain_offer` plugin (`jaato-web-coder-server/plugin/`) through `tool.result_enriched` | the plugin is installed into the daemon's venv ([INSTALL.md](../../jaato-web-coder-server/plugin/INSTALL.md)) |
 
 Nothing here has been run against an enforcing AppArmor kernel; phase 0 is
 still the proof that mise's binaries run in a confined session.
@@ -306,7 +306,7 @@ proposes.
 | Signal | Seen by | When | Strength |
 |---|---|---|---|
 | markers after a clone (`package.json`, `go.mod`, `Cargo.toml`, `pom.xml`, `.tool-versions`, `.nvmrc`) | BFF scan, asked by the page when #1332's clone completes | before the first session | best moment to ask |
-| a `cli` result with exit 127 or `<name>: not found` | page (tool events) | mid-session | unambiguous: the agent tried and failed |
+| a `cli`, `interactive_shell` or `notebook` result showing a command was not found | the web coder's `toolchain_offer` enrichment plugin, in the runner, reading `.jaato/toolchain-offer.json`; the page gets its `tool.result_enriched` notice (protocol 1.31) and detects nothing itself | mid-session | unambiguous: the agent tried and failed. The model reads the plugin's hint in the same result |
 | `WorkspaceFilesChangedEvent` naming a new manifest | page | mid-session | weak: writing a manifest does not mean running it |
 
 The page shows a chip: *"Node 22 detected (from `.nvmrc`). Bind it?"*.

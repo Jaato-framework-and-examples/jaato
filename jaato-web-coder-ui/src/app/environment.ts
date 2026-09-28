@@ -14,9 +14,10 @@
  * - **clone time**: once a New workspace's repositories are checked out, the
  *   page asks the backend to scan them (``refresh``), which also writes the
  *   repository-guidance pointer, and shows what it found;
- * - **mid-session**: a command that failed with ``<name>: command not found``
- *   for a name a known toolchain provides ({@link notFoundCommand},
- *   {@link toolForCommand}) raises a chip in the rail.
+ * - **mid-session**: the daemon's ``tool.result_enriched`` notice from the
+ *   web coder's ``toolchain_offer`` plugin, which found a missing command a
+ *   toolchain this server offers provides, raises a chip in the rail.  The
+ *   page does no detection of its own (see ``store.ts``, ``noteToolchainOffer``).
  *
  * Accepting calls ``bind``; "Not now" calls ``decline``, which the backend
  * remembers per user and workspace.
@@ -136,40 +137,6 @@ export function environmentApi(url: string, fetchImpl: typeof fetch = fetch): En
       return ((await res.json()) as { job: EnvironmentJob }).job;
     },
   };
-}
-
-/**
- * Which command a shell said it could not find, or ``null``.  Recognises the
- * shapes bash, dash and ``env`` print: ``bash: line 1: go: command not
- * found``, ``sh: 1: node: not found``, ``/usr/bin/env: 'node': No such file
- * or directory``.  Only a bare command name counts -- a path that is missing
- * is a different problem.
- */
-export function notFoundCommand(text: string): string | null {
-  const patterns = [
-    /(?:^|\n)[^\n:]*:\s*(?:line \d+:\s*)?([A-Za-z0-9._+-]+): command not found/,
-    /(?:^|\n)(?:sh|dash|bash):\s*\d+:\s*([A-Za-z0-9._+-]+): not found/,
-    /(?:^|\n)\/usr\/bin\/env:\s*['‘]?([A-Za-z0-9._+-]+)['’]?: No such file or directory/,
-  ];
-  for (const re of patterns) {
-    const m = re.exec(text);
-    if (m) return m[1]!;
-  }
-  return null;
-}
-
-/** The toolchain that provides ``command``, among those this page knows. */
-export const COMMAND_TOOLS: Record<string, ToolId> = {
-  node: "node", npm: "node", npx: "node", corepack: "node", tsc: "node",
-  go: "go", gofmt: "go", gopls: "go",
-  bun: "bun", bunx: "bun",
-  basedpyright: "python", "basedpyright-langserver": "python", pyright: "python",
-  java: "java", javac: "java", jar: "java", jshell: "java", javadoc: "java", jlink: "java", jpackage: "java", keytool: "java",
-  mvn: "maven", gradle: "gradle",
-};
-
-export function toolForCommand(command: string): ToolId | null {
-  return COMMAND_TOOLS[command] ?? null;
 }
 
 /** The chip text for a proposal. */

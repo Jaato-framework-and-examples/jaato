@@ -271,6 +271,16 @@ The repository-guidance pointer is written on the same scan:
 and `.cursor/rules`, never their contents. The workspace root's own files are
 the framework's (#1347).
 
+**The mid-session hint needs a plugin in the daemon.** On every status read,
+bind and unbind this server writes `.jaato/toolchain-offer.json`: the
+toolchains the operator allows, their versions, the commands that suggest
+each one, and what is bound. The `toolchain_offer` enrichment plugin
+([`plugin/`](plugin/README.md), shipped in this package) reads it in the
+runner. When a command a toolchain provides is not found, the plugin tells
+the model to ask for the bind and sends the page the notice behind the Bind
+chip. It must be installed into the DAEMON's Python environment:
+[`plugin/INSTALL.md`](plugin/INSTALL.md).
+
 ## Routes
 
 | Route | Method | |

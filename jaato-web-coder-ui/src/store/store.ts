@@ -24,7 +24,6 @@ import { faultFromError, type SessionFault } from "@/protocol/sessionFault";
 import { clampStallThreshold, DEFAULT_STALL_THRESHOLD_MS } from "@/store/phase";
 import type { RailPanelId } from "@/store/railSplits";
 import type { SessionNote } from "@/app/notes";
-import { notFoundCommand, toolForCommand } from "@/app/environment";
 
 /**
  * What the note editor says about the last save, rendered in the section's
@@ -617,20 +616,21 @@ function updateTool(s: JaatoState, callId: string | undefined | null, agentHint:
 }
 
 /**
- * A failed shell call whose output says ``<name>: command not found``, for a
- * name a known toolchain provides, becomes the rail's toolchain hint
- * (#1344 phase 4).  Only a proposal: nothing is installed until the person
- * accepts it.
+ * The rail's toolchain chip comes from the daemon, not from this page
+ * (#1344).  The web coder's ``toolchain_offer`` enrichment plugin reads the
+ * command's output in the runner and, when a toolchain this server offers
+ * provides the missing command, attaches a ``client_notice`` the daemon emits
+ * as ``tool.result_enriched`` (protocol 1.31).  One detection, in one place.
+ * A toolchain already bound (``bound`` set) is not offered again: the plugin
+ * tells the model that something else is wrong.  Only a proposal: nothing is
+ * installed until the person accepts it.
  */
-function noteMissingCommand(s: JaatoState, callId: string | undefined, agentHint: string): void {
-  const hit = findTool(s, callId, agentHint);
-  if (!hit) return;
-  const t = s.blocks[hit.agentId]?.[hit.index] as ToolBlock | undefined;
-  if (!t) return;
-  // The tail is enough: the shell's complaint is the last thing it printed.
-  const command = notFoundCommand(`${t.output.slice(-8000)}\n${t.errorMessage ?? ""}`);
-  const tool = command ? toolForCommand(command) : null;
-  if (command && tool) s.environmentHint = { command, tool };
+function noteToolchainOffer(s: JaatoState, ev: AnyEvent): void {
+  if (!s.environmentUrl || ev.kind !== "toolchain_offer") return;
+  const data = (ev.data ?? {}) as Record<string, unknown>;
+  const command = typeof data.command === "string" ? data.command : "";
+  const tool = typeof data.tool === "string" ? data.tool : "";
+  if (command && tool && (data.bound === null || data.bound === undefined)) s.environmentHint = { command, tool };
 }
 
 function upsertPermission(s: JaatoState, ev: AnyEvent, inputMode: boolean): void {
@@ -685,6 +685,7 @@ const AGENT_ACTIVITY_EVENT_TYPES = new Set<string>([
   EventTypeValue.TOOL_CALL_START,
   EventTypeValue.TOOL_CALL_END,
   EventTypeValue.TOOL_OUTPUT,
+  EventTypeValue.TOOL_RESULT_ENRICHED,
   EventTypeValue.PERMISSION_REQUESTED,
   EventTypeValue.PERMISSION_INPUT_MODE,
   EventTypeValue.PERMISSION_RESOLVED,
@@ -863,12 +864,13 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           },
         ]);
       }
-      // A shell reports a missing command in its output with exit 127, which
-      // the cli tool returns as a RESULT, not a failed call: every end is looked at.
-      if (s.environmentUrl) noteMissingCommand(s, ev.call_id as string | undefined, agentId);
       if (s.ui.popupCallId && s.ui.popupCallId === ev.call_id && !ev.continuation_id) {
         s.ui = { ...s.ui, popupCallId: null };
       }
+      break;
+    }
+    case EventTypeValue.TOOL_RESULT_ENRICHED: {
+      noteToolchainOffer(s, ev);
       break;
     }
     case EventTypeValue.TOOL_OUTPUT: {

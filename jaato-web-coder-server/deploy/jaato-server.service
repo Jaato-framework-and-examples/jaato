@@ -22,7 +22,7 @@ Group=jaato
 WorkingDirectory=/srv/jaato
 Environment=PYTHONUNBUFFERED=1
 # The venv with `pip install jaato-server[...]`; adjust the path.
-ExecStart=/srv/jaato/.venv/bin/python -m server \
+ExecStart=/srv/jaato/.venv/bin/python -m jaato_server \
     --web-socket 127.0.0.1:8080 \
     --ws-app-credentials /etc/jaato/ws-apps.json \
     --ws-token-file /etc/jaato/ws.token

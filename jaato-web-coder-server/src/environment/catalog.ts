@@ -110,6 +110,14 @@ export const MARKER_TOOLCHAINS = "toolchains";
 export const MARKER_ENVIRONMENT = "environment";
 export const MARKER_LSP = "lsp";
 export const MARKER_APPARMOR = "apparmor";
+export const MARKER_TOOLCHAIN_OFFER = "toolchain-offer";
+/**
+ * What could be bound here, and what is: read by the web coder's
+ * ``toolchain_offer`` enrichment plugin in the runner, which turns a
+ * ``command not found`` into a hint for the model and a notice for the page.
+ * Data only; the plugin owns the wording.
+ */
+export const TOOLCHAIN_OFFER_PATH = ".jaato/toolchain-offer.json";
 
 /**
  * The allowed version (from the operator's list) a detected pin maps to, or

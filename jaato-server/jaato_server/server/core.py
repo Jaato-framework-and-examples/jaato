@@ -589,6 +589,20 @@ def _plan_output_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) ->
     )
 
 
+def _tool_result_enriched_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'ToolResultEnrichedEvent':
+    """The runner's ``tool_result_enriched`` frame (1.31), read defensively like its siblings."""
+    from jaato_sdk.events import ToolResultEnrichedEvent
+    data = payload.get("data")
+    return ToolResultEnrichedEvent(
+        agent_id=str(payload.get("agent_id") or ""),
+        call_id=payload.get("call_id"),
+        tool_name=str(payload.get("tool_name") or ""),
+        plugin=str(payload.get("plugin") or ""),
+        kind=str(payload.get("kind") or ""),
+        data=dict(data) if isinstance(data, dict) else {},
+    )
+
+
 #: Runner notification event_type -> the client event it becomes, for the
 #: notifications whose entire handling is "build it, emit it, return".
 #: Everything with a side effect (a continuation that starts a model thread,
@@ -603,6 +617,7 @@ _PURE_NOTIFICATION_EVENTS = {
     "plan_step_updated": _plan_step_updated_from_payload,
     "plan_cleared": _plan_cleared_from_payload,
     "plan_output": _plan_output_from_payload,
+    "tool_result_enriched": _tool_result_enriched_from_payload,
 }
 
 
@@ -4681,6 +4696,15 @@ class JaatoServer:
                         server.emit(ServiceListEvent(
                             services=svc_plugin.get_service_metadata(),
                         ))
+
+            def on_tool_result_enriched(self, agent_id, call_id, tool_name,
+                                        plugin, kind, data):
+                """An enrichment plugin's client notice (1.31), in-process path."""
+                from jaato_sdk.events import ToolResultEnrichedEvent
+                server.emit(ToolResultEnrichedEvent(
+                    agent_id=agent_id, call_id=call_id, tool_name=tool_name,
+                    plugin=plugin, kind=kind, data=dict(data or {}),
+                ))
 
             def on_tool_output(self, agent_id, call_id, chunk,
                                stream_id="", sequence=None, mime_type=None,

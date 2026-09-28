@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { EnvironmentPanel } from "./EnvironmentPanel";
-import { notFoundCommand, proposalText, toolForCommand } from "@/app/environment";
+import { proposalText } from "@/app/environment";
 import { useJaato } from "@/store/store";
 
 const WS = "/srv/ws/demo";
@@ -27,37 +27,42 @@ function fakeFetch(handler: (url: string, init?: RequestInit) => unknown) {
 
 afterEach(() => cleanup());
 
-describe("not-found detection", () => {
-  it("reads the shapes shells print, and nothing else", () => {
-    expect(notFoundCommand("bash: line 1: go: command not found")).toBe("go");
-    expect(notFoundCommand("out\nsh: 1: node: not found\n")).toBe("node");
-    expect(notFoundCommand("/usr/bin/env: 'node': No such file or directory")).toBe("node");
-    expect(notFoundCommand("cat: missing.txt: No such file or directory")).toBeNull();
-    expect(toolForCommand("npx")).toBe("node");
-    expect(toolForCommand("javac")).toBe("java");
-    expect(toolForCommand("mvn")).toBe("maven");
-    expect(toolForCommand("cargo")).toBeNull();
-  });
-
+describe("the toolchain chip comes from the daemon", () => {
   it("says when the repository pins a version the server does not offer", () => {
     expect(proposalText({ tool: "go", label: "Go", version: "1.23", pin: "1.19", pinAllowed: false, source: "svc/go.mod" }))
       .toBe("Go detected (svc/go.mod pins 1.19, which this server does not offer). Bind 1.23 instead?");
   });
 
-  it("a failed cli call printing `command not found` becomes the rail's hint, only with a backend", () => {
+  const notice = (data: Record<string, unknown>) => ({
+    type: "tool.result_enriched", agent_id: "main", call_id: "c1", tool_name: "cli_based_tool",
+    plugin: "toolchain_offer", kind: "toolchain_offer", data,
+  });
+
+  it("a toolchain_offer notice becomes the rail's hint, only with a backend", () => {
     const st = useJaato.getState();
     st.setEnvironmentUrl(null);
-    const events = (id: string) => [
-      { type: "tool.call_start", agent_id: "main", call_id: id, tool_name: "cli_based_tool", tool_args: {} },
-      { type: "tool.output", agent_id: "main", call_id: id, chunk: "bash: line 1: go: command not found" },
-      { type: "tool.call_end", agent_id: "main", call_id: id, success: true },
-    ];
-    st.dispatch(events("c1") as never);
+    st.dispatch([notice({ command: "javac", tool: "java", bound: null })] as never);
     expect(useJaato.getState().environmentHint).toBeNull();
     st.setEnvironmentUrl("./api/environment");
-    st.dispatch(events("c2") as never);
-    expect(useJaato.getState().environmentHint).toEqual({ command: "go", tool: "go" });
+    st.dispatch([notice({ command: "javac", tool: "java", bound: null })] as never);
+    expect(useJaato.getState().environmentHint).toEqual({ command: "javac", tool: "java" });
     st.setEnvironmentHint(null);
+    st.setEnvironmentUrl(null);
+  });
+
+  it("the page detects nothing itself: a not-found line with no notice raises no chip", () => {
+    const st = useJaato.getState();
+    st.setEnvironmentUrl("./api/environment");
+    st.dispatch([
+      { type: "tool.call_start", agent_id: "main", call_id: "c2", tool_name: "cli_based_tool", tool_args: {} },
+      { type: "tool.output", agent_id: "main", call_id: "c2", chunk: "bash: line 1: go: command not found" },
+      { type: "tool.call_end", agent_id: "main", call_id: "c2", success: true },
+    ] as never);
+    expect(useJaato.getState().environmentHint).toBeNull();
+    // Nor does a notice for a toolchain that is already bound, or of another kind.
+    st.dispatch([notice({ command: "go", tool: "go", bound: "1.23" })] as never);
+    st.dispatch([{ ...notice({ command: "go", tool: "go", bound: null }), kind: "something_else" }] as never);
+    expect(useJaato.getState().environmentHint).toBeNull();
     st.setEnvironmentUrl(null);
   });
 });
