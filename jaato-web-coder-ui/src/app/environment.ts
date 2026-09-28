@@ -70,6 +70,10 @@ export interface EnvironmentStatus {
   declined: ToolId[];
   job: EnvironmentJob | null;
   guidance: string[];
+  /** Whether the backend can write this workspace; ``false`` refuses every bind.  Absent from an older backend. */
+  installable?: boolean;
+  /** ``.jaato/toolchain-offer.json``, which the page stages (``app/toolchainOffer.ts``); absent from an older backend. */
+  offer?: { path: string; content: string };
 }
 
 export interface EnvironmentApi {
@@ -95,7 +99,12 @@ async function failure(res: Response, what: string): Promise<Error> {
   return new Error(`${what}: ${detail || `HTTP ${res.status}`}`);
 }
 
-export function environmentApi(url: string, fetchImpl: typeof fetch = fetch): EnvironmentApi {
+/**
+ * ``onStatus`` sees every status the backend returns (status, refresh,
+ * unbind): the page stages the toolchain offer from it.
+ */
+export function environmentApi(url: string, fetchImpl: typeof fetch = fetch, onStatus?: (st: EnvironmentStatus) => void): EnvironmentApi {
+  const seen = <T extends EnvironmentStatus>(st: T): T => { onStatus?.(st); return st; };
   const common: RequestInit = { credentials: "same-origin", cache: "no-store" };
   const getInit = { ...common, headers: { Accept: "application/json" } };
   const post = (leaf: string, body: unknown) => fetchImpl(subUrl(url, leaf), {
@@ -105,12 +114,12 @@ export function environmentApi(url: string, fetchImpl: typeof fetch = fetch): En
     async status(workspace) {
       const res = await fetchImpl(`${url}${url.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(workspace)}`, getInit);
       if (!res.ok) throw await failure(res, "Reading the workspace's toolchains failed");
-      return await res.json() as EnvironmentStatus;
+      return seen(await res.json() as EnvironmentStatus);
     },
     async refresh(workspace) {
       const res = await post("refresh", { workspace });
       if (!res.ok) throw await failure(res, "Scanning the workspace failed");
-      return ((await res.json()) as { status: EnvironmentStatus }).status;
+      return seen(((await res.json()) as { status: EnvironmentStatus }).status);
     },
     async bind(workspace, tool, version) {
       const res = await post("bind", { workspace, tool, version });
@@ -120,7 +129,9 @@ export function environmentApi(url: string, fetchImpl: typeof fetch = fetch): En
     async unbind(workspace, tool) {
       const res = await post("unbind", { workspace, tool });
       if (!res.ok) throw await failure(res, `Unbinding ${tool} failed`);
-      return await res.json() as { status: EnvironmentStatus; notes: string[] };
+      const r = await res.json() as { status: EnvironmentStatus; notes: string[] };
+      seen(r.status);
+      return r;
     },
     async decline(workspace, tool) {
       const res = await post("decline", { workspace, tool });

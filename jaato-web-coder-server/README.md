@@ -256,7 +256,10 @@ must be writable here and the installed files readable and executable
 there; the runner's profile grants no `dac_override`, so even a root runner
 is bound by file permissions. A BFF that runs as an account which cannot
 reach the daemon's workspaces (the `workspace.app_write` deployment above)
-cannot use this feature.
+cannot use this feature: the routes answer 404 for a workspace outside a
+`workspace_root` it can resolve, and where it can read but not write, the
+status says `installable: false`, bind and unbind answer 409, and the offer
+below lists no toolchain.
 
 **Unbind** removes the links, the server's binaries and the tool's entry in
 the managed files; the download under `.home/.local/share/mise` is kept, so a
@@ -271,14 +274,20 @@ The repository-guidance pointer is written on the same scan:
 and `.cursor/rules`, never their contents. The workspace root's own files are
 the framework's (#1347).
 
-**The mid-session hint needs a plugin in the daemon.** On every status read,
-bind and unbind this server writes `.jaato/toolchain-offer.json`: the
-toolchains the operator allows, their versions, the commands that suggest
-each one, and what is bound. The `toolchain_offer` enrichment plugin
+**The mid-session hint needs a plugin in the daemon.** Every environment
+status this server returns carries `offer`: the content of
+`.jaato/toolchain-offer.json` (the toolchains the operator allows, their
+versions, the commands that suggest each one, and what is bound; none when
+this server cannot install there). This server does not write the file,
+because it may run as an account that cannot write the workspace; the PAGE
+stages it into its session's workspace through the daemon
+(`StageFilesRequest`), when the workspace becomes known and on every status
+the Toolchains section reads. The `toolchain_offer` enrichment plugin
 ([`plugin/`](plugin/README.md), shipped in this package) reads it in the
 runner. When a command a toolchain provides is not found, the plugin tells
 the model to ask for the bind and sends the page the notice behind the Bind
-chip. It must be installed into the DAEMON's Python environment:
+chip. It must be installed into the DAEMON's Python environment, with its
+AppArmor fragment, which keeps a confined session from rewriting the file:
 [`plugin/INSTALL.md`](plugin/INSTALL.md).
 
 ## Routes

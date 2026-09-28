@@ -26,14 +26,14 @@
  * names a toolchain whose install did not finish.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import { removeManagedFile, writeManagedFile, type ManagedFile, type ManagedWriteOutcome } from "../managed-files.js";
+import { managedContent, removeManagedFile, writeManagedFile, type ManagedFile, type ManagedWriteOutcome } from "../managed-files.js";
 import { LOCAL_BIN, MISE_DATA_DIR, TOOLCHAINS, TOOL_IDS, matchToolVersion, type ServerId, type ToolId } from "./catalog.js";
 import { detectWorkspace } from "./detect.js";
 import {
   apparmorFragmentFile, apparmorFragmentIdentity, environmentInstructionsFile, environmentInstructionsIdentity, lspConfigFile, lspConfigIdentity,
-  manifestFile, miseConfigFile, pinnedServer, readManifest, toolchainOfferFile, toolchainOfferIdentity, type BoundToolchain, type Manifest,
+  manifestFile, miseConfigFile, pinnedServer, readManifest, toolchainOfferFile, type BoundToolchain, type Manifest,
 } from "./files.js";
 import { findRepoGuidance, repoGuidanceFile, repoGuidanceIdentity } from "./guidance.js";
 import { InstallCancelled, Installer, spawnRunner, unlinkBinaries, type JdtlsOptions, type ProcessRunner } from "./installer.js";
@@ -67,6 +67,8 @@ export interface EnvironmentOptions {
   ownership: WorkspaceOwnership;
   run?: ProcessRunner;
   log?: (msg: string) => void;
+  /** Whether this process may write ``real`` for a bind; defaults to {@link isInstallable}.  A test seam: a root test process can write anything. */
+  canWrite?: (real: string) => boolean;
 }
 
 export type JobStatus = "running" | "done" | "failed" | "cancelled";
@@ -120,6 +122,20 @@ export interface EnvironmentStatus {
   declined: ToolId[];
   job: JobView | null;
   guidance: string[];
+  /**
+   * Whether this process can write the workspace, so a bind can install.
+   * ``false`` when it runs as an account the workspace's files do not let
+   * write (a backend beside a root daemon): every bind is then refused, and
+   * ``offer`` lists no toolchain, so no hint points at a Bind that fails.
+   */
+  installable: boolean;
+  /**
+   * ``.jaato/toolchain-offer.json`` for this workspace, read by the
+   * ``toolchain_offer`` plugin.  The page stages it through the daemon
+   * (``StageFilesRequest``); the backend never writes it, because it may not
+   * be able to.
+   */
+  offer: { path: string; content: string };
 }
 
 const LOG_TAIL = 200;
@@ -137,6 +153,16 @@ export class EnvironmentService {
     this._root = realpathSafe(opts.workspaceRoot) ?? opts.workspaceRoot;
     this._run = opts.run ?? spawnRunner;
     this._log = opts.log ?? (() => undefined);
+  }
+
+  private _canWrite(real: string): boolean {
+    return (this.o.canWrite ?? isInstallable)(real);
+  }
+
+  private _refuseUnwritable(real: string): void {
+    if (!this._canWrite(real)) {
+      throw new EnvironmentError("this server cannot write this workspace (it runs as an account the workspace's files do not let write), so it cannot install toolchains here", 409);
+    }
   }
 
   /** The toolchains the operator allows, in catalog order. */
@@ -176,8 +202,8 @@ export class EnvironmentService {
   private _status(sub: string, real: string, workspace: string): EnvironmentStatus {
     const manifest = readManifest(real);
     const allowed = this.allowedTools();
-    // The offer follows the allow-list as well as the bindings, so every read refreshes it (a no-op when unchanged).
-    this._writeOffer(real, manifest);
+    const installable = this._canWrite(real);
+    const offer = toolchainOfferFile(installable ? allowed : [], manifest);
     const declined = this.o.store.declined(sub, workspace);
     const bound = new Set(manifest.toolchains.map((t) => t.tool));
     const proposals: Proposal[] = [];
@@ -196,6 +222,8 @@ export class EnvironmentService {
       allowed, proposals, declined,
       job: this._jobFor(real),
       guidance: findRepoGuidance(real),
+      installable,
+      offer: { path: offer.relativePath, content: managedContent(offer) },
     };
   }
 
@@ -226,6 +254,7 @@ export class EnvironmentService {
   /** Start installing ``tool@version``; refuses a version off the allow-list and a workspace with a job running. */
   async bind(sub: string, user: string, workspace: string, tool: ToolId, version: string): Promise<JobView> {
     const real = await this._authorize(user, workspace);
+    this._refuseUnwritable(real);
     const allowed = this.allowedTools().find((a) => a.tool === tool);
     if (!allowed) throw new EnvironmentError(`${tool} is not offered on this server`, 403);
     if (!allowed.versions.includes(version)) throw new EnvironmentError(`${tool} ${version} is not an allowed version (allowed: ${allowed.versions.join(", ")})`, 403);
@@ -287,20 +316,14 @@ export class EnvironmentService {
     put(apparmorFragmentFile(manifest, real, notes), apparmorFragmentIdentity());
     if (manifest.toolchains.length) put(manifestFile(manifest), manifestFile(manifest));
     else put(null, manifestFile(manifest));
-    this._writeOffer(real, manifest);
     return notes;
   }
 
-  /** Rewrite (or remove) ``.jaato/toolchain-offer.json``; a failure is logged, never raised: the offer is a convenience. */
-  private _writeOffer(real: string, manifest: Manifest): void {
-    const file = toolchainOfferFile(this.allowedTools(), manifest);
-    const outcome = file ? writeManagedFile(real, file, atomicWrite, this._log) : removeManagedFile(real, toolchainOfferIdentity(), this._log);
-    if (outcome.action === "error") this._log(`environment: could not write the toolchain offer in ${real}: ${(outcome as Extract<ManagedWriteOutcome, { action: "error" }>).message}`);
-  }
 
   /** Remove a binding: its links, its server's binaries, and its entry in the managed files.  The installed data is kept. */
   async unbind(sub: string, user: string, workspace: string, tool: ToolId): Promise<{ status: EnvironmentStatus; notes: string[]; removed: string[] }> {
     const real = await this._authorize(user, workspace);
+    this._refuseUnwritable(real);
     const running = this._jobFor(real);
     if (running && running.status === "running") throw new EnvironmentError("an install is running in this workspace; cancel it first", 409);
     const manifest = readManifest(real);
@@ -351,6 +374,19 @@ function view(j: Job): JobView {
     id: j.id, workspace: j.workspace, tool: j.tool, version: j.version, status: j.status,
     log: [...j.log], error: j.error, notes: [...j.notes], startedAt: j.startedAt, finishedAt: j.finishedAt,
   };
+}
+
+/**
+ * Whether this process may write where a bind writes: the workspace, and its
+ * ``.home`` and ``.jaato`` when they exist.  A permission check, not a
+ * promise: a later write can still fail, and says so.
+ */
+export function isInstallable(real: string): boolean {
+  for (const p of [real, join(real, ".home"), join(real, ".home/.local/bin"), join(real, ".jaato")]) {
+    if (p !== real && !existsSync(p)) continue;
+    try { accessSync(p, fsConstants.W_OK | fsConstants.X_OK); } catch { return false; }
+  }
+  return true;
 }
 
 function realpathSafe(p: string): string | null {

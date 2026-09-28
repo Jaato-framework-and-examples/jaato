@@ -30,6 +30,7 @@
     "plugin/pyproject.toml",
     "plugin/README.md",
     "plugin/INSTALL.md",
+    "plugin/apparmor/*.rules",
     "plugin/jaato_toolchain_offer/*.py",
     "README.md"
   ],

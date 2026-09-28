@@ -350,11 +350,16 @@ describe("EnvironmentService", () => {
   test("the toolchain offer: what the operator allows, the commands from the catalog, and what is bound", async () => {
     const { root, ws } = workspaceRoot();
     const svc = service(root, fakeRunner().run);
-    const read = () => JSON.parse(readFileSync(join(ws, ".jaato/toolchain-offer.json"), "utf8"));
+    const offerOf = (st: { offer: { path: string; content: string } }) => {
+      assert.equal(st.offer.path, ".jaato/toolchain-offer.json");
+      return JSON.parse(st.offer.content);
+    };
 
-    // A status read writes it, before anything is bound.
-    await svc.status("sub", "alice", ws);
-    const first = read();
+    // The status carries it, before anything is bound; the backend never writes it (the page stages it).
+    const st = await svc.status("sub", "alice", ws);
+    assert.equal(st.installable, true);
+    const first = offerOf(st);
+    assert.ok(!existsSync(join(ws, ".jaato/toolchain-offer.json")), "the backend does not write the offer");
     assert.equal(first._jaato_managed, "toolchain-offer v1");
     assert.equal(first.schema, 1);
     const java = first.toolchains.find((t: { tool: string }) => t.tool === "java");
@@ -364,17 +369,32 @@ describe("EnvironmentService", () => {
 
     // A bind records the version; an unbind clears it.
     await svc.waitFor((await svc.bind("sub", "alice", ws, "go", "1.23")).id);
-    assert.equal(read().toolchains.find((t: { tool: string }) => t.tool === "go").bound, "1.23");
-    await svc.unbind("sub", "alice", ws, "go");
-    assert.equal(read().toolchains.find((t: { tool: string }) => t.tool === "go").bound, null);
+    assert.equal(offerOf(await svc.status("sub", "alice", ws)).toolchains.find((t: { tool: string }) => t.tool === "go").bound, "1.23");
+    const after = await svc.unbind("sub", "alice", ws, "go");
+    assert.equal(offerOf(after.status).toolchains.find((t: { tool: string }) => t.tool === "go").bound, null);
+    assert.ok(!existsSync(join(ws, ".jaato/toolchain-offer.json")));
 
-    // A server that allows nothing removes it.
+    // A server that allows nothing offers nothing.
     const none = new EnvironmentService({
       workspaceRoot: root, tools: {}, lsp: {}, mise: "/usr/bin/mise", python: "python3", paranoid: false, installTimeoutMs: 1000,
       store: new FileEnvironmentStore(join(root, "..", `state-${Math.random()}.json`)), ownership: owner(true), run: fakeRunner().run,
     });
-    await none.status("sub", "alice", ws);
-    assert.ok(!existsSync(join(ws, ".jaato/toolchain-offer.json")));
+    assert.deepEqual(offerOf(await none.status("sub", "alice", ws)).toolchains, []);
+  });
+
+  test("a workspace this server cannot write: no toolchain offered, and bind and unbind refused", async () => {
+    const { root, ws } = workspaceRoot();
+    const svc = new EnvironmentService({
+      workspaceRoot: root, tools: { java: ["21"] }, lsp: {}, mise: "/usr/bin/mise", python: "python3", paranoid: false, installTimeoutMs: 1000,
+      store: new FileEnvironmentStore(join(root, "..", `state-${Math.random()}.json`)), ownership: owner(true), run: fakeRunner().run,
+      canWrite: () => false,
+    });
+    const st = await svc.status("sub", "alice", ws);
+    assert.equal(st.installable, false);
+    assert.deepEqual(JSON.parse(st.offer.content).toolchains, [], "no hint may point at a Bind that fails");
+    assert.deepEqual(st.allowed.map((a) => a.tool), ["java"], "the rail still says what the server allows");
+    await assert.rejects(svc.bind("sub", "alice", ws, "java", "21"), (e: Error & { status?: number }) => /cannot write this workspace/.test(e.message));
+    await assert.rejects(svc.unbind("sub", "alice", ws, "java"), /cannot write this workspace/);
   });
 
   test("the toolchain offer is exactly what the plugin's fixture says it reads", async () => {
@@ -385,9 +405,9 @@ describe("EnvironmentService", () => {
       mise: "/usr/bin/mise", python: "python3", paranoid: false, installTimeoutMs: 1000,
       store: new FileEnvironmentStore(join(root, "..", `state-${Math.random()}.json`)), ownership: owner(true), run: fakeRunner().run,
     });
-    await svc.status("sub", "alice", ws);
+    const st = await svc.status("sub", "alice", ws);
     const fixture = readFileSync(new URL("../plugin/tests/fixtures/toolchain-offer.json", import.meta.url), "utf8");
-    assert.deepEqual(JSON.parse(readFileSync(join(ws, ".jaato/toolchain-offer.json"), "utf8")), JSON.parse(fixture));
+    assert.deepEqual(JSON.parse(st.offer.content), JSON.parse(fixture));
   });
 
   test("a directory AppArmor would read as a pattern gets no rule, and the job says so", async () => {

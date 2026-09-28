@@ -10,8 +10,13 @@ the web coder offers a toolchain that provides it, the plugin:
 - sends the page a `tool.result_enriched` notice (`kind: "toolchain_offer"`,
   daemon protocol 1.31), which becomes the Bind chip in the rail.
 
-It reads `<workspace>/.jaato/toolchain-offer.json`, written by
-`jaato-web-coder-server` when its `environment:` block is on. A workspace
-without that file gets nothing.
+It reads `<workspace>/.jaato/toolchain-offer.json`, which the web coder page
+stages into the workspace (through the daemon) from what
+`jaato-web-coder-server` returns when its `environment:` block is on. A
+workspace without that file gets nothing.
+
+`apparmor/jaato-toolchain-offer.rules` denies confined sessions writing,
+linking or locking that file, so the agent cannot change what the plugin
+says. It is installed into the daemon account's `~/.jaato/apparmor-fragments/`.
 
 Installation: see [INSTALL.md](INSTALL.md).

@@ -24,18 +24,23 @@ runner processes, so it must be installed into the **daemon's** Python
 environment, not the web coder's. The web coder backend (Node) cannot install
 it at runtime.
 
-It is off in every workspace where the backend hasn't written
-`<workspace>/.jaato/toolchain-offer.json`. So installing it on a daemon that
-also serves non-web-coder workspaces is safe: it does nothing there.
+It reads `<workspace>/.jaato/toolchain-offer.json`, which the web coder
+**page** stages into the workspace through the daemon (the backend computes
+it but does not write it, since it may run as another account). It is off in
+every workspace without that file, so installing it on a daemon that also
+serves non-web-coder workspaces is safe: it does nothing there.
+
+It ships with an **AppArmor fragment** that keeps confined sessions from
+rewriting that file. Install both (steps 2 and 3).
 
 ## Prerequisites
 
 | | Needed | How to check |
 |---|---|---|
 | `jaato-server` | a release whose protocol is **1.31** or later (it carries `tool.result_enriched`) | `/srv/jaato/.venv/bin/python -c "import jaato_sdk.events as e; print(e.PROTOCOL_VERSION)"` |
-| `@jaato/web-coder-server` | a release that writes `toolchain-offer.json` and ships `plugin/` (this one) | `ls "$(npm root -g)/@jaato/web-coder-server/plugin/pyproject.toml"` |
-| `@jaato/web-coder-ui` | a release that reads `tool.result_enriched` (the same release train) | served by the web coder server; no separate step |
-| backend config | an `environment:` block in the web coder server's config; without it the offer file is never written and the plugin stays silent | `grep -n '^environment:' /etc/jaato-web-coder/jaato_server.server.yaml` |
+| `@jaato/web-coder-server` | a release that returns the offer in its environment status and ships `plugin/` (this one) | `ls "$(npm root -g)/@jaato/web-coder-server/plugin/apparmor/jaato-toolchain-offer.rules"` |
+| `@jaato/web-coder-ui` | a release that stages the offer and reads `tool.result_enriched` (the same release train) | served by the web coder server; no separate step |
+| backend config | an `environment:` block in the web coder server's config; without it no offer is staged and the plugin stays silent | `grep -n '^environment:' /etc/jaato-web-coder/jaato_server.server.yaml` |
 | Python build backend | `hatchling`. It is fetched from PyPI at install time. On a host without PyPI access, build the wheel elsewhere (step 2, offline variant) | — |
 
 With an older daemon (protocol below 1.31), the model still gets the hint but
@@ -45,11 +50,12 @@ the page gets no chip. Nothing breaks either way.
 
 1. Upgrade `jaato-server` in `/srv/jaato/.venv` (if it is below 1.31).
 2. Install this plugin into the same venv (below).
-3. Restart the daemon (below).
-4. Upgrade `@jaato/web-coder-server` (which brings the matching UI) and
+3. Install its AppArmor fragment (below).
+4. Restart the daemon (below).
+5. Upgrade `@jaato/web-coder-server` (which brings the matching UI) and
    restart `jaato-web-coder-server`.
 
-Steps 1 to 3 can be done in one maintenance window. Step 4 can come before
+Steps 1 to 4 can be done in one maintenance window. Step 5 can come before
 or after; the pieces tolerate each other's absence.
 
 ## 1. Locate the plugin source
@@ -107,7 +113,38 @@ Environment=JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST=...,jaato-web-coder-toolchain-off
 If the variable is unset, every installed distribution may contribute
 plugins, and nothing needs to change.
 
-## 3. Restart the daemon
+## 3. Install the AppArmor fragment
+
+The offer lives in the workspace, which a session's tools can write. This
+fragment denies confined sessions writing, linking or locking any
+`.jaato/toolchain-offer.json`; reading stays allowed, so the plugin works.
+The daemon itself, which stages the file, is not confined and is unaffected.
+
+Install it into the **daemon account's** user tier, which applies to every
+workspace that daemon serves:
+
+```bash
+DAEMON_HOME="$(getent passwd jaato | cut -d: -f6)"
+sudo install -d -o jaato -g jaato -m 0755 "$DAEMON_HOME/.jaato/apparmor-fragments"
+sudo install -o jaato -g jaato -m 0644 "$PLUGIN_DIR/apparmor/jaato-toolchain-offer.rules" \
+    "$DAEMON_HOME/.jaato/apparmor-fragments/jaato-toolchain-offer.rules"
+```
+
+Use the home of the account in the unit's `User=` (for a root daemon,
+`/root`). The file must be named exactly as shipped.
+
+- It applies to sessions provisioned **after** it is installed; running
+  sessions keep the profile they were confined with (the restart in step 4
+  takes care of that).
+- Web coder sessions declare no `apparmor_fragments:`, so they compose it
+  automatically. A profile that does declare that list must add
+  `jaato-toolchain-offer` to it.
+- On a host without AppArmor, or for a session that runs unconfined, nothing
+  enforces it. The plugin validates every field of the file and never
+  quotes free text from it, so a rewritten offer can at worst produce a
+  wrong hint.
+
+## 4. Restart the daemon
 
 Plugins are imported when the daemon starts its runner template, and every
 pooled runner is forked from that template, so a running daemon never picks
@@ -121,7 +158,7 @@ journalctl -u jaato-server -n 50 --no-pager
 A restart unloads live sessions. They are saved and come back when users
 reattach, but a turn in progress is cut. Schedule it accordingly.
 
-## 4. Verify
+## 5. Verify
 
 **The daemon's environment sees it**, loaded the way a runner loads it:
 
@@ -134,12 +171,16 @@ If the line is missing, look in `journalctl -u jaato-server` for an entry
 naming `toolchain_offer`. It says why: refused by the allow-list, or a
 protocol problem.
 
+**The fragment is composed** into new sessions' profiles: after a session
+starts, the daemon log line `AppArmor profile … composing N fragments: [...]`
+lists `jaato-toolchain-offer`.
+
 **The whole path**, with a signed-in user and an `environment:` block that
 allows at least one toolchain (Java, say) that is not bound in the test
 workspace:
 
-1. Open a workspace in the web coder and open the rail's *Toolchains*
-   section. The backend writes the offer file:
+1. Open a session in a workspace in the web coder. The page stages the
+   offer file through the daemon:
    ```bash
    sudo cat /srv/jaato/workspaces/<workspace>/.jaato/toolchain-offer.json
    # {"_jaato_managed":"toolchain-offer v1","schema":1,"toolchains":[...]}
@@ -158,22 +199,24 @@ workspace:
 
 ```bash
 sudo -u jaato /srv/jaato/.venv/bin/python -m pip uninstall -y jaato-web-coder-toolchain-offer
+sudo rm -f "$DAEMON_HOME/.jaato/apparmor-fragments/jaato-toolchain-offer.rules"
 sudo systemctl restart jaato-server
 ```
 
 Nothing else depends on the plugin. Without it the chip and the hint stop,
-and binding by hand from the rail keeps working. The offer files the backend
-wrote stay in the workspaces and are harmless.
+and binding by hand from the rail keeps working. The offer files the page staged
+stay in the workspaces and are harmless.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
 | `explain plugins` has no `toolchain_offer` line | installed into another venv (check the `ExecStart` path in the unit), or refused by `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` |
-| listed, but no chip and no hint | the daemon wasn't restarted; or the workspace has no `.jaato/toolchain-offer.json` (no `environment:` block, or the backend never opened that workspace); or the command's toolchain isn't in the allow-list, or the command isn't one the catalog maps to it |
+| listed, but no chip and no hint | the daemon wasn't restarted; or the workspace has no `.jaato/toolchain-offer.json` (no `environment:` block, no page has opened a session there since, or the backend cannot resolve that workspace under its `environment.workspace_root`); or the command's toolchain isn't in the allow-list, or the command isn't one the catalog maps to it |
+| the offer file lists no toolchain | the web coder server cannot write that workspace (it runs as another account), so it offers nothing it could not install; its environment status says `installable: false` |
+| the log line for a new session does not list `jaato-toolchain-offer` | the fragment is in the wrong account's home, is misnamed, or the session's profile declares `apparmor_fragments:` without it |
 | the hint reaches the agent but no chip appears | the daemon is below protocol 1.31, or the page is an older UI |
 | `toolchain_offer: ... is not a schema-1 offer` in the daemon log | the plugin and the web coder server come from different releases; install the plugin from the running server's package |
-| the offer file exists but the runner cannot read it | uid layout: the file is written by the web coder server's account and read by the daemon's. See "The uid layout matters" in [`../README.md`](../README.md) |
 
 What the plugin reads and what it sends are documented in
 [`README.md`](README.md) and in the `jaato_toolchain_offer/plugin.py`

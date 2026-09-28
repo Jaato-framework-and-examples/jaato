@@ -27,6 +27,7 @@ import {
   type EnvironmentStatus,
   type ToolId,
 } from "@/app/environment";
+import { stageToolchainOffer } from "@/app/toolchainOffer";
 
 /** How often a running install is polled. */
 export const JOB_POLL_MS = 1000;
@@ -42,7 +43,7 @@ export function EnvironmentPanel({ url, workspace, scan = false, hint, onHintDon
   onHintDone?: () => void;
   fetchImpl?: typeof fetch;
 }) {
-  const api = useRef(environmentApi(url, fetchImpl)).current;
+  const api = useRef(environmentApi(url, fetchImpl, (st) => { void stageToolchainOffer(st); })).current;
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
   const [job, setJob] = useState<EnvironmentJob | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,6 +99,9 @@ export function EnvironmentPanel({ url, workspace, scan = false, hint, onHintDon
   return (
     <div className="flex flex-col gap-3 px-3.5 py-3 text-[13px]" data-testid="environment-panel">
       {error && <div className="text-error" role="alert">{error}</div>}
+      {status.installable === false && (
+        <div className="text-text-muted" role="note">This server cannot write this workspace, so it cannot install toolchains here.</div>
+      )}
 
       {hintTool && (
         <div className="tint-warning border hairline px-3 py-2 flex flex-col gap-2" data-testid="environment-hint">

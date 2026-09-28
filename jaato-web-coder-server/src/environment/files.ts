@@ -195,13 +195,17 @@ export const TOOLCHAIN_OFFER_SCHEMA = 1;
 /**
  * The offer: every toolchain the operator allows, its versions, the commands
  * that suggest it (from {@link TOOLCHAINS}, the one command table), and the
- * version bound here or ``null``.  ``null`` when nothing is allowed (the file
- * is then removed).  Structured data only: the file is in the workspace,
- * where the model can write, so the plugin validates every field and builds
- * the sentence itself.
+ * version bound here or ``null``.  An empty ``allowed`` gives an offer with
+ * no toolchains, which the plugin reads as "nothing to hint".
+ *
+ * The backend does not write this file: it returns it in the environment
+ * status and the page stages it into the workspace through the daemon
+ * (``StageFilesRequest``), because this process may run as an account that
+ * cannot write the workspace.  Structured data only: the file is in the
+ * workspace, where an unconfined model can write, so the plugin validates
+ * every field and builds the sentence itself.
  */
-export function toolchainOfferFile(allowed: Array<{ tool: ToolId; label: string; versions: string[] }>, m: Manifest): ManagedFile | null {
-  if (allowed.length === 0) return null;
+export function toolchainOfferFile(allowed: Array<{ tool: ToolId; label: string; versions: string[] }>, m: Manifest): ManagedFile {
   const bound = new Map(m.toolchains.map((t) => [t.tool, t.version]));
   const body = JSON.stringify({
     schema: TOOLCHAIN_OFFER_SCHEMA,
@@ -210,8 +214,4 @@ export function toolchainOfferFile(allowed: Array<{ tool: ToolId; label: string;
     })),
   });
   return { relativePath: TOOLCHAIN_OFFER_PATH, markerId: MARKER_TOOLCHAIN_OFFER, version: MANIFEST_VERSION, body, format: "json", generated: true };
-}
-
-export function toolchainOfferIdentity(): ManagedFile {
-  return { relativePath: TOOLCHAIN_OFFER_PATH, markerId: MARKER_TOOLCHAIN_OFFER, version: MANIFEST_VERSION, body: "{}", format: "json", generated: true };
 }
