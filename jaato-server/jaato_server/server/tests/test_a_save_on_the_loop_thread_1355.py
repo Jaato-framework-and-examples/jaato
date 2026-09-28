@@ -310,40 +310,54 @@ _RECEIVER_SCOPED = {
 _SERVER_DIR = pathlib.Path(__file__).resolve().parents[1]
 
 
+def _is_blocking_call(node: ast.Call) -> bool:
+    """A non-awaited attribute call that reaches a runner wrapper."""
+    attr = node.func.attr
+    if attr.endswith("_threadsafe") and attr != "run_coroutine_threadsafe":
+        return True
+    if attr in _BLOCKING_ENTRY_POINTS:
+        return True
+    scoped = _RECEIVER_SCOPED.get(attr)
+    return bool(scoped) and ast.unparse(node.func.value).endswith(scoped)
+
+
+def _calls_in_coroutine_body(fn: ast.AsyncFunctionDef):
+    """Non-awaited attribute calls that run in *fn* itself.
+
+    Nested functions, lambdas and classes are skipped: they run elsewhere
+    (a worker thread, a callback), not in this coroutine.
+    """
+    awaited = {
+        id(n.value) for n in ast.walk(fn)
+        if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+    }
+    stack = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and id(node) not in awaited):
+            yield node
+
+
 def _blocking_calls_in_async_defs() -> List[str]:
     found = []
     for path in sorted(_SERVER_DIR.rglob("*.py")):
         if "tests" in path.relative_to(_SERVER_DIR).parts:
             continue
         tree = ast.parse(path.read_text())
-        for fn in ast.walk(tree):
-            if not isinstance(fn, ast.AsyncFunctionDef):
-                continue
-            awaited = {
-                id(n.value) for n in ast.walk(fn)
-                if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
-            }
-            stack = list(fn.body)
-            while stack:
-                node = stack.pop()
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                     ast.Lambda, ast.ClassDef)):
-                    continue       # runs elsewhere, not in this coroutine
-                stack.extend(ast.iter_child_nodes(node))
-                if not (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and id(node) not in awaited):
-                    continue
-                attr = node.func.attr
-                receiver = ast.unparse(node.func.value)
-                scoped = _RECEIVER_SCOPED.get(attr)
-                if (attr.endswith("_threadsafe")
-                        and attr != "run_coroutine_threadsafe"
-                        or attr in _BLOCKING_ENTRY_POINTS
-                        or scoped and receiver.endswith(scoped)):
+        coroutines = [n for n in ast.walk(tree)
+                      if isinstance(n, ast.AsyncFunctionDef)]
+        for fn in coroutines:
+            for node in _calls_in_coroutine_body(fn):
+                if _is_blocking_call(node):
                     found.append(
                         f"{path.name}:{node.lineno} {fn.name}: "
-                        f"{receiver}.{attr}()")
+                        f"{ast.unparse(node.func.value)}.{node.func.attr}()")
     return found
 
 
