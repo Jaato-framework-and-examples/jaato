@@ -167,6 +167,20 @@ STATE_PROBES: Tuple[Tuple[str, str], ...] = (
     ("openrouter_auth.json", "a STORED PROVIDER CREDENTIAL"),
 )
 
+#: Runtime state under ``.jaato/`` that the AppArmor template ALSO
+#: write-denies.  The template's write-denies otherwise name only authored
+#: assets (which is what lets the guard derive :data:`AUTHORED` from them),
+#: so each exception is declared here, with why it is denied, rather than
+#: silently skipped.  None of these is re-included: they stay ignored by
+#: ``.jaato/*`` like every other piece of runtime state.
+#: ``(path relative to .jaato/, what it holds)``.
+CONFINED_STATE: Tuple[Tuple[str, str], ...] = (
+    (".cache/apparmor-fragments/",
+     "walker-generated AppArmor fragments (the cache tier, #1385): "
+     "written outside the confined runner, denied to it because the next "
+     "provisioning composes them"),
+)
+
 #: Workspace-root scratch the framework writes OUTSIDE ``.jaato/``, which
 #: ``.jaato/*`` therefore does not cover: the private ``/tmp`` (#1381) is
 #: ``<ws>/.tmp``, bound over ``/tmp`` in a confined runner's namespace.
