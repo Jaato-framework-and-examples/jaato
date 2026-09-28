@@ -74,6 +74,10 @@ User=jaato
 Group=jaato
 ExecStart=/usr/local/bin/jaato-server --web-socket :8089
 Restart=on-failure
+# Signal only the daemon on stop, so it can save loaded sessions through
+# its runners before they go (the default control-group mode signals them
+# all at once).
+KillMode=mixed
 
 # This line is what makes per-session cgroups work without root:
 # systemd hands the service its own cgroup with cpu/memory/pids

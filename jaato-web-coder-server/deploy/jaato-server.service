@@ -28,6 +28,13 @@ ExecStart=/srv/jaato/.venv/bin/python -m jaato_server \
     --ws-token-file /etc/jaato/ws.token
 Restart=on-failure
 RestartSec=3
+# Stop signals the daemon alone.  The default (control-group) sends SIGTERM
+# to the daemon AND its runner processes at once; the runners exit first,
+# and the daemon cannot save a loaded session through them ("Failed to save
+# session ...: RunnerRPCClient is closed").  With mixed, the daemon saves,
+# stops its runners itself, and anything left when it exits (or when
+# TimeoutStopSec runs out) gets SIGKILL.
+KillMode=mixed
 # Hardening. The daemon spawns tools; relax as your workspace needs.
 NoNewPrivileges=true
 ProtectSystem=full
