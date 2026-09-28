@@ -24,13 +24,9 @@
  * | ``/api/github/default`` | POST | ``{id}`` — make one account the default (same-origin only) |
  * | ``/api/github/disconnect`` | POST | ``{id}`` — delete + revoke a grant and reload the user's sessions (same-origin only) |
  * | ``/api/github/bind`` | POST | ``{workspace, account_id\|null}`` — bind/clear an account on a workspace (same-origin only) |
- * | ``/api/environment?workspace=`` | GET | bound toolchains, the operator's allow-list, proposals from the workspace's files, the running install |
- * | ``/api/environment/bind`` | POST | ``{workspace, tool, version}`` — start an install (same-origin only) |
- * | ``/api/environment/unbind`` | POST | ``{workspace, tool}`` — remove a binding's links and files (same-origin only) |
+ * | ``/api/environment?workspace=`` | GET | the operator's allow-list, this user's declines, and the toolchain offer's content (the page stages it) |
  * | ``/api/environment/decline`` | POST | ``{workspace, tool}`` — "not now" for a proposal (same-origin only) |
- * | ``/api/environment/refresh`` | POST | ``{workspace}`` — rewrite the repository-guidance pointer after a clone or pull (same-origin only) |
- * | ``/api/environment/jobs/<id>`` | GET | one install's progress |
- * | ``/api/environment/jobs/<id>/cancel`` | POST | cancel it (same-origin only) |
+ * | ``/api/environment/undecline`` | POST | ``{workspace, tool}`` — propose it again (same-origin only) |
  * | anything else | GET | the bundle (``@jaato/web-coder-ui``'s static handler) |
  *
  * The four credential routes exist only when the config carries a
@@ -350,36 +346,15 @@ export function createRouter(deps: RouterDeps): Handler {
       if (rest.length === 0 && method === "GET") {
         return json(res, 200, await environment.status(s.sub, s.user, url.searchParams.get("workspace") ?? ""));
       }
-      if (rest.length === 2 && rest[0] === "jobs" && method === "GET") {
-        const job = environment.job(s.sub, rest[1]!);
-        return job ? json(res, 200, { job }) : json(res, 404, { error: "no such job" });
-      }
-      if (rest.length === 3 && rest[0] === "jobs" && rest[2] === "cancel" && method === "POST") {
-        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
-        const job = environment.cancel(s.sub, rest[1]!);
-        if (job) log(`environment install cancelled by ${s.user}: job=${job.id}`);
-        return job ? json(res, 200, { job }) : json(res, 404, { error: "no such job" });
-      }
-      if (rest.length === 1 && method === "POST" && ["bind", "unbind", "decline", "refresh"].includes(rest[0]!)) {
+      if (rest.length === 1 && method === "POST" && (rest[0] === "decline" || rest[0] === "undecline")) {
         if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
         const body = await readJsonObject(req);
         const workspace = typeof body.workspace === "string" ? body.workspace : "";
         if (!workspace) return json(res, 400, { error: "workspace required" });
-        if (rest[0] === "refresh") return json(res, 200, await environment.refreshGuidance(s.sub, s.user, workspace));
         if (!isToolId(body.tool)) return json(res, 400, { error: "tool must be one of the known toolchains" });
-        if (rest[0] === "decline") {
-          await environment.decline(s.sub, s.user, workspace, body.tool);
-          return json(res, 200, { declined: body.tool });
-        }
-        if (rest[0] === "unbind") {
-          const r = await environment.unbind(s.sub, s.user, workspace, body.tool);
-          log(`environment unbind for ${s.user}: workspace=${workspace} tool=${body.tool}`);
-          return json(res, 200, r);
-        }
-        if (typeof body.version !== "string" || !body.version) return json(res, 400, { error: "version required" });
-        const job = await environment.bind(s.sub, s.user, workspace, body.tool, body.version);
-        log(`environment bind for ${s.user}: workspace=${workspace} tool=${body.tool}@${body.version} job=${job.id}`);
-        return json(res, 202, { job });
+        if (rest[0] === "decline") await environment.decline(s.sub, s.user, workspace, body.tool);
+        else await environment.undecline(s.sub, s.user, workspace, body.tool);
+        return json(res, 200, { [rest[0]]: body.tool });
       }
       return text(res, 404, "not found");
     } catch (e) {

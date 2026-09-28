@@ -31,7 +31,7 @@
     "plugin/README.md",
     "plugin/INSTALL.md",
     "plugin/apparmor/*.rules",
-    "plugin/jaato_toolchain_offer/*.py",
+    "plugin/jaato_web_coder_toolchains/*.py",
     "README.md"
   ],
   "scripts": {

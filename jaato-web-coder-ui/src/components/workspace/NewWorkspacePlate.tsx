@@ -15,10 +15,11 @@
  *     session picker".
  *
  * Once every repository is checked out, and the backend offers the
- * environment bootstrap, the plate also shows ``EnvironmentPanel`` in its
- * clone-time mode: the clones are scanned for toolchain markers, the
- * repository-guidance pointer is written, and what was found is PROPOSED --
- * nothing is installed without a click (#1344).
+ * environment bootstrap, the plate also shows ``EnvironmentPanel``.  No
+ * session exists yet and installs run in a session's runner, so what is
+ * chosen here is remembered and bound when the first session in the
+ * workspace starts; the repositories are scanned for proposals then too
+ * (#1344).  Nothing is installed without a click.
  *
  * The order of the requests is load-bearing: the workspace is created,
  * then the user's default GitHub account is bound to it (which writes
@@ -220,7 +221,7 @@ export function NewWorkspacePlate({ githubUrl, onCreated, onOpen, onNotice }: {
           {ready && environmentUrl && createdPath && (
             <div className="border-t hairline">
               <div className="px-5 pt-3.5"><span className="kicker tracking-[0.16em]">Toolchains</span></div>
-              <EnvironmentPanel url={environmentUrl} workspace={createdPath} scan />
+              <EnvironmentPanel url={environmentUrl} workspace={createdPath} />
             </div>
           )}
         </>

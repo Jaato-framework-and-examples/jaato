@@ -1,31 +1,60 @@
 /**
- * The Toolchains panel (#1344): a proposal installs only on a click, "Not
- * now" is sent to the backend (which remembers it), a running install can be
- * cancelled, and a failed one can be retried.
+ * The Toolchains panel (#1344).  In a session it reads the plugin's
+ * ``.jaato/environment.json`` through the daemon and acts by sending the
+ * ``toolchain`` command; without one (the New workspace plate) a choice is
+ * remembered and bound when the first session starts.  Pinned here: nothing
+ * installs without a click, a bind is a command and never a backend call,
+ * "Not now" goes to the backend, and a pending choice is sent once a
+ * session exists.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { EnvironmentPanel } from "./EnvironmentPanel";
-import { proposalText } from "@/app/environment";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useJaato } from "@/store/store";
 
 const WS = "/srv/ws/demo";
-const BASE = {
-  workspace: WS, toolchains: [], declined: [], job: null, guidance: ["api/AGENTS.md"],
-  allowed: [{ tool: "node", label: "Node.js", versions: ["22", "20"], server: null }],
-  proposals: [{ tool: "node", label: "Node.js", version: "22", pin: "22", pinAllowed: true, source: "api/.nvmrc" }],
-};
+const BASE = { workspace: WS, declined: [] as string[], allowed: [{ tool: "node", label: "Node.js", versions: ["22", "20"], server: null }] };
+const PROPOSAL = { tool: "node", label: "Node.js", version: "22", pin: "22", pinAllowed: true, source: "api/.nvmrc" };
 
-function fakeFetch(handler: (url: string, init?: RequestInit) => unknown) {
-  const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
+let manifest: Record<string, unknown> | null = null;
+const commands: string[][] = [];
+let onCommand: (args: string[]) => void = () => undefined;
+
+vi.mock("@/sdk/connection", () => ({
+  isConnected: () => true,
+  getClient: () => ({
+    serverProtocolVersion: "1.31",
+    fetchWorkspaceFile: async () => manifest === null
+      ? { event: { ok: false, category: "not_found" }, data: null }
+      : { event: { ok: true }, data: new TextEncoder().encode(JSON.stringify(manifest)) },
+    executeCommand: async (_c: string, args: string[]) => { commands.push(args); onCommand(args); },
+    stageFiles: async (_w: string, files: Array<{ name: string }>) => ({ staged: files.map((f) => f.name), failed: [] }),
+  }),
+  reassertAfterReconnect: async () => undefined,
+}));
+
+const { EnvironmentPanel, proposalText } = await import("./EnvironmentPanel");
+
+function fakeFetch(handler: (url: string, init?: RequestInit) => unknown = () => BASE) {
+  const calls: Array<{ url: string; body?: unknown }> = [];
   const f = vi.fn(async (url: string, init?: RequestInit) => {
-    calls.push({ url: String(url), method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
     return new Response(JSON.stringify(handler(String(url), init) ?? {}), { status: 200, headers: { "content-type": "application/json" } });
   });
   return { calls, fetchImpl: f as unknown as typeof fetch };
 }
 
-afterEach(() => cleanup());
+function inSession(on: boolean): void {
+  useJaato.setState((s) => ({
+    sessionId: on ? "s1" : null,
+    workspace: { ...s.workspace, selected: "demo", list: [{ name: "demo", path: WS } as never] },
+  }));
+}
+
+beforeEach(() => {
+  manifest = null; commands.length = 0; onCommand = () => undefined;
+  localStorage.clear();
+});
+afterEach(() => { cleanup(); inSession(false); });
 
 describe("the toolchain chip comes from the daemon", () => {
   it("says when the repository pins a version the server does not offer", () => {
@@ -67,60 +96,105 @@ describe("the toolchain chip comes from the daemon", () => {
   });
 });
 
-describe("EnvironmentPanel", () => {
-  it("scans on mount in clone-time mode, and binds only on a click", async () => {
-    let job = { id: "j1", tool: "node", version: "22", status: "running", log: ["$ mise install node@22"], notes: [], startedAt: "t" };
-    const { calls, fetchImpl } = fakeFetch((url) => {
-      if (url.endsWith("/refresh")) return { status: BASE };
-      if (url.endsWith("/bind")) return { job };
-      if (url.includes("/jobs/j1")) { job = { ...job, status: "done" }; return { job }; }
-      // The backend reports the workspace's latest job beside the bindings.
-      return { ...BASE, proposals: [], job, toolchains: [{ tool: "node", version: "22", bin: ["node"], boundAt: "t", server: null }] };
-    });
-    render(<EnvironmentPanel url="./api/environment" workspace={WS} scan fetchImpl={fetchImpl} />);
+describe("EnvironmentPanel in a session", () => {
+  it("shows the plugin's proposals and binds with the toolchain command, never a backend call", async () => {
+    inSession(true);
+    manifest = { toolchains: [], proposals: [PROPOSAL], guidance: ["api/AGENTS.md"], job: null };
+    onCommand = (args) => {
+      if (args[0] === "bind") manifest = { ...manifest, proposals: [], toolchains: [{ tool: "node", version: "22", bin: ["node"], boundAt: "t", server: null }],
+        job: { id: "j1", action: "bind", tool: "node", version: "22", status: "done", log: [], error: null, notes: [], startedAt: "t", finishedAt: "t" } };
+    };
+    const { calls, fetchImpl } = fakeFetch();
+    render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fetchImpl} pollMs={20} />);
     expect(await screen.findByText("Node.js 22 detected (from api/.nvmrc). Bind it?")).toBeInTheDocument();
-    expect(calls.filter((c) => c.url.endsWith("/bind"))).toHaveLength(0);
     expect(screen.getByText("api/AGENTS.md")).toBeInTheDocument();
+    expect(commands).toEqual([]);
     fireEvent.click(screen.getByRole("button", { name: "Bind Node.js" }));
-    await waitFor(() => expect(calls.find((c) => c.url.endsWith("/bind"))?.body).toEqual({ workspace: WS, tool: "node", version: "22" }));
-    expect(await screen.findByText("node 22 installed.", {}, { timeout: 3000 })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Unbind node" })).toBeInTheDocument();
+    await waitFor(() => expect(commands).toEqual([["bind", "node", "22"]]));
+    expect(await screen.findByText("node 22 installed.")).toBeInTheDocument();
+    const unbind = await screen.findByRole("button", { name: "Unbind node" });
+    await waitFor(() => expect(unbind).not.toBeDisabled());
+    fireEvent.click(unbind);
+    await waitFor(() => expect(commands.at(-1)).toEqual(["unbind", "node"]));
+    expect(calls.some((c) => /\/(bind|unbind)$/.test(c.url))).toBe(false);
   });
 
   it("Not now declines the proposal through the backend", async () => {
+    inSession(true);
+    manifest = { toolchains: [], proposals: [PROPOSAL], guidance: [], job: null };
     let declined = false;
     const { calls, fetchImpl } = fakeFetch((url) => {
       if (url.endsWith("/decline")) { declined = true; return {}; }
-      return declined ? { ...BASE, proposals: [], declined: ["node"] } : BASE;
+      return declined ? { ...BASE, declined: ["node"] } : BASE;
     });
-    render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fetchImpl} />);
+    render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fetchImpl} pollMs={20} />);
     fireEvent.click(await screen.findByRole("button", { name: "Not now" }));
     await waitFor(() => expect(screen.queryByTestId("environment-proposal")).toBeNull());
     expect(calls.find((c) => c.url.endsWith("/decline"))?.body).toEqual({ workspace: WS, tool: "node" });
   });
 
-  it("a running install offers Cancel; a failed one says why and offers Retry", async () => {
-    const running = { id: "j2", tool: "node", version: "22", status: "running", log: [], notes: [], startedAt: "t" };
-    const { calls, fetchImpl } = fakeFetch((url) => {
-      if (url.endsWith("/cancel")) return { job: { ...running, status: "cancelled" } };
-      return { ...BASE, proposals: [], job: running };
-    });
-    render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fetchImpl} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel install" }));
+  it("follows a running install, offers Cancel, and Retry once it failed", async () => {
+    inSession(true);
+    const job = { id: "j2", action: "bind", tool: "node", version: "22", status: "running", log: ["$ mise install node@22"], error: null, notes: [], startedAt: "t", finishedAt: null };
+    manifest = { toolchains: [], proposals: [], guidance: [], job };
+    onCommand = (args) => { if (args[0] === "cancel") manifest = { ...manifest, job: { ...job, status: "cancelled" } }; };
+    render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fakeFetch().fetchImpl} pollMs={20} />);
+    expect(await screen.findByText("Installing node 22…")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel install" }));
+    await waitFor(() => expect(commands).toEqual([["cancel"]]));
     expect(await screen.findByRole("button", { name: "Retry node" })).toBeInTheDocument();
-    expect(calls.some((c) => c.url.endsWith("/jobs/j2/cancel"))).toBe(true);
   });
 
   it("shows the mid-session hint and binds from it", async () => {
-    const { calls, fetchImpl } = fakeFetch((url) => {
-      if (url.endsWith("/bind")) return { job: { id: "j3", tool: "node", version: "22", status: "done", log: [], notes: [], startedAt: "t" } };
-      return { ...BASE, proposals: [] };
-    });
+    inSession(true);
+    manifest = { toolchains: [], proposals: [], guidance: [], job: null };
     const done = vi.fn();
-    render(<EnvironmentPanel url="./api/environment" workspace={WS} hint={{ command: "npx", tool: "node" }} onHintDone={done} fetchImpl={fetchImpl} />);
+    render(<EnvironmentPanel url="./api/environment" workspace={WS} hint={{ command: "npx", tool: "node" }} onHintDone={done} fetchImpl={fakeFetch().fetchImpl} pollMs={20} />);
     expect(await screen.findByTestId("environment-hint")).toHaveTextContent("npx was not found in the last command.");
     fireEvent.click(screen.getByRole("button", { name: "Bind Node.js" }));
     await waitFor(() => expect(done).toHaveBeenCalled());
-    expect(calls.find((c) => c.url.endsWith("/bind"))?.body).toEqual({ workspace: WS, tool: "node", version: "22" });
+    await waitFor(() => expect(commands).toEqual([["bind", "node", "22"]]));
+  });
+});
+
+describe("EnvironmentPanel with no session yet", () => {
+  it("remembers a choice instead of installing, and says when it will be bound", async () => {
+    inSession(false);
+    render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fakeFetch().fetchImpl} pollMs={20} />);
+    expect(await screen.findByRole("note")).toHaveTextContent("bound when the first session in this workspace starts");
+    fireEvent.change(screen.getByRole("combobox", { name: "Toolchain" }), { target: { value: "node" } });
+    fireEvent.click(screen.getByRole("button", { name: "Choose" }));
+    expect(await screen.findByTestId("environment-pending")).toHaveTextContent("node 22");
+    expect(commands).toEqual([]);
+    const { pendingBinds } = await import("@/app/toolchains");
+    expect(pendingBinds(WS)).toEqual([{ tool: "node", version: "22" }]);
+  });
+
+  it("the pending choice is bound once a session starts, and leaves the list when its job ends", async () => {
+    const { addPending, flushPending, pendingBinds } = await import("@/app/toolchains");
+    addPending(WS, "node", "22");
+    inSession(true);
+    manifest = { toolchains: [], proposals: [], guidance: [], job: null };
+    onCommand = (args) => {
+      if (args[0] === "bind") manifest = { ...manifest, toolchains: [{ tool: "node", version: "22", bin: [], boundAt: "t", server: null }],
+        job: { id: "j9", action: "bind", tool: "node", version: "22", status: "done", log: [], error: null, notes: [], startedAt: "t", finishedAt: "t" } };
+    };
+    await act(async () => { await flushPending(WS, 10); });
+    expect(commands).toEqual([["bind", "node", "22"]]);
+    expect(pendingBinds(WS)).toEqual([]);
+  });
+
+  it("a pending bind the plugin refuses is given up, not waited on forever", async () => {
+    const mod = await import("@/app/toolchains");
+    mod.addPending(WS, "node", "18");
+    inSession(true);
+    manifest = { toolchains: [], proposals: [], guidance: [], job: null };
+    vi.useFakeTimers();
+    const run = mod.flushPending(WS, 1000);
+    await vi.advanceTimersByTimeAsync(mod.START_GRACE_MS + 5000);
+    await run;
+    vi.useRealTimers();
+    expect(commands).toEqual([["bind", "node", "18"]]);
+    expect(mod.pendingBinds(WS)).toEqual([]);
   });
 });

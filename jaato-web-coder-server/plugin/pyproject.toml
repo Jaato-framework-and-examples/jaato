@@ -3,17 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jaato-web-coder-toolchain-offer"
-version = "0.1.0"
-description = "The web coder's toolchain_offer enrichment plugin: a missing command becomes a hint for the model and a notice for the page."
+name = "jaato-web-coder-toolchains"
+version = "0.2.0"
+description = "The web coder's toolchains plugin: binds and installs a workspace's toolchains from inside the session's runner, and turns a missing command into a hint for the model and a notice for the page."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "BUSL-1.1"
-# The plugin API it uses: ToolResultEnrichmentResult, and client_notice (protocol 1.31).
+# The plugin API it uses: ToolResultEnrichmentResult, UserCommand, and client_notice (protocol 1.31).
 dependencies = ["jaato-sdk>=0.29"]
 
-[project.entry-points."jaato.enrichment_plugins"]
-toolchain_offer = "jaato_toolchain_offer:create_plugin"
+[project.entry-points."jaato.plugins"]
+web_coder_toolchains = "jaato_web_coder_toolchains:create_plugin"
 
 [tool.hatch.build.targets.wheel]
-packages = ["jaato_toolchain_offer"]
+packages = ["jaato_web_coder_toolchains"]

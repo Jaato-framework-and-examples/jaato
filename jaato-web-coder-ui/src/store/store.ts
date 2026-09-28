@@ -617,7 +617,7 @@ function updateTool(s: JaatoState, callId: string | undefined | null, agentHint:
 
 /**
  * The rail's toolchain chip comes from the daemon, not from this page
- * (#1344).  The web coder's ``toolchain_offer`` enrichment plugin reads the
+ * (#1344).  The web coder's ``web_coder_toolchains`` plugin reads the
  * command's output in the runner and, when a toolchain this server offers
  * provides the missing command, attaches a ``client_notice`` the daemon emits
  * as ``tool.result_enriched`` (protocol 1.31).  One detection, in one place.

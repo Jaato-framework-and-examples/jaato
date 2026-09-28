@@ -1,0 +1,23 @@
+# jaato-web-coder-toolchains: what the web coder's toolchains need under confinement.
+#
+# Install into the daemon account's user tier, where it applies to every
+# workspace:  ~/.jaato/apparmor-fragments/jaato-web-coder-toolchains.rules
+# (see INSTALL.md).  An unscoped session composes it automatically; a
+# profile that declares apparmor_fragments: must list
+# jaato-web-coder-toolchains.  It takes effect for sessions provisioned
+# after it is installed.
+
+# The toolchain offer the page stages is the operator's policy: a confined
+# session may read it, never write, link or lock it.  The daemon, which
+# stages it, is not confined.
+  audit deny /**/.jaato/toolchain-offer.json wlk,
+
+# What the template does not already grant a toolchain mise installed under
+# a workspace's .home: a JDK loads its own shared objects (libjli.so,
+# libjvm.so) and forks through lib/jspawnhelper, which is not under a bin/.
+# bin/* is repeated so a profile that scopes its fragments (and so gets no
+# broad exec) can still run the bound toolchains.
+  /**/.home/.local/share/mise/installs/**/bin/* ix,
+  /**/.home/.local/share/mise/installs/**/*.so m,
+  /**/.home/.local/share/mise/installs/**/*.so.* m,
+  /**/.home/.local/share/mise/installs/java/**/lib/jspawnhelper ix,
