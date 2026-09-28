@@ -2907,6 +2907,13 @@ either read, because AppArmor resolves `/proc/self` before matching.
 Guard: `jaato_server/shared/tests/test_private_tmp_1381.py`, nine
 reversions.
 
+Every body, the isolated sub-runner's too, also reads `/etc/mime.types`
+since v42. `mimetypes.init()` stats the file (allowed) and then opens it,
+so before v42 every `mimetypes.guess_type()` in a confined process raised
+`PermissionError`, jaato's own runner-side attachment handling included.
+`/etc/os-release` needs no rule: it resolves into `/usr/lib`. Guard:
+`jaato_server/shared/tests/test_mimetypes_works_confined.py`, two reversions.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are

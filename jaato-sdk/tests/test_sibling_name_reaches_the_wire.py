@@ -97,7 +97,11 @@ def test_every_create_session_kwarg_the_server_takes_is_reachable():
     Server-side-only params are legitimate (in-process/daemon-extension
     concerns), so they are excused BY NAME with a reason.
     """
-    from jaato_server.server.session_manager import SessionManager
+    # The server half lives in jaato-server.  CI installs both packages, so
+    # this skip only applies to an SDK-only venv, where the test has
+    # nothing to compare against.
+    session_manager = pytest.importorskip("jaato_server.server.session_manager")
+    SessionManager = session_manager.SessionManager
 
     server_params = set(
         inspect.signature(SessionManager._create_session_impl).parameters)
