@@ -642,7 +642,15 @@ class AppArmorManager:
     #       ``ulimit``/``resource`` readers were denied, because the
     #       existing ``/proc/self/** r`` line never matches (AppArmor
     #       resolves ``/proc/self`` first).
-    _TEMPLATE_VERSION = 41
+    #   v42: ``/etc/mime.types r`` in base, ``tool_hat``, ``//child`` and
+    #       the isolated sub-runner.  ``mimetypes.init()`` stats the file
+    #       (allowed) and then opens it (denied), so every
+    #       ``mimetypes.guess_type()`` in a confined process raised
+    #       ``PermissionError`` -- the model's code and jaato's own
+    #       runner-side attachment handling alike.  The file is a public
+    #       extension table; ``/etc/os-release`` needs no rule because
+    #       it resolves into ``/usr/lib``.
+    _TEMPLATE_VERSION = 42
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -844,6 +852,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /etc/ld.so.cache     r,
   /etc/passwd          r,
   /etc/nsswitch.conf   r,
+  # v42: the stdlib's mimetypes.init() opens it; without it every
+  # mimetypes.guess_type() in a confined process raises EACCES.
+  /etc/mime.types      r,
   /proc/self/**        r,
   # v41: two reads the broad /proc/self/** line never grants (AppArmor
   # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
@@ -1975,6 +1986,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/python>
+  # v42: mimetypes.init() opens it (see the base body).
+  /etc/mime.types r,
 
   # ---- workspace (inherited from parent per §4.3 invariant) ----
   "{ws_root}/"   {ws_dir_perm}
@@ -3150,6 +3163,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /etc/ld.so.cache     r,
     /etc/passwd          r,
     /etc/nsswitch.conf   r,
+    # v42: the stdlib's mimetypes.init() opens it; without it every
+    # mimetypes.guess_type() in a confined process raises EACCES.
+    /etc/mime.types      r,
     /proc/self/**        r,
     # v41: two reads the broad /proc/self/** line never grants (AppArmor
     # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
@@ -3419,6 +3435,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /etc/ld.so.cache     r,
     /etc/passwd          r,
     /etc/nsswitch.conf   r,
+    # v42: the stdlib's mimetypes.init() opens it; without it every
+    # mimetypes.guess_type() in a confined process raises EACCES.
+    /etc/mime.types      r,
     /proc/self/**        r,
     # v41: two reads the broad /proc/self/** line never grants (AppArmor
     # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
