@@ -32,6 +32,7 @@
     "plugin/INSTALL.md",
     "plugin/apparmor/*.rules",
     "plugin/jaato_web_coder_toolchains/*.py",
+    "plugin/jaato_web_coder_toolchains/gitignore_templates/*",
     "README.md"
   ],
   "scripts": {
