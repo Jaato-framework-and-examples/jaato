@@ -155,7 +155,9 @@ def test_the_snapshot_is_the_live_projection():
     current = contracts.SNAPSHOT_FILE.read_text(encoding="utf-8")
     assert current == expected, (
         f"{contracts.SNAPSHOT_FILE.name} differs from the tree.  Regenerate it: "
-        "python -m jaato_server.shared.scaffold.authoring_contracts --write")
+        "python -m jaato_server.shared.scaffold.authoring_contracts --write "
+        "(the repo's pre-commit hook does this for you: "
+        "git config core.hooksPath .githooks)")
 
 
 def test_the_snapshot_answers_what_the_live_tree_answers(monkeypatch):

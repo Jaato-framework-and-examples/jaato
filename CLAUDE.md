@@ -4173,7 +4173,9 @@ in the way. This step removes them. Nothing moves to the SDK yet.
 | `subagent.config` loaded the whole subagent plugin through an eager package `__init__`, and `jaato_runtime` (provider loading, token accounting, telemetry) to find a premium directory | the `__init__` is lazy (`__getattr__`); the helper is `shared/premium_content.py`, re-exported by `jaato_runtime`. A cold import of `config` loads 10 modules instead of 20 |
 
 The snapshot is regenerated with
-`python -m jaato_server.shared.scaffold.authoring_contracts --write`. It
+`python -m jaato_server.shared.scaffold.authoring_contracts --write`, which
+`.githooks/pre-commit` runs and stages on any commit touching non-test
+jaato-server source (`git config core.hooksPath .githooks` once per clone). It
 holds every `provider:<x>` env var and every other var with a non-empty
 default, because that is what `_compose_env` can render; an edit elsewhere
 does not change it. A snapshot is never generated from itself.

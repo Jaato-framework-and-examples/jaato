@@ -31,6 +31,9 @@ The snapshot is checked in and regenerated with::
 
     python -m jaato_server.shared.scaffold.authoring_contracts --write
 
+The repo's ``.githooks/pre-commit`` runs that automatically, and stages the
+result, whenever a commit touches non-test jaato-server source (activate the
+hooks once per clone with ``git config core.hooksPath .githooks``).
 ``test_authoring_snapshot_matches_the_tree.py`` fails when it differs from
 the live projection, naming that command.  A snapshot nobody checks is a
 second source of truth that drifts silently; the guard is what keeps this one
