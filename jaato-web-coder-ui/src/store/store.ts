@@ -288,6 +288,14 @@ export interface JaatoState {
    * output; cleared by binding, dismissing, or a new session.
    */
   environmentHint: { command: string; tool: string } | null;
+  /**
+   * How many of the plugin's toolchain proposals are waiting on the user
+   * (not bound, not declined, not chosen, offered by this server).  Written
+   * by the Toolchains panel and by the session-start read in
+   * ``app/toolchainOffer.ts``; the rail's badge counts it, so a repository's
+   * proposal is visible with the section closed.
+   */
+  environmentWaiting: number;
   /** The rail's Memories section (#1232, ``app/memories.ts``). */
   memories: MemoriesState;
   /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
@@ -358,6 +366,7 @@ export interface JaatoState {
   setGithubUrls: (urls: { githubUrl: string | null; githubLoginUrl: string | null }) => void;
   setEnvironmentUrl: (url: string | null) => void;
   setEnvironmentHint: (hint: { command: string; tool: string } | null) => void;
+  setEnvironmentWaiting: (n: number) => void;
   /** Replace the whole set, from one listing. */
   setNotes: (notes: SessionNote[]) => void;
   /** Upsert one, or drop it when ``null`` (an emptied note is a forgotten one). */
@@ -487,6 +496,7 @@ const emptySessionState = () => ({
   paletteOpen: false,
   sessionFault: null as SessionFault | null,
   environmentHint: null as { command: string; tool: string } | null,
+  environmentWaiting: 0,
   memories: emptyMemories(),
   diagnostics: emptyDiagnostics(),
   lastEventAt: {} as Record<string, number>,
@@ -1426,6 +1436,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setGithubUrls: ({ githubUrl, githubLoginUrl }) => set({ githubUrl, githubLoginUrl }),
   setEnvironmentUrl: (environmentUrl) => set({ environmentUrl }),
   setEnvironmentHint: (environmentHint) => set({ environmentHint }),
+  setEnvironmentWaiting: (environmentWaiting) => set((s) => (s.environmentWaiting === environmentWaiting ? s : { environmentWaiting })),
   setNotes: (list) => set({ notes: Object.fromEntries(list.map((n) => [n.sessionId, n])) }),
   setNote: (sessionId, note) =>
     set((st) => {

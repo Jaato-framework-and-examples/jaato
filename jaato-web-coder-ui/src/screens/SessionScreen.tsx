@@ -261,6 +261,7 @@ function Rail({ agentId }: { agentId: string }) {
   const diagnostics = useJaato((s) => s.diagnostics);
   const environmentUrl = useJaato((s) => s.environmentUrl);
   const environmentHint = useJaato((s) => s.environmentHint);
+  const environmentWaiting = useJaato((s) => s.environmentWaiting);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
 
   const values: Record<RailPanelId, string | null> = {
@@ -270,7 +271,8 @@ function Rail({ agentId }: { agentId: string }) {
     sessions: notedSummary(sessions, notes),
     memories: memoriesSummary(memories),
     diagnostics: diagnosticsSummary(diagnostics),
-    environment: environmentHint ? "!" : null,
+    // A missing command the last run hit outranks a count of repository proposals.
+    environment: environmentHint ? "!" : environmentWaiting > 0 ? String(environmentWaiting) : null,
   };
   const panels: Record<RailPanelId, React.ReactNode> = {
     plan: <PlanPanel agentId={agentId} />,

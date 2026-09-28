@@ -629,7 +629,20 @@ class AppArmorManager:
     #       like a user-tier fragment that shadows it (the cache tier wins
     #       a basename collision) and drops its denies.  The walker that
     #       fills the tier runs outside the confined runner.
-    _TEMPLATE_VERSION = 40
+    #   v41: a private ``/dev/shm`` beside the private ``/tmp``.  The same
+    #       runner that binds ``<ws>/.tmp`` mounts a fresh tmpfs on
+    #       ``/dev/shm`` in its namespace, so base, ``tool_hat`` and
+    #       ``//child`` of such a boundary gain ``/dev/shm/** rwkl``
+    #       (POSIX semaphores and shared memory: Python multiprocessing's
+    #       ``SemLock``, which failed with ``EACCES``).  The grant is gated
+    #       exactly like the ``/tmp`` one, so it never reaches the host's
+    #       ``/dev/shm``, which every session on the host shares.  Every
+    #       body also gains ``/proc/cpuinfo r`` and ``owner
+    #       /proc/*/limits r``: ``os.cpu_count``-style probes and
+    #       ``ulimit``/``resource`` readers were denied, because the
+    #       existing ``/proc/self/** r`` line never matches (AppArmor
+    #       resolves ``/proc/self`` first).
+    _TEMPLATE_VERSION = 41
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -832,6 +845,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /etc/passwd          r,
   /etc/nsswitch.conf   r,
   /proc/self/**        r,
+  # v41: two reads the broad /proc/self/** line never grants (AppArmor
+  # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
+  /proc/cpuinfo        r,
+  owner /proc/*/limits r,
   /dev/null            rw,
   /dev/urandom         r,
   /dev/pts/*           rw,
@@ -3006,6 +3023,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             "/tmp/**        rwkl,",
             "/var/tmp/      rw,",
             "/var/tmp/**    rwkl,",
+            "# and /dev/shm is a fresh tmpfs in the same namespace",
+            "/dev/shm/      r,",
+            "/dev/shm/**    rwkl,",
         )
         return "\n".join(f"{indent}{line}" for line in lines)
 
@@ -3131,6 +3151,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /etc/passwd          r,
     /etc/nsswitch.conf   r,
     /proc/self/**        r,
+    # v41: two reads the broad /proc/self/** line never grants (AppArmor
+    # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
+    /proc/cpuinfo        r,
+    owner /proc/*/limits r,
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
@@ -3396,6 +3420,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /etc/passwd          r,
     /etc/nsswitch.conf   r,
     /proc/self/**        r,
+    # v41: two reads the broad /proc/self/** line never grants (AppArmor
+    # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
+    /proc/cpuinfo        r,
+    owner /proc/*/limits r,
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
@@ -3535,14 +3563,15 @@ def _plugin_configs_with_managed_defaults(
     profile: Optional[Any],
     workspace_path: str,
     managed_workspace_root: Optional[str],
-) -> Tuple[Dict[str, Any], bool]:
+) -> Tuple[Dict[str, Any], bool, Optional[str]]:
     """The profile's ``plugin_configs`` with the managed defaults folded in.
 
     A copy, per section, so folding a default never writes into the profile
     object the rest of the session reads.  The folds are the envelope's own
     (``inject_workspace_home`` #1225, ``inject_workspace_venv`` #1274), so
     the rules are resolved against the values the runner will use.  Returns
-    ``(configs, whether any default applied)``.
+    ``(configs, whether any default applied, the managed workspace home or
+    None)``.
     """
     from jaato_server.shared.plugins.workspace_home import inject_workspace_home
     from jaato_server.shared.plugins.workspace_venv import inject_workspace_venv
@@ -3554,7 +3583,42 @@ def _plugin_configs_with_managed_defaults(
     }
     home = inject_workspace_home(configs, workspace_path, managed_workspace_root)
     venv = inject_workspace_venv(configs, workspace_path, managed_workspace_root)
-    return configs, bool(home or venv)
+    return configs, bool(home or venv), home or None
+
+
+def _rule_config(cfg: Any, managed_home: Optional[str], private_tmp: Optional[str] = None) -> Dict[str, Any]:
+    """A plugin's config as its rule contributor sees it.
+
+    On a managed workspace every contributor gets ``workspace_home``, not
+    only the three surfaces the envelope folds it into: that is how an
+    out-of-tree plugin (the web coder's toolchains) grants what its installs
+    need on managed workspaces and nothing on a user's own checkout.  A value
+    the section already carries wins.  ``private_tmp_dir`` is set when the
+    boundary binds ``<ws>/.tmp`` over ``/tmp`` (#1381), so a grant on
+    ``/tmp/**`` is known to reach the workspace's own directory and never the
+    host's.  Resolution only; the envelope is unchanged.
+    """
+    out = dict(cfg) if isinstance(cfg, dict) else {}
+    if managed_home:
+        out.setdefault("workspace_home", managed_home)
+    if private_tmp:
+        out["private_tmp_dir"] = private_tmp
+    return out
+
+
+def _private_tmp_for_rules(profile: Any, workspace_path: str, managed_workspace_root: Optional[str]) -> Optional[str]:
+    """The private ``/tmp`` directory the rendered profile will bind, or ``None``.
+
+    The same resolution the provisioning path renders the ``/tmp`` grants
+    from (:func:`shared.private_tmp.resolve_private_tmp`), so a contributor
+    is told a private ``/tmp`` exists exactly when the profile has one.
+    """
+    try:
+        from jaato_server.shared.private_tmp import resolve_private_tmp
+        return resolve_private_tmp(profile, workspace_path, managed_workspace_root)
+    except Exception:  # noqa: BLE001 -- a contributor then just grants less
+        logger.exception("private /tmp resolution for plugin rules failed")
+        return None
 
 
 class PluginRules(list):
@@ -3695,6 +3759,9 @@ def resolve_plugin_apparmor_rules(
     A confined runner missing one plugin's rules beats a session that
     fails to start.
 
+    On a managed workspace every contributor's ``plugin_config`` also carries
+    that ``workspace_home`` (:func:`_rule_config`).
+
     ``managed_workspace_root`` (the WS server's provisioning root) folds in
     the same managed defaults the envelope carries -- ``workspace_home``
     (#1225) and ``workspace_venv`` (#1274) -- so the grants follow the
@@ -3703,9 +3770,10 @@ def resolve_plugin_apparmor_rules(
     plugin rules at all; one on a managed workspace now gets them, because
     the runner loads the same plugins either way.
     """
-    plugin_configs, defaulted = _plugin_configs_with_managed_defaults(
+    plugin_configs, defaulted, managed_home = _plugin_configs_with_managed_defaults(
         profile, workspace_path, managed_workspace_root,
     )
+    private_tmp = _private_tmp_for_rules(profile, workspace_path, managed_workspace_root)
     if profile is None and not defaulted:
         return None
     rules: List[str] = []
@@ -3746,7 +3814,7 @@ def resolve_plugin_apparmor_rules(
                     workspace_path=workspace_path,
                     session_id=session_id,
                     config_root=config_root,
-                    plugin_config=plugin_configs.get(plugin_name, {}),
+                    plugin_config=_rule_config(plugin_configs.get(plugin_name), managed_home, private_tmp),
                 )
             except Exception:  # noqa: BLE001 — boundary surface
                 logger.exception(

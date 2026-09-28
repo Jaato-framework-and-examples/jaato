@@ -54,6 +54,12 @@ DEFAULT_PRIVATE_TMP_DIR = ".tmp"
 #: ``/tmp`` is required; ``/var/tmp`` is bound when it exists.
 PRIVATE_TMP_TARGETS = ("/tmp", "/var/tmp")
 
+#: Given a fresh tmpfs in the same namespace, when it exists.  POSIX
+#: semaphores and shared memory live here (Python multiprocessing's
+#: ``SemLock``), and the host's is shared by every session on the host,
+#: so the profile grants it only where this mount is made.
+PRIVATE_SHM_TARGET = "/dev/shm"
+
 #: The author-facing knob: ``plugin_configs.cli.private_tmp`` (a bool),
 #: beside ``workspace_home`` / ``workspace_venv`` (#1225 / #1274).
 CONFIG_SURFACE = "cli"
@@ -61,6 +67,8 @@ CONFIG_KEY = "private_tmp"
 
 # <sched.h> / <sys/mount.h>
 _CLONE_NEWNS = 0x00020000
+_MS_NOSUID = 2
+_MS_NODEV = 4
 _MS_BIND = 4096
 _MS_REC = 16384
 _MS_PRIVATE = 1 << 18
@@ -73,6 +81,8 @@ _warn_lock = threading.Lock()
 
 # The directory this PROCESS bound over /tmp, once it has (runner side).
 _active_dir: Optional[str] = None
+# ``(st_dev, st_ino)`` of the tmpfs this process mounted on /dev/shm.
+_shm_identity: Optional[Tuple[int, int]] = None
 
 
 class PrivateTmpError(RuntimeError):
@@ -296,8 +306,40 @@ def _bind_targets(libc: Any, tmp_dir: str) -> None:
         os.close(fd)
 
 
+def _mount_private_shm(libc: Any) -> None:
+    """Mount a fresh tmpfs on ``/dev/shm`` (inside the new namespace).
+
+    Skipped where ``/dev/shm`` does not exist.  Verified by identity: a
+    mount that left the host's ``/dev/shm`` in place is a refusal, because
+    the profile grants ``/dev/shm/**`` to a boundary with a private
+    ``/tmp`` and that grant must not reach the host's.
+    """
+    global _shm_identity
+    if not os.path.isdir(PRIVATE_SHM_TARGET):
+        return
+    before = _identity(PRIVATE_SHM_TARGET)
+    _check(
+        libc.mount(b"tmpfs", PRIVATE_SHM_TARGET.encode(), b"tmpfs",
+                   _MS_NOSUID | _MS_NODEV, b"mode=1777"),
+        f"mounting a private tmpfs on {PRIVATE_SHM_TARGET}",
+    )
+    after = _identity(PRIVATE_SHM_TARGET)
+    if after is None or after == before:
+        raise PrivateTmpError(
+            f"{PRIVATE_SHM_TARGET} is still the host's after the tmpfs mount; "
+            "refusing to start")
+    _shm_identity = after
+
+
+def private_shm_in_effect() -> bool:
+    """True iff ``/dev/shm`` is the tmpfs this process mounted."""
+    return (_shm_identity is not None
+            and _identity(PRIVATE_SHM_TARGET) == _shm_identity)
+
+
 def enter_private_tmp(tmp_dir: Optional[str]) -> None:
-    """Bind *tmp_dir* over ``/tmp`` and ``/var/tmp`` in a new mount namespace.
+    """Bind *tmp_dir* over ``/tmp`` and ``/var/tmp`` in a new mount namespace,
+    and mount a fresh tmpfs on ``/dev/shm`` there.
 
     No-op for ``None``.  Idempotent: a process (a reused pool slot) that
     already sits in a namespace where ``/tmp`` is *tmp_dir* does nothing,
@@ -335,6 +377,7 @@ def enter_private_tmp(tmp_dir: Optional[str]) -> None:
     if not _targets_are(identity):
         raise PrivateTmpError(
             f"/tmp is not {tmp_dir} after the bind mount; refusing to start")
+    _mount_private_shm(libc)
     _active_dir = tmp_dir
 
 
@@ -357,8 +400,9 @@ def describe() -> Tuple[bool, Optional[str]]:
 
 def _reset_for_tests() -> None:
     """Clear the per-process state (tests only)."""
-    global _active_dir, _warned_unavailable
+    global _active_dir, _warned_unavailable, _shm_identity
     _active_dir = None
+    _shm_identity = None
     _warned_unavailable = False
 
 

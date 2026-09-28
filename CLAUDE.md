@@ -1932,14 +1932,15 @@ account and under its confinement:
 
 | Piece | Where |
 |---|---|
+| running what a project builds: the plugin's `get_apparmor_rules` contributes `"<ws>/**" mix` on a MANAGED workspace only (`resolve_plugin_apparmor_rules` hands every contributor the managed `workspace_home`, `_rule_config`), so `node_modules/.bin/*`, `.node` addons and compiled outputs run and a TUI user's checkout keeps the template; `.home/.config/go/env` sets `GOTMPDIR` inside the workspace so `go test` / `go run` binaries run | `plugin.py`, `state.py`, `server/apparmor.py` |
 | policy: the allow-list of pinned versions, server pins, "Not now" per user; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30) | `jaato-web-coder-server/src/environment/service.ts`, `src/config.ts` |
 | the offer (`.jaato/toolchain-offer.json`, schema 2): computed by the server, **staged by the page** through the daemon (`StageFilesRequest`), read by the plugin as its policy | `src/environment/files.ts`, `jaato-web-coder-ui/src/app/toolchainOffer.ts`, `plugin/…/offer.py`; one fixture pins it from both sides |
-| binding: the `toolchain bind|unbind|scan|cancel` user command, sent by the PAGE; a bind starts a plugin-owned job thread and returns at once (the executor's auto-background is built for the model, and a user command's RPC times out at 60 s). `mise install` with every mise dir under `.home`, a clean env and `MISE_CEILING_PATHS`; every step execs through the session's `//child` transition (installers run vendor code); relative links into `.home/.local/bin`; the pinned server; `.lsp.json` (for #1345) and the mise config; one job per workspace (`flock` under `.home/.cache`) | `plugin/jaato_web_coder_toolchains/plugin.py`, `installer.py`, `state.py` |
+| binding: the `toolchain bind|unbind|scan|cancel` user command, sent by the PAGE; a bind starts a plugin-owned job thread and returns at once (the executor's auto-background is built for the model, and a user command's RPC times out at 60 s). `mise install` with every mise dir under `.home`, a clean env and `MISE_CEILING_PATHS`; every step execs through the session's `//child` transition (installers run vendor code); gopls built with its own mise Go (`lsp.gopls.go`, `latest` by default); basedpyright's venv made `--without-pip` and given pip by `ensurepip` or the runner's `pip --python`; npm run as the bound Node's own `npm-cli.js`; relative links into `.home/.local/bin` from the directories `mise bin-paths` names (Maven and Gradle unpack a level deeper than `<dir>/bin`); the pinned server; `.lsp.json` (for #1345), the mise config, and `.home/.mavenrc` while Java or Maven is bound (Java reads `user.home` from the account, not `$HOME`, so Maven would otherwise use the account's `~/.m2`); one job per workspace (`flock` under `.home/.cache`) | `plugin/jaato_web_coder_toolchains/plugin.py`, `installer.py`, `state.py` |
 | the record: `.jaato/environment.json` (bound toolchains for the `runtime` aspect, the job with its log, proposals, guidance), read by the page with `workspace.file.fetch` (1.20) | `state.py`, `jaato-web-coder-ui/src/app/toolchains.ts` |
 | proposals from repository markers (root and each clone), limited to what is allowed, at session start and on `scan`; the environment and repository-guidance instruction section | `detect.py`, the plugin's `get_system_instructions` |
 | the mid-session hint: a `cli` / `interactive_shell` / `notebook` result naming a missing command gets one line for the model and a `tool.result_enriched` notice, the page's only source for the chip | the plugin's `enrich_tool_result`, `store.ts` `noteToolchainOffer` |
-| the Toolchains panel; a choice made before any session exists (the New workspace plate) is kept in the browser and bound when the first session starts | `EnvironmentPanel.tsx`, `app/toolchains.ts` `flushPending` |
-| AppArmor: one user-tier fragment the deployer installs with the plugin, denying a confined session writes to the offer and granting a mise JDK `m` on its `.so` files and `ix` on `lib/jspawnhelper` (globs; a scoped profile names `jaato-web-coder-toolchains`) | `plugin/apparmor/jaato-web-coder-toolchains.rules`, `INSTALL.md` |
+| the Toolchains panel: a status strip (running / failed / suggestions waiting / chosen / nothing bound / ready, `stripState`), tiles with a "+ Add toolchain" version picker, ask rows for the hint and proposals; the rail badge shows `!` for the hint, else the count of waiting proposals (`waitingProposals`, read at session start too, so it shows with the section closed); a choice made before any session exists (the New workspace plate) is kept in the browser and bound when the first session starts | `EnvironmentPanel.tsx`, `app/toolchains.ts` `flushPending`, `app/toolchainOffer.ts` |
+| AppArmor: one user-tier fragment the deployer installs with the plugin, denying a confined session writes to the offer and granting a mise JDK `m` on its `.so` files and `ix` on `lib/jspawnhelper`, and a mise Go `ix` on `pkg/tool/*/*` (globs; a scoped profile names `jaato-web-coder-toolchains`) | `plugin/apparmor/jaato-web-coder-toolchains.rules`, `INSTALL.md` |
 
 Toolchains: Node, Go, Bun, Python (basedpyright only), Java, Maven and
 Gradle. Java ships although #806 is open: jdtls is a checksum-verified
@@ -2846,6 +2847,7 @@ from the session at all.
 |---|---|
 | the decision (managed workspace = on, user checkout = opt-in via `plugin_configs.cli.private_tmp`, non-root daemon or a workspace under `/tmp` = off with one WARNING) | `shared/private_tmp.py::resolve_private_tmp`, called only on the confined provisioning path (`runner_spawn.resolve_session_private_tmp` from the WS pre-init hook and the IPC `_provision_apparmor_for_session`), and stashed on the server |
 | the grant | template **v39**: base, `tool_hat` and `//child` gain `/tmp/** rwkl` and `/var/tmp/** rwkl` ONLY when rendered with `private_tmp_dir`; the body names the directory, so it is part of the confinement id and so of the slot key |
+| `/dev/shm` | template **v41**: the same runner mounts a fresh tmpfs (`nosuid,nodev,mode=1777`) on `/dev/shm` in the namespace, and the same gated block grants `/dev/shm/** rwkl`, so POSIX semaphores and shared memory (Python multiprocessing's `SemLock`) work. Verified by identity; a mount that left the host's `/dev/shm` in place refuses the start. Its pages count against the session's memory cgroup, like any tmpfs. A confined session with no private `/tmp` still has no `/dev/shm` |
 | cold spawn | `runner_spawner._enter_private_tmp_in_child`, in the forked child before `exec` (before `runner/__main__` confines); a failure writes the cause to stderr and exits `126` |
 | pool slot | `bootstrap_session` step **1b2** (`_enter_private_tmp`), before step 1c confines, on the main thread |
 | the envelope | `SessionInitEnvelope.private_tmp_dir` (absolute; no schema bump: an older daemon renders no grant) |
@@ -2898,7 +2900,11 @@ Step 2 (a spawner process owning the model's view of `/etc`, the home and
 `/var`, so the runner keeps the host view and the credentials) is a
 separate design in the issue.
 
-Guard: `jaato_server/shared/tests/test_private_tmp_1381.py`, seven
+Every body (not only a private-`/tmp` one) also reads `/proc/cpuinfo` and
+`owner /proc/*/limits` since v41. The `/proc/self/** r` line never matched
+either read, because AppArmor resolves `/proc/self` before matching.
+
+Guard: `jaato_server/shared/tests/test_private_tmp_1381.py`, nine
 reversions.
 
 ### Binary Media Chunks (delivery)

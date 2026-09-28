@@ -30,6 +30,7 @@ grants ``rw`` because it sees it in ``.lsp.json``.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import platform
 import re
@@ -124,6 +125,61 @@ def unlink_binaries(dest_bin: str, names: List[str], mise_root: str) -> List[str
     return removed
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_PROGRESS_RE = re.compile(r"\d+(?:\.\d+)?/\d+(?:\.\d+)?\b.*\b\d+(?:\.\d+)?s\b|\b\d+(?:\.\d+)?s\b.*\d+(?:\.\d+)?/\d+(?:\.\d+)?\b")
+_VOLATILE_RE = re.compile(r"[\d.]+|[\u2580-\u259f\u2800-\u28ff#=>\-]+")
+
+
+_ERROR_LINE_RE = re.compile(r"^\s*(?:\w+Error|Error|ERROR|error|fatal|FATAL|go: .*(?:requires|cannot|not found))\b")
+
+
+def error_line(out: List[str]) -> Optional[str]:
+    """The last line of ``out`` that names an error, stripped; ``None`` when none does.
+
+    A failing step's last line is often a trace or a footer (Node ends with
+    ``Node.js v24.21.0`` after the stack), and the line that says what went
+    wrong (``Error: Cannot find module '...'``) is above it.
+    """
+    for line in reversed(out):
+        if _ERROR_LINE_RE.match(line):
+            return line.strip()
+    return None
+
+
+def _venv_has_pip(venv: str) -> bool:
+    import glob
+    return bool(glob.glob(os.path.join(venv, "lib", "python*", "site-packages", "pip", "__init__.py")))
+
+
+def clean_line(line: str) -> str:
+    """The last state of a line a progress bar redrew with ``\\r``, without ANSI codes."""
+    return _ANSI_RE.sub("", line.rsplit("\r", 1)[-1])
+
+
+def progress_key(line: str) -> Optional[str]:
+    """What stays the same across snapshots of one progress bar; ``None`` for an ordinary line.
+
+    mise draws its bars on a terminal and, with no terminal, prints a
+    snapshot of each every few seconds (``maven@3.9.9 downloading 3.0s
+    0.5/9.1 MB``, then ``mise 0/1 · 6.0s``).  Two snapshots of one bar differ
+    only in their numbers and bar glyphs, so the key is the line without them.
+    """
+    if not _PROGRESS_RE.search(line):
+        return None
+    return " ".join(_VOLATILE_RE.sub("", line).split())
+
+
+def append_log_line(log: List[str], line: str, lookback: int = 6) -> None:
+    """Append ``line``, or replace a recent snapshot of the same progress bar in place."""
+    key = progress_key(line)
+    if key is not None:
+        for i in range(len(log) - 1, max(-1, len(log) - 1 - lookback), -1):
+            if progress_key(log[i]) == key:
+                log[i] = line
+                return
+    log.append(line)
+
+
 class Installer:
     """One install, in one workspace.  Not reusable across workspaces."""
 
@@ -188,7 +244,7 @@ class Installer:
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
-                line = line.rstrip("\n")
+                line = clean_line(line.rstrip("\n"))
                 out.append(line)
                 if line.strip():
                     last = line.strip()
@@ -200,7 +256,8 @@ class Installer:
         if self.cancel.is_set():
             raise InstallCancelled()
         if code != 0:
-            raise InstallError(f"{what} failed (exit {code})" + (f": {last}" if last else ""))
+            cause = error_line(out) or last
+            raise InstallError(f"{what} failed (exit {code})" + (f": {cause}" if cause else ""))
         return out
 
     def _kill(self) -> None:
@@ -216,23 +273,42 @@ class Installer:
         self.cancel.set()
         self._kill()
 
+    def _inside_mise(self, ref: str, path: str) -> str:
+        """``path`` resolved; an :class:`InstallError` when it is not under the workspace's mise directory."""
+        d = os.path.realpath(path)
+        if not d.startswith(os.path.realpath(self.abs(MISE_DATA_DIR)) + os.sep):
+            raise InstallError(f"locating {ref}: {d} is outside the workspace's mise directory")
+        return d
+
     def _mise_install(self, ref: str) -> str:
         self.step(f"installing {ref}", [self.mise, "install", ref])
         where = [ln.strip() for ln in self.step(f"locating {ref}", [self.mise, "where", ref]) if ln.strip()]
         if not where:
             raise InstallError(f"locating {ref}: mise named no directory")
-        d = os.path.realpath(where[-1])
-        if not d.startswith(os.path.realpath(self.abs(MISE_DATA_DIR)) + os.sep):
-            raise InstallError(f"locating {ref}: {d} is outside the workspace's mise directory")
-        return d
+        return self._inside_mise(ref, where[-1])
+
+    def _bin_paths(self, ref: str, install_dir: str) -> List[str]:
+        """The directories holding ``ref``'s executables, as mise reports them.
+
+        Not ``<install dir>/bin``: Maven and Gradle unpack one level deeper
+        (``maven/3.9.9/apache-maven-3.9.9/bin/mvn``), so that guess linked
+        nothing for them.  ``mise bin-paths`` is where mise itself puts them
+        on ``PATH``.  Falls back to ``<install dir>/bin`` when it names none.
+        """
+        lines = [ln.strip() for ln in self.step(f"locating {ref}'s executables", [self.mise, "bin-paths", ref]) if ln.strip()]
+        paths = [self._inside_mise(ref, ln) for ln in lines if os.path.isabs(ln)]
+        return paths or [os.path.join(install_dir, "bin")]
 
     def install_toolchain(self, tool: str, version: str) -> Dict[str, object]:
         spec = TOOLCHAINS[tool]
         os.makedirs(self.abs(LOCAL_BIN), exist_ok=True)
         if not spec.mise:
             return {"installDir": None, "bin": []}
-        d = self._mise_install(f"{spec.mise}@{version}")
-        linked = link_binaries(os.path.join(d, "bin"), self.abs(LOCAL_BIN), self.abs(MISE_DATA_DIR), self.log)
+        ref = f"{spec.mise}@{version}"
+        d = self._mise_install(ref)
+        linked: List[str] = []
+        for src in self._bin_paths(ref, d):
+            linked += [b for b in link_binaries(src, self.abs(LOCAL_BIN), self.abs(MISE_DATA_DIR), self.log) if b not in linked]
         return {"installDir": os.path.relpath(d, self.ws), "bin": linked}
 
     def install_server(self, sid: str, spec: Dict[str, str]) -> Dict[str, object]:
@@ -244,26 +320,66 @@ class Installer:
             return self._install_jdtls(version, spec)
         if sid == "basedpyright":
             venv = os.path.join(lsp, "basedpyright")
-            if not os.path.exists(os.path.join(venv, "bin", "python")):
-                self.step("creating the basedpyright venv", [sys.executable, "-m", "venv", venv])
-            self.step(f"installing basedpyright {version}", [os.path.join(venv, "bin", "python"), "-m", "pip", "install",
+            self.step(f"installing basedpyright {version}", self._pip_install(venv) + [
                       "--disable-pip-version-check", "--no-input", f"basedpyright=={version}"])
             return {"id": sid, "version": version, "language": "python",
                     "command": os.path.join(venv, "bin", "basedpyright-langserver"), "args": ["--stdio"]}
         if sid == "typescript-language-server":
             prefix = os.path.join(lsp, "npm")
-            self.step(f"installing typescript-language-server {version}", [self.abs(LOCAL_BIN + "/npm"), "install", "-g",
+            self.step(f"installing typescript-language-server {version}", self._npm() + ["install", "-g",
                       "--no-fund", "--no-audit", "--prefix", prefix,
                       f"typescript-language-server@{version}", f"typescript@{spec['typescript']}"])
             return {"id": sid, "version": version, "language": "typescript", "command": self.abs(LOCAL_BIN + "/node"),
                     "args": [os.path.join(prefix, "lib", "node_modules", "typescript-language-server", "lib", "cli.mjs"), "--stdio"]}
-        # gopls, with the linked go; GOTOOLCHAIN=local so go fetches no other toolchain behind the pin.
+        # gopls, built with its own Go (a gopls release needs a newer Go than
+        # many projects pin; at run time it uses the project's go on PATH);
+        # GOTOOLCHAIN=local so go fetches no other toolchain behind that pin.
         home = self.abs(".home")
-        self.step(f"installing gopls {version}", [self.abs(LOCAL_BIN + "/go"), "install", f"golang.org/x/tools/gopls@{version}"], {
+        go_home = self._mise_install(f"go@{spec.get('go', 'latest')}")
+        self.step(f"installing gopls {version}", [os.path.join(go_home, "bin", "go"), "install", f"golang.org/x/tools/gopls@{version}"], {
             "GOBIN": self.abs(LOCAL_BIN), "GOPATH": os.path.join(home, "go"),
             "GOCACHE": os.path.join(home, ".cache", "go-build"), "GOTOOLCHAIN": "local",
         })
         return {"id": sid, "version": version, "language": "go", "command": self.abs(LOCAL_BIN + "/gopls"), "args": []}
+
+    def _pip_install(self, venv: str) -> List[str]:
+        """The argv prefix that ``pip install``s into ``venv``, creating it first.
+
+        The venv is made ``--without-pip``: ``python -m venv`` bootstraps pip
+        with ``ensurepip``, which a distribution Python may lack, and then
+        fails AFTER writing ``bin/python``, so a retry that saw the
+        interpreter skipped creating it and ran a venv with no pip.  Pip is
+        added with ``ensurepip`` when this Python has it; otherwise the
+        runner's own pip installs into the venv (``pip --python``).
+        """
+        py = os.path.join(venv, "bin", "python")
+        if not os.path.exists(py):
+            self.step("creating the basedpyright venv", [sys.executable, "-m", "venv", "--without-pip", venv])
+        if _venv_has_pip(venv):
+            return [py, "-m", "pip", "install"]
+        try:
+            self.step("adding pip to the basedpyright venv", [py, "-m", "ensurepip", "--default-pip"])
+        except InstallError as e:
+            if importlib.util.find_spec("pip") is None:
+                raise InstallError(f"{e}; and the runner's Python has no pip to install with either") from e
+            self.log("no ensurepip here; installing with the runner's pip instead")
+            return [sys.executable, "-m", "pip", "--python", py, "install"]
+        return [py, "-m", "pip", "install"]
+
+    def _npm(self) -> List[str]:
+        """npm, as the bound Node's own ``node .../npm-cli.js``.
+
+        Not ``.home/.local/bin/npm``: that is a link to mise's ``bin/npm``,
+        itself a link to ``npm-cli.js``, started through ``#!/usr/bin/env
+        node``.  Running the script with the Node binary directly has no
+        link to resolve and no interpreter to look up.
+        """
+        node = os.path.realpath(self.abs(LOCAL_BIN + "/node"))
+        cli = os.path.join(os.path.dirname(os.path.dirname(node)), "lib", "node_modules", "npm", "bin", "npm-cli.js")
+        if os.path.isfile(cli):
+            self._inside_mise("node", cli)
+            return [node, cli]
+        return [self.abs(LOCAL_BIN + "/npm")]
 
     def _install_jdtls(self, version: str, spec: Dict[str, str]) -> Dict[str, object]:
         java_home = self._mise_install(f"java@{spec['java']}")

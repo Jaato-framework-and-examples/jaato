@@ -94,6 +94,11 @@ def parse_offer(raw: Any) -> Optional[Offer]:
                 if not _version(spec.get("typescript")):
                     continue
                 clean["typescript"] = spec["typescript"]
+            if sid == "gopls":
+                go = spec.get("go", "latest")
+                if not _version(go):
+                    continue
+                clean["go"] = go
             if sid == "jdtls":
                 java = spec.get("java", "21")
                 heap = spec.get("max_heap", "1G")

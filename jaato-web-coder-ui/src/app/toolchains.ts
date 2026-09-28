@@ -72,6 +72,22 @@ export interface Manifest {
 
 export const EMPTY_MANIFEST: Manifest = { toolchains: [], proposals: [], guidance: [], job: null };
 
+/**
+ * The proposals still waiting on the user: not bound, not declined, not
+ * already chosen for the first session, and offered by this server.  The
+ * panel's ask rows and the rail badge's count are this one list.
+ */
+export function waitingProposals(
+  m: Manifest,
+  status: { allowed: Array<{ tool: string }>; declined: string[] },
+  pending: Array<{ tool: string }>,
+): Proposal[] {
+  const bound = new Set(m.toolchains.map((t) => t.tool));
+  const chosen = new Set(pending.map((p) => p.tool));
+  const offered = new Set(status.allowed.map((a) => a.tool));
+  return m.proposals.filter((p) => !bound.has(p.tool) && !status.declined.includes(p.tool) && !chosen.has(p.tool) && offered.has(p.tool));
+}
+
 /** Whether this connection can read the manifest: a daemon that serves ``workspace.file.fetch``. */
 export function canReadManifest(): boolean {
   if (!isConnected()) return false;

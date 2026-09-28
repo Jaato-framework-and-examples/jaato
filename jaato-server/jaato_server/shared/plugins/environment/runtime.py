@@ -190,7 +190,8 @@ def private_tmp_report() -> Dict[str, Any]:
     Read from this process's mount namespace (device + inode), not from the
     envelope, so it never claims a private ``/tmp`` the task does not see.
     """
-    from jaato_server.shared.private_tmp import describe
+    from jaato_server.shared.private_tmp import (
+        describe, private_shm_in_effect)
     private, backing = describe()
     if not private:
         return {
@@ -201,6 +202,7 @@ def private_tmp_report() -> Dict[str, Any]:
     return {
         "private": True,
         "backing_dir": backing,
+        "private_shm": private_shm_in_effect(),
         "note": "/tmp and /var/tmp are this workspace's own directory, "
                 "shared by its sessions and invisible to other workspaces",
     }
@@ -305,7 +307,8 @@ def _subprocess_lines(block: Dict[str, Any]) -> List[Tuple[str, str]]:
 
 def _private_tmp_line(block: Dict[str, Any]) -> str:
     if block.get("private"):
-        return f"yes ({block.get('backing_dir')} bound over /tmp, /var/tmp)"
+        shm = ", private /dev/shm" if block.get("private_shm") else ""
+        return f"yes ({block.get('backing_dir')} bound over /tmp, /var/tmp{shm})"
     return "no"
 
 

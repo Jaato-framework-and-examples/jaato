@@ -284,7 +284,7 @@ const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const SERVER_KEYS: Record<ServerId, string[]> = {
   basedpyright: ["version"],
   "typescript-language-server": ["version", "typescript"],
-  gopls: ["version"],
+  gopls: ["version", "go"],
   jdtls: ["version", "java", "max_heap", "mirror"],
 };
 
@@ -355,6 +355,9 @@ export function parseEnvironment(raw: unknown, baseDir: string): ServerConfig["e
       if (o.typescript === undefined) throw new ConfigError(`${where}.typescript is required (the server needs a pinned typescript beside it): write ${name}: {version: ..., typescript: ...}`);
       settings.typescript = version(o.typescript, `${where}.typescript`);
     }
+    // gopls is built with its own Go: a gopls release needs a newer Go than
+    // many projects pin.  "latest" unless the operator pins one.
+    if (name === "gopls") settings.go = o.go === undefined ? "latest" : version(o.go, `${where}.go`);
     if (name === "jdtls") {
       const maxHeap = o.max_heap === undefined ? "1G" : str(String(o.max_heap), `${where}.max_heap`);
       if (!/^[1-9][0-9]{0,5}[mMgG]$/.test(maxHeap)) throw new ConfigError(`${where}.max_heap: '${maxHeap}' is not a JVM heap size such as 768m or 2G`);

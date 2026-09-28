@@ -14,7 +14,9 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -28,18 +30,23 @@ FIXTURE = Path(__file__).parent / "fixtures" / "toolchain-offer.json"
 
 FAKE_MISE = textwrap.dedent("""\
     #!/bin/sh
-    # install <tool>@<ver> | where <tool>@<ver>, into $MISE_DATA_DIR like mise.
+    # install | where | bin-paths <tool>@<ver>, into $MISE_DATA_DIR like mise.
     set -e
     ref="$2"; tool="${ref%@*}"; ver="${ref#*@}"
     dir="$MISE_DATA_DIR/installs/$tool/$ver"
     case "$1" in
       install)
         [ "$ver" = "broken" ] && { echo "no such version" >&2; exit 1; }
-        mkdir -p "$dir/bin" "$dir/lib"
-        for b in java javac; do printf '#!/bin/sh\\necho %s\\n' "$b" > "$dir/bin/$b"; chmod +x "$dir/bin/$b"; done
+        # Maven unpacks one level deeper, like the real archive; the rest are flat.
+        case "$tool" in maven) bin="$dir/apache-maven-$ver/bin"; names="mvn mvnDebug";;
+                        *) bin="$dir/bin"; names="java javac";; esac
+        mkdir -p "$bin" "$dir/lib"
+        for b in $names; do printf '#!/bin/sh\\necho %s\\n' "$b" > "$bin/$b"; chmod +x "$bin/$b"; done
         echo "HOME=$HOME CEILING=$MISE_CEILING_PATHS" > "$dir/env.txt"
         echo "installed $ref";;
       where) echo "$dir";;
+      bin-paths)
+        case "$tool" in maven) echo "$dir/apache-maven-$ver/bin";; outside) echo "/usr/bin";; *) echo "$dir/bin";; esac;;
     esac
 """)
 
@@ -123,8 +130,9 @@ def test_bind_installs_links_and_records_it(workspace, tmp_path):
     m = read_manifest(str(workspace))
     assert m["job"]["status"] == "done", m["job"]
     [entry] = m["toolchains"]
-    assert (entry["tool"], entry["version"], entry["bin"]) == ("maven", "3.9.9", ["java", "javac"])
-    link = workspace / ".home/.local/bin/javac"
+    assert (entry["tool"], entry["version"], entry["bin"]) == ("maven", "3.9.9", ["mvn", "mvnDebug"])
+    link = workspace / ".home/.local/bin/mvn"
+    assert os.readlink(link) == "../share/mise/installs/maven/3.9.9/apache-maven-3.9.9/bin/mvn", "the nested bin dir mise reports"
     assert link.is_symlink() and not os.path.isabs(os.readlink(link)), "a relative link"
     env = (workspace / ".home/.local/share/mise/installs/maven/3.9.9/env.txt").read_text()
     assert f"HOME={workspace}/.home" in env and f"CEILING={workspace}/.home" in env, "a clean environment under .home"
@@ -176,7 +184,7 @@ def test_unbind_removes_only_our_links(workspace):
     (workspace / ".jaato/environment.json").write_text(json.dumps(m))
     out = ex.execute("toolchain", {"action": "unbind", "tool": "maven"})[1]
     assert "unbound maven" in out
-    assert not (workspace / ".home/.local/bin/javac").exists() and foreign.exists()
+    assert not (workspace / ".home/.local/bin/mvn").exists() and foreign.exists()
     assert read_manifest(str(workspace))["toolchains"] == []
 
 
@@ -230,7 +238,7 @@ def test_the_instructions_name_what_is_bound_and_the_guidance(workspace):
     _executor(plugin).execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
     _wait(plugin)
     text = plugin.get_system_instructions()
-    assert "- Maven 3.9.9 (`java`, `javac`)" in text and "`api/AGENTS.md`" in text
+    assert "- Maven 3.9.9 (`mvn`, `mvnDebug`)" in text and "`api/AGENTS.md`" in text
 
 
 def test_the_command_is_a_user_command_the_model_never_sees(workspace):
@@ -323,3 +331,225 @@ def test_the_session_delivers_the_hint_and_the_notice(workspace):
     assert "[toolchain] `javac` is provided by Java" in json.dumps(result.result)
     assert [(n["plugin"], n["kind"], n["data"]["command"]) for n in notices] == [
         ("web_coder_toolchains", "toolchain_offer", "javac")]
+
+
+def test_mise_progress_snapshots_replace_each_other_in_the_job_log():
+    """mise prints a snapshot of each bar every few seconds when stdout is not a terminal.
+
+    One download must read as one bar that updates, not a new bar per snapshot.
+    """
+    from jaato_web_coder_toolchains.installer import append_log_line, clean_line
+
+    log = ["$ mise install maven@3.9.9"]
+    for line in [
+        "  maven@3.9.9  downloading  3.0s  0.5/9.1 MB · 197 kB/s",
+        "mise █░░░░ 0/1 · 6.0s",
+        "  maven@3.9.9  downloading  6.0s  1.0/9.1 MB · 187 kB/s",
+        "mise ██░░░ 0/1 · 9.0s",
+        "java@21 downloading 1.0s 3.0/190.0 MB · 3 MB/s",
+        "mise maven@3.9.9 ✓ installed",
+        "mise maven@3.9.9 ✓ installed",
+    ]:
+        append_log_line(log, line)
+    assert log == [
+        "$ mise install maven@3.9.9",
+        "  maven@3.9.9  downloading  6.0s  1.0/9.1 MB · 187 kB/s",
+        "mise ██░░░ 0/1 · 9.0s",
+        "java@21 downloading 1.0s 3.0/190.0 MB · 3 MB/s",
+        "mise maven@3.9.9 ✓ installed",
+        "mise maven@3.9.9 ✓ installed",
+    ]
+    assert clean_line("a 1/2 1s\r\x1b[2Ka 2/2 2s") == "a 2/2 2s"
+
+
+def test_a_bin_path_outside_the_workspace_mise_directory_fails_the_bind(tmp_path):
+    from jaato_web_coder_toolchains.installer import InstallError, Installer
+    import pytest as _pytest
+
+    inst = Installer(str(tmp_path), mise="/bin/true", timeout=5, paranoid=False, preexec=None,
+                     cancel=threading.Event(), log=lambda line: None)
+    inst.step = lambda what, argv, extra_env=None: ["/usr/bin"]
+    with _pytest.raises(InstallError, match="outside the workspace's mise directory"):
+        inst._bin_paths("outside@1", str(tmp_path / ".home/.local/share/mise/installs/outside/1"))
+
+
+def test_mavenrc_points_user_home_at_the_workspace_while_java_or_maven_is_bound(workspace):
+    """Java takes ``user.home`` from the account, so Maven would use ``/root/.m2``."""
+    plugin = _plugin(workspace)
+    ex = _executor(plugin)
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    rc = workspace / ".home/.mavenrc"
+    assert rc.read_text().startswith("# jaato-managed: mavenrc v1")
+    home = str(workspace / ".home")
+    opts = subprocess.run(
+        ["sh", "-c", '. "$HOME/.mavenrc"; printf %s "$MAVEN_OPTS"'],
+        env={"HOME": home, "TMPDIR": home + "/tmp", "MAVEN_OPTS": "-Xmx1g"},
+        capture_output=True, text=True, check=True).stdout
+    assert opts == f"-Duser.home={home} -Djava.io.tmpdir={home}/tmp -Xmx1g", "the way mvn sources it"
+    opts = subprocess.run(["sh", "-c", '. "$HOME/.mavenrc"; printf %s "$MAVEN_OPTS"'],
+                          env={"HOME": home}, capture_output=True, text=True, check=True).stdout
+    assert opts == f"-Duser.home={home}"
+
+    ex.execute("toolchain", {"action": "unbind", "tool": "maven"})
+    assert not rc.exists(), "removed with the last Java or Maven binding"
+
+    rc.write_text("MAVEN_OPTS=mine\n")                      # the user's own file
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    assert rc.read_text() == "MAVEN_OPTS=mine\n"
+    assert any("kept your own .home/.mavenrc" in n for n in read_manifest(str(workspace))["job"].get("notes") or [])
+
+
+# -------------------------------------------------- the language-server steps
+
+def _recording_installer(ws, fail=()):
+    """An Installer whose steps are recorded; a step whose ``what`` starts with one of ``fail`` fails."""
+    from jaato_web_coder_toolchains.installer import InstallError, Installer
+
+    inst = Installer(str(ws), mise="/bin/true", timeout=5, paranoid=False, preexec=None,
+                     cancel=threading.Event(), log=lambda line: None)
+    inst.ran = []
+
+    def step(what, argv, extra_env=None):
+        inst.ran.append((what, argv, extra_env or {}))
+        if what.startswith(tuple(fail)):
+            raise InstallError(f"{what} failed (exit 1)")
+        return []
+    inst.step = step
+    return inst
+
+
+def test_a_step_names_the_error_line_not_the_trace_footer(tmp_path):
+    from jaato_web_coder_toolchains.installer import error_line
+
+    out = ["node:internal/modules/cjs/loader:1228", "  throw err;", "",
+           "Error: Cannot find module '/x/npm-cli.js'", "    at Module._load (node:internal/...)",
+           "  code: 'MODULE_NOT_FOUND',", "}", "", "Node.js v24.21.0"]
+    assert error_line(out) == "Error: Cannot find module '/x/npm-cli.js'"
+    assert error_line(["go: golang.org/x/tools/gopls@v0.20.0 requires go >= 1.24.2 (running go 1.23.12)",
+                       "To install and activate, run:"]).startswith("go: golang.org/x/tools/gopls@v0.20.0 requires")
+    assert error_line(["all fine", "done"]) is None
+
+
+def test_basedpyright_venv_is_made_without_pip_and_gets_it_from_ensurepip(tmp_path):
+    inst = _recording_installer(tmp_path)
+    argv = inst._pip_install(str(tmp_path / "venv"))
+    whats = [r[0] for r in inst.ran]
+    assert whats == ["creating the basedpyright venv", "adding pip to the basedpyright venv"]
+    assert "--without-pip" in inst.ran[0][1]
+    assert argv == [str(tmp_path / "venv/bin/python"), "-m", "pip", "install"]
+
+
+def test_no_ensurepip_installs_with_the_runners_pip(tmp_path, monkeypatch):
+    import importlib.util as iu
+    import sys
+
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: object() if name == "pip" else real(name, *a))
+    inst = _recording_installer(tmp_path, fail=("adding pip",))
+    argv = inst._pip_install(str(tmp_path / "venv"))
+    assert argv == [sys.executable, "-m", "pip", "--python", str(tmp_path / "venv/bin/python"), "install"]
+
+
+def test_no_pip_anywhere_says_so(tmp_path, monkeypatch):
+    import importlib.util as iu
+    from jaato_web_coder_toolchains.installer import InstallError
+
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: None if name == "pip" else real(name, *a))
+    inst = _recording_installer(tmp_path, fail=("adding pip",))
+    with pytest.raises(InstallError, match="runner's Python has no pip"):
+        inst._pip_install(str(tmp_path / "venv"))
+
+
+def test_a_venv_left_by_a_failed_ensurepip_is_not_run_without_pip(tmp_path):
+    """The deployment's failure: bin/python exists, pip does not."""
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    (tmp_path / "venv/bin/python").write_text("")
+    inst = _recording_installer(tmp_path)
+    inst._pip_install(str(tmp_path / "venv"))
+    assert [r[0] for r in inst.ran] == ["adding pip to the basedpyright venv"]
+
+
+def test_npm_is_the_bound_nodes_own_script(tmp_path):
+    install = tmp_path / ".home/.local/share/mise/installs/node/24"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin/node").write_text("")
+    cli = install / "lib/node_modules/npm/bin/npm-cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("")
+    (tmp_path / ".home/.local/bin").mkdir(parents=True)
+    os.symlink("../share/mise/installs/node/24/bin/node", tmp_path / ".home/.local/bin/node")
+    inst = _recording_installer(tmp_path)
+    assert inst._npm() == [os.path.realpath(install / "bin/node"), os.path.realpath(cli)]
+
+
+def test_gopls_is_built_with_its_own_go_not_the_projects(tmp_path):
+    inst = _recording_installer(tmp_path)
+    go_home = tmp_path / ".home/.local/share/mise/installs/go/1.25.1"
+    inst._mise_install = lambda ref: (inst.ran.append(("mise", [ref], {})), str(go_home))[1]
+    out = inst.install_server("gopls", {"version": "v0.20.0", "go": "1.25"})
+    mise, build = inst.ran
+    assert mise[1] == ["go@1.25"]
+    assert build[1][0] == str(go_home / "bin/go") and build[2]["GOTOOLCHAIN"] == "local"
+    assert out["command"].endswith(".home/.local/bin/gopls"), "run with the project's go on PATH"
+    raw = json.loads(FIXTURE.read_text())
+    raw["servers"]["gopls"] = {"version": "v0.20.0"}
+    assert parse_offer(raw).servers["gopls"]["go"] == "latest", "an offer without go builds with the latest"
+
+
+# ------------------------------------------------ running what the workspace builds
+
+def test_a_managed_workspace_may_run_and_map_what_it_holds(tmp_path):
+    rules = WebCoderToolchainsPlugin.get_apparmor_rules(
+        workspace_path=str(tmp_path), session_id="s1", config_root=None,
+        plugin_config={"workspace_home": ".home"})
+    assert rules == [f'"{os.path.realpath(tmp_path)}/**" mix,']
+
+
+def test_a_private_tmp_is_granted_too_and_the_hosts_never(tmp_path):
+    kw = dict(workspace_path=str(tmp_path), session_id="s1", config_root=None)
+    with_private = WebCoderToolchainsPlugin.get_apparmor_rules(
+        **kw, plugin_config={"workspace_home": ".home", "private_tmp_dir": str(tmp_path / ".tmp")})
+    assert "/tmp/** mix," in with_private and "/var/tmp/** mix," in with_private
+    assert not any(r.startswith("/tmp") for r in WebCoderToolchainsPlugin.get_apparmor_rules(
+        **kw, plugin_config={"workspace_home": ".home"})), "the host's /tmp is never granted"
+
+
+def test_a_users_own_checkout_gets_no_grant(tmp_path):
+    """The TUI on the same daemon: no managed home, the template as it is."""
+    assert WebCoderToolchainsPlugin.get_apparmor_rules(
+        workspace_path=str(tmp_path), session_id="s1", config_root=None, plugin_config={}) == []
+
+
+def test_the_framework_hands_every_contributor_the_managed_home(tmp_path):
+    """Resolution gives the plugin ``workspace_home`` on a managed workspace, and only there."""
+    from jaato_server.server.apparmor import resolve_plugin_apparmor_rules
+    from jaato_server.shared.plugins.registry import PluginRegistry
+
+    registry = PluginRegistry()
+    registry.register_plugin(WebCoderToolchainsPlugin(), expose=False)
+    server = type("S", (), {"registry": registry})()
+    ws = tmp_path / "workspaces" / "w1"
+    ws.mkdir(parents=True)
+    managed = resolve_plugin_apparmor_rules(server, None, "s1", str(ws), None, managed_workspace_root=str(tmp_path / "workspaces"))
+    assert f'"{os.path.realpath(ws)}/**" mix,' in (managed or [])
+    assert not resolve_plugin_apparmor_rules(server, None, "s1", str(ws), None)
+
+
+@pytest.mark.skipif(not shutil.which("go"), reason="needs a go command")
+def test_go_reads_the_managed_env_file_and_builds_tests_in_the_workspace(workspace):
+    from jaato_web_coder_toolchains.state import write_derived
+
+    m = read_manifest(str(workspace))
+    m["toolchains"] = [{"tool": "go", "version": "1.23", "bin": ["go"], "server": None}]
+    write_derived(str(workspace), m)
+    home = workspace / ".home"
+    out = subprocess.run([shutil.which("go"), "env", "GOTMPDIR"], capture_output=True, text=True, check=True,
+                         env={"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "PATH": os.environ["PATH"]}).stdout
+    assert out.strip() == f"{os.path.realpath(workspace)}/.home/.cache/go-tmp"
+    assert (home / ".cache/go-tmp").is_dir()
+    m["toolchains"] = []
+    write_derived(str(workspace), m)
+    assert not (home / ".config/go/env").exists()

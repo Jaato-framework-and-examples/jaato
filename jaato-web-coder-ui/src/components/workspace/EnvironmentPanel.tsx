@@ -14,6 +14,13 @@
  * while a job runs), and acts by sending the plugin's ``toolchain`` command.
  * The sign-in backend only supplies the allow-list and remembers "Not now".
  *
+ * Layout (the "status strip + tiles" design): a strip that always says what
+ * the environment is doing (:func:`stripState`) with its one action, a
+ * progress bar and the job's log while an install runs, ask rows for the
+ * hint and the proposals, the bound toolchains as tiles with a final
+ * "+ Add toolchain" tile that opens a version picker, and a footer.  A
+ * finished install is "✓ just now" on its tile, not a banner.
+ *
  * Nothing is installed without a click.  Every control is a real ``button``
  * whose accessible name contains its visible word, and none is hover-gated.
  */
@@ -21,16 +28,47 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { environmentApi, type AllowedTool, type EnvironmentStatus, type ToolId } from "@/app/environment";
 import { stageToolchainOffer, currentWorkspacePath } from "@/app/toolchainOffer";
 import {
-  POLL_MS, addPending, canReadManifest, pendingBinds, readManifest, removePending, toolchainCommand,
-  type Manifest, type PendingBind, type Proposal,
+  POLL_MS, addPending, canReadManifest, pendingBinds, readManifest, removePending, toolchainCommand, waitingProposals,
+  type Manifest, type PendingBind, type Proposal, type ToolchainJob,
 } from "@/app/toolchains";
 import { useJaato } from "@/store/store";
 
-/** The chip text for a proposal. */
+/** The ask-row text for a proposal. */
 export function proposalText(p: Proposal): string {
   const what = p.tool === "python" ? `${p.label}` : `${p.label} ${p.version}`;
   if (p.pin && !p.pinAllowed) return `${p.label} detected (${p.source} pins ${p.pin}, which this server does not offer). Bind ${p.version} instead?`;
-  return `${what} detected (from ${p.source}). Bind it?`;
+  return `${what} detected in ${p.source}.`;
+}
+
+export type StripTone = "running" | "failed" | "waiting" | "neutral" | "ready";
+
+/**
+ * What the strip says, first match wins: a running install, one that failed
+ * or was cancelled, asks waiting on the user, not yet in a session, nothing
+ * bound, ready.  A FINISHED install has no strip state: it is "✓ just now"
+ * on its tile.  ``action`` is the strip's one button, shown only when live.
+ */
+export function stripState(a: {
+  job: ToolchainJob | null; label: (tool: string) => string; waiting: number;
+  live: boolean; bound: number; pending: number;
+}): { tone: StripTone; glyph: string; text: string; action: "cancel" | "retry" | null } {
+  const { job } = a;
+  const what = job ? `${a.label(job.tool)}${job.tool === "python" || !job.version ? "" : ` ${job.version}`}` : "";
+  if (job?.status === "running") {
+    return { tone: "running", glyph: "↓", text: `${job.action === "unbind" ? "Unbinding" : "Installing"} ${what}…`, action: "cancel" };
+  }
+  if (job && (job.status === "failed" || job.status === "cancelled")) {
+    const text = job.status === "cancelled" ? `Install of ${what} cancelled.` : `${what} failed: ${job.error ?? "unknown error"}`;
+    return { tone: "failed", glyph: "✗", text, action: job.action === "bind" && job.version ? "retry" : null };
+  }
+  if (a.waiting > 0) return { tone: "waiting", glyph: "!", text: `${a.waiting} suggestion${a.waiting === 1 ? "" : "s"} waiting`, action: null };
+  if (!a.live) {
+    return a.pending > 0
+      ? { tone: "neutral", glyph: "◷", text: `${a.pending} chosen · bound when the first session starts`, action: null }
+      : { tone: "neutral", glyph: "○", text: "No toolchains bound", action: null };
+  }
+  if (a.bound === 0) return { tone: "neutral", glyph: "○", text: "No toolchains bound", action: null };
+  return { tone: "ready", glyph: "✓", text: `${a.bound} bound · ready`, action: null };
 }
 
 export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, pollMs = POLL_MS }: {
@@ -45,12 +83,14 @@ export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, 
 }) {
   const api = useRef(environmentApi(url, fetchImpl, (st) => { void stageToolchainOffer(st); })).current;
   const live = useJaato((s) => !!s.sessionId && currentWorkspacePath(s) === workspace) && canReadManifest();
+  const setWaiting = useJaato((s) => s.setEnvironmentWaiting);
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [pending, setPending] = useState<PendingBind[]>(() => pendingBinds(workspace));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [pick, setPick] = useState<{ tool: ToolId | ""; version: string }>({ tool: "", version: "" });
+  const [adding, setAdding] = useState(false);
+  const [picked, setPicked] = useState<Partial<Record<ToolId, string>>>({});
 
   const loadStatus = useCallback(async () => {
     try { setStatus(await api.status(workspace)); setError(null); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
@@ -71,6 +111,11 @@ export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, 
     const t = setInterval(() => { void loadManifest(); setPending(pendingBinds(workspace)); }, pollMs);
     return () => clearInterval(t);
   }, [live, running, pending.length, loadManifest, workspace, pollMs]);
+
+  const m = manifest ?? { toolchains: [], proposals: [], guidance: [], job: null };
+  const proposals = status ? waitingProposals(m, status, pending) : [];
+  // The rail badge counts what this panel would ask, for the session's own workspace.
+  useEffect(() => { if (live && status && manifest) setWaiting(proposals.length); }, [live, status, manifest, proposals.length, setWaiting]);
 
   const act = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -98,141 +143,151 @@ export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, 
   if (!status) {
     return <div className="px-3.5 py-3 text-[13px] text-text-muted" role="status">{error ?? "Reading the workspace's toolchains…"}</div>;
   }
-  const m = manifest ?? { toolchains: [], proposals: [], guidance: [], job: null };
   const job = m.job;
   const bound = new Set(m.toolchains.map((t) => t.tool));
   const pendingTools = new Set(pending.map((p) => p.tool));
   const allowed = (tool: string): AllowedTool | undefined => status.allowed.find((a) => a.tool === tool);
+  const label = (tool: string) => allowed(tool)?.label ?? tool;
   const hintTool = hint ? status.allowed.find((a) => a.tool === hint.tool && !bound.has(a.tool)) : undefined;
-  const proposals = m.proposals.filter((p) => !bound.has(p.tool) && !status.declined.includes(p.tool) && !pendingTools.has(p.tool) && allowed(p.tool));
   const addable = status.allowed.filter((a) => !bound.has(a.tool) && !pendingTools.has(a.tool));
-  const pickedAllowed = addable.find((a) => a.tool === pick.tool);
+  const strip = stripState({
+    job, label, waiting: proposals.length + (hintTool ? 1 : 0), live, bound: m.toolchains.length, pending: pending.length,
+  });
+  const locked = busy || running;
+  const versionOf = (tool: string, version: string) => (tool === "python" ? "" : version);
+
+  const tiles = live
+    ? m.toolchains.map((t) => ({
+        key: t.tool, tool: t.tool, version: t.version, testid: "environment-bound",
+        sub: t.server ? `LSP ${t.server.id}` : t.bin.join(" "),
+        meta: job?.action === "bind" && job.status === "done" && job.tool === t.tool
+          ? <span className="text-success">✓ just now</span> : null,
+        action: <button type="button" disabled={locked} className="tc-text-btn" aria-label={`Unbind ${t.tool}`} onClick={() => void command("unbind", t.tool)}>Unbind</button>,
+      }))
+    : pending.map((p) => {
+        const a = allowed(p.tool);
+        return {
+          key: p.tool, tool: p.tool, version: p.version, testid: "environment-pending",
+          sub: a?.server ? `LSP ${a.server.id}` : "",
+          meta: <span className="text-text-muted">pending</span>,
+          action: <button type="button" className="tc-text-btn" aria-label={`Remove ${p.tool}`} onClick={() => { removePending(workspace, p.tool); setPending(pendingBinds(workspace)); }}>Remove</button>,
+        };
+      });
 
   return (
-    <div className="flex flex-col gap-3 px-3.5 py-3 text-[13px]" data-testid="environment-panel" data-live={live ? "true" : "false"}>
-      {error && <div className="text-error" role="alert">{error}</div>}
-      {!live && (
-        <div className="text-text-muted" role="note">
-          Toolchains are installed inside a session. Choose them now and they are bound when the first session in this workspace starts.
-        </div>
-      )}
+    <div className="flex flex-col text-[13px]" data-testid="environment-panel" data-live={live ? "true" : "false"}>
+      <div className={`tc-strip tc-strip-${strip.tone}`} role="status" data-testid="environment-strip" data-tone={strip.tone}>
+        <span className="glyph" aria-hidden="true">{strip.glyph}</span>
+        <span className="min-w-0 break-words">{strip.text}</span>
+        {live && strip.action === "cancel" && (
+          <button type="button" disabled={busy} className="tc-strip-action" aria-label="Cancel install" onClick={() => void command("cancel")}>Cancel</button>
+        )}
+        {live && strip.action === "retry" && job?.version && (
+          <button type="button" disabled={busy} className="tc-strip-action" aria-label={`Retry ${job.tool}`} onClick={() => void command("bind", job.tool, job.version!)}>Retry</button>
+        )}
+      </div>
+      {running && <div className="tc-progress" aria-hidden="true"><span /></div>}
 
-      {hintTool && (
-        <div className="tint-warning border hairline px-3 py-2 flex flex-col gap-2" data-testid="environment-hint">
-          <span><code className="font-mono">{hint!.command}</code> was not found in the last command. Bind {hintTool.label} {hintTool.tool === "python" ? "" : hintTool.versions[0]}?</span>
-          <div className="flex gap-2">
-            <button type="button" disabled={busy || running} className="btn btn-sm btn-steel" onClick={() => void bind(hintTool.tool, hintTool.versions[0]!)}>Bind {hintTool.label}</button>
-            <button type="button" className="btn btn-sm btn-quiet" onClick={() => onHintDone?.()}>Dismiss</button>
+      <div className="tc-body flex flex-col gap-3.5 px-4 pt-3.5 pb-4">
+        {job && job.status !== "done" && (
+          <div className="flex flex-col gap-1.5" data-testid="environment-job" data-state={job.status}>
+            {job.log.length > 0 && <pre className="tc-log">{job.log.slice(-8).join("\n")}</pre>}
+            {job.notes.map((n) => <span key={n} className="text-warning text-[12px]">{n}</span>)}
           </div>
-        </div>
-      )}
-
-      {proposals.length > 0 && (
-        <ul className="m-0 p-0 list-none flex flex-col gap-2" aria-label="Toolchain proposals">
-          {proposals.map((p) => (
-            <li key={p.tool} className="border hairline px-3 py-2 flex flex-col gap-2" data-testid="environment-proposal">
-              <span>{proposalText(p)}</span>
-              <div className="flex gap-2">
-                <button type="button" disabled={busy || running} className="btn btn-sm btn-steel" onClick={() => void bind(p.tool, p.version)}>Bind {p.label}</button>
-                <button type="button" disabled={busy} className="btn btn-sm btn-quiet" onClick={() => void decline(p.tool)}>Not now</button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {job && job.action === "bind" && (
-        <div className="border hairline px-3 py-2 flex flex-col gap-1.5" data-testid="environment-job" data-state={job.status}>
-          <span className={job.status === "failed" ? "text-error" : job.status === "done" ? "text-success" : "text-steel"} role="status">
-            {job.status === "running" ? `Installing ${job.tool} ${job.version}…`
-              : job.status === "done" ? `${job.tool} ${job.version} installed.`
-              : job.status === "cancelled" ? `Install of ${job.tool} ${job.version} cancelled.`
-              : `Install of ${job.tool} ${job.version} failed: ${job.error ?? "unknown error"}`}
-          </span>
-          {job.log.length > 0 && job.status !== "done" && (
-            <pre className="m-0 font-mono text-[11px] text-text-muted whitespace-pre-wrap break-words max-h-32 overflow-auto">{job.log.slice(-8).join("\n")}</pre>
-          )}
-          {job.notes.map((n) => <span key={n} className="text-warning">{n}</span>)}
-          <div className="flex gap-2">
-            {running && live && <button type="button" disabled={busy} className="btn btn-sm" onClick={() => void command("cancel")}>Cancel install</button>}
-            {(job.status === "failed" || job.status === "cancelled") && live && job.version && (
-              <button type="button" disabled={busy} className="btn btn-sm btn-steel" onClick={() => void command("bind", job.tool, job.version!)}>Retry {job.tool}</button>
-            )}
+        )}
+        {job?.status === "done" && job.notes.length > 0 && (
+          <div className="flex flex-col gap-1" data-testid="environment-job" data-state="done">
+            {job.notes.map((n) => <span key={n} className="text-warning text-[12px]">{n}</span>)}
           </div>
-        </div>
-      )}
+        )}
 
-      {pending.length > 0 && (
-        <section aria-label="Chosen toolchains" className="flex flex-col gap-1.5">
-          <span className="kicker">To bind in the first session</span>
-          <ul className="m-0 p-0 list-none flex flex-col gap-1">
-            {pending.map((p) => (
-              <li key={p.tool} className="flex items-baseline justify-between gap-2" data-testid="environment-pending">
-                <span className="font-mono">{p.tool}{p.tool === "python" ? "" : ` ${p.version}`}</span>
-                <button type="button" className="btn btn-sm btn-quiet" onClick={() => { removePending(workspace, p.tool); setPending(pendingBinds(workspace)); }}>Remove {p.tool}</button>
+        {error && <div className="text-error text-[13px]" role="alert">{error}</div>}
+
+        {hintTool && (
+          <div className="tc-ask tc-ask-hint" data-testid="environment-hint">
+            <span className="min-w-0">
+              “<code className="font-mono">{hint!.command}</code>” was not found in the last command. {hintTool.label}{hintTool.tool === "python" ? "" : ` ${hintTool.versions[0]}`} provides it.
+            </span>
+            <span className="flex gap-2">
+              <button type="button" disabled={locked} className="tc-primary" onClick={() => void bind(hintTool.tool, hintTool.versions[0]!)}>Bind {hintTool.label}</button>
+              <button type="button" className="tc-x" aria-label="Dismiss" onClick={() => onHintDone?.()}>✕</button>
+            </span>
+          </div>
+        )}
+
+        {proposals.length > 0 && (
+          <ul className="m-0 p-0 list-none flex flex-col gap-2" aria-label="Toolchain proposals">
+            {proposals.map((p) => (
+              <li key={p.tool} className="tc-ask tc-ask-proposal" data-testid="environment-proposal">
+                <span className="min-w-0">{proposalText(p)}</span>
+                <span className="flex gap-2">
+                  <button type="button" disabled={locked} className="tc-primary" aria-label={`Bind ${p.label}`} onClick={() => void bind(p.tool, p.version)}>Bind</button>
+                  <button type="button" disabled={busy} className="tc-x" aria-label="Not now" onClick={() => void decline(p.tool)}>✕</button>
+                </span>
               </li>
             ))}
           </ul>
-        </section>
-      )}
+        )}
 
-      {live && (
-        <section aria-label="Bound toolchains" className="flex flex-col gap-1.5">
-          <span className="kicker">Bound</span>
-          {m.toolchains.length === 0 ? (
-            <span className="text-text-muted italic">None yet. {status.allowed.length ? "Bind one below or from a proposal." : "This server offers none."}</span>
-          ) : (
-            <ul className="m-0 p-0 list-none flex flex-col gap-1">
-              {m.toolchains.map((t) => (
-                <li key={t.tool} className="flex items-baseline justify-between gap-2" data-testid="environment-bound">
-                  <span>
-                    <span className="font-mono">{t.tool}{t.tool === "python" ? "" : ` ${t.version}`}</span>
-                    {t.server && <span className="text-text-muted"> · {t.server.id}</span>}
-                  </span>
-                  <button type="button" disabled={busy || running} className="btn btn-sm btn-quiet" onClick={() => void command("unbind", t.tool)}>Unbind {t.tool}</button>
-                </li>
-              ))}
-            </ul>
+        {(tiles.length > 0 || addable.length > 0) && (
+          <div className="tc-tiles" aria-label={live ? "Bound toolchains" : "Chosen toolchains"} role="group">
+            {tiles.map((t) => (
+              <div key={t.key} className="tc-tile" data-testid={t.testid}>
+                <div>
+                  <span className="tc-tile-label">{label(t.tool)}</span>
+                  {versionOf(t.tool, t.version) && <span className="tc-tile-version">{t.version}</span>}
+                </div>
+                {t.sub && <div className="tc-tile-sub">{t.sub}</div>}
+                <div className="tc-tile-foot">
+                  <span>{t.meta}</span>
+                  {t.action}
+                </div>
+              </div>
+            ))}
+            {addable.length > 0 && (
+              <button type="button" className="tc-add" aria-expanded={adding} disabled={running} onClick={() => setAdding((v) => !v)}>
+                <span className="tc-add-label">+ Add toolchain</span>
+                <span className="text-[12px] text-text-muted">{addable.length} offered by this server</span>
+              </button>
+            )}
+          </div>
+        )}
+
+        {adding && addable.length > 0 && (
+          <div className="tc-picker" aria-label="Add a toolchain" role="group">
+            {addable.map((a) => {
+              const version = picked[a.tool] ?? a.versions[0] ?? "";
+              return (
+                <div key={a.tool} className="tc-pick-row">
+                  <span className="text-[13px] font-semibold">{a.label}</span>
+                  {a.tool === "python" ? <span /> : (
+                    <span className="flex flex-wrap gap-1" role="radiogroup" aria-label={`${a.label} version`}>
+                      {a.versions.map((v) => (
+                        <button key={v} type="button" role="radio" aria-checked={v === version} className="tc-chip"
+                          onClick={() => setPicked((cur) => ({ ...cur, [a.tool]: v }))}>{v}</button>
+                      ))}
+                    </span>
+                  )}
+                  <button type="button" disabled={locked || !version} className="tc-primary" aria-label={`${live ? "Bind" : "Choose"} ${a.label}`}
+                    onClick={() => { void bind(a.tool, version); setAdding(false); }}>{live ? "Bind" : "Choose"}</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="flex items-baseline justify-between gap-3 border-t hairline pt-2.5">
+          <span className="text-[12px] text-text-muted min-w-0">
+            {status.allowed.length === 0 ? "This server offers none."
+              : m.guidance.length > 0 ? <>Sessions read {m.guidance.map((g, i) => <span key={g}>{i ? ", " : ""}<code className="font-mono">{g}</code></span>)}</>
+              : !live ? <span role="note">Toolchains install inside a session. Choose them now and they are bound when the first session in this workspace starts.</span>
+              : null}
+          </span>
+          {live && (
+            <button type="button" disabled={locked} className="tc-rescan" aria-label="Rescan repositories" onClick={() => void command("scan")}>↻ Rescan repos</button>
           )}
-        </section>
-      )}
-
-      {addable.length > 0 && (
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (pickedAllowed && pick.version) { void bind(pickedAllowed.tool, pick.version); setPick({ tool: "", version: "" }); } }}>
-          <label className="flex flex-col gap-1">
-            <span className="kicker">Toolchain</span>
-            <select className="input" value={pick.tool} onChange={(e) => {
-              const a = addable.find((x) => x.tool === e.target.value);
-              setPick({ tool: (a?.tool ?? "") as ToolId | "", version: a?.versions[0] ?? "" });
-            }}>
-              <option value="">Choose…</option>
-              {addable.map((a) => <option key={a.tool} value={a.tool}>{a.label}</option>)}
-            </select>
-          </label>
-          {pickedAllowed && pickedAllowed.tool !== "python" && (
-            <label className="flex flex-col gap-1">
-              <span className="kicker">Version</span>
-              <select className="input" value={pick.version} onChange={(e) => setPick({ ...pick, version: e.target.value })}>
-                {pickedAllowed.versions.map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
-            </label>
-          )}
-          <button type="submit" disabled={busy || running || !pickedAllowed} className="btn btn-sm btn-steel">{live ? "Bind" : "Choose"}</button>
-        </form>
-      )}
-
-      {live && (
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" disabled={busy || running} className="btn btn-sm btn-quiet" onClick={() => void command("scan")}>Rescan repositories</button>
         </div>
-      )}
-
-      {m.guidance.length > 0 && (
-        <section aria-label="Repository guidance" className="flex flex-col gap-1">
-          <span className="kicker">Repository guidance</span>
-          <span className="text-text-muted">Sessions are pointed at: {m.guidance.map((g) => <code key={g} className="font-mono mr-1">{g}</code>)}</span>
-        </section>
-      )}
+      </div>
     </div>
   );
 }

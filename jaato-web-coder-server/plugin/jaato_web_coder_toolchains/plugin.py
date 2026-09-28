@@ -55,7 +55,7 @@ from jaato_sdk.plugins.base import CommandParameter, ToolResultEnrichmentResult,
 
 from .catalog import LOCAL_BIN, LOCK_PATH, MANIFEST_PATH, MISE_DATA_DIR, TOOLCHAINS, match_tool_version
 from .detect import detect_workspace, find_repo_guidance
-from .installer import InstallCancelled, InstallError, Installer, mise_binary, unlink_binaries
+from .installer import InstallCancelled, InstallError, Installer, append_log_line, mise_binary, unlink_binaries
 from .offer import Allowed, Offer, OfferReader
 from .state import read_manifest, write_derived, write_manifest
 
@@ -154,6 +154,45 @@ class WebCoderToolchainsPlugin:
             self._session_id = config["session_id"]
         if isinstance(config.get("workspace_path"), str) and config["workspace_path"]:
             self.set_workspace_path(config["workspace_path"])
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Let a web coder workspace run what it builds and installs.
+
+        The template grants a workspace ``rwkl`` and no ``x`` or ``m``, so
+        nothing a project puts there could run: ``node_modules/.bin/*`` (every
+        ``npm run`` / ``bun run`` of a local CLI), a ``.node`` addon, a
+        ``bun build --compile`` output, a Go test binary.  ``mix`` on the
+        workspace changes nothing a confined session could not already do: it
+        may write any file into ``.home/.local/bin`` and run it (#1273), and
+        what runs stays in the same profile (``ix``).  Denials beat it, so
+        ``.jaato`` stays closed.  When the boundary has a private ``/tmp``
+        (the framework says so with ``private_tmp_dir``), ``/tmp`` and
+        ``/var/tmp`` get the same grant, since there they are the
+        workspace's own ``.tmp``.
+
+        Only on a MANAGED workspace (the framework hands every rule
+        contributor ``workspace_home`` there): a user's own checkout, driven
+        from the TUI on the same daemon, keeps the template as it is.
+        """
+        if not plugin_config.get("workspace_home") or not workspace_path:
+            return []
+        ws = os.path.realpath(workspace_path)
+        if '"' in ws or "\n" in ws:
+            return []
+        rules = [f'"{ws}/**" mix,']
+        # With a private /tmp (#1381) /tmp and /var/tmp ARE the workspace's
+        # .tmp, judged as /tmp/... by AppArmor; never granted on the host's.
+        if plugin_config.get("private_tmp_dir"):
+            rules += ["/tmp/** mix,", "/var/tmp/** mix,"]
+        return rules
 
     def shutdown(self) -> None:
         """Session end: stop a running job (the manifest records it cancelled)."""
@@ -304,7 +343,7 @@ class WebCoderToolchainsPlugin:
         tool, version = job.record["tool"], job.record["version"]
 
         def log(line: str) -> None:
-            job.record["log"].append(line[:500])
+            append_log_line(job.record["log"], line[:500])
             del job.record["log"][:-LOG_TAIL]
             self._flush(job)
 
