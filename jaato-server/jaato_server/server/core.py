@@ -195,6 +195,17 @@ def _on_loop_thread(loop: Any) -> bool:
         return False
 
 
+class _RaceLost(Exception):
+    """Signals ``shutdown`` that another caller won the #1061 race.
+
+    ``_take_runner_triple`` raises this when the captured triple is empty
+    *and* ``_runner_released`` was set by an earlier caller.  ``shutdown``
+    catches it and returns; the winner already emitted ``SlotSettledEvent``
+    and ran the close ladder, so the loser must not duplicate either.
+    """
+    pass
+
+
 def _server_event_to_bus_event(server_event: Event) -> Optional[BusEvent]:
     """Convert a server event to a bus event.
 
@@ -1143,6 +1154,17 @@ class JaatoServer:
         # lazily by _get_replay_pipeline, serialised by its lock.
         self._replay_pipeline = None
         self._replay_pipeline_lock = threading.Lock()
+
+        # #1061: serialises every read/write of the per-session runner triple
+        # (``_runner_rpc``, ``_spawned_runner``, ``_pool_manager_ref``) and the
+        # readiness event.  Without it, two ``shutdown()`` callers can each
+        # read the triple before either nulls it, and end up returning the same
+        # pool slot to the pool twice and tearing down the same RPC twice.
+        # ``set_runner_rpc`` writes the triple and clears ``_runner_ready``;
+        # ``shutdown`` reads the triple, clears it, clears ``_runner_ready``,
+        # and sets ``_runner_released`` — all under that same lock, so the
+        # capture is atomic and exactly one caller wins.
+        self._runner_lock = threading.Lock()
 
     # =========================================================================
     # Workspace Management
@@ -8090,9 +8112,22 @@ class JaatoServer:
                 Stored for ``shutdown()`` so we can reap the runner
                 if it doesn't exit cleanly on socket close.
         """
-        self._runner_rpc = rpc_client
-        self._spawned_runner = spawned
-        # Runner readiness is BOOTSTRAP-complete, NOT rpc-handle-live.  A reused
+        # #1061: serialise the triple-write + readiness clear with the
+        # matching shutdown capture-and-null so a concurrent teardown
+        # cannot read a half-written triple (or null it while a setter
+        # is still writing).  ``_pool_manager_ref`` is set later by
+        # ``runner_spawn``; once set, it is read under the same lock
+        # by ``shutdown``.
+        #
+        # The ``getattr`` / ``nullcontext`` fallback mirrors the
+        # forward-compat idiom used elsewhere in this class for the
+        # benefit of test fakes that bypass ``__init__`` via
+        # ``JaatoServer.__new__``.
+        _lock = getattr(self, "_runner_lock", None)
+        with _lock if _lock is not None else contextlib.nullcontext():
+            self._runner_rpc = rpc_client
+            self._spawned_runner = spawned
+            # Runner readiness is BOOTSTRAP-complete, NOT rpc-handle-live.  A reused
         # warm pool slot's rpc handle is live the instant it's claimed, but the
         # slot can't service THIS session until its ``session.bootstrap``
         # completes — so wiring the handle CLEARS readiness; ``mark_runner_ready``
@@ -8206,6 +8241,55 @@ class JaatoServer:
         """Read accessor for the runner RPC handle."""
         return self._runner_rpc
 
+    def _take_runner_triple(self) -> "Tuple[Optional[RunnerRPCClient], Optional[SpawnedRunner], Any]":
+        """Atomically capture-and-null the per-session runner triple.
+
+        #1061.  Returns ``(rpc, spawned, pool_manager)`` as they were on
+        entry; all three fields are then cleared on ``self`` under
+        ``_runner_lock``, so a second caller arriving concurrently sees
+        ``None`` and can return early.  ``_runner_ready`` is cleared so the
+        send path blocks until a fresh runner is wired in.
+
+        ``_runner_released`` is set to ``True`` iff ``rpc`` was non-``None``
+        on entry, so ``_save_session`` (which reads this flag to refuse
+        writing the empty history it would otherwise fetch over a record the
+        pre-release save wrote correctly — #1355) can distinguish
+        "released this runner" from "never had a runner".
+
+        When the lock is acquired and the triple is empty (we lost the race
+        to another caller), raises :class:`_RaceLost` so ``shutdown`` can
+        return without emitting a duplicate ``SlotSettledEvent`` or running
+        the close ladder.  A stage that never had a runner has
+        ``_runner_released`` False and proceeds normally through
+        ``shutdown``.
+
+        Lifted out of :meth:`shutdown` to keep that method's cyclomatic
+        complexity within the audit baseline (#1061 review).  The lock
+        acquisition lives here so callers cannot accidentally serialise
+        part of the capture.
+
+        Falls back to ``contextlib.nullcontext`` when ``_runner_lock`` is
+        absent (test fakes built via ``JaatoServer.__new__``), preserving
+        the forward-compat idiom used elsewhere in this class.
+        """
+        _lock = getattr(self, "_runner_lock", None)
+        with _lock if _lock is not None else contextlib.nullcontext():
+            rpc = self._runner_rpc
+            spawned = self._spawned_runner
+            pool_manager = self._pool_manager_ref
+            if rpc is not None:
+                self._runner_released = True
+            self._runner_rpc = None
+            self._runner_ready.clear()  # runner torn down — send path must await respawn
+            self._spawned_runner = None
+            self._pool_manager_ref = None
+        # #1061: when another caller won the race and already cleared the
+        # triple, ``rpc`` is now ``None`` and ``_runner_released`` is
+        # ``True`` (the winner set it).  Signal ``shutdown`` to bail.
+        if rpc is None and getattr(self, "_runner_released", False):
+            raise _RaceLost()
+        return rpc, spawned, pool_manager
+
     # =========================================================================
     # Cleanup
     # =========================================================================
@@ -8285,19 +8369,16 @@ class JaatoServer:
         # inside ``RunnerRPCClient.close``; we run it on the daemon's
         # main loop via run_coroutine_threadsafe so this synchronous
         # ``shutdown`` doesn't block.
-        rpc = self._runner_rpc
-        spawned = self._spawned_runner
-        pool_manager = self._pool_manager_ref
-        # #1355: once the runner is released, ``_runner_rpc is None`` stops
-        # meaning "this server never had a runner".  ``_save_session`` reads
-        # this to refuse writing the empty history it would otherwise fetch
-        # over a record the pre-release save wrote correctly.
-        if rpc is not None:
-            self._runner_released = True
-        self._runner_rpc = None
-        self._runner_ready.clear()  # runner torn down — send path must await respawn
-        self._spawned_runner = None
-        self._pool_manager_ref = None
+        #
+        # ``_take_runner_triple`` captures the triple atomically under
+        # ``_runner_lock`` and, when the helper observes that another
+        # ``shutdown`` caller has already cleared it (the loser of the
+        # race in #1061), it raises ``_RaceLost`` so we can return
+        # cleanly without emitting a duplicate ``SlotSettledEvent``.
+        try:
+            rpc, spawned, pool_manager = self._take_runner_triple()
+        except _RaceLost:
+            return
 
         # Phase 2 cascade-sharing: when the runner was served from
         # the pool, attempt to return the slot instead of closing the
