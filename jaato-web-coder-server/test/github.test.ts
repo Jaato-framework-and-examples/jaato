@@ -299,4 +299,52 @@ describe("github service — the daemon writes what this server cannot reach", (
     assert.equal(again.changed, 0);
     assert.deepEqual(reloader.calls, ["alice"], "an unchanged resync reloads nothing");
   });
+
+  test("resync drops a binding the daemon has no workspace for, and keeps the rest", async () => {
+    const writer = new FakeWorkspaceWriter();
+    const { svc, store } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    store.bind("sub-alice", "alice", "/gone", account.id);
+    store.bind("sub-alice", "alice", "/live", account.id);
+    const real = writer.writeWorkspace.bind(writer);
+    writer.writeWorkspace = async (user, workspace, request) => workspace === "/gone"
+      ? { status: "not_found", env: {}, files: [], detail: "no such workspace for this user" }
+      : real(user, workspace, request);
+    const result = await svc.resyncWorkspaces();
+    assert.equal(result.removed, 1);
+    assert.deepEqual(store.allBindings().map((b) => b.workspace), ["/live"]);
+    assert.equal(result.notes.length, 0, "a dropped binding is not also reported as a refusal");
+  });
+
+  test("resync drops a binding keyed by a name, without asking the daemon", async () => {
+    const writer = new FakeWorkspaceWriter();
+    const { svc, store } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    store.bind("sub-alice", "alice", "legacy-name", account.id);
+    const result = await svc.resyncWorkspaces();
+    assert.equal(result.removed, 1);
+    assert.equal(writer.calls.length, 0);
+    assert.deepEqual(store.allBindings(), []);
+  });
+
+  test("resync keeps a binding the daemon refused for another reason", async () => {
+    const writer = new FakeWorkspaceWriter();
+    writer.answer = { status: "error", env: {}, files: [], detail: "disk full" };
+    const { svc, store } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    store.bind("sub-alice", "alice", "/w", account.id);
+    const result = await svc.resyncWorkspaces();
+    assert.equal(result.removed, 0);
+    assert.equal(store.allBindings().length, 1);
+  });
+
+  test("an explicit bind that the daemon answers not_found keeps the binding and says why", async () => {
+    const writer = new FakeWorkspaceWriter();
+    writer.answer = { status: "not_found", env: {}, files: [], detail: "no such workspace for this user" };
+    const { svc, store } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    const result = await svc.bind("sub-alice", "alice", "/w", account.id);
+    assert.match(result.note!, /not_found/);
+    assert.equal(store.allBindings().length, 1);
+  });
 });

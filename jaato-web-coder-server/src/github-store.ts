@@ -298,6 +298,21 @@ export class FileGitHubStore {
   }
 
   /**
+   * Drop the binding of ``workspace`` for the daemon-facing ``user``, with no
+   * ownership check.  For the resync only, when the daemon has said the
+   * workspace is not there (see {@link GitHubService.resyncWorkspaces});
+   * a user clears a binding through {@link bind} with ``null``.  Returns
+   * whether a binding was removed.
+   */
+  removeBinding(user: string, workspace: string): boolean {
+    const before = this._bindings.length;
+    this._bindings = this._bindings.filter((b) => !(b.user === user && b.workspace === workspace));
+    if (this._bindings.length === before) return false;
+    this._save();
+    return true;
+  }
+
+  /**
    * Bind ``workspace`` to ``grantId`` (or clear it for ``grantId === null``).
    * The grant must be owned by ``owner``; ``user`` is the daemon-facing
    * identity the resolve path will match, recorded alongside so a
