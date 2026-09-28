@@ -2274,6 +2274,7 @@ class SessionManager:
         # posture #1260 put in the WS pre-init hook, now on the SessionManager
         # spawn path that a WS ``session.new`` actually takes.
         confinement_required = False
+        from jaato_server.server.runner_spawn import resolve_session_private_tmp
         if opt_in_apparmor:
             profile_name, sandbox_mode = self._provision_apparmor_for_session(
                 session_id=session_id,
@@ -2283,6 +2284,12 @@ class SessionManager:
                 env_file=env_file,
                 requested_fragments=requested_fragments,
                 plugin_rules=plugin_rules,
+                # #1381: decided (and stashed on the server) before the
+                # render, since it is part of the boundary.  Off for a
+                # user's own checkout unless the profile opts in.
+                private_tmp_dir=resolve_session_private_tmp(
+                    server, workspace_path,
+                    self._managed_workspace_root_for_spawn()),
             )
             confinement_required = self._apparmor_available()
 
@@ -2537,6 +2544,7 @@ class SessionManager:
         env_file: Optional[str],
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        private_tmp_dir: Optional[str] = None,
     ) -> "Tuple[str, Optional[str]]":
         """Provision the AppArmor profile for a session
         (Phase 3 §7a — opt-in only).
@@ -2573,6 +2581,7 @@ class SessionManager:
               spawn the runner (with disable_confine=True) — that's
               the §7a always-spawn intent.
         """
+        from jaato_server.server.runner_spawn import private_tmp_kwargs
         # Lazy-init the AppArmor manager.
         if getattr(self, "_apparmor_manager", None) is None:
             from jaato_server.server.apparmor import AppArmorManager
@@ -2607,6 +2616,7 @@ class SessionManager:
             env_file=env_file,
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
+            **private_tmp_kwargs(private_tmp_dir),
         )
         if not apparmor.provision_profile(
             session_id,
@@ -2616,6 +2626,7 @@ class SessionManager:
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
             confinement_id=confinement_id,
+            **private_tmp_kwargs(private_tmp_dir),
         ):
             self._notify_apparmor(
                 client_id, session_id,

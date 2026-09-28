@@ -1173,11 +1173,21 @@ class JaatoWSServer:
                 # pre-warm slot that already wears it needs no
                 # ``aa_change_profile`` — which it could not perform for
                 # the threads it already has (#1023).
+                # #1381: a private /tmp is part of the boundary (it renders
+                # the /tmp grants), so it is decided before the render and
+                # stashed for the spawn and the envelope to read back.
+                from jaato_server.server.runner_spawn import (
+                    private_tmp_kwargs, resolve_session_private_tmp,
+                )
+                private_tmp = resolve_session_private_tmp(
+                    server, workspace_path, ws_workspace_root)
                 if apparmor.provision_profile(
                     session_id, workspace_path,
                     plugin_rules=plugin_rules,
                     confinement_id=apparmor.confinement_id_for_boundary(
-                        workspace_path, plugin_rules=plugin_rules),
+                        workspace_path, plugin_rules=plugin_rules,
+                        **private_tmp_kwargs(private_tmp)),
+                    **private_tmp_kwargs(private_tmp),
                 ):
                     profile_name = apparmor.get_profile_name(session_id)
                 else:
@@ -1437,11 +1447,20 @@ class JaatoWSServer:
                 config_root=getattr(server, "config_root", None),
                 managed_workspace_root=ws_workspace_root,
             )
+            # #1381: re-render with the private /tmp the pre-init hook
+            # decided (read back, never re-decided), or this would load a
+            # different body under a different name after the spawn.
+            from jaato_server.server.runner_spawn import (
+                private_tmp_kwargs, stashed_private_tmp,
+            )
+            private_tmp = private_tmp_kwargs(stashed_private_tmp(server))
             if not apparmor.provision_profile(
                 session_id, sess.workspace_path,
                 plugin_rules=plugin_rules,
                 confinement_id=apparmor.confinement_id_for_boundary(
-                    sess.workspace_path, plugin_rules=plugin_rules),
+                    sess.workspace_path, plugin_rules=plugin_rules,
+                    **private_tmp),
+                **private_tmp,
             ):
                 # #1253: reaching here means confinement was REQUIRED for this
                 # WS-provisioned session — the host has an available

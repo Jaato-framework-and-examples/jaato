@@ -2440,7 +2440,26 @@ def validate_gitignore(workspace: str) -> List[Diagnostic]:
             f"runtime state is one `git add -A` from being committed.  "
             f"Run: {fix}",
             profile=".gitignore"))
+    out.extend(_scratch_findings(verdict, fix))
     return out
+
+
+def _scratch_findings(verdict: Any, fix: str) -> List[Diagnostic]:
+    """``gitignore_leaks_scratch``: workspace-root scratch left committable.
+
+    The private ``/tmp`` (#1381) lives at ``<ws>/.tmp``, outside ``.jaato/``,
+    so the ``.jaato/*`` rule does not reach it.  Anything a session wrote to
+    ``/tmp`` is then one ``git add -A`` from a commit.
+    """
+    scratch = getattr(verdict, "unignored_scratch", ())
+    if not scratch:
+        return []
+    leaked = ", ".join(f"{probe.split('/')[0]}/ ({what})" for probe, what in scratch)
+    return [Diagnostic(
+        "warn", "gitignore_leaks_scratch",
+        f".gitignore does not ignore {leaked}: what sessions write there is "
+        f"one `git add -A` from being committed.  Run: {fix}",
+        profile=".gitignore")]
 
 
 # ------------------------------------------------------------- single file

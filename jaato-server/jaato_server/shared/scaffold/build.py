@@ -576,7 +576,9 @@ def _new_gitignore(args) -> int:
     verdict = _gitignore.assess(ws)
     if not verdict.clean:
         hidden = ", ".join(verdict.hidden_authored) or "-"
-        leaked = ", ".join(p for p, _ in verdict.unignored_state) or "-"
+        leaked = ", ".join(
+            [p for p, _ in verdict.unignored_state]
+            + [p for p, _ in verdict.unignored_scratch]) or "-"
         print(f"✘ the block did not take — generator bug: still ignored "
               f"[{hidden}]; still committable [{leaked}]")
         return 1

@@ -189,6 +189,10 @@ class SlotKey:
     warm plugin instances, tenant isolation ``cascade_driver_id``
     the AppArmor profile its threads wear   ``workspace_root`` +
                                             ``profile_name``
+    the mount namespace (#1381 private      ``profile_name`` — the
+    ``/tmp``: ``<ws>/.tmp`` over ``/tmp``)  body names the bound
+                                            directory, so it is part of
+                                            the confinement id
     the cgroup (``runtime_limits`` trio)    not needed — a session
                                             needing one is routed away
                                             from the pool entirely
@@ -210,6 +214,16 @@ class SlotKey:
     with no AppArmor, where the workspace is still the thing #890 cares
     about; and ``workspace_root`` alone does not distinguish two
     boundaries over one workspace.
+
+    The mount-namespace row (#1381) needs no field of its own, and that is
+    checked rather than assumed (``test_private_tmp_1381``): only a
+    CONFINED runner enters a private ``/tmp``, a confined slot is handed
+    only to a session wanting the ``profile_name`` it wears, and that name
+    is derived from a body that names the bound directory.  A confined slot
+    can no longer mount (every body denies ``mount`` and ``sys_admin``), so
+    a key that let it reach a different boundary would be a refused
+    bootstrap, never a shared ``/tmp``.  An unconfined slot never enters a
+    namespace, so ``profile_name=None`` keeps meaning "no namespace".
 
     ``PoolSlot.has_served`` (#1100) is deliberately NOT a fifth field.  A
     key says what an ARRIVING SESSION wants; ``has_served`` says what a

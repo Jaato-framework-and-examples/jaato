@@ -44,6 +44,9 @@ from jaato_server.shared.apparmor_label import (
     profile_name_ignoring_mode,
 )
 from jaato_server.shared.session_envelope import SessionInitEnvelope
+from jaato_server.shared.private_tmp import (
+    PRIVATE_TMP_TARGETS, PrivateTmpError, enter_private_tmp,
+)
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
@@ -755,6 +758,71 @@ def _configure_output_redaction(
         )
 
 
+def _private_tmp_of(envelope: SessionInitEnvelope) -> Optional[str]:
+    """The ``<ws>/.tmp`` this runner binds over ``/tmp``, or ``None`` (#1381).
+
+    Only a CONFINED runner has one; an envelope carrying the field with an
+    empty ``profile_name`` is ignored, so an unconfined pool slot never
+    acquires a namespace another workspace would inherit.
+    """
+    if not envelope.profile_name:
+        return None
+    # ``getattr``: a duck-typed envelope (a test double) predating the
+    # field means "no private /tmp", as an older daemon's envelope does.
+    return getattr(envelope, "private_tmp_dir", None)
+
+
+def _enter_private_tmp(envelope: SessionInitEnvelope) -> None:
+    """Bind the workspace's ``.tmp`` over ``/tmp`` before confining (#1381).
+
+    Step 1b2 of :func:`bootstrap_session`, BEFORE step 1c
+    (:func:`_maybe_self_confine`): every profile body denies ``mount`` and
+    ``capability sys_admin``, so only the still-unconfined slot can unshare
+    and mount.  Runs on the main thread, which is the thread that confines.
+
+    Paths:
+
+    - **cold spawn**: the forked child already entered the namespace before
+      ``exec`` (``runner_spawner._enter_private_tmp_in_child``), so this
+      finds ``/tmp`` already bound and does nothing;
+    - **virgin pool slot**: unshares and binds here;
+    - **reused pool slot**: its reuse key carries the profile it wears, and
+      the profile body names the private directory, so it only ever serves
+      the SAME boundary; it finds ``/tmp`` already bound and does nothing.
+      A confined slot asked for a DIFFERENT directory could not mount, and
+      refuses.
+
+    **Why no per-thread namespace check.**  A mount namespace is per task,
+    like an AppArmor label (#1023), so a thread created before the unshare
+    stays in the host namespace.  Every such thread is also still
+    ``unconfined`` after step 1c, which ``verify_thread_confinement``
+    already refuses; every thread that passes that check was created by a
+    confined thread, and confinement comes after this step on the same
+    thread.  So the label check covers the namespace too.
+
+    Raises:
+        BootstrapError: stage ``private_tmp`` -- the runner must not run
+            under a ``/tmp`` grant against the host's ``/tmp``.  The daemon
+            turns it into a non-recoverable ``RunnerBootstrapFailed``.
+    """
+    tmp_dir = _private_tmp_of(envelope)
+    try:
+        enter_private_tmp(tmp_dir)
+    except (PrivateTmpError, OSError) as exc:
+        raise BootstrapError(
+            "private_tmp",
+            f"this session's profile expects a private /tmp ({tmp_dir} bound "
+            f"over /tmp and /var/tmp) and it could not be set up: {exc}.  "
+            f"Refusing to start rather than run with a /tmp grant against the "
+            f"host's /tmp (#1381)",
+        ) from exc
+    if tmp_dir:
+        logger.info(
+            "runner-session bootstrap: private /tmp in effect (%s bound over "
+            "%s)", tmp_dir, ", ".join(PRIVATE_TMP_TARGETS),
+        )
+
+
 def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
     """Point this runner's temp files at the directory its profile grants.
 
@@ -792,7 +860,21 @@ def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
 
     An unconfined runner (no ``profile_name``) keeps the pre-#1171
     ``/tmp/jaato-<session_id>`` and the whole-``/tmp`` allowance.
+
+    **A private ``/tmp`` (#1381)** changes both halves: ``/tmp`` is then the
+    workspace's own ``.tmp``, the profile grants all of it, and the #1171
+    session directory on the host's ``/tmp`` is not even visible.  So
+    ``TMPDIR`` is ``/tmp`` itself, and the ``sandbox_utils`` allowance is
+    ``/tmp`` and ``/var/tmp`` -- a plain ``/tmp/x`` then works through
+    ``cli``, ``interactive_shell`` and the notebook kernel alike.  Shared by
+    every session of the boundary, as ``/tmp`` is by two processes of one
+    user; ``tempfile`` names are random.
     """
+    from jaato_server.shared.plugins import sandbox_utils
+    if _private_tmp_of(envelope):
+        sandbox_utils.set_temp_roots(list(PRIVATE_TMP_TARGETS))
+        _set_tempdir("/tmp", envelope)
+        return
     path = session_tmpdir(
         envelope.session_id,
         confinement_id_from_profile_name(envelope.profile_name or ""),
@@ -801,7 +883,6 @@ def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
     # The profile grants this directory and nothing else under /tmp, so
     # the pre-flight and the file tools must not allow more (#1361).
     # Before the mkdir below: the grant holds whether or not it succeeds.
-    from jaato_server.shared.plugins import sandbox_utils
     if envelope.profile_name:
         sandbox_utils.narrow_temp_roots(path)
     else:
@@ -826,6 +907,11 @@ def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
         )
         return
 
+    _set_tempdir(path, envelope)
+
+
+def _set_tempdir(path: str, envelope: SessionInitEnvelope) -> None:
+    """Point ``TMPDIR`` and :data:`tempfile.tempdir` at *path*."""
     os.environ["TMPDIR"] = path
     tempfile.tempdir = path
     logger.info(
@@ -1471,6 +1557,12 @@ def bootstrap_session(
             "to os.environ (session_id=%s)",
             len(resolved_session_env), envelope.session_id,
         )
+
+    # ---- 1b2. The workspace's private /tmp, before confining (#1381) ----
+    # A confined task cannot mount, so this is the last moment it can
+    # happen.  Refuses the bootstrap when the profile expects it and it
+    # cannot be set up.
+    _enter_private_tmp(envelope)
 
     # ---- 1c. Per-slot AppArmor self-confine (pool PR 5a) ----
     # Pool slots fork from the (unconfined) template — they need to

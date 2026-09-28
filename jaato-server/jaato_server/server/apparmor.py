@@ -605,7 +605,21 @@ class AppArmorManager:
     #       These files are world-readable.  Base, ``tool_hat`` and a
     #       non-scoping ``//child``; a SCOPED ``//child`` is unchanged,
     #       and its fragments must name the resolved target.
-    _TEMPLATE_VERSION = 38
+    #   v39 (#1381, step 1): a private ``/tmp`` per workspace.  A boundary
+    #       rendered with ``private_tmp_dir`` has its runner unshare a
+    #       mount namespace and bind ``<ws>/.tmp`` over ``/tmp`` and
+    #       ``/var/tmp`` BEFORE it confines (a confined task cannot mount:
+    #       every body denies ``mount`` and ``capability sys_admin``).
+    #       AppArmor judges the path as the task sees it, so base,
+    #       ``tool_hat`` and ``//child`` gain ``/tmp/** rwkl`` and
+    #       ``/var/tmp/** rwkl`` -- ONLY for such a boundary, whose runner
+    #       refuses to start without the namespace, so the grant never
+    #       reaches the host's ``/tmp``.  Other boundaries render a comment
+    #       line in its place.  The flat isolated sub-runner profile is
+    #       unchanged: that runner is spawned by the daemon in the host
+    #       namespace, so it keeps the ``/tmp/jaato-*`` grants and nothing
+    #       wider.  No exec from ``/tmp``, as none from the workspace.
+    _TEMPLATE_VERSION = 39
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -771,6 +785,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /tmp/jaato-{session_id}-** rw,
   /tmp/jaato-{session_id}/   rw,
   /tmp/jaato-{session_id}/** rw,
+{private_tmp_rules}
 
   # Note: sibling workspaces are implicitly denied by AppArmor's
   # default-deny policy.  An explicit deny on the sessions root would
@@ -1355,6 +1370,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
         confinement_id: Optional[str] = None,
+        private_tmp_dir: Optional[str] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -1373,11 +1389,16 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
                 :meth:`confinement_id_for_boundary`.  ``None`` keeps the
                 pre-fix ``jaato-ws-{session_id}`` name, which is what an
                 un-pooled caller and every existing test get.
+            private_tmp_dir: ``<ws>/.tmp`` when this boundary's runner
+                binds it over ``/tmp`` (#1381); renders the ``/tmp``
+                grants.  Must be the value ``confinement_id`` was derived
+                with.
         """
         return self._run_unconfined(
             self._provision_profile_impl,
             session_id, workspace_path, config_root, env_file,
             requested_fragments, plugin_rules, confinement_id,
+            private_tmp_dir,
         )
 
     def _provision_profile_impl(
@@ -1389,6 +1410,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
         confinement_id: Optional[str] = None,
+        private_tmp_dir: Optional[str] = None,
     ) -> bool:
         """Inner body of :meth:`provision_profile`.
 
@@ -1453,6 +1475,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
             composition_out=composition,
+            private_tmp_dir=private_tmp_dir,
         )
 
         try:
@@ -2504,6 +2527,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        private_tmp_dir: Optional[str] = None,
     ) -> str:
         """Compute the confinement id for a boundary, without loading it.
 
@@ -2534,6 +2558,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                 PROBE_ID, workspace_path, config_root, env_file,
                 requested_fragments=requested_fragments,
                 plugin_rules=plugin_rules,
+                private_tmp_dir=private_tmp_dir,
             )
         except Exception as exc:  # noqa: BLE001 — diagnostic, not a gate
             logger.warning(
@@ -2787,8 +2812,17 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
         composition_out: Optional[Dict[str, Any]] = None,
+        private_tmp_dir: Optional[str] = None,
     ) -> str:
         """Render the profile template with session-specific values.
+
+        ``private_tmp_dir`` (#1381, template v39): the ``<ws>/.tmp`` this
+        boundary's runner binds over ``/tmp`` and ``/var/tmp`` in its own
+        mount namespace.  When set, base, ``tool_hat`` and ``//child`` gain
+        ``/tmp/**`` and ``/var/tmp/**`` grants (:meth:`_private_tmp_rules`);
+        when ``None`` they gain nothing.  Part of the body, so part of the
+        confinement id: a boundary with a private ``/tmp`` never shares a
+        profile (or a pool slot) with one without.
 
         ``composition_out``, when given, is filled with which extension
         fragments were inlined, from which tier and file, and which were
@@ -2878,6 +2912,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
             subprofile_flag_clause=subprofile_flag_clause,
+            private_tmp_rules=self._private_tmp_rules(private_tmp_dir, "    "),
         )
 
         # Phase 5 §5.10: build the //child sub-profile body.  Mirrors
@@ -2904,6 +2939,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             # A scoped session (a list, incl. ``[]``) keeps v18's
             # fragment-sole exec authority.
             broad_system_exec=(requested_fragments is None),
+            private_tmp_rules=self._private_tmp_rules(private_tmp_dir, "    "),
         )
 
         return self.PROFILE_TEMPLATE.format(
@@ -2922,7 +2958,34 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             child_subprofile=child_subprofile,
             profile_flags=profile_flags,
             user_global_block=self._render_user_global_block(2),
+            private_tmp_rules=self._private_tmp_rules(private_tmp_dir, "  "),
         )
+
+    @staticmethod
+    def _private_tmp_rules(private_tmp_dir: Optional[str], indent: str) -> str:
+        """The ``/tmp`` grants of a boundary with a private ``/tmp`` (#1381).
+
+        AppArmor judges a path as the task sees it, so inside the runner's
+        mount namespace a write to ``/tmp/x`` is judged as ``/tmp/x`` and
+        needs a ``/tmp`` grant.  That grant is safe only while ``/tmp`` IS
+        ``<ws>/.tmp``, so it is rendered only for a boundary whose runner
+        refuses to start without the namespace
+        (:func:`shared.private_tmp.enter_private_tmp`).  Read/write/lock/link
+        like the workspace; no exec, like the workspace.  An empty comment
+        line otherwise, so the body still says the feature is off.
+        """
+        if not private_tmp_dir:
+            return f"{indent}# (no private /tmp for this boundary)"
+        lines = (
+            f"# ---- private /tmp (#1381): /tmp and /var/tmp are {private_tmp_dir}",
+            "# bound in this runner's own mount namespace; the runner refuses to",
+            "# start without it, so these never reach the host's /tmp ----",
+            "/tmp/          rw,",
+            "/tmp/**        rwkl,",
+            "/var/tmp/      rw,",
+            "/var/tmp/**    rwkl,",
+        )
+        return "\n".join(f"{indent}{line}" for line in lines)
 
     def _build_tool_hat_subprofile(
         self,
@@ -2935,6 +2998,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         plugin_contributed_rules: str,
         session_id: str,
         subprofile_flag_clause: str = "",
+        private_tmp_rules: str = "",
     ) -> str:
         """Build the ``profile tool_hat { ... }`` sub-profile body
         (server 0.6.55+).
@@ -3023,6 +3087,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /tmp/jaato-{session_id}-** rw,
     /tmp/jaato-{session_id}/   rw,
     /tmp/jaato-{session_id}/** rw,
+{private_tmp_rules}
 
     # ---- basic system access (mirrors base) ----
     /usr/bin/**          ix,
@@ -3102,6 +3167,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         session_id: str,
         subprofile_flag_clause: str = "",
         broad_system_exec: bool = False,
+        private_tmp_rules: str = "",
     ) -> str:
         """Build the ``profile child { ... }`` sub-profile body
         (Phase 5 §5.10, template v14).
@@ -3262,6 +3328,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /tmp/jaato-{session_id}-** rw,
     /tmp/jaato-{session_id}/   rw,
     /tmp/jaato-{session_id}/** rw,
+{private_tmp_rules}
 
     # ---- basic system access (mirrors tool_hat) ----
     # In-PATH exec authority in //child depends on whether the session

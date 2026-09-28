@@ -3,6 +3,7 @@
 import logging
 import os
 from jaato_server.shared.session_context import get_workspace_root, get_config_root
+from jaato_server.shared.private_tmp import temp_files_hint
 import re
 import shutil
 import shlex
@@ -538,6 +539,21 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                         "persist there. Recommended: .jaato/tool-venv"
                     ),
                 },
+                "private_tmp": {
+                    "type": "boolean",
+                    "description": (
+                        "Give this session a private /tmp (#1381): a "
+                        "confined runner binds <workspace>/.tmp over /tmp "
+                        "and /var/tmp in its own mount namespace before it "
+                        "confines, and its AppArmor profile grants both, so "
+                        "a plain /tmp write works for every tool.  Unset = "
+                        "on for workspaces the daemon manages under "
+                        "workspace_root, off for a user's own checkout.  "
+                        "Needs a root daemon with AppArmor; otherwise off "
+                        "with one WARNING.  The runner refuses to start if "
+                        "the namespace cannot be set up."
+                    ),
+                },
                 "workspace_home": {
                     "type": "string",
                     "default": "",
@@ -756,8 +772,11 @@ The user manages which env vars are set. If a command fails due to a missing
 variable, report which variable is needed so the user can set it.
 
 TEMPORARY FILES: write scratch files under `$TMPDIR` (or use `mktemp`, which
-honours it). It is this session's own temp directory. In a confined session it
-is the only writable place under /tmp, and other /tmp paths are refused.
+honours it). When the session has a private /tmp (get_environment
+aspect="runtime" reports `private_tmp`), `$TMPDIR` is /tmp itself: /tmp and
+/var/tmp are this workspace's own directory and any path under them works.
+Otherwise, in a confined session `$TMPDIR` is the only writable place under
+/tmp, and other /tmp paths are refused.
 
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
@@ -1463,7 +1482,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 f"the workspace, or ask the operator to grant this path "
                 f"(`sandbox add`).  plugin_configs.cli.extra_paths lets a "
                 f"directory's binaries be RUN; it never makes them readable "
-                f"as data."
+                f"as data.  {temp_files_hint()}"
             )
         return {
             'stdout': '',

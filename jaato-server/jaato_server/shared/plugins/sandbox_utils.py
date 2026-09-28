@@ -33,7 +33,9 @@ Key feature: /tmp Access
 The /tmp directory is allowed by default for sandboxed tools to support
 temporary file operations. This can be disabled via the allow_tmp parameter.
 A confined runner narrows it to the session's own tmpdir, the one directory
-its AppArmor profile grants under /tmp (#1361; see narrow_temp_roots).
+its AppArmor profile grants under /tmp (#1361; see narrow_temp_roots) --
+unless it has a private /tmp (#1381), where /tmp and /var/tmp are the
+workspace's own .tmp and both stay allowed (see set_temp_roots).
 
 Key feature: POSIX pseudo-devices
 =================================
@@ -115,6 +117,18 @@ def narrow_temp_roots(root: str) -> None:
     """
     global SYSTEM_TEMP_PATHS
     SYSTEM_TEMP_PATHS = [root]
+
+
+def set_temp_roots(roots: list) -> None:
+    """Allow exactly *roots* as temp directories (#1381).
+
+    Used by a runner with a private ``/tmp``: there ``/tmp`` and
+    ``/var/tmp`` are the workspace's own ``.tmp``, bound in the runner's
+    mount namespace, and the profile grants both, so the pre-flight and the
+    file tools allow both.  :func:`narrow_temp_roots` is the one-root form.
+    """
+    global SYSTEM_TEMP_PATHS
+    SYSTEM_TEMP_PATHS = list(roots)
 
 
 def restore_temp_roots() -> None:
