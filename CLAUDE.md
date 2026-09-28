@@ -9829,6 +9829,42 @@ the rules of the plugins the runner loads either way.
 Not verified here: no AppArmor kernel. The exec grants and the resolved-path
 reasoning are exercised as rendered strings, not against an enforcing host.
 
+### The Files Panel Asks Git What a Clone Ignores
+
+The workspace monitor filtered paths through `GitignoreParser`, which reads
+only `<workspace>/.gitignore`. A workspace is not a repository — the web
+coder clones each project to `<ws>/<name>`, and every clone has its own
+`.gitignore` and `.git/info/exclude` the parser never saw — so a clone's
+`node_modules/` and `build/` showed in the panel however correctly the
+project ignored them.
+
+`GitIgnoreOracle` (`server/workspace_gitignore_query.py`) answers for a path
+inside a checkout by asking that checkout's own git, through one long-lived
+`git check-ignore --stdin -z -v -n` process per checkout (~40µs per query
+warm). A checkout is the panel's own set: the workspace root when it holds
+`.git`, and each immediate non-hidden child that holds one (matching
+`workspace_sources`); the set is rescanned once when git reports a path it
+cannot place, so a clone that appeared mid-session is picked up.
+
+**The parser still answers first, and its "ignored" is final** — it carries
+the framework's own force-hides (`.home/`, `.tmp/`, the tool venv, `.git/`)
+and the workspace-root `.gitignore`, none of which git may override. Git is
+consulted only for a path the parser lets *through*; `None` (no checkout
+owns it) leaves the parser's "not ignored" standing. So a root checkout
+whose own `.gitignore` omits `.home` still hides it.
+
+**Every git call is hardened**, because a checkout is model-writable and its
+`.git/config` is not: a repo-local value such as `core.fsmonitor` or
+`core.hooksPath` names a program git would run even for a read-only query.
+The process launches with global and system config neutralised
+(`GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` = `/dev/null`) and those two knobs
+forced off on the command line (`-c core.fsmonitor=false -c
+core.hooksPath=/dev/null`); `check-ignore` reads the repository's own
+`.gitignore` / `.git/info/exclude` and touches no network.
+
+Guard: `jaato_server/server/test_files_panel_agrees_with_git.py`, one
+reversion, plus a case that a repo-configured program is not run.
+
 ### Bytecode a Clone Never Sees
 
 A model running a project's Python (`pytest`, `python -m`) wrote

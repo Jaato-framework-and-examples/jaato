@@ -46,6 +46,7 @@ from watchdog.events import (
 from watchdog.observers import Observer
 
 from jaato_server.shared.utils.gitignore import GitignoreParser
+from .workspace_gitignore_query import GitIgnoreOracle
 from jaato_server.shared.plugins.workspace_home import DEFAULT_WORKSPACE_HOME
 from jaato_server.shared.plugins.workspace_venv import DEFAULT_WORKSPACE_VENV
 from jaato_server.shared.private_tmp import DEFAULT_PRIVATE_TMP_DIR
@@ -277,6 +278,12 @@ class WorkspaceMonitor:
             Path(self.workspace_path), include_defaults=True,
             extra_patterns=list(_WORKSPACE_HOME_IGNORE),
         )
+        # Git's own verdict for paths inside a checkout (root or a clone),
+        # so the panel agrees with `git status` on a clone's own .gitignore
+        # and .git/info/exclude.  The parser above stays as the answer for
+        # paths outside every checkout (the workspace-home extras, .git/).
+        self._git_ignore: Optional[GitIgnoreOracle] = GitIgnoreOracle(
+            self.workspace_path)
         self._observer: Optional[Observer] = None
         self._accumulator = _ChangeAccumulator(on_flush=self._handle_flush)
         self._running = False
@@ -341,6 +348,8 @@ class WorkspaceMonitor:
         """
         self._running = False
         self._accumulator.cancel()
+        if self._git_ignore is not None:
+            self._git_ignore.close()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=2)
@@ -692,17 +701,24 @@ class WorkspaceMonitor:
         Returns:
             True if the path matches gitignore or default ignore patterns.
         """
-        if self._gitignore is None:
-            return False
+        # The parser answers first, and its "ignored" is final: it carries
+        # the framework's own force-hides (``.home/``, ``.tmp/``, the tool
+        # venv, ``.git/``) and the workspace-root ``.gitignore``, none of
+        # which git may override.  Only when the parser lets a path THROUGH
+        # do we ask git for a second opinion — a path inside a checkout is
+        # judged by that repository's own ``.gitignore`` /
+        # ``.git/info/exclude``, which the parser never reads (it sees only
+        # ``<workspace>/.gitignore``).  ``None`` from git means no checkout
+        # owns the path, so the parser's "not ignored" stands.
+        if self._gitignore is not None and self._gitignore.is_ignored(Path(abs_path)):
+            return True
 
-        p = Path(abs_path)
-        # For directories, append a trailing separator so the parser
-        # can match directory-only patterns.
-        if is_dir:
-            # Create a fake child so relative_to works and the parser sees
-            # the directory name in the path parts.
-            return self._gitignore.is_ignored(p)
-        return self._gitignore.is_ignored(p)
+        if self._git_ignore is not None:
+            verdict = self._git_ignore.is_ignored(abs_path)
+            if verdict is not None:
+                return verdict
+
+        return False
 
     def _reload_gitignore(self) -> None:
         """Rebuild the ``GitignoreParser`` from the current ``.gitignore``.
