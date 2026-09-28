@@ -32,9 +32,9 @@ from __future__ import annotations
 
 import os
 import re
-import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
+from jaato_server.server.contained_write import PathLeavesRoot, atomic_write_bytes, contained_dir
 from jaato_server.shared.plugins.subagent.config import parse_app_secret_reference
 
 #: An env name this verb may set: an ordinary upper-case variable name.
@@ -139,10 +139,6 @@ def _current_env_value(body: str, key: str) -> Optional[str]:
     return value
 
 
-def _under(path: str, root: str) -> bool:
-    return path == root or path.startswith(root + os.sep)
-
-
 def _read_nofollow(path: str) -> Optional[str]:
     """The file's text, ``None`` when absent.  Refuses a symlink."""
     try:
@@ -154,48 +150,20 @@ def _read_nofollow(path: str) -> Optional[str]:
 
 
 def _atomic_write(path: str, body: str, mode: int) -> None:
-    """Temp file in the same directory, then ``os.replace``.
+    """Temp file in the same directory, then ``os.replace`` (shared helper)."""
+    atomic_write_bytes(path, body.encode("utf-8"), mode)
 
-    ``os.replace`` over a symlink replaces the LINK, so a planted link at the
-    destination is never followed.
-    """
-    tmp = os.path.join(os.path.dirname(path), f".{secrets.token_hex(6)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(body)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+
+def _dir_mode(part: str) -> int:
+    return 0o700 if part == ".home" else 0o755
 
 
 def _contained_dir(root: str, rel_dir: str, create: bool) -> Optional[str]:
-    """The real directory ``root/rel_dir``, creating it when asked.
-
-    Walks one component at a time and checks each existing one resolves
-    inside ``root`` before descending, so no ``mkdir`` ever happens through a
-    link that leaves the workspace.  ``None`` when the directory is absent and
-    ``create`` is false.
-    """
-    current = root
-    for part in [p for p in rel_dir.split("/") if p]:
-        nxt = os.path.join(current, part)
-        if os.path.lexists(nxt):
-            real = os.path.realpath(nxt)
-            if not _under(real, root) or not os.path.isdir(real):
-                raise AppWriteRefused(f"{rel_dir} leaves the workspace or is not a directory")
-            current = real
-            continue
-        if not create:
-            return None
-        os.mkdir(nxt, 0o700 if part == ".home" else 0o755)
-        current = nxt
-    return current
+    """The real directory ``root/rel_dir`` (see :func:`.contained_write.contained_dir`)."""
+    try:
+        return contained_dir(root, rel_dir, create, _dir_mode)
+    except PathLeavesRoot as exc:
+        raise AppWriteRefused(f"{rel_dir} leaves the workspace or is not a directory") from exc
 
 
 def _marker_owner(body: str) -> Optional[str]:

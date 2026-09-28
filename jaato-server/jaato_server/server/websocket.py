@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 import threading
 
@@ -51,6 +51,7 @@ from .apparmor import AppArmorManager
 from .cgroups import CgroupsManager
 from .session_logging import set_logging_context, clear_logging_context
 from .transfer_limits import STAGE_PER_FILE_LIMIT, STAGE_TOTAL_LIMIT
+from .contained_write import PathLeavesRoot, write_contained
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -322,21 +323,43 @@ def _safe_staged_filename(name: str) -> Optional[Path]:
     if not name:
         return None
     clean = Path(name)
-    if clean.is_absolute() or ".." in clean.parts:
+    if clean.is_absolute() or ".." in clean.parts or not clean.parts:
         return None
     return clean
 
 
-def _write_staged_payload(ws_path: Path, name: Path, payload: bytes) -> None:
-    """Atomically write ``payload`` into ``ws_path / name``.
+#: What a staged write reports when a link would carry it out of the workspace.
+_STAGED_LINK_REFUSAL = (
+    "path is, or passes through, a symlink leaving the workspace; "
+    "staging never writes through a link"
+)
 
-    Caller is responsible for path-safety validation (use
-    :func:`_safe_staged_filename`) and size enforcement.  Creates parent
-    directories as needed.
+
+def _write_staged_payload(
+    ws_path: Path, name: Path, payload: bytes,
+) -> Optional[Tuple[str, str]]:
+    """Write ``payload`` to ``ws_path / name`` without following a link (#1386).
+
+    The workspace is model-writable, so a symlink may have been planted on
+    the file or on a parent directory.  :func:`.contained_write.write_contained`
+    resolves the workspace root, creates and checks each parent component
+    inside it, refuses a destination that is a symlink, and writes through a
+    temp file plus ``os.replace``.
+
+    Caller is responsible for name validation (:func:`_safe_staged_filename`)
+    and size enforcement.  Never raises: returns ``None`` on success, else
+    ``(category, error)`` for the result's ``failed`` list — ``unsafe_path``
+    for a link leaving the workspace (or a parent that is not a directory),
+    ``io_error`` for an I/O failure.
     """
-    dest = ws_path / name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(payload)
+    try:
+        write_contained(str(ws_path), name.as_posix(), payload)
+    except PathLeavesRoot as exc:
+        logger.warning("Refusing staged file %s: %s", name, exc)
+        return "unsafe_path", f"{_STAGED_LINK_REFUSAL} ({exc})"
+    except OSError as exc:
+        return "io_error", str(exc)
+    return None
 
 
 def _materialize_staged_files(
@@ -353,8 +376,9 @@ def _materialize_staged_files(
     :meth:`JaatoWSServer._handle_stage_files_request`.
 
     Unsafe entries (absolute paths, ``..`` components, invalid base64,
-    non-dict entries, missing ``name``) are logged and skipped; the
-    caller never sees an exception.
+    non-dict entries, missing ``name``, a path that is or passes through
+    a symlink leaving the workspace, an I/O failure) are logged and
+    skipped; the caller never sees an exception.
 
     Args:
         ws_path: Root of the workspace.  All writes are rooted here;
@@ -388,7 +412,10 @@ def _materialize_staged_files(
                 "Rejecting staged_file %s: invalid base64 (%s)", name, exc,
             )
             continue
-        _write_staged_payload(ws_path, clean, payload)
+        failure = _write_staged_payload(ws_path, clean, payload)
+        if failure is not None:
+            logger.warning("Rejecting staged_file %s: %s", name, failure[1])
+            continue
         written += 1
     return written
 
@@ -3100,13 +3127,12 @@ class JaatoWSServer:
                 })
                 continue
 
-            try:
-                _write_staged_payload(Path(workspace_path), clean, payload)
-            except OSError as exc:
+            failure = _write_staged_payload(Path(workspace_path), clean, payload)
+            if failure is not None:
                 failed.append({
                     "name": spec.name,
-                    "category": "io_error",
-                    "error": str(exc),
+                    "category": failure[0],
+                    "error": failure[1],
                 })
                 continue
 

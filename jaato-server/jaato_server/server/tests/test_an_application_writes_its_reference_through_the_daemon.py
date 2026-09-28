@@ -37,9 +37,9 @@ REVERSIONS = [
         because="the verb writes a secret to disk",
     ),
     Reversion(
-        target=_MOD,
-        find="            if not _under(real, root) or not os.path.isdir(real):\n",
-        replace="            if not os.path.isdir(real):\n",
+        target="jaato-server/jaato_server/server/contained_write.py",
+        find="            if not under(real, root):\n",
+        replace="            if False:\n",
         test="test_a_planted_symlink_cannot_carry_the_write_outside",
         because="a root daemon writes wherever a model-planted link points",
     ),

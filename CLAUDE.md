@@ -8210,6 +8210,35 @@ so an auto-provisioned workspace needs the provisioner's own
 `templates/default/.env` seeded. A probe whose sessions do not start
 reports on the no-session path and says so nowhere.
 
+### A Staged File Written Through a Planted Link (#1386)
+
+Staging wrote with `mkdir(parents=True)` and `write_bytes`, and both follow
+symlinks. A workspace is model-writable, so the agent could plant a link on
+a file or a parent directory, and the next staging that named the path wrote
+the client's bytes wherever the link pointed: on a root daemon, anywhere on
+the host. Found by reading the code, not reproduced.
+
+`workspace.app_write` already had the rule, so it moved into
+`server/contained_write.py` and both use it. `write_contained` resolves the
+root once, walks the parent one component at a time (an existing component
+must resolve inside the root, a missing one is created inside a directory
+already proved contained), refuses a destination that is a symlink, and
+writes through a temp file plus `os.replace`. A link pointing outside is
+refused whether or not its target exists.
+
+| Writer | Change |
+|---|---|
+| `_write_staged_payload` (`StageFilesRequest`, inline `staged_files`, `/api/task/artifacts`) | `write_contained`; a refusal is `unsafe_path` in `failed`, an I/O error `io_error`, and it returns them instead of raising |
+| `_materialize_staged_files` | skips a refused or failed entry and logs it; it used to raise on an `OSError` |
+| `session_inbox.spool` / `store_file` (Phase 3 copies) | directories under the session storage dir are created with `contained_dir`; a link out is a `PermissionError`, the callers' existing `OSError` path |
+
+Not changed: the `--artifacts <id>` copy in `session.new` (`shutil.copytree`
+into a workspace provisioned in the same call), and the session storage
+directory itself, which is the daemon's own record root.
+
+Guard: `server/tests/test_staging_does_not_follow_a_planted_link_1386.py`,
+three reversions.
+
 ### A File That Could Go In and Not Come Out
 
 A remote client could put a file INTO a workspace (`StageFilesRequest`)
