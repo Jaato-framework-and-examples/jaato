@@ -9,9 +9,16 @@
  * sees names.  Without a backend -- or with no GitHub account connected --
  * a typed ``owner/repo`` can still be added by hand, which clones anything
  * public.
+ *
+ * Typing also searches GitHub (``/api/github/search``), so a repository
+ * outside the App's installations -- an organisation's repository the App
+ * was never installed on -- autocompletes too.  Such a repository is marked,
+ * and picking it says why: it clones if public, but the token the
+ * workspace's sessions get cannot push, branch or open a pull request there
+ * until the App is installed on its owner (``appReach``).
  */
 import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { githubApi, type GitHubRepo } from "@/app/github";
+import { appReach, githubApi, reachWarning, type GitHubRepo, type RepoListing, type SearchedRepo } from "@/app/github";
 import { cloneTarget } from "@/protocol/workspaces";
 
 export interface PickedRepo {
@@ -30,8 +37,35 @@ export function filterRepos(repos: GitHubRepo[], query: string): GitHubRepo[] {
   return q ? repos.filter((r) => r.fullName.toLowerCase().includes(q)) : repos;
 }
 
+/** How long typing must pause before the field asks GitHub search. */
+export const SEARCH_DEBOUNCE_MS = 250;
+
+/** Merge the listing's matches with search hits: listing first, a hit it already has dropped. */
+export function mergeHits(listed: GitHubRepo[], hits: SearchedRepo[]): Array<GitHubRepo & { appCanWrite: boolean | null }> {
+  const seen = new Set(listed.map((r) => r.fullName.toLowerCase()));
+  return [
+    ...listed.map((r) => ({ ...r, appCanWrite: true as boolean | null })),
+    ...hits.filter((h) => !seen.has(h.fullName.toLowerCase())),
+  ];
+}
+
+function useRepoSearch(githubUrl: string | null | undefined, query: string) {
+  const [hits, setHits] = useState<SearchedRepo[]>([]);
+  useEffect(() => {
+    const q = query.trim();
+    if (!githubUrl || q.length < 2 || !/^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]*)?$/.test(q)) { setHits([]); return; }
+    let live = true;
+    const timer = setTimeout(() => {
+      githubApi(githubUrl).searchRepos(q).then((r) => { if (live) setHits(r); }).catch(() => { if (live) setHits([]); });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => { live = false; clearTimeout(timer); };
+  }, [githubUrl, query]);
+  return hits;
+}
+
 function useRepoListing(githubUrl: string | null | undefined) {
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
+  const [listing, setListing] = useState<RepoListing | null>(null);
   const [login, setLogin] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -42,6 +76,7 @@ function useRepoListing(githubUrl: string | null | undefined) {
     githubApi(githubUrl).listRepos().then((l) => {
       if (!live) return;
       setRepos(l.repos);
+      setListing(l);
       setLogin(l.account.login);
       setError("");
     }).catch((err) => {
@@ -49,13 +84,25 @@ function useRepoListing(githubUrl: string | null | undefined) {
     }).finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [githubUrl]);
-  return { repos, login, error, loading };
+  return { repos, listing, login, error, loading };
 }
 
 function Check({ on }: { on: boolean }) {
   return (
     <span aria-hidden="true" className={`inline-flex items-center justify-center w-[14px] h-[14px] border text-[10px] leading-none shrink-0 ${on ? "bg-steel border-steel text-bg" : "border-[color:var(--c-text-muted)]"}`}>
       {on ? "✓" : ""}
+    </span>
+  );
+}
+
+/** The warning under a repository the App cannot write to; nothing when it can, or when that is unknown. */
+export function ReachNote({ listing, repo }: { listing: RepoListing | null | undefined; repo: string }) {
+  const r = appReach(listing, repo);
+  if (!r || r.canWrite) return null;
+  return (
+    <span className="text-[12px] text-warning" role="note" data-testid="reach-warning">
+      {reachWarning(r)}{" "}
+      {r.installUrl && <a href={r.installUrl} target="_blank" rel="noopener noreferrer" className="link">{r.ownerInstalled ? "Configure the App" : "Install the App"}</a>}
     </span>
   );
 }
@@ -69,12 +116,13 @@ export function RepoPicker({ githubUrl, workspace, picked, onChange, leading }: 
   /** A state setter: branch lists arrive after the pick, so updates are functional. */
   onChange: Dispatch<SetStateAction<PickedRepo[]>>;
 }) {
-  const { repos, login, error, loading } = useRepoListing(githubUrl);
+  const { repos, listing, login, error, loading } = useRepoListing(githubUrl);
   const [query, setQuery] = useState("");
-  const shown = useMemo(() => filterRepos(repos, query), [repos, query]);
+  const hits = useRepoSearch(githubUrl, query);
+  const shown = useMemo(() => mergeHits(filterRepos(repos, query), hits), [repos, query, hits]);
   const isPicked = (name: string) => picked.some((p) => p.repo === name);
   const typed = query.trim();
-  const canAddTyped = REPO_RE.test(typed) && !repos.some((r) => r.fullName.toLowerCase() === typed.toLowerCase()) && !isPicked(typed);
+  const canAddTyped = REPO_RE.test(typed) && !shown.some((r) => r.fullName.toLowerCase() === typed.toLowerCase()) && !isPicked(typed);
 
   const loadBranches = (name: string) => {
     if (!githubUrl) return;
@@ -123,6 +171,7 @@ export function RepoPicker({ githubUrl, workspace, picked, onChange, leading }: 
                 <button type="button" role="checkbox" aria-checked={on} onClick={() => toggle(r)} className={`w-full flex items-center gap-2.5 px-3 py-1.5 border-b hairline text-left ${on ? "tint" : "hover:bg-tint/60"}`}>
                   <Check on={on} />
                   <span className="font-mono text-[12px] flex-1 min-w-0 truncate">{r.fullName}</span>
+                  {r.appCanWrite === false && <span className="chrome chrome-sm text-[11px] text-warning" title="The GitHub App cannot write here: agents cannot push, branch or open pull requests">App not installed</span>}
                   <span className="chrome chrome-sm text-[11px] text-text-muted">{r.private ? "Private" : "Public"}</span>
                 </button>
               </li>
@@ -153,6 +202,7 @@ export function RepoPicker({ githubUrl, workspace, picked, onChange, leading }: 
                 <div className="flex-1 min-w-0 flex flex-col">
                   <span className="font-mono text-[13px] truncate">{p.repo}</span>
                   <span className="font-mono text-[11px] text-text-muted truncate">→ {cloneTarget(workspace || "{name}", p.repo)}</span>
+                  <ReachNote listing={githubUrl ? listing : null} repo={p.repo} />
                 </div>
                 {/* A fixed-width wrapper: ``.input`` is unlayered CSS with
                     ``width: 100%``, which a width utility on the field loses to. */}

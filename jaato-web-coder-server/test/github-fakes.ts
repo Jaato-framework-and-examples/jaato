@@ -64,6 +64,19 @@ export class FakeGitHubApi implements GitHubApi {
     return repos.slice(0, maxItems);
   }
 
+  /** Every search repository, filtered by the fake the way GitHub would (``user:`` + name substring). */
+  searchable: GitHubRepo[] = [];
+  searchCalls: Array<{ token: string; query: string }> = [];
+
+  async searchRepos(accessToken: string, query: string, maxItems: number): Promise<GitHubRepo[]> {
+    this.searchCalls.push({ token: accessToken, query });
+    const user = /user:(\S+)/.exec(query)?.[1]?.toLowerCase();
+    const name = /(\S+) in:name/.exec(query)?.[1]?.toLowerCase() ?? "";
+    return this.searchable
+      .filter((r) => (!user || r.fullName.toLowerCase().startsWith(`${user}/`)) && r.fullName.split("/")[1]!.toLowerCase().includes(name))
+      .slice(0, maxItems);
+  }
+
   async listBranches(accessToken: string, owner: string, repo: string, maxItems: number): Promise<string[]> {
     this.branchCalls.push({ token: accessToken, repo: `${owner}/${repo}` });
     const b = this.branches.get(`${owner}/${repo}`);

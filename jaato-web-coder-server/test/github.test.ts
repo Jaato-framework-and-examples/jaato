@@ -348,3 +348,77 @@ describe("github service — the daemon writes what this server cannot reach", (
     assert.equal(store.allBindings().length, 1);
   });
 });
+
+describe("github service — which repositories the App can write to", () => {
+  test("the listing names where the App is installed and links to installing it", async () => {
+    const { svc, api } = service();
+    api.identity = { ...api.identity, installations: [{ id: 7, account: "alice", appSlug: "jaato-web-coder" }] };
+    api.installationRepos.set(7, [{ fullName: "alice/dots", private: false, defaultBranch: "main" }]);
+    await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    const l = await svc.listRepos("sub-alice");
+    assert.deepEqual(l.installedOn, ["alice"]);
+    assert.equal(l.truncated, false);
+    assert.equal(l.installUrl, "https://github.com/apps/jaato-web-coder/installations/new");
+    // An org repository the App is not installed on is absent: the listing
+    // is complete, so its absence means the token cannot write there.
+    assert.ok(!l.repos.some((r) => r.fullName.startsWith("Jaato-framework-and-examples/")));
+  });
+
+  test("a configured slug wins, and a GHE web host is used for the link", async () => {
+    const store = new FileGitHubStore(storePath(), KEY);
+    const api = new FakeGitHubApi();
+    const svc = new GitHubService({ store, api, reloader: new FakeReloader(), appSlug: "configured", webBaseUrl: "https://ghe.example/" });
+    api.installationRepos.set(7, []);
+    await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    assert.equal((await svc.listRepos("sub-alice")).installUrl, "https://ghe.example/apps/configured/installations/new");
+  });
+
+  test("an installation that failed to list makes the listing incomplete, a removed one does not", async () => {
+    const { svc, api } = service();
+    api.identity = { ...api.identity, installations: [{ id: 7, account: "acme" }, { id: 8, account: "alice" }] };
+    api.installationRepos.set(7, [{ fullName: "acme/api", private: true, defaultBranch: "main" }]);
+    await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    // 8 answers 404 while GitHub still reports it: unknown, so incomplete.
+    assert.equal((await svc.listRepos("sub-alice")).truncated, true);
+  });
+
+  test("a stored installation GitHub no longer reports is not asked and does not make the listing incomplete", async () => {
+    const store = new FileGitHubStore(storePath(), KEY);
+    const api = new FakeGitHubApi();
+    const svc = new GitHubService({ store, api, reloader: new FakeReloader() });
+    api.identity = { ...api.identity, installations: [{ id: 7, account: "acme" }, { id: 9, account: "gone" }] };
+    await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    api.identity = { ...api.identity, installations: [{ id: 7, account: "acme" }] };
+    api.installationRepos.set(7, [{ fullName: "acme/api", private: true, defaultBranch: "main" }]);
+    const l = await svc.listRepos("sub-alice");
+    assert.equal(l.truncated, false);
+    assert.deepEqual(l.installedOn, ["acme"]);
+    assert.ok(!api.repoCalls.some((c) => c.installationId === 9));
+  });
+});
+
+describe("github service — repo autocomplete", () => {
+  test("owner/partial searches that owner, and flags what the App cannot write to", async () => {
+    const { svc, api } = service();
+    api.identity = { ...api.identity, installations: [{ id: 7, account: "alice" }] };
+    api.installationRepos.set(7, [{ fullName: "alice/jaato-notes", private: false, defaultBranch: "main" }]);
+    api.searchable = [
+      { fullName: "Jaato-framework-and-examples/jaato", private: false, defaultBranch: "main" },
+      { fullName: "alice/jaato-notes", private: false, defaultBranch: "main" },
+    ];
+    await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    const org = await svc.searchRepos("sub-alice", "Jaato-framework-and-examples/jaa");
+    assert.deepEqual(org.repos.map((r) => [r.fullName, r.appCanWrite]), [["Jaato-framework-and-examples/jaato", false]]);
+    assert.equal(api.searchCalls.at(-1)!.query, "jaa in:name user:Jaato-framework-and-examples");
+    const word = await svc.searchRepos("sub-alice", "jaato");
+    assert.deepEqual(word.repos.map((r) => [r.fullName, r.appCanWrite]), [["Jaato-framework-and-examples/jaato", false], ["alice/jaato-notes", true]]);
+  });
+
+  test("a term too short or outside the name alphabet does not reach GitHub", async () => {
+    const { svc, api } = service();
+    api.installationRepos.set(7, []);
+    await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    for (const t of ["", "j", "a b", "x/../y", "user:evil"]) assert.deepEqual((await svc.searchRepos("sub-alice", t)).repos, []);
+    assert.equal(api.searchCalls.length, 0);
+  });
+});

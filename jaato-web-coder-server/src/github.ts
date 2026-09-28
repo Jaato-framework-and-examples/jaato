@@ -66,9 +66,33 @@ export const REPO_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export interface RepoListing {
   account: { id: string; login: string };
   repos: GitHubRepo[];
+  /**
+   * The accounts (users, organisations) the App is installed on, as this
+   * user sees them.  The token a bound workspace's sessions get is a
+   * user-to-server token, so it can WRITE (push, create a branch, open a pull
+   * request) only to a repository one of these installations covers — which
+   * is exactly the set in ``repos``.  A public repository outside it still
+   * clones, anonymously, and then every push fails.
+   */
+  installedOn: string[];
+  /** ``repos`` stopped at {@link MAX_LISTED_REPOS}, so a repository missing from it may still be covered. */
+  truncated: boolean;
+  /** Where the user installs the App or adds a repository to it; absent when the App's slug is unknown. */
+  installUrl?: string;
 }
 
 /** What ``GET /api/github/branches`` answers. */
+/** One search hit, with whether the App can write to it (``null`` = the listing cannot say). */
+export type SearchedRepo = GitHubRepo & { appCanWrite: boolean | null };
+
+export interface RepoSearch {
+  query: string;
+  repos: SearchedRepo[];
+}
+
+/** The most repositories one autocomplete answer carries. */
+export const MAX_SEARCHED_REPOS = 20;
+
 export interface BranchListing {
   repo: string;
   defaultBranch?: string;
@@ -150,6 +174,14 @@ export interface GitHubServiceOptions {
    * the daemon resolves only references it finds there.
    */
   workspaceWriter?: WorkspaceWriter;
+  /**
+   * The GitHub App's URL slug, for the install link a listing carries.
+   * Unset = taken from any installation ``/user/installations`` reports; a
+   * user with no installation at all then gets no link, only the wording.
+   */
+  appSlug?: string;
+  /** ``https://github.com`` or the GHE web host the install link points at. */
+  webBaseUrl?: string;
   marginSeconds?: number;
   log?: (msg: string) => void;
 }
@@ -204,6 +236,8 @@ export class GitHubService {
   private readonly _mint = new KeyedMutex();
   /** ``owner \0 accountId`` -> the last listing and when it was taken (see {@link REPO_LIST_CACHE_MS}). */
   private readonly _repoCache = new Map<string, { at: number; listing: RepoListing }>();
+  private readonly _appSlug?: string;
+  private readonly _webBase: string;
 
   constructor(opts: GitHubServiceOptions) {
     this._store = opts.store;
@@ -213,6 +247,8 @@ export class GitHubService {
     this._writer = opts.workspaceWriter;
     this._margin = opts.marginSeconds ?? TOKEN_REFRESH_MARGIN_SECONDS;
     this._log = opts.log ?? (() => undefined);
+    this._appSlug = opts.appSlug || undefined;
+    this._webBase = (opts.webBaseUrl || "https://github.com").replace(/\/$/, "");
   }
 
   // ---- connect flow -------------------------------------------------------
@@ -302,10 +338,16 @@ export class GitHubService {
     for (const [k, v] of this._repoCache) if (now - v.at >= REPO_LIST_CACHE_MS) this._repoCache.delete(k);
 
     const { value: token } = await this._mintToken(account.id);
-    const installationIds = new Set(account.installations.map((i) => i.id));
+    const installs = new Map(account.installations.map((i) => [i.id, i]));
+    // The installations GitHub reports NOW; null when that read failed.  A
+    // stored installation it no longer reports was removed, so its failure
+    // to list says nothing about coverage.
+    let current: Set<number> | null = null;
     try {
-      for (const i of (await this._api.fetchIdentity(token)).installations) installationIds.add(i.id);
+      current = new Set();
+      for (const i of (await this._api.fetchIdentity(token)).installations) { installs.set(i.id, i); current.add(i.id); }
     } catch (e) {
+      current = null;
       if (e instanceof GitHubGrantRevoked) throw e;
       this._log(`github repos: could not refresh installations for ${account.login}: ${(e as Error).message}`);
     }
@@ -313,12 +355,18 @@ export class GitHubService {
     const byName = new Map<string, GitHubRepo>();
     let failures = 0;
     let lastError: Error | null = null;
+    // With a fresh read, a stored installation it no longer reports is not
+    // asked (it was removed); without one, every stored installation is.
+    const installationIds = current ?? new Set(installs.keys());
+    const reached = new Set<number>();
+    let truncated = false;
     for (const id of installationIds) {
-      if (byName.size >= MAX_LISTED_REPOS) break;
+      if (byName.size >= MAX_LISTED_REPOS) { truncated = true; break; }
       try {
         for (const r of await this._api.listInstallationRepos(token, id, MAX_LISTED_REPOS - byName.size)) {
           if (!byName.has(r.fullName)) byName.set(r.fullName, r);
         }
+        reached.add(id);
       } catch (e) {
         if (e instanceof GitHubGrantRevoked) throw e;
         failures += 1; lastError = e as Error;
@@ -328,10 +376,48 @@ export class GitHubService {
     if (installationIds.size > 0 && failures === installationIds.size) {
       throw new GitHubApiError(`could not list repositories: ${lastError?.message ?? "unknown error"}`);
     }
+    if (byName.size >= MAX_LISTED_REPOS) truncated = true;
+    // An installation that failed transiently is unknown, not absent: its
+    // repositories are missing from the listing, so the listing cannot be
+    // read as "the App does not reach it".
+    if (reached.size < installationIds.size) truncated = true;
     const repos = [...byName.values()].slice(0, MAX_LISTED_REPOS).sort(compareRepos);
-    const listing: RepoListing = { account: { id: account.id, login: account.login }, repos };
+    const live = [...installs.values()].filter((i) => !current || current.has(i.id));
+    const installedOn = [...new Set(live.map((i) => i.account).filter(Boolean))].sort();
+    const slug = this._appSlug ?? [...installs.values()].find((i) => i.appSlug)?.appSlug;
+    const listing: RepoListing = {
+      account: { id: account.id, login: account.login }, repos, installedOn, truncated,
+      ...(slug ? { installUrl: `${this._webBase}/apps/${encodeURIComponent(slug)}/installations/new` } : {}),
+    };
     this._repoCache.set(key, { at: now, listing });
     return listing;
+  }
+
+  /**
+   * Repositories matching what was typed in the picker, from GitHub's search
+   * (so an org repository the App is not installed on autocompletes too).
+   * ``owner/partial`` searches ``partial`` among ``owner``'s repositories;
+   * a bare word searches names.  Each result carries ``appCanWrite``: whether
+   * the App's installations cover it (from the listing), ``null`` when the
+   * listing is incomplete and cannot say.  Terms shorter than two characters
+   * and anything outside the ``owner/name`` alphabet answer an empty list
+   * without reaching GitHub.
+   */
+  async searchRepos(owner: string, term: string, accountId?: string | null): Promise<RepoSearch> {
+    const t = (typeof term === "string" ? term : "").trim();
+    const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]*)$/.exec(t) ?? /^()([A-Za-z0-9_.-]+)$/.exec(t);
+    const account = this._pickAccount(owner, accountId);
+    if (!m || t.length < 2) return { query: t, repos: [] };
+    const [, who, name] = m as unknown as [string, string, string];
+    const q = [name ? `${name} in:name` : "", who ? `user:${who}` : ""].filter(Boolean).join(" ");
+    const listing = await this.listRepos(owner, account.id);
+    const covered = new Set(listing.repos.map((r) => r.fullName.toLowerCase()));
+    const { value: token } = await this._mintToken(account.id);
+    const found = await this._api.searchRepos(token, q, MAX_SEARCHED_REPOS);
+    return {
+      query: t,
+      repos: found.map((r) => ({ ...r, appCanWrite: covered.has(r.fullName.toLowerCase()) ? true : listing.truncated ? null : false })),
+    };
   }
 
   /**

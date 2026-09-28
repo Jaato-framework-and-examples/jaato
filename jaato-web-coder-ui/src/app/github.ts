@@ -72,6 +72,8 @@ export interface GitHubApi {
    * that lists them stays in the backend.
    */
   listRepos(accountId?: string): Promise<RepoListing>;
+  /** Repositories matching what was typed (``owner/partial`` or a word), from GitHub search. */
+  searchRepos(term: string, accountId?: string): Promise<SearchedRepo[]>;
   /** A repository's branch names; ``defaultBranch`` when the backend knows it. */
   listBranches(repo: string, accountId?: string): Promise<{ repo: string; defaultBranch?: string; branches: string[] }>;
 }
@@ -86,7 +88,49 @@ export interface GitHubRepo {
 
 export interface RepoListing {
   account: { id: string; login: string };
+  /** Exactly the repositories the App's installations cover: where agents can push, branch and open PRs. */
   repos: GitHubRepo[];
+  /** The owners the App is installed on (absent from an older backend). */
+  installedOn?: string[];
+  /** ``repos`` is incomplete (a cap, or an installation that failed to list), so absence proves nothing. */
+  truncated?: boolean;
+  /** Where to install the App, or add a repository to its installation. */
+  installUrl?: string;
+}
+
+/** A search hit for the picker's autocomplete; ``appCanWrite`` null = the backend could not say. */
+export interface SearchedRepo extends GitHubRepo {
+  appCanWrite: boolean | null;
+}
+
+/**
+ * Whether the App can WRITE to ``repo`` (``owner/name``), judged from a
+ * listing.  A bound workspace's sessions get a user-to-server token, which
+ * reaches only what an installation covers: a public repository outside it
+ * clones anonymously and every push, branch and pull request then fails.
+ *
+ * ``null`` = cannot say (no listing, an incomplete one, or an older backend
+ * that does not report coverage) -- nothing is claimed then.  Otherwise
+ * ``ownerInstalled`` tells "install the App on this owner" apart from
+ * "add this repository to the installation you already have".
+ */
+export function appReach(listing: RepoListing | null | undefined, repo: string):
+  | null
+  | { canWrite: true }
+  | { canWrite: false; owner: string; ownerInstalled: boolean; installUrl?: string } {
+  if (!listing || listing.truncated || !Array.isArray(listing.installedOn)) return null;
+  const lower = repo.toLowerCase();
+  if (listing.repos.some((r) => r.fullName.toLowerCase() === lower)) return { canWrite: true };
+  const owner = repo.split("/")[0] ?? "";
+  const ownerInstalled = listing.installedOn.some((o) => o.toLowerCase() === owner.toLowerCase());
+  return { canWrite: false, owner, ownerInstalled, ...(listing.installUrl ? { installUrl: listing.installUrl } : {}) };
+}
+
+/** The sentence a picker or a workspace row shows for a repository the App cannot write to. */
+export function reachWarning(r: { owner: string; ownerInstalled: boolean }): string {
+  return r.ownerInstalled
+    ? `The GitHub App is installed on ${r.owner} but not for this repository: agents can clone it if it is public, but cannot push, create branches or open pull requests. Add it to the installation.`
+    : `The GitHub App is not installed on ${r.owner}: agents can clone this repository if it is public, but cannot push, create branches or open pull requests. Install the App on ${r.owner}.`;
 }
 
 function subUrl(base: string, leaf: string): string {
@@ -163,7 +207,25 @@ export function githubApi(githubUrl: string, fetchImpl: typeof fetch = fetch): G
           fullName: r.fullName, private: r.private === true, defaultBranch: typeof r.defaultBranch === "string" ? r.defaultBranch : "", pushedAt: r.pushedAt,
         }))
         : [];
-      return { account: { id: String(body.account?.id ?? ""), login: String(body.account?.login ?? "") }, repos };
+      const b = body as { installedOn?: unknown; truncated?: unknown; installUrl?: unknown };
+      return {
+        account: { id: String(body.account?.id ?? ""), login: String(body.account?.login ?? "") }, repos,
+        ...(Array.isArray(b.installedOn) ? { installedOn: b.installedOn.filter((o): o is string => typeof o === "string") } : {}),
+        ...(typeof b.truncated === "boolean" ? { truncated: b.truncated } : {}),
+        ...(typeof b.installUrl === "string" && /^https:\/\//.test(b.installUrl) ? { installUrl: b.installUrl } : {}),
+      };
+    },
+    async searchRepos(term, accountId) {
+      const q = `q=${encodeURIComponent(term)}${accountId ? `&account=${encodeURIComponent(accountId)}` : ""}`;
+      const res = await fetchImpl(withQuery(subUrl(githubUrl, "search"), q), getInit);
+      if (!res.ok) throw await failure(res, "Searching GitHub repositories failed");
+      const body = (await res.json()) as { repos?: unknown };
+      return Array.isArray(body.repos)
+        ? (body.repos as SearchedRepo[]).filter((r) => r && typeof r.fullName === "string").map((r) => ({
+          fullName: r.fullName, private: r.private === true, defaultBranch: typeof r.defaultBranch === "string" ? r.defaultBranch : "",
+          pushedAt: r.pushedAt, appCanWrite: typeof r.appCanWrite === "boolean" ? r.appCanWrite : null,
+        }))
+        : [];
     },
     async listBranches(repo, accountId) {
       const q = `repo=${encodeURIComponent(repo)}${accountId ? `&account=${encodeURIComponent(accountId)}` : ""}`;

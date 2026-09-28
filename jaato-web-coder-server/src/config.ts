@@ -80,6 +80,8 @@ export interface ServerConfig {
     apiBaseUrl?: string;
     noreplyDomain?: string;
     workspaceRoot?: string;
+    /** The App's URL slug (``github.com/apps/<slug>``), for the "install the App" link; optional. */
+    appSlug?: string;
   };
   /**
    * The environment bootstrap (``src/environment/``, #1344): the operator's
@@ -257,7 +259,9 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     // refuses a workspace outside this root (the daemon's own rule).  Resolved
     // to an absolute path so a relative one is anchored at the config dir.
     const workspaceRoot = g.workspace_root ? resolve(baseDir, str(g.workspace_root, "github.workspace_root")) : undefined;
-    github = { file, key, clientId, clientSecret, oauthBaseUrl, apiBaseUrl, noreplyDomain, workspaceRoot };
+    const appSlug = g.app_slug ? str(g.app_slug, "github.app_slug") : undefined;
+    if (appSlug && !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(appSlug)) throw new ConfigError("github.app_slug must be the App's URL slug");
+    github = { file, key, clientId, clientSecret, oauthBaseUrl, apiBaseUrl, noreplyDomain, workspaceRoot, appSlug };
   }
 
   const environment = parseEnvironment(o.environment, baseDir);
