@@ -146,11 +146,6 @@ def error_line(out: List[str]) -> Optional[str]:
     return None
 
 
-def _venv_has_pip(venv: str) -> bool:
-    import glob
-    return bool(glob.glob(os.path.join(venv, "lib", "python*", "site-packages", "pip", "__init__.py")))
-
-
 def clean_line(line: str) -> str:
     """The last state of a line a progress bar redrew with ``\\r``, without ANSI codes."""
     return _ANSI_RE.sub("", line.rsplit("\r", 1)[-1])
@@ -342,29 +337,56 @@ class Installer:
         })
         return {"id": sid, "version": version, "language": "go", "command": self.abs(LOCAL_BIN + "/gopls"), "args": []}
 
+    def probe(self, argv: List[str]) -> bool:
+        """Whether ``argv`` exits 0, run as a step would be but not logged.
+
+        For questions only the interpreter can answer: whether a venv's
+        Python starts, and whether it can import pip.
+        """
+        try:
+            return subprocess.run(
+                argv, cwd=self.abs(".home"), env=self.env(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                preexec_fn=self.preexec, timeout=60,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def _pip_install(self, venv: str) -> List[str]:
         """The argv prefix that ``pip install``s into ``venv``, creating it first.
 
         The venv is made ``--without-pip``: ``python -m venv`` bootstraps pip
         with ``ensurepip``, which a distribution Python may lack, and then
-        fails AFTER writing ``bin/python``, so a retry that saw the
-        interpreter skipped creating it and ran a venv with no pip.  Pip is
-        added with ``ensurepip`` when this Python has it; otherwise the
-        runner's own pip installs into the venv (``pip --python``).
+        fails AFTER writing ``bin/python``.  So nothing here trusts a file on
+        disk: the venv's own Python is asked whether it starts (a venv that
+        does not is removed and made again) and whether it imports pip, both
+        before and after ``ensurepip``.  A ``site-packages/pip`` left by
+        another interpreter version, or an ``ensurepip`` that exits 0 and
+        installs nothing, used to send ``python -m pip install`` to a venv
+        with no pip.  When the venv still has none, the runner's own pip
+        installs into it (``pip --python``).
         """
         py = os.path.join(venv, "bin", "python")
+        if os.path.lexists(py) and not self.probe([py, "-c", "pass"]):
+            self.log("the basedpyright venv's Python does not start; making the venv again")
+            shutil.rmtree(venv, ignore_errors=True)
         if not os.path.exists(py):
             self.step("creating the basedpyright venv", [sys.executable, "-m", "venv", "--without-pip", venv])
-        if _venv_has_pip(venv):
+        has_pip = [py, "-m", "pip", "--version"]
+        if self.probe(has_pip):
             return [py, "-m", "pip", "install"]
         try:
             self.step("adding pip to the basedpyright venv", [py, "-m", "ensurepip", "--default-pip"])
         except InstallError as e:
-            if importlib.util.find_spec("pip") is None:
-                raise InstallError(f"{e}; and the runner's Python has no pip to install with either") from e
-            self.log("no ensurepip here; installing with the runner's pip instead")
-            return [sys.executable, "-m", "pip", "--python", py, "install"]
-        return [py, "-m", "pip", "install"]
+            why = str(e)
+        else:
+            if self.probe(has_pip):
+                return [py, "-m", "pip", "install"]
+            why = "ensurepip finished but the venv's Python still cannot import pip"
+        if importlib.util.find_spec("pip") is None:
+            raise InstallError(f"{why}; and the runner's Python has no pip to install with either")
+        self.log(f"{why}; installing with the runner's pip instead")
+        return [sys.executable, "-m", "pip", "--python", py, "install"]
 
     def _npm(self) -> List[str]:
         """npm, as the bound Node's own ``node .../npm-cli.js``.
