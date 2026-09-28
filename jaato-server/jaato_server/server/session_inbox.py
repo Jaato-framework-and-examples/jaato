@@ -64,6 +64,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .contained_write import PathLeavesRoot, contained_dir
 from .transfer_limits import STAGE_PER_FILE_LIMIT, STAGE_TOTAL_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,25 @@ def _safe_name(index: int, display_name: Any) -> str:
     return f"{index:02d}-{base[:120]}"
 
 
+def _contained_mkdir(storage_dir: Path, rel: str) -> Path:
+    """Create ``storage_dir/rel`` without following a link out of it (#1386).
+
+    The session storage directory sits inside a model-writable workspace,
+    so a symlink may have been planted on ``<id>.inbox`` or below it.  Each
+    component is checked by :func:`.contained_write.contained_dir` before it
+    is created or entered.  A link leaving the storage directory is raised
+    as ``PermissionError`` so callers keep their one ``OSError`` path.
+    """
+    # The storage directory itself is the daemon's own record root (session
+    # records already live there); only what is created beneath it is judged.
+    Path(storage_dir).mkdir(parents=True, exist_ok=True)
+    try:
+        contained_dir(os.path.realpath(storage_dir), rel, create=True)
+    except PathLeavesRoot as exc:
+        raise PermissionError(f"inbox path {rel}: {exc}") from exc
+    return Path(storage_dir) / rel
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + f".tmp-{uuid.uuid4().hex[:8]}")
     with open(tmp, "wb") as fh:
@@ -197,13 +217,11 @@ def spool(
     The bytes go first, the envelope last: an envelope that exists names
     files that exist.  Returns the entry with its manifest filled in.
     """
-    root = inbox_dir(storage_dir, entry.session_id)
-    root.mkdir(parents=True, exist_ok=True)
+    root = _contained_mkdir(storage_dir, inbox_dir(Path(""), entry.session_id).name)
     manifest: List[Dict[str, Any]] = []
     items = list(attachments or [])
     if items:
-        payload_dir = root / entry.message_id
-        payload_dir.mkdir(exist_ok=True)
+        payload_dir = _contained_mkdir(storage_dir, f"{root.name}/{entry.message_id}")
         for i, att in enumerate(items):
             if not isinstance(att, dict):
                 continue
@@ -278,8 +296,10 @@ def store_file(
     the source it already trusted.  Raises ``OSError`` on any failure;
     nothing half-written is left under the final name.
     """
-    root = files_dir(storage_dir, session_id, message_id)
-    root.mkdir(parents=True, exist_ok=True)
+    root = _contained_mkdir(
+        storage_dir,
+        files_dir(Path(""), session_id, message_id).as_posix(),
+    )
     name = _safe_name(index, display_name)
     dest = root / name
     tmp = dest.with_name(dest.name + f".tmp-{uuid.uuid4().hex[:8]}")

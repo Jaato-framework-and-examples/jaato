@@ -70,7 +70,10 @@ Up-front (before any binary frame is read):
 Per-file (some failures still allow processing of subsequent files):
 
 - `unsafe_path` — `name` is empty, absolute, or contains `..`. Frame
-  is drained; remaining files continue.
+  is drained; remaining files continue. Also reported, after the frame
+  is read, when the path is, or passes through, a symlink leaving the
+  workspace, or the destination is itself a symlink (see
+  [Symlinks in the workspace](#symlinks-in-the-workspace)).
 - `size_limit_per_file` — declared `size` exceeds the per-file cap
   (default 10 MB). Frame is drained; remaining files continue.
 - `size_mismatch` — the binary frame's actual length doesn't equal the
@@ -84,6 +87,32 @@ Fatal (aborts the remainder of the stream):
   as `size_mismatch` with `"protocol violation"` in the message.
   Subsequent files in the request are silently skipped because we
   cannot trust the stream alignment.
+
+### Symlinks in the workspace
+
+A workspace is model-writable: the agent's `cli` and `file_edit` tools
+write there, so a link may have been planted on the file (`foo ->
+/etc/...`) or on a parent directory (`sub -> /`). The daemon never writes
+through one (#1386). Every staging route — `StageFilesRequest`, the legacy
+inline `staged_files` on `session.new`, and `/api/task/artifacts` — writes
+through `jaato_server/server/contained_write.py::write_contained`, the same
+rule `workspace.app_write` uses:
+
+1. The workspace root is resolved with `realpath` once.
+2. Parent directories are created and checked one component at a time.
+   An existing component must resolve inside the root and be a
+   directory; a missing one is created inside a directory already proved
+   contained. A link pointing outside is refused whether or not its target
+   exists, so the refusal says nothing about the host's filesystem.
+3. A destination that is itself a symlink is refused, even one pointing
+   inside the workspace.
+4. The file is written to a temp name in the same directory and moved
+   into place with `os.replace`, which replaces a link rather than
+   following it.
+
+A link that stays inside the workspace may still be used as a parent
+directory. The refused entry is reported as `unsafe_path` and skipped;
+the other files in the request continue, and staging never raises.
 
 ## Caps
 
