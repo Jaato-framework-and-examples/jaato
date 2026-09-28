@@ -124,6 +124,40 @@ def unlink_binaries(dest_bin: str, names: List[str], mise_root: str) -> List[str
     return removed
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_PROGRESS_RE = re.compile(r"\d+(?:\.\d+)?/\d+(?:\.\d+)?\b.*\b\d+(?:\.\d+)?s\b|\b\d+(?:\.\d+)?s\b.*\d+(?:\.\d+)?/\d+(?:\.\d+)?\b")
+_VOLATILE_RE = re.compile(r"[\d.]+|[\u2580-\u259f\u2800-\u28ff#=>\-]+")
+
+
+def clean_line(line: str) -> str:
+    """The last state of a line a progress bar redrew with ``\\r``, without ANSI codes."""
+    return _ANSI_RE.sub("", line.rsplit("\r", 1)[-1])
+
+
+def progress_key(line: str) -> Optional[str]:
+    """What stays the same across snapshots of one progress bar; ``None`` for an ordinary line.
+
+    mise draws its bars on a terminal and, with no terminal, prints a
+    snapshot of each every few seconds (``maven@3.9.9 downloading 3.0s
+    0.5/9.1 MB``, then ``mise 0/1 · 6.0s``).  Two snapshots of one bar differ
+    only in their numbers and bar glyphs, so the key is the line without them.
+    """
+    if not _PROGRESS_RE.search(line):
+        return None
+    return " ".join(_VOLATILE_RE.sub("", line).split())
+
+
+def append_log_line(log: List[str], line: str, lookback: int = 6) -> None:
+    """Append ``line``, or replace a recent snapshot of the same progress bar in place."""
+    key = progress_key(line)
+    if key is not None:
+        for i in range(len(log) - 1, max(-1, len(log) - 1 - lookback), -1):
+            if progress_key(log[i]) == key:
+                log[i] = line
+                return
+    log.append(line)
+
+
 class Installer:
     """One install, in one workspace.  Not reusable across workspaces."""
 
@@ -188,7 +222,7 @@ class Installer:
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
-                line = line.rstrip("\n")
+                line = clean_line(line.rstrip("\n"))
                 out.append(line)
                 if line.strip():
                     last = line.strip()

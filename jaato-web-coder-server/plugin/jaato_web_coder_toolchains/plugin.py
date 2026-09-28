@@ -55,7 +55,7 @@ from jaato_sdk.plugins.base import CommandParameter, ToolResultEnrichmentResult,
 
 from .catalog import LOCAL_BIN, LOCK_PATH, MANIFEST_PATH, MISE_DATA_DIR, TOOLCHAINS, match_tool_version
 from .detect import detect_workspace, find_repo_guidance
-from .installer import InstallCancelled, InstallError, Installer, mise_binary, unlink_binaries
+from .installer import InstallCancelled, InstallError, Installer, append_log_line, mise_binary, unlink_binaries
 from .offer import Allowed, Offer, OfferReader
 from .state import read_manifest, write_derived, write_manifest
 
@@ -304,7 +304,7 @@ class WebCoderToolchainsPlugin:
         tool, version = job.record["tool"], job.record["version"]
 
         def log(line: str) -> None:
-            job.record["log"].append(line[:500])
+            append_log_line(job.record["log"], line[:500])
             del job.record["log"][:-LOG_TAIL]
             self._flush(job)
 

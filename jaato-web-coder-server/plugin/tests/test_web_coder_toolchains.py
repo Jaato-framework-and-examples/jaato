@@ -323,3 +323,32 @@ def test_the_session_delivers_the_hint_and_the_notice(workspace):
     assert "[toolchain] `javac` is provided by Java" in json.dumps(result.result)
     assert [(n["plugin"], n["kind"], n["data"]["command"]) for n in notices] == [
         ("web_coder_toolchains", "toolchain_offer", "javac")]
+
+
+def test_mise_progress_snapshots_replace_each_other_in_the_job_log():
+    """mise prints a snapshot of each bar every few seconds when stdout is not a terminal.
+
+    One download must read as one bar that updates, not a new bar per snapshot.
+    """
+    from jaato_web_coder_toolchains.installer import append_log_line, clean_line
+
+    log = ["$ mise install maven@3.9.9"]
+    for line in [
+        "  maven@3.9.9  downloading  3.0s  0.5/9.1 MB · 197 kB/s",
+        "mise █░░░░ 0/1 · 6.0s",
+        "  maven@3.9.9  downloading  6.0s  1.0/9.1 MB · 187 kB/s",
+        "mise ██░░░ 0/1 · 9.0s",
+        "java@21 downloading 1.0s 3.0/190.0 MB · 3 MB/s",
+        "mise maven@3.9.9 ✓ installed",
+        "mise maven@3.9.9 ✓ installed",
+    ]:
+        append_log_line(log, line)
+    assert log == [
+        "$ mise install maven@3.9.9",
+        "  maven@3.9.9  downloading  6.0s  1.0/9.1 MB · 187 kB/s",
+        "mise ██░░░ 0/1 · 9.0s",
+        "java@21 downloading 1.0s 3.0/190.0 MB · 3 MB/s",
+        "mise maven@3.9.9 ✓ installed",
+        "mise maven@3.9.9 ✓ installed",
+    ]
+    assert clean_line("a 1/2 1s\r\x1b[2Ka 2/2 2s") == "a 2/2 2s"
