@@ -35,12 +35,15 @@ real path is not inside the workspace is left alone and reported.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from .catalog import HOME_DIR, LSP_CONFIG_PATH, MANIFEST_PATH, OFFER_PATH, TOOLCHAINS
 from .detect import MAX_SCANNED_DIRS
-from .templates import patterns_for_tool
+from .templates import TemplateUnavailable, patterns_for_tool
+
+logger = logging.getLogger(__name__)
 
 BEGIN = "# >>> jaato-managed: toolchains v1 (bind or unbind toolchains in the web coder; edits inside this block are replaced)"
 END = "# <<< jaato-managed: toolchains"
@@ -158,7 +161,18 @@ def write_excludes(workspace: str, m: Dict[str, Any]) -> List[str]:
         except OSError as e:
             notes.append(f"could not read {rel}'s .git/info/exclude ({e.strerror or e})")
             continue
-        body = splice(current, patterns_for(checkout, workspace, tools))
+        try:
+            wanted = patterns_for(checkout, workspace, tools)
+        except TemplateUnavailable as e:
+            # Keep the block as it is: rewriting it without this template
+            # would drop the patterns an earlier bind wrote.
+            logger.warning("%s; left %s's git excludes unchanged", e, rel)
+            notes.append(
+                f"left {rel}'s git excludes unchanged: the {e.name} gitignore template is missing"
+                " from this install (reinstall the web_coder_toolchains plugin)"
+            )
+            continue
+        body = splice(current, wanted)
         if body == current:
             continue
         try:

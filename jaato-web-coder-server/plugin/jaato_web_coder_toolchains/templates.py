@@ -43,10 +43,29 @@ _JAATO_TOOL_EXTRAS: Dict[str, Tuple[str, ...]] = {
 _cache: Dict[str, List[str]] = {}
 
 
+class TemplateUnavailable(Exception):
+    """A vendored template could not be read (an install that did not ship it).
+
+    Raised rather than answered with ``[]``: an empty answer would make the
+    caller rewrite the managed block WITHOUT that tool's patterns, removing
+    lines an earlier bind put there.  The caller leaves the block alone and
+    says why; nothing is cached, so a repaired install is picked up at once.
+    """
+
+    def __init__(self, name: str, path: str, error: OSError):
+        self.name = name
+        self.path = path
+        super().__init__(f"gitignore template {name!r} is not readable at {path} ({error.strerror or error})")
+
+
 def _read_template(name: str) -> List[str]:
     path = os.path.join(_TEMPLATES_DIR, name + ".gitignore")
     lines: List[str] = []
-    with open(path, encoding="utf-8") as handle:
+    try:
+        handle = open(path, encoding="utf-8")
+    except OSError as e:
+        raise TemplateUnavailable(name, path, e) from e
+    with handle:
         for raw in handle:
             line = raw.rstrip("\n")
             stripped = line.strip()
@@ -60,7 +79,8 @@ def patterns_for_tool(tool: str) -> List[str]:
     """The gitignore lines for one toolchain, in upstream order, deduped.
 
     An unknown tool contributes nothing.  A negation line (``!x``) is kept in
-    place — git reads the block top to bottom.
+    place — git reads the block top to bottom.  Raises
+    :class:`TemplateUnavailable` when the tool's template is missing.
     """
     if tool in _cache:
         return _cache[tool]
