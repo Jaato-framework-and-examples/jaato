@@ -1936,6 +1936,7 @@ account and under its confinement:
 | policy: the allow-list of pinned versions, server pins, "Not now" per user; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30) | `jaato-web-coder-server/src/environment/service.ts`, `src/config.ts` |
 | the offer (`.jaato/toolchain-offer.json`, schema 2): computed by the server, **staged by the page** through the daemon (`StageFilesRequest`), read by the plugin as its policy | `src/environment/files.ts`, `jaato-web-coder-ui/src/app/toolchainOffer.ts`, `plugin/…/offer.py`; one fixture pins it from both sides |
 | binding: the `toolchain bind|unbind|scan|cancel` user command, sent by the PAGE; a bind starts a plugin-owned job thread and returns at once (the executor's auto-background is built for the model, and a user command's RPC times out at 60 s). `mise install` with every mise dir under `.home`, a clean env and `MISE_CEILING_PATHS`; every step execs through the session's `//child` transition (installers run vendor code); gopls built with its own mise Go (`lsp.gopls.go`, `latest` by default); basedpyright's venv made `--without-pip` and given pip by `ensurepip` or the runner's `pip --python`; npm run as the bound Node's own `npm-cli.js`; relative links into `.home/.local/bin` from the directories `mise bin-paths` names (Maven and Gradle unpack a level deeper than `<dir>/bin`); the pinned server; `.lsp.json` (for #1345), the mise config, and `.home/.mavenrc` while Java or Maven is bound (Java reads `user.home` from the account, not `$HOME`, so Maven would otherwise use the account's `~/.m2`; Gradle's `~/.gradle` has no rc file and is moved by the framework instead, which sets `GRADLE_USER_HOME` wherever it applies the workspace HOME); one job per workspace (`flock` under `.home/.cache`) | `plugin/jaato_web_coder_toolchains/plugin.py`, `installer.py`, `state.py` |
+| git excludes: each bound toolchain's build output in a marked block of every checkout's `.git/info/exclude` (root and each clone), from vendored `github/gitignore` templates (pinned, checksummed), never the project's committed `.gitignore`; rewritten on bind, unbind and `scan`, and a root checkout also excludes `.home/` and the plugin's root files | `ignores.py`, `templates.py`, `gitignore_templates/` |
 | the record: `.jaato/environment.json` (bound toolchains for the `runtime` aspect, the job with its log, proposals, guidance), read by the page with `workspace.file.fetch` (1.20) | `state.py`, `jaato-web-coder-ui/src/app/toolchains.ts` |
 | proposals from repository markers (root and each clone), limited to what is allowed, at session start and on `scan`; the environment and repository-guidance instruction section | `detect.py`, the plugin's `get_system_instructions` |
 | the mid-session hint: a `cli` / `interactive_shell` / `notebook` result naming a missing command gets one line for the model and a `tool.result_enriched` notice, the page's only source for the chip | the plugin's `enrich_tool_result`, `store.ts` `noteToolchainOffer` |
@@ -8728,7 +8729,7 @@ already holds for other reasons:
 |---|---|---|
 | `waiting` | a pending permission / clarification / reference for that agent | a person is blocked — outranks everything |
 | `tool` | an open `tool.call_start` with no end, oldest first, plus the batch count | names what is running |
-| `thinking` | the daemon's `active` | |
+| `thinking` | the daemon's `active`; its clock starts at the later of the turn's start and the last `tool.call_end` (`toolEndedAt`), so it restarts after every tool call | |
 | `sending` | `busySince` stamped by the composer, no daemon word yet | the one optimistic piece |
 | `idle` | — | |
 
@@ -9828,6 +9829,61 @@ the rules of the plugins the runner loads either way.
 
 Not verified here: no AppArmor kernel. The exec grants and the resolved-path
 reasoning are exercised as rendered strings, not against an enforcing host.
+
+### The Files Panel Asks Git What a Clone Ignores
+
+The workspace monitor filtered paths through `GitignoreParser`, which reads
+only `<workspace>/.gitignore`. A workspace is not a repository — the web
+coder clones each project to `<ws>/<name>`, and every clone has its own
+`.gitignore` and `.git/info/exclude` the parser never saw — so a clone's
+`node_modules/` and `build/` showed in the panel however correctly the
+project ignored them.
+
+`GitIgnoreOracle` (`server/workspace_gitignore_query.py`) answers for a path
+inside a checkout by asking that checkout's own git, through one long-lived
+`git check-ignore --stdin -z -v -n` process per checkout (~40µs per query
+warm). A checkout is the panel's own set: the workspace root when it holds
+`.git`, and each immediate non-hidden child that holds one (matching
+`workspace_sources`); the set is rescanned once when git reports a path it
+cannot place, so a clone that appeared mid-session is picked up.
+
+**The parser still answers first, and its "ignored" is final** — it carries
+the framework's own force-hides (`.home/`, `.tmp/`, the tool venv, `.git/`)
+and the workspace-root `.gitignore`, none of which git may override. Git is
+consulted only for a path the parser lets *through*; `None` (no checkout
+owns it) leaves the parser's "not ignored" standing. So a root checkout
+whose own `.gitignore` omits `.home` still hides it.
+
+**Every git call is hardened**, because a checkout is model-writable and its
+`.git/config` is not: a repo-local value such as `core.fsmonitor` or
+`core.hooksPath` names a program git would run even for a read-only query.
+The process launches with global and system config neutralised
+(`GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` = `/dev/null`) and those two knobs
+forced off on the command line (`-c core.fsmonitor=false -c
+core.hooksPath=/dev/null`); `check-ignore` reads the repository's own
+`.gitignore` / `.git/info/exclude` and touches no network.
+
+Guard: `jaato_server/server/test_files_panel_agrees_with_git.py`, one
+reversion, plus a case that a repo-configured program is not run.
+
+### Bytecode a Clone Never Sees
+
+A model running a project's Python (`pytest`, `python -m`) wrote
+`__pycache__/*.pyc` beside every module it imported, so a project that does
+not ignore them showed them in `git status` and in the Files panel. Wherever
+the workspace HOME applies (#1225), `apply_home_to_env` also sets
+`PYTHONPYCACHEPREFIX=<home>/.cache/pycache`, for `cli`, `interactive_shell`
+and the notebook kernel. The bytecode is still cached, under `.home/`, which
+already has its own `*` gitignore and is hidden from the panel. Nothing is
+ignored; the files are never written in the tree.
+
+Stated cost: an interpreter reads bytecode only from the prefix tree, so the
+first run in a workspace recompiles what it imports, installed packages
+included. `get_environment(aspect="runtime")` reports `pycache_prefix`. A
+user's own checkout without a workspace HOME is unchanged. Guard:
+`jaato_server/shared/tests/test_bytecode_stays_out_of_the_workspace.py`,
+one reversion, with a control that shows an unredirected interpreter does
+write `__pycache__`.
 
 ### Asking What a Session Can Run (#1346)
 

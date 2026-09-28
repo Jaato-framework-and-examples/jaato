@@ -266,6 +266,15 @@ export interface JaatoState {
    * ``store/phase.ts`` is what reads it.
    */
   busySince: Record<string, number>;
+  /**
+   * When each agent's most recent tool call ended.  One turn can hold
+   * dozens of model calls separated by tool calls; the ``thinking`` clock
+   * counts from the later of this and ``busySince``, so it restarts after
+   * every tool call instead of measuring the whole turn.  Never cleared:
+   * a value from an earlier turn is older than that turn's ``busySince``
+   * and loses the comparison.
+   */
+  toolEndedAt: Record<string, number>;
   /** The open exit confirmation, or ``null`` (``app/exitChoice.ts``). */
   exitChoice: ExitChoice | null;
   /** The command palette (#1304 §6): Ctrl/⌘+K, and where ``help`` now lands instead of the transcript. */
@@ -492,6 +501,7 @@ const emptySessionState = () => ({
   workspaceViewRequest: null as { path: string; nonce: number } | null,
   permissionStatus: null,
   busySince: {} as Record<string, number>,
+  toolEndedAt: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
   paletteOpen: false,
   sessionFault: null as SessionFault | null,
@@ -844,6 +854,8 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     }
     case EventTypeValue.TOOL_CALL_END: {
       const agentId = agentOf(ev);
+      const owner = s.toolOwner[ev.call_id as string] ?? agentId;
+      s.toolEndedAt = { ...s.toolEndedAt, [owner]: Date.now() };
       const ok = ev.success !== false && ev.is_error_result !== true;
       const found = updateTool(s, ev.call_id as string | undefined, agentId, (t) => ({
         ...t,

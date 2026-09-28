@@ -179,6 +179,7 @@ def subprocess_report(cli_plugin: Any) -> Dict[str, Any]:
         "home": env.get("HOME"),
         "tmpdir": env.get("TMPDIR"),
         "xdg": {k: env[k] for k in _XDG_KEYS if k in env},
+        "pycache_prefix": env.get("PYTHONPYCACHEPREFIX"),
         "virtual_env": env.get("VIRTUAL_ENV"),
         "tool_venv": _venv_report(venv_path),
     }

@@ -38,6 +38,8 @@ _XDG_KEYS = (
     "XDG_STATE_HOME",
     # a JVM ignores $HOME, so Gradle needs its own redirect
     "GRADLE_USER_HOME",
+    # bytecode goes under the home, not beside the source
+    "PYTHONPYCACHEPREFIX",
 )
 
 

@@ -108,7 +108,12 @@ export function agentPhase(s: JaatoState, agentId: string): AgentPhase {
   if (tools) return { kind: "tool", since: tools.first.startedAt, toolName: tools.first.toolName, running: tools.count };
   // ``active`` is the daemon's word; without it the only thing that made
   // this agent busy is the composer, still waiting to be answered.
-  if (s.agents[agentId]?.status === BUSY_STATUS) return { kind: "thinking", since };
+  // The model call in progress began when the last tool call ended, not
+  // when the turn did: a long agentic turn is many model calls, and a clock
+  // from the turn's start reads 49 minutes on a call ten seconds old.
+  if (s.agents[agentId]?.status === BUSY_STATUS) {
+    return { kind: "thinking", since: Math.max(since, s.toolEndedAt?.[agentId] ?? 0) };
+  }
   return { kind: "sending", since };
 }
 

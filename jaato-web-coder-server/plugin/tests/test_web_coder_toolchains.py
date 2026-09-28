@@ -610,3 +610,93 @@ def test_go_reads_the_managed_env_file_and_builds_tests_in_the_workspace(workspa
     m["toolchains"] = []
     write_derived(str(workspace), m)
     assert not (home / ".config/go/env").exists()
+
+
+# ------------------------------------------------ what a toolchain leaves in git
+
+from jaato_web_coder_toolchains import ignores  # noqa: E402
+
+
+def _git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
+
+
+def _clone(ws, name):
+    repo = ws / name
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    (repo / ".gitignore").write_text("*.log\n")   # the project's own, unrelated
+    return repo
+
+
+def test_a_bound_toolchain_keeps_its_output_out_of_each_clone(workspace):
+    repo = _clone(workspace, "app")
+    (repo / ".git/info/exclude").write_text("# mine\nscratch/\n")
+    plugin = _plugin(workspace)
+    ex = _executor(plugin)
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    (repo / "target").mkdir()
+    (repo / "target/App.class").write_text("x")
+    (repo / "Main.java").write_text("x")
+    status = _git("status", "--porcelain", "--untracked-files=all", cwd=repo)
+    assert "target/" not in status and "Main.java" in status, "git itself reads the exclude"
+    assert (repo / ".gitignore").read_text() == "*.log\n", "the project's own .gitignore is never edited"
+    exclude = (repo / ".git/info/exclude").read_text()
+    assert exclude.startswith("# mine\nscratch/\n") and ignores.BEGIN in exclude
+    assert "target/" in exclude, "the pattern comes from the vendored Maven template"
+
+    ex.execute("toolchain", {"action": "unbind", "tool": "maven"})
+    assert (repo / ".git/info/exclude").read_text() == "# mine\nscratch/\n", "unbind removes only the block"
+
+
+def test_a_repository_cloned_after_the_bind_gets_the_excludes_on_scan(workspace):
+    plugin = _plugin(workspace)
+    ex = _executor(plugin)
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    repo = _clone(workspace, "later")
+    ex.execute("toolchain", {"action": "scan"})
+    assert "target/" in (repo / ".git/info/exclude").read_text()
+
+
+def test_a_root_checkout_also_excludes_the_files_the_plugin_writes_there(workspace):
+    _git("init", "-q", cwd=workspace)
+    plugin = _plugin(workspace)
+    ex = _executor(plugin)
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    (workspace / ".lsp.json").write_text("{}")
+    status = _git("status", "--porcelain", "--untracked-files=all", cwd=workspace)
+    assert ".lsp.json" not in status and ".jaato/environment.json" not in status and ".home" not in status
+
+
+def test_a_git_file_pointing_out_of_the_workspace_is_left_alone(workspace, tmp_path):
+    outside = tmp_path / "elsewhere"
+    (outside / "info").mkdir(parents=True)
+    repo = workspace / "planted"
+    repo.mkdir()
+    (repo / ".git").write_text(f"gitdir: {outside}\n")
+    plugin = _plugin(workspace)
+    ex = _executor(plugin)
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    assert not (outside / "info/exclude").exists()
+    assert any("left planted's git excludes alone" in n for n in read_manifest(str(workspace))["job"]["notes"])
+
+
+def test_java_alone_still_excludes_what_the_repositorys_wrapper_builds(tmp_path):
+    ws = tmp_path / "ws"
+    repo = ws / "svc"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pom.xml").write_text("<project/>")
+    lines = ignores.patterns_for(str(repo), str(ws), ["java"])
+    assert "target/" in lines and ".factorypath" in lines and "**/build/" not in lines
+
+
+def test_a_deleted_end_marker_loses_none_of_the_users_lines():
+    text = f"mine/\n{ignores.BEGIN}\ntarget/\ntheirs/\n"
+    assert ignores.splice(text, []) == "mine/\ntarget/\ntheirs/\n"
+    assert ignores.splice("", []) == ""
+    once = ignores.splice("mine/\n", ["a/"])
+    assert ignores.splice(once, ["a/"]) == once, "stable, so a rescan writes nothing"

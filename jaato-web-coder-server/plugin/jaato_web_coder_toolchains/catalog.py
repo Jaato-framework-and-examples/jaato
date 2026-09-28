@@ -59,6 +59,7 @@ LANGUAGE_SERVERS: Dict[str, str] = {
 
 JDTLS_MIRROR = "https://download.eclipse.org/jdtls/milestones"
 
+HOME_DIR = ".home"
 LSP_DIR = ".home/.local/share/jaato-lsp"
 LOCAL_BIN = ".home/.local/bin"
 MAVENRC_PATH = ".home/.mavenrc"

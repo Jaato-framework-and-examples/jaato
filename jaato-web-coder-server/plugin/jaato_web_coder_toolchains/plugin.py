@@ -57,6 +57,7 @@ from .catalog import LOCAL_BIN, LOCK_PATH, MANIFEST_PATH, MISE_DATA_DIR, TOOLCHA
 from .detect import detect_workspace, find_repo_guidance
 from .installer import InstallCancelled, InstallError, Installer, append_log_line, mise_binary, unlink_binaries
 from .offer import Allowed, Offer, OfferReader
+from .ignores import write_excludes
 from .state import read_manifest, write_derived, write_manifest
 
 logger = logging.getLogger(__name__)
@@ -409,6 +410,9 @@ class WebCoderToolchainsPlugin:
             return
         try:
             m = read_manifest(ws)
+            # A repository cloned after the bind gets the bound toolchains' excludes here.
+            for note in write_excludes(ws, m):
+                logger.info("web_coder_toolchains: %s", note)
             offer = self._offers.read()
             proposals = []
             for d in detect_workspace(ws):
