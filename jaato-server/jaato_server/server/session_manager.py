@@ -15,6 +15,7 @@ Integration with Session Plugin:
 - Session IDs are consistent between runtime and storage
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -13004,6 +13005,37 @@ class SessionManager:
         )
         thread.start()
 
+    @staticmethod
+    def _history_for_save(session: Session) -> Optional[list]:
+        """The history a save should write, or ``None`` to skip the save.
+
+        Fetched from the runner (``session.get_history``), which is the
+        only copy that includes an in-progress turn.  This is a blocking
+        round-trip to the daemon loop, so a save must run OFF that loop
+        (#1355): a loop-thread caller has it refused by the client's
+        guard, the exception propagates, and ``_save_session`` writes
+        nothing -- a failed fetch is never saved as an empty history.
+
+        ``None`` when the runner has been RELEASED (``JaatoServer.shutdown``
+        ran): a save arriving after that -- an async save racing an unload
+        -- would otherwise fetch nothing and write ``[]`` over the record
+        the pre-release save wrote correctly.  A server that never had a
+        runner still saves ``[]``, as before.
+        """
+        server = session.server
+        if not server:
+            return []
+        if getattr(server, "_runner_rpc", None) is not None:
+            return server._runner_rpc.session_get_history_threadsafe()
+        if getattr(server, "_runner_released", False):
+            logger.warning(
+                "Not saving session %s: its runner was already released, so "
+                "its history cannot be read; keeping the record on disk.",
+                session.session_id,
+            )
+            return None
+        return []
+
     def _save_session(self, session: Session) -> bool:
         """Save a session to disk.
 
@@ -13034,9 +13066,9 @@ class SessionManager:
                 # ``session.get_history`` RPC instead of the daemon-side
                 # JaatoClient indirection.  Captures in-progress turns
                 # (the agent state cache only updates at turn end).
-                history = []
-                if session.server and session.server._runner_rpc is not None:
-                    history = session.server._runner_rpc.session_get_history_threadsafe()
+                history = self._history_for_save(session)
+                if history is None:
+                    return False
                 turn_accounting = []
 
                 if session.server:
@@ -16223,6 +16255,21 @@ class SessionManager:
                         "ephemeral %s: delete_session(%s) raised",
                         cid, session_id,
                     )
+
+    async def shutdown_from_loop(self) -> None:
+        """Stop the lifetime watchdog and shut down, from the daemon loop.
+
+        The daemon's own exit path runs ON the event loop, and everything
+        :meth:`shutdown` does per session -- the save's history fetch,
+        ``session.end`` / ``session.shutdown``, the transport close --
+        blocks on a coroutine that loop has to run.  Called there directly
+        (as it was) every one of them was refused by the client's guard or
+        stalled to its timeout, so every dirty session's state was lost on
+        restart (#1355).  Running both steps on a worker thread and
+        awaiting it leaves the loop free to serve those round-trips.
+        """
+        await asyncio.to_thread(self.stop_lifetime_watchdog)
+        await asyncio.to_thread(self.shutdown)
 
     def shutdown(self) -> None:
         """Shutdown all sessions, saving to disk first."""
