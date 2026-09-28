@@ -403,8 +403,13 @@ def test_mavenrc_points_user_home_at_the_workspace_while_java_or_maven_is_bound(
 
 # -------------------------------------------------- the language-server steps
 
-def _recording_installer(ws, fail=()):
-    """An Installer whose steps are recorded; a step whose ``what`` starts with one of ``fail`` fails."""
+def _recording_installer(ws, fail=(), pip_after_ensurepip=True, starts=True):
+    """An Installer whose steps are recorded; a step whose ``what`` starts with one of ``fail`` fails.
+
+    ``probe`` stands in for asking a venv's Python: it starts when
+    ``starts``, and imports pip once ``ensurepip`` has run and
+    ``pip_after_ensurepip`` says it worked.
+    """
     from jaato_web_coder_toolchains.installer import InstallError, Installer
 
     inst = Installer(str(ws), mise="/bin/true", timeout=5, paranoid=False, preexec=None,
@@ -417,6 +422,13 @@ def _recording_installer(ws, fail=()):
             raise InstallError(f"{what} failed (exit 1)")
         return []
     inst.step = step
+
+    def probe(argv):
+        if argv[1:] == ["-c", "pass"]:
+            return starts
+        ensured = any(r[0].startswith("adding pip") and not r[0].startswith(tuple(fail)) for r in inst.ran)
+        return ensured and pip_after_ensurepip
+    inst.probe = probe
     return inst
 
 
@@ -470,6 +482,51 @@ def test_a_venv_left_by_a_failed_ensurepip_is_not_run_without_pip(tmp_path):
     inst = _recording_installer(tmp_path)
     inst._pip_install(str(tmp_path / "venv"))
     assert [r[0] for r in inst.ran] == ["adding pip to the basedpyright venv"]
+
+
+def test_an_ensurepip_that_installs_nothing_falls_back_to_the_runners_pip(tmp_path, monkeypatch):
+    """The reported failure: ``python -m pip install`` against a venv with no pip."""
+    import importlib.util as iu
+    import sys
+
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: object() if name == "pip" else real(name, *a))
+    inst = _recording_installer(tmp_path, pip_after_ensurepip=False)
+    argv = inst._pip_install(str(tmp_path / "venv"))
+    assert argv[:4] == [sys.executable, "-m", "pip", "--python"]
+
+
+def test_a_pip_directory_is_not_taken_for_a_working_pip(tmp_path):
+    """site-packages/pip left by another interpreter version: the Python is asked, not the disk."""
+    site = tmp_path / "venv/lib/python3.11/site-packages/pip"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("")
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    (tmp_path / "venv/bin/python").write_text("")
+    inst = _recording_installer(tmp_path)
+    inst._pip_install(str(tmp_path / "venv"))
+    assert [r[0] for r in inst.ran] == ["adding pip to the basedpyright venv"]
+
+
+def test_a_venv_whose_python_does_not_start_is_made_again(tmp_path):
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    (tmp_path / "venv/bin/python").write_text("")
+    inst = _recording_installer(tmp_path, starts=False)
+    inst._pip_install(str(tmp_path / "venv"))
+    assert [r[0] for r in inst.ran] == ["creating the basedpyright venv", "adding pip to the basedpyright venv"]
+
+
+def test_probe_asks_a_real_interpreter(tmp_path):
+    """The one call the recording installer fakes, run for real once."""
+    import sys
+    from jaato_web_coder_toolchains.installer import Installer
+
+    inst = Installer(str(tmp_path), mise="/bin/true", timeout=5, paranoid=False, preexec=None,
+                     cancel=threading.Event(), log=lambda line: None)
+    (tmp_path / ".home").mkdir()
+    assert inst.probe([sys.executable, "-c", "pass"])
+    assert not inst.probe([sys.executable, "-c", "import no_such_module_here"])
+    assert not inst.probe([str(tmp_path / "missing")])
 
 
 def test_npm_is_the_bound_nodes_own_script(tmp_path):
