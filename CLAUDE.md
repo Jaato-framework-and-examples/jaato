@@ -4157,6 +4157,36 @@ validate . --set drive` reports nothing about reactor rules however wrong they
 are, in either venv. That is its own change, and the entry-point group
 `jaato.premium_reactors` the report names has never existed.
 
+### The Authoring Half of `jaato-scaffold` Stands Alone (#1267, step 1)
+
+#1267 proposes shipping `jaato-scaffold new` / `integration` in jaato-sdk,
+which applications install, while `explain` / `validate` stay with
+jaato-server, which is deployed once. A measurement on the issue found the
+schema modules clean (stdlib + `jaato_sdk` at module level) and three things
+in the way. This step removes them. Nothing moves to the SDK yet.
+
+| Was | Now |
+|---|---|
+| `build` (the `new` verb) imported `explain`, `introspect`, `validate` at module level | it imports `archetypes`, `authoring_facts`, `authoring_contracts`. `validate` (the profile-set re-check) is imported inside that function. A cold import of `build` loads 8 `jaato_server` modules and no introspection |
+| `new` parsed jaato-server's SOURCE with `ast` for provider contracts (27 provider `__init__.py`) and env vars (~630 modules): nothing in `sys.modules`, and nothing on disk in an SDK-only install | `scaffold/authoring_contracts.py` answers from the live tree when `introspect` imports and the provider directory exists, and from `authoring_snapshot.json` (~32 KB, only the fields `build` reads) otherwise |
+| `workspace_profile_set` and the profile `env:` facts lived in `explain` | `scaffold/authoring_facts.py`; `explain` re-exports them |
+| `subagent.config` loaded the whole subagent plugin through an eager package `__init__`, and `jaato_runtime` (provider loading, token accounting, telemetry) to find a premium directory | the `__init__` is lazy (`__getattr__`); the helper is `shared/premium_content.py`, re-exported by `jaato_runtime`. A cold import of `config` loads 10 modules instead of 20 |
+
+The snapshot is regenerated with
+`python -m jaato_server.shared.scaffold.authoring_contracts --write`. It
+holds every `provider:<x>` env var and every other var with a non-empty
+default, because that is what `_compose_env` can render; an edit elsewhere
+does not change it. A snapshot is never generated from itself.
+
+`__main__.py` still imports `explain` and `validate` at module level: the
+`explain` scope table is built from them, and splitting the CLI shell belongs
+to the move itself.
+
+Guard: `jaato_server/shared/tests/test_authoring_does_not_load_introspection_1267.py`,
+five reversions. Import footprints are measured in a fresh interpreter. The
+snapshot must equal the live projection, and `new` must write the same
+`.env` and set-profile text for every provider from either source.
+
 ### An Integration Declares Its Own Paths, and Its Own Harness
 
 `jaato-scaffold integration <name>` installs the `jaato-sdk` skill where

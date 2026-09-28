@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
 from . import archetypes as _archetypes
 from . import introspect
+from .authoring_facts import (  # noqa: F401  (re-exported: explain.X is public)
+    ENV_EXAMPLE_VALUE,
+    ENV_EXAMPLE_VAR,
+    PROFILE_ENV_FACTS,
+    workspace_profile_set,
+)
 
 Rendered = Tuple[Dict[str, Any], str]
 
@@ -1833,38 +1839,9 @@ def gc() -> Rendered:
 # it spawns a subagent.  A cwd that changes mid-session is not something to
 # write a path against.
 
-#: Worked example wherever the profile ``env:`` block is documented -- HERE and
-#: in the commented block ``new`` emits (``build._set_profile_yaml``).  It is a
-#: path knob on purpose: the resolution fact below is the half that bites, and
-#: this is the variable people reach for when a session misbehaves.
-ENV_EXAMPLE_VAR = "JAATO_PROVIDER_TRACE"
-
-#: The example's VALUE, shared for the same reason as its name.  Deliberately
-#: RELATIVE: ``jaato_sdk.trace._resolve_trace_file`` joins a relative trace
-#: path onto ``JAATO_WORKSPACE_ROOT``, which the runner seeds per session, so
-#: this form gives every session its own trace in its own workspace.  The
-#: absolute form is fixed at the PROFILE and every session sharing that
-#: profile appends to one interleaved file -- the failure mode this example
-#: exists to steer people away from, and the one an earlier draft of this note
-#: recommended (jaato #752 review).
-ENV_EXAMPLE_VALUE = "provider_trace.log"
-
-#: The three load-bearing, non-obvious properties of the profile ``env:``
-#: block, rendered by BOTH halves of its documentation from this ONE
-#: definition.
-#:
-#: Sharing the strings is the anti-drift mechanism.  #716's
-#: ``test_a_real_run_writes_only_documented_files`` asserts which FILES ``new``
-#: writes, never their content, so a fact stated in the generated comment and
-#: not in ``explain env`` (or reworded in one of them) would drift with nothing
-#: failing -- "documentation about a generator rots", one level down.  Kept
-#: short enough to render as a comment line inside a generated YAML file.
-PROFILE_ENV_FACTS = (
-    "outranks the workspace .env, per key",
-    "takes ${VAR} expansion + secret URIs (pass://, vault://, ...)",
-    "is applied verbatim — a relative path is resolved by its READER",
-    "refuses a SWITCH (1/true/off) in a path var — #775, at profile load",
-)
+# ENV_EXAMPLE_VAR / ENV_EXAMPLE_VALUE / PROFILE_ENV_FACTS live in
+# :mod:`authoring_facts` (imported at the top of this module) so ``new`` can
+# read them without importing ``explain`` (#1267).
 
 
 def _placeholder_table(indent: str = "    ") -> List[str]:
@@ -2822,7 +2799,7 @@ def _instruction_search_order(ws: Path):
     """
     order = []
     try:
-        from jaato_server.shared.jaato_runtime import _get_premium_content_path
+        from jaato_server.shared.premium_content import _get_premium_content_path
         premium = _get_premium_content_path("instructions")
         if premium:
             order.append(("premium", Path(premium)))
@@ -3952,34 +3929,6 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
         "  the two stop verbs apply to every profile alike -- "
         "`explain oversight` (bare) names them.",
     ]
-
-
-def workspace_profile_set(workspace: str) -> Optional[str]:
-    """``JAATO_PROFILE_SET`` from a workspace's own ``.env``, if it names one.
-
-    A profile inside ``profiles/<set>/`` is only in the effective set when
-    that set is selected, and the selector a workspace runs under lives in
-    its ``.env`` -- written there by ``new profile-set``.  Reading it is
-    what makes ``explain oversight <name>`` resolve against the SAME set
-    the workspace's own client will run under; without it, every profile a
-    scaffolded workspace declares is invisible to these pages.
-
-    One definition: ``build`` reads it from here rather than carrying its
-    own, so the generator and the explain pages cannot disagree about which
-    set a workspace is on.
-    """
-    envf = Path(workspace).resolve() / ".env"
-    if not envf.is_file():
-        return None
-    try:
-        for line in envf.read_text(encoding="utf-8",
-                                   errors="replace").splitlines():
-            key, _, value = line.partition("=")
-            if key.strip() == "JAATO_PROFILE_SET":
-                return value.strip() or None
-    except OSError:             # pragma: no cover -- best-effort
-        return None
-    return None
 
 
 def _resolve_workspace_profile(name: str, workspace: str,
