@@ -399,3 +399,101 @@ def test_mavenrc_points_user_home_at_the_workspace_while_java_or_maven_is_bound(
     _wait(plugin)
     assert rc.read_text() == "MAVEN_OPTS=mine\n"
     assert any("kept your own .home/.mavenrc" in n for n in read_manifest(str(workspace))["job"].get("notes") or [])
+
+
+# -------------------------------------------------- the language-server steps
+
+def _recording_installer(ws, fail=()):
+    """An Installer whose steps are recorded; a step whose ``what`` starts with one of ``fail`` fails."""
+    from jaato_web_coder_toolchains.installer import InstallError, Installer
+
+    inst = Installer(str(ws), mise="/bin/true", timeout=5, paranoid=False, preexec=None,
+                     cancel=threading.Event(), log=lambda line: None)
+    inst.ran = []
+
+    def step(what, argv, extra_env=None):
+        inst.ran.append((what, argv, extra_env or {}))
+        if what.startswith(tuple(fail)):
+            raise InstallError(f"{what} failed (exit 1)")
+        return []
+    inst.step = step
+    return inst
+
+
+def test_a_step_names_the_error_line_not_the_trace_footer(tmp_path):
+    from jaato_web_coder_toolchains.installer import error_line
+
+    out = ["node:internal/modules/cjs/loader:1228", "  throw err;", "",
+           "Error: Cannot find module '/x/npm-cli.js'", "    at Module._load (node:internal/...)",
+           "  code: 'MODULE_NOT_FOUND',", "}", "", "Node.js v24.21.0"]
+    assert error_line(out) == "Error: Cannot find module '/x/npm-cli.js'"
+    assert error_line(["go: golang.org/x/tools/gopls@v0.20.0 requires go >= 1.24.2 (running go 1.23.12)",
+                       "To install and activate, run:"]).startswith("go: golang.org/x/tools/gopls@v0.20.0 requires")
+    assert error_line(["all fine", "done"]) is None
+
+
+def test_basedpyright_venv_is_made_without_pip_and_gets_it_from_ensurepip(tmp_path):
+    inst = _recording_installer(tmp_path)
+    argv = inst._pip_install(str(tmp_path / "venv"))
+    whats = [r[0] for r in inst.ran]
+    assert whats == ["creating the basedpyright venv", "adding pip to the basedpyright venv"]
+    assert "--without-pip" in inst.ran[0][1]
+    assert argv == [str(tmp_path / "venv/bin/python"), "-m", "pip", "install"]
+
+
+def test_no_ensurepip_installs_with_the_runners_pip(tmp_path, monkeypatch):
+    import importlib.util as iu
+    import sys
+
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: object() if name == "pip" else real(name, *a))
+    inst = _recording_installer(tmp_path, fail=("adding pip",))
+    argv = inst._pip_install(str(tmp_path / "venv"))
+    assert argv == [sys.executable, "-m", "pip", "--python", str(tmp_path / "venv/bin/python"), "install"]
+
+
+def test_no_pip_anywhere_says_so(tmp_path, monkeypatch):
+    import importlib.util as iu
+    from jaato_web_coder_toolchains.installer import InstallError
+
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: None if name == "pip" else real(name, *a))
+    inst = _recording_installer(tmp_path, fail=("adding pip",))
+    with pytest.raises(InstallError, match="runner's Python has no pip"):
+        inst._pip_install(str(tmp_path / "venv"))
+
+
+def test_a_venv_left_by_a_failed_ensurepip_is_not_run_without_pip(tmp_path):
+    """The deployment's failure: bin/python exists, pip does not."""
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    (tmp_path / "venv/bin/python").write_text("")
+    inst = _recording_installer(tmp_path)
+    inst._pip_install(str(tmp_path / "venv"))
+    assert [r[0] for r in inst.ran] == ["adding pip to the basedpyright venv"]
+
+
+def test_npm_is_the_bound_nodes_own_script(tmp_path):
+    install = tmp_path / ".home/.local/share/mise/installs/node/24"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin/node").write_text("")
+    cli = install / "lib/node_modules/npm/bin/npm-cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("")
+    (tmp_path / ".home/.local/bin").mkdir(parents=True)
+    os.symlink("../share/mise/installs/node/24/bin/node", tmp_path / ".home/.local/bin/node")
+    inst = _recording_installer(tmp_path)
+    assert inst._npm() == [os.path.realpath(install / "bin/node"), os.path.realpath(cli)]
+
+
+def test_gopls_is_built_with_its_own_go_not_the_projects(tmp_path):
+    inst = _recording_installer(tmp_path)
+    go_home = tmp_path / ".home/.local/share/mise/installs/go/1.25.1"
+    inst._mise_install = lambda ref: (inst.ran.append(("mise", [ref], {})), str(go_home))[1]
+    out = inst.install_server("gopls", {"version": "v0.20.0", "go": "1.25"})
+    mise, build = inst.ran
+    assert mise[1] == ["go@1.25"]
+    assert build[1][0] == str(go_home / "bin/go") and build[2]["GOTOOLCHAIN"] == "local"
+    assert out["command"].endswith(".home/.local/bin/gopls"), "run with the project's go on PATH"
+    raw = json.loads(FIXTURE.read_text())
+    raw["servers"]["gopls"] = {"version": "v0.20.0"}
+    assert parse_offer(raw).servers["gopls"]["go"] == "latest", "an offer without go builds with the latest"

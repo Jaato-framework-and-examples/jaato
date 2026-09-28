@@ -20,6 +20,7 @@ file gets nothing: no scan, no record, no hints, no instructions.
 `apparmor/jaato-web-coder-toolchains.rules` is installed into the daemon
 account's `~/.jaato/apparmor-fragments/`. It denies confined sessions
 writing the offer (so the agent cannot widen the allow-list) and grants what
-a bound JDK needs (its `.so` files and `lib/jspawnhelper`).
+a bound JDK needs (its `.so` files and `lib/jspawnhelper`) and what a bound
+Go needs (`pkg/tool/<os_arch>/*`: `compile`, `link`, …).
 
 Installation: see [INSTALL.md](INSTALL.md).

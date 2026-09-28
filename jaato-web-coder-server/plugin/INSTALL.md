@@ -159,7 +159,10 @@ The fragment does two things for confined sessions:
   (reading stays allowed), so the agent cannot widen the operator's
   allow-list. The daemon, which stages the file, is not confined;
 - grants what a JDK that mise installed under a workspace's `.home` needs:
-  `m` on its `.so` files and exec of its `lib/jspawnhelper`.
+  `m` on its `.so` files and exec of its `lib/jspawnhelper`; and exec of a
+  mise Go's `pkg/tool/<os_arch>/*` (`compile`, `link`, `asm`, `cgo`, `vet`),
+  without which every `go build` is refused. **Reinstall the fragment when
+  upgrading the plugin**: it gained the Go rule in 0.2.1.
 
 Install it into the **daemon account's** user tier, which applies to every
 workspace that daemon serves:

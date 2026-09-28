@@ -23,6 +23,7 @@ RULES = [
     "/**/.home/.local/share/mise/installs/**/*.so m,",
     "/**/.home/.local/share/mise/installs/**/*.so.* m,",
     "/**/.home/.local/share/mise/installs/java/**/lib/jspawnhelper ix,",
+    "/**/.home/.local/share/mise/installs/go/*/pkg/tool/*/* ix,",
 ]
 
 

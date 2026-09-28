@@ -147,18 +147,19 @@ describe("config: the environment block", () => {
     }, "/")!;
     assert.deepEqual(j.tools, { java: ["temurin-21", "17"], maven: ["3.9.9"], gradle: ["8.10"] });
     assert.deepEqual(j.servers, {
-      gopls: { version: "v0.20.0" },
+      gopls: { version: "v0.20.0", go: "latest" },
       "typescript-language-server": { version: "4.4.0", typescript: "5.9.3" },
       jdtls: { version: "1.40.0", java: "25", max_heap: "2G", mirror: "https://mirror.example/jdtls" },
     });
     assert.deepEqual(parseEnvironment({ lsp: { jdtls: { version: "1.40.0" } } }, "/")!.servers.jdtls, { version: "1.40.0", java: "21", max_heap: "1G" });
+    assert.deepEqual(parseEnvironment({ lsp: { gopls: { version: "v0.20.0", go: "1.25" } } }, "/")!.servers.gopls, { version: "v0.20.0", go: "1.25" });
     assert.deepEqual(parseEnvironment({ tools: { node: { versions: ["22"] } } }, "/")!.tools, parseEnvironment({ tools: { node: ["22"] } }, "/")!.tools);
 
     const bad = (x: Record<string, unknown>) => () => parseEnvironment(x, "/");
     assert.throws(bad({ lsp: { jdtls: { version: "1.40.0", max_heap: "lots" } } }), /lsp\.jdtls\.max_heap: 'lots' is not a JVM heap size/);
     assert.throws(bad({ lsp: { jdtls: { version: "1.40.0", mirror: "http://mirror.example" } } }), /https/);
     assert.throws(bad({ lsp: { jdtls: { java: "21" } } }), /lsp\.jdtls\.version is required/);
-    assert.throws(bad({ lsp: { gopls: { version: "v0.20.0", typescript: "5" } } }), /lsp\.gopls\.typescript: unknown key \(one of version\)/);
+    assert.throws(bad({ lsp: { gopls: { version: "v0.20.0", typescript: "5" } } }), /lsp\.gopls\.typescript: unknown key \(one of version, go\)/);
     assert.throws(bad({ tools: { node: { versions: ["22"], mirror: "x" } } }), /tools\.node\.mirror: unknown key/);
     assert.throws(bad({ typescript_version: "5.9.3" }), /typescript_version has moved to environment\.lsp\.typescript-language-server\.typescript/);
     assert.throws(bad({ jdtls_max_heap: "2G" }), /jdtls_max_heap has moved to environment\.lsp\.jdtls\.max_heap/);
