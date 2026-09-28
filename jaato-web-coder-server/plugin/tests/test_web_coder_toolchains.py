@@ -508,6 +508,15 @@ def test_a_managed_workspace_may_run_and_map_what_it_holds(tmp_path):
     assert rules == [f'"{os.path.realpath(tmp_path)}/**" mix,']
 
 
+def test_a_private_tmp_is_granted_too_and_the_hosts_never(tmp_path):
+    kw = dict(workspace_path=str(tmp_path), session_id="s1", config_root=None)
+    with_private = WebCoderToolchainsPlugin.get_apparmor_rules(
+        **kw, plugin_config={"workspace_home": ".home", "private_tmp_dir": str(tmp_path / ".tmp")})
+    assert "/tmp/** mix," in with_private and "/var/tmp/** mix," in with_private
+    assert not any(r.startswith("/tmp") for r in WebCoderToolchainsPlugin.get_apparmor_rules(
+        **kw, plugin_config={"workspace_home": ".home"})), "the host's /tmp is never granted"
+
+
 def test_a_users_own_checkout_gets_no_grant(tmp_path):
     """The TUI on the same daemon: no managed home, the template as it is."""
     assert WebCoderToolchainsPlugin.get_apparmor_rules(

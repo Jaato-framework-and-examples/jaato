@@ -3558,20 +3558,39 @@ def _plugin_configs_with_managed_defaults(
     return configs, bool(home or venv), home or None
 
 
-def _rule_config(cfg: Any, managed_home: Optional[str]) -> Dict[str, Any]:
+def _rule_config(cfg: Any, managed_home: Optional[str], private_tmp: Optional[str] = None) -> Dict[str, Any]:
     """A plugin's config as its rule contributor sees it.
 
     On a managed workspace every contributor gets ``workspace_home``, not
     only the three surfaces the envelope folds it into: that is how an
     out-of-tree plugin (the web coder's toolchains) grants what its installs
     need on managed workspaces and nothing on a user's own checkout.  A value
-    the section already carries wins.  Resolution only; the envelope is
-    unchanged.
+    the section already carries wins.  ``private_tmp_dir`` is set when the
+    boundary binds ``<ws>/.tmp`` over ``/tmp`` (#1381), so a grant on
+    ``/tmp/**`` is known to reach the workspace's own directory and never the
+    host's.  Resolution only; the envelope is unchanged.
     """
     out = dict(cfg) if isinstance(cfg, dict) else {}
     if managed_home:
         out.setdefault("workspace_home", managed_home)
+    if private_tmp:
+        out["private_tmp_dir"] = private_tmp
     return out
+
+
+def _private_tmp_for_rules(profile: Any, workspace_path: str, managed_workspace_root: Optional[str]) -> Optional[str]:
+    """The private ``/tmp`` directory the rendered profile will bind, or ``None``.
+
+    The same resolution the provisioning path renders the ``/tmp`` grants
+    from (:func:`shared.private_tmp.resolve_private_tmp`), so a contributor
+    is told a private ``/tmp`` exists exactly when the profile has one.
+    """
+    try:
+        from jaato_server.shared.private_tmp import resolve_private_tmp
+        return resolve_private_tmp(profile, workspace_path, managed_workspace_root)
+    except Exception:  # noqa: BLE001 -- a contributor then just grants less
+        logger.exception("private /tmp resolution for plugin rules failed")
+        return None
 
 
 class PluginRules(list):
@@ -3726,6 +3745,7 @@ def resolve_plugin_apparmor_rules(
     plugin_configs, defaulted, managed_home = _plugin_configs_with_managed_defaults(
         profile, workspace_path, managed_workspace_root,
     )
+    private_tmp = _private_tmp_for_rules(profile, workspace_path, managed_workspace_root)
     if profile is None and not defaulted:
         return None
     rules: List[str] = []
@@ -3766,7 +3786,7 @@ def resolve_plugin_apparmor_rules(
                     workspace_path=workspace_path,
                     session_id=session_id,
                     config_root=config_root,
-                    plugin_config=_rule_config(plugin_configs.get(plugin_name), managed_home),
+                    plugin_config=_rule_config(plugin_configs.get(plugin_name), managed_home, private_tmp),
                 )
             except Exception:  # noqa: BLE001 — boundary surface
                 logger.exception(

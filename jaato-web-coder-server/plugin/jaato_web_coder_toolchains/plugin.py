@@ -173,7 +173,10 @@ class WebCoderToolchainsPlugin:
         workspace changes nothing a confined session could not already do: it
         may write any file into ``.home/.local/bin`` and run it (#1273), and
         what runs stays in the same profile (``ix``).  Denials beat it, so
-        ``.jaato`` stays closed.
+        ``.jaato`` stays closed.  When the boundary has a private ``/tmp``
+        (the framework says so with ``private_tmp_dir``), ``/tmp`` and
+        ``/var/tmp`` get the same grant, since there they are the
+        workspace's own ``.tmp``.
 
         Only on a MANAGED workspace (the framework hands every rule
         contributor ``workspace_home`` there): a user's own checkout, driven
@@ -184,7 +187,12 @@ class WebCoderToolchainsPlugin:
         ws = os.path.realpath(workspace_path)
         if '"' in ws or "\n" in ws:
             return []
-        return [f'"{ws}/**" mix,']
+        rules = [f'"{ws}/**" mix,']
+        # With a private /tmp (#1381) /tmp and /var/tmp ARE the workspace's
+        # .tmp, judged as /tmp/... by AppArmor; never granted on the host's.
+        if plugin_config.get("private_tmp_dir"):
+            rules += ["/tmp/** mix,", "/var/tmp/** mix,"]
+        return rules
 
     def shutdown(self) -> None:
         """Session end: stop a running job (the manifest records it cancelled)."""
