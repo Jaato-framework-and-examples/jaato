@@ -16,8 +16,9 @@ INSIDE the workspace (``<ws>/.home/`` by default): a relative path resolved
 against the session workspace root, absolute allowed, a relative path with
 no workspace root refused (no silent fallback to cwd).
 
-Only the environment handed to the SUBPROCESS is changed -- ``HOME`` plus
-the four XDG base-directory variables.  The runner's own ``HOME`` is
+Only the environment handed to the SUBPROCESS is changed -- ``HOME``, the
+four XDG base-directory variables, ``GRADLE_USER_HOME`` and
+``PYTHONPYCACHEPREFIX``.  The runner's own ``HOME`` is
 untouched, so jaato's ``~/.jaato`` lookups and the ``${HOME}`` profile
 expansion variable keep their meaning (§8).
 
@@ -95,7 +96,7 @@ def resolve_home_path(
 def apply_home_to_env(
     env: MutableMapping[str, str], home_path: str,
 ) -> None:
-    """Point ``HOME``, the XDG base dirs and ``GRADLE_USER_HOME`` at ``home_path`` in ``env``.
+    """Point ``HOME``, the XDG base dirs, ``GRADLE_USER_HOME`` and Python's bytecode cache at ``home_path``.
 
     The XDG variables are set to subdirectories under the home, matching the
     XDG base-directory spec's own defaults relative to ``HOME``.  Setting
@@ -105,6 +106,15 @@ def apply_home_to_env(
 
     ``<home>/.local/bin`` is also APPENDED to ``PATH`` (#1273), so a program
     a user-level installer put there resolves by name on the next command.
+
+    ``PYTHONPYCACHEPREFIX`` sends every ``.pyc`` a Python subprocess writes
+    to ``<home>/.cache/pycache`` instead of a ``__pycache__/`` beside the
+    source, so running a project's code (``pytest``, ``python -m``) leaves
+    nothing in a clone for git or the Files panel to see, whatever the
+    project's own ``.gitignore`` says.  Bytecode is still cached, only
+    elsewhere.  Cost: an interpreter reads bytecode from the prefix tree
+    alone, so the first run in a workspace recompiles what it imports
+    (installed packages included), and later runs reuse it.
 
     Mutates ``env`` in place.  Nothing on disk is created here -- the tools
     make their own XDG subdirectories on demand, under the ``<home>`` the
@@ -122,12 +132,20 @@ def apply_home_to_env(
     # account's ``~/.gradle``.  ``GRADLE_USER_HOME`` is the one setting both
     # the launcher and the wrapper read.  Overwritten for the XDG reason.
     env["GRADLE_USER_HOME"] = os.path.join(home_path, ".gradle")
+    # Overwritten for the XDG reason: a daemon exporting its own prefix
+    # would otherwise put the workspace's bytecode in the daemon's tree.
+    env["PYTHONPYCACHEPREFIX"] = pycache_dir(home_path)
     # #1273: ``uv tool install``, ``pipx`` and ``pip install --user`` put the
     # programs they install in ``~/.local/bin``.  With HOME redirected that is
     # ``<home>/.local/bin``, which was on nobody's PATH, so a tool installed
     # by one command was "not found" by the next.  Appended, so it can never
     # shadow a host binary; per workspace, so it does not leak across them.
     append_path_entry(env, local_bin_dir(home_path))
+
+
+def pycache_dir(home_path: str) -> str:
+    """``<home>/.cache/pycache``: where a subprocess's Python bytecode goes."""
+    return os.path.join(home_path, ".cache", "pycache")
 
 
 def local_bin_dir(home_path: str) -> str:

@@ -9829,6 +9829,25 @@ the rules of the plugins the runner loads either way.
 Not verified here: no AppArmor kernel. The exec grants and the resolved-path
 reasoning are exercised as rendered strings, not against an enforcing host.
 
+### Bytecode a Clone Never Sees
+
+A model running a project's Python (`pytest`, `python -m`) wrote
+`__pycache__/*.pyc` beside every module it imported, so a project that does
+not ignore them showed them in `git status` and in the Files panel. Wherever
+the workspace HOME applies (#1225), `apply_home_to_env` also sets
+`PYTHONPYCACHEPREFIX=<home>/.cache/pycache`, for `cli`, `interactive_shell`
+and the notebook kernel. The bytecode is still cached, under `.home/`, which
+already has its own `*` gitignore and is hidden from the panel. Nothing is
+ignored; the files are never written in the tree.
+
+Stated cost: an interpreter reads bytecode only from the prefix tree, so the
+first run in a workspace recompiles what it imports, installed packages
+included. `get_environment(aspect="runtime")` reports `pycache_prefix`. A
+user's own checkout without a workspace HOME is unchanged. Guard:
+`jaato_server/shared/tests/test_bytecode_stays_out_of_the_workspace.py`,
+one reversion, with a control that shows an unredirected interpreter does
+write `__pycache__`.
+
 ### Asking What a Session Can Run (#1346)
 
 An agent in a confined session found out what it could run by probing, and
