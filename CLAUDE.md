@@ -2847,6 +2847,7 @@ from the session at all.
 |---|---|
 | the decision (managed workspace = on, user checkout = opt-in via `plugin_configs.cli.private_tmp`, non-root daemon or a workspace under `/tmp` = off with one WARNING) | `shared/private_tmp.py::resolve_private_tmp`, called only on the confined provisioning path (`runner_spawn.resolve_session_private_tmp` from the WS pre-init hook and the IPC `_provision_apparmor_for_session`), and stashed on the server |
 | the grant | template **v39**: base, `tool_hat` and `//child` gain `/tmp/** rwkl` and `/var/tmp/** rwkl` ONLY when rendered with `private_tmp_dir`; the body names the directory, so it is part of the confinement id and so of the slot key |
+| `/dev/shm` | template **v41**: the same runner mounts a fresh tmpfs (`nosuid,nodev,mode=1777`) on `/dev/shm` in the namespace, and the same gated block grants `/dev/shm/** rwkl`, so POSIX semaphores and shared memory (Python multiprocessing's `SemLock`) work. Verified by identity; a mount that left the host's `/dev/shm` in place refuses the start. Its pages count against the session's memory cgroup, like any tmpfs. A confined session with no private `/tmp` still has no `/dev/shm` |
 | cold spawn | `runner_spawner._enter_private_tmp_in_child`, in the forked child before `exec` (before `runner/__main__` confines); a failure writes the cause to stderr and exits `126` |
 | pool slot | `bootstrap_session` step **1b2** (`_enter_private_tmp`), before step 1c confines, on the main thread |
 | the envelope | `SessionInitEnvelope.private_tmp_dir` (absolute; no schema bump: an older daemon renders no grant) |
@@ -2899,7 +2900,11 @@ Step 2 (a spawner process owning the model's view of `/etc`, the home and
 `/var`, so the runner keeps the host view and the credentials) is a
 separate design in the issue.
 
-Guard: `jaato_server/shared/tests/test_private_tmp_1381.py`, seven
+Every body (not only a private-`/tmp` one) also reads `/proc/cpuinfo` and
+`owner /proc/*/limits` since v41. The `/proc/self/** r` line never matched
+either read, because AppArmor resolves `/proc/self` before matching.
+
+Guard: `jaato_server/shared/tests/test_private_tmp_1381.py`, nine
 reversions.
 
 ### Binary Media Chunks (delivery)

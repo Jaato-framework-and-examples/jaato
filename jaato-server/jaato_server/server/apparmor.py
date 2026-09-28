@@ -629,7 +629,20 @@ class AppArmorManager:
     #       like a user-tier fragment that shadows it (the cache tier wins
     #       a basename collision) and drops its denies.  The walker that
     #       fills the tier runs outside the confined runner.
-    _TEMPLATE_VERSION = 40
+    #   v41: a private ``/dev/shm`` beside the private ``/tmp``.  The same
+    #       runner that binds ``<ws>/.tmp`` mounts a fresh tmpfs on
+    #       ``/dev/shm`` in its namespace, so base, ``tool_hat`` and
+    #       ``//child`` of such a boundary gain ``/dev/shm/** rwkl``
+    #       (POSIX semaphores and shared memory: Python multiprocessing's
+    #       ``SemLock``, which failed with ``EACCES``).  The grant is gated
+    #       exactly like the ``/tmp`` one, so it never reaches the host's
+    #       ``/dev/shm``, which every session on the host shares.  Every
+    #       body also gains ``/proc/cpuinfo r`` and ``owner
+    #       /proc/*/limits r``: ``os.cpu_count``-style probes and
+    #       ``ulimit``/``resource`` readers were denied, because the
+    #       existing ``/proc/self/** r`` line never matches (AppArmor
+    #       resolves ``/proc/self`` first).
+    _TEMPLATE_VERSION = 41
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -832,6 +845,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /etc/passwd          r,
   /etc/nsswitch.conf   r,
   /proc/self/**        r,
+  # v41: two reads the broad /proc/self/** line never grants (AppArmor
+  # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
+  /proc/cpuinfo        r,
+  owner /proc/*/limits r,
   /dev/null            rw,
   /dev/urandom         r,
   /dev/pts/*           rw,
@@ -3006,6 +3023,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             "/tmp/**        rwkl,",
             "/var/tmp/      rw,",
             "/var/tmp/**    rwkl,",
+            "# and /dev/shm is a fresh tmpfs in the same namespace",
+            "/dev/shm/      r,",
+            "/dev/shm/**    rwkl,",
         )
         return "\n".join(f"{indent}{line}" for line in lines)
 
@@ -3131,6 +3151,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /etc/passwd          r,
     /etc/nsswitch.conf   r,
     /proc/self/**        r,
+    # v41: two reads the broad /proc/self/** line never grants (AppArmor
+    # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
+    /proc/cpuinfo        r,
+    owner /proc/*/limits r,
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
@@ -3396,6 +3420,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /etc/passwd          r,
     /etc/nsswitch.conf   r,
     /proc/self/**        r,
+    # v41: two reads the broad /proc/self/** line never grants (AppArmor
+    # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.
+    /proc/cpuinfo        r,
+    owner /proc/*/limits r,
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,

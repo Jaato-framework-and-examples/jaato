@@ -62,6 +62,23 @@ _GITIGNORE = "jaato-server/jaato_server/shared/scaffold/gitignore.py"
 
 REVERSIONS = [
     Reversion(
+        target=_PRIVATE,
+        find="    _mount_private_shm(libc)\n",
+        replace="",
+        test="test_entering_the_namespace_mounts_a_private_shm",
+        because=(
+            "the profile grants /dev/shm/** to the boundary while /dev/shm is "
+            "still the host's, shared by every session on it"
+        ),
+    ),
+    Reversion(
+        target=_PRIVATE,
+        find="    if after is None or after == before:\n",
+        replace="    if after is None:\n",
+        test="test_a_shm_mount_that_changed_nothing_is_a_refusal",
+        because="a no-op mount is reported as a private /dev/shm",
+    ),
+    Reversion(
         target=_APPARMOR,
         find='            private_tmp_rules=self._private_tmp_rules(private_tmp_dir, "  "),\n',
         replace='            private_tmp_rules=self._private_tmp_rules(None, "  "),\n',
@@ -155,6 +172,62 @@ def test_the_tmp_grant_is_rendered_in_base_tool_hat_and_child():
     assert body.count("/tmp/**        rwkl,") == 3
     assert body.count("/var/tmp/**    rwkl,") == 3
     assert TMP_DIR in body
+
+
+def test_the_shm_grant_follows_the_private_tmp():
+    assert _render(TMP_DIR).count("/dev/shm/**    rwkl,") == 3
+    assert "/dev/shm" not in _render(None)
+
+
+def test_every_body_reads_cpuinfo_and_its_own_limits():
+    for body in (_render(TMP_DIR), _render(None)):
+        assert body.count("/proc/cpuinfo        r,") == 3
+        assert body.count("owner /proc/*/limits r,") == 3
+
+
+class _FakeLibc:
+    def __init__(self):
+        self.mounts = []
+
+    def unshare(self, flags):
+        return 0
+
+    def mount(self, source, target, fstype, flags, data):
+        self.mounts.append((source, target, fstype))
+        return 0
+
+
+def _fake_namespace(monkeypatch, shm_changes=True):
+    libc = _FakeLibc()
+    monkeypatch.setattr(private_tmp, "_libc", lambda: libc)
+    monkeypatch.setattr(private_tmp, "private_tmp_in_effect", lambda d: False)
+    monkeypatch.setattr(private_tmp, "_targets_are", lambda i: True)
+    monkeypatch.setattr(private_tmp, "_bind_targets", lambda l, d: None)
+    monkeypatch.setattr(os.path, "isdir", lambda p: True)
+    monkeypatch.setattr(private_tmp, "under_a_target", lambda p: False)
+    ids = {"n": 0}
+
+    def ident(path):
+        if path != private_tmp.PRIVATE_SHM_TARGET:
+            return (1, 1)
+        ids["n"] += 1
+        return (9, ids["n"] if shm_changes else 1)
+
+    monkeypatch.setattr(private_tmp, "_identity", ident)
+    return libc
+
+
+def test_entering_the_namespace_mounts_a_private_shm(monkeypatch):
+    libc = _fake_namespace(monkeypatch)
+    private_tmp.enter_private_tmp(TMP_DIR)
+    assert (b"tmpfs", b"/dev/shm", b"tmpfs") in libc.mounts
+    assert private_tmp._shm_identity is not None
+
+
+def test_a_shm_mount_that_changed_nothing_is_a_refusal(monkeypatch):
+    _fake_namespace(monkeypatch, shm_changes=False)
+    with pytest.raises(private_tmp.PrivateTmpError, match="/dev/shm"):
+        private_tmp.enter_private_tmp(TMP_DIR)
 
 
 def test_no_tmp_grant_without_a_private_tmp():
@@ -349,15 +422,17 @@ def test_the_namespace_really_binds_tmp():
             "except p.PrivateTmpError as e:\n"
             "    print('SKIP', e); sys.exit(0)\n"
             f"open('/tmp/{marker}', 'w').write('x')\n"
-            "print('OK', p.describe()[0])\n"
+            f"open('/dev/shm/{marker}', 'w').write('x')\n"
+            "print('OK', p.describe()[0], p.private_shm_in_effect())\n"
         )
         proc = subprocess.run([sys.executable, "-c", code, str(ws / ".tmp")],
                               capture_output=True, text=True, timeout=60)
         if proc.stdout.startswith("SKIP"):
             pytest.skip(f"this host refuses a mount namespace: {proc.stdout}")
-        assert proc.stdout.strip() == "OK True", proc.stderr
+        assert proc.stdout.strip() == "OK True True", proc.stderr
         assert (ws / ".tmp" / marker).exists()
         assert not Path("/tmp", marker).exists()
+        assert not Path("/dev/shm", marker).exists()
     finally:
         subprocess.run(["rm", "-rf", str(ws)], check=False)
 
