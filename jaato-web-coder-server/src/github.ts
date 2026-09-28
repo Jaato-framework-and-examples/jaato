@@ -120,6 +120,12 @@ interface BindingWrite {
   envChanged: boolean;
   gitconfigSeeded: boolean;
   guidanceWritten: boolean;
+  /**
+   * The daemon answered ``not_found``: no workspace at this path is owned by
+   * this user (it was deleted, or never registered to them).  The resync
+   * drops such a binding; an explicit {@link GitHubService.bind} only notes it.
+   */
+  gone: boolean;
   notes: string[];
 }
 
@@ -381,22 +387,52 @@ export class GitHubService {
    * first time a write is possible, without the user picking the account
    * again.  Every write is idempotent, so resyncing a healthy store changes
    * nothing.
+   *
+   * It also drops the bindings that can never work again, because nothing
+   * else does: deleting a workspace is a browser-to-daemon verb this server
+   * never sees, so its binding would otherwise stay forever, refused at every
+   * resync and inherited by a later workspace of the same path.  Two cases,
+   * each on evidence rather than on absence from some listing:
+   *
+   * - the recorded workspace is not an absolute path (a binding saved before
+   *   bindings were keyed by path).  The daemon only ever resolves a
+   *   session's workspace, which is absolute, so it can never match;
+   * - the daemon answered ``not_found``: it owns the workspace registry and
+   *   says no workspace at that path belongs to this user.
+   *
+   * Each drop is logged with its reason.  A wrongly dropped binding costs the
+   * user picking the account again.
    */
-  async resyncWorkspaces(): Promise<{ bindings: number; changed: number; notes: string[] }> {
+  async resyncWorkspaces(): Promise<{ bindings: number; changed: number; removed: number; notes: string[] }> {
     const all = this._store.allBindings();
     const changedUsers = new Set<string>();
     const notes: string[] = [];
+    const removedNotes: string[] = [];
     let changed = 0;
     for (const b of all) {
+      if (!isAbsolute(b.workspace)) {
+        if (this._store.removeBinding(b.user, b.workspace)) {
+          removedNotes.push(`${b.workspace}: not a workspace path (a binding saved before bindings were keyed by path)`);
+        }
+        continue;
+      }
       const account = this._store.accountById(b.grantId);
       if (!account) continue;
       const w = await this._writeBindingFiles(b.user, b.workspace, account);
+      if (w.gone) {
+        if (this._store.removeBinding(b.user, b.workspace)) {
+          removedNotes.push(`${b.workspace}: the daemon has no such workspace for this user`);
+        }
+        continue;
+      }
       if (w.envChanged) { changed += 1; changedUsers.add(b.user); }
       for (const n of w.notes) notes.push(`${b.workspace}: ${n}`);
     }
     for (const user of changedUsers) await this._reload(user, "resync");
-    this._log(`github resync: ${all.length} binding(s), ${changed} workspace .env updated${notes.length ? `; ${notes.join("; ")}` : ""}`);
-    return { bindings: all.length, changed, notes };
+    const removed = removedNotes.length;
+    this._log(`github resync: ${all.length} binding(s), ${changed} workspace .env updated, ${removed} removed${notes.length ? `; ${notes.join("; ")}` : ""}`);
+    if (removed) this._log(`github resync removed ${removed} binding(s): ${removedNotes.join("; ")}`);
+    return { bindings: all.length, changed, removed, notes };
   }
 
   /**
@@ -415,14 +451,14 @@ export class GitHubService {
       const gitconfigSeeded = account ? this._seedGitConfig(resolved, account) : false;
       const g = this._applyGuidance(resolved, present);
       if (g.note) notes.push(g.note);
-      return { envWritten, envChanged: readEnvSafe(resolved) !== before, gitconfigSeeded, guidanceWritten: g.written, notes };
+      return { envWritten, envChanged: readEnvSafe(resolved) !== before, gitconfigSeeded, guidanceWritten: g.written, gone: false, notes };
     }
     if (this._writer?.canWriteWorkspaces()) return this._writeThroughDaemon(user, workspace, account);
     const why = this._workspaceRoot
       ? "the workspace is outside this server's workspace_root"
       : "this server has no workspace_root";
     return {
-      envWritten: false, envChanged: false, gitconfigSeeded: false, guidanceWritten: false,
+      envWritten: false, envChanged: false, gitconfigSeeded: false, guidanceWritten: false, gone: false,
       notes: [`GH_TOKEN was not written to the workspace .env: ${why}, and the daemon does not accept workspace.app_write (it needs protocol 1.30 and a connected bind channel); sessions in this workspace will not get GH_TOKEN`],
     };
   }
@@ -436,7 +472,7 @@ export class GitHubService {
       files.push({ path: ".home/.gitconfig", content: renderGitConfig({ name: account.name || account.login, email: account.noreplyEmail, gitHost: this._api.gitHost }) });
     }
     files.push({ path: guidance.relativePath, content: present ? managedContent(guidance) : null, managed_by: guidance.markerId });
-    const none: BindingWrite = { envWritten: false, envChanged: false, gitconfigSeeded: false, guidanceWritten: false, notes: [] };
+    const none: BindingWrite = { envWritten: false, envChanged: false, gitconfigSeeded: false, guidanceWritten: false, gone: false, notes: [] };
     let ans: WorkspaceWriteAnswer;
     try {
       ans = await this._writer!.writeWorkspace(user, workspace, { env: { [GH_TOKEN_ENV]: present ? GH_TOKEN_ENV_VALUE : null }, files });
@@ -444,7 +480,7 @@ export class GitHubService {
       return { ...none, notes: [`the daemon could not be asked to write the workspace: ${(e as Error).message}; sessions there will not get GH_TOKEN`] };
     }
     if (ans.status !== "ok") {
-      return { ...none, notes: [`the daemon did not write the workspace (${ans.status}${ans.detail ? `: ${ans.detail}` : ""}); sessions there will not get GH_TOKEN`] };
+      return { ...none, gone: ans.status === "not_found", notes: [`the daemon did not write the workspace (${ans.status}${ans.detail ? `: ${ans.detail}` : ""}); sessions there will not get GH_TOKEN`] };
     }
     const notes: string[] = [];
     const envAction = ans.env[GH_TOKEN_ENV] ?? "error";
@@ -464,6 +500,7 @@ export class GitHubService {
       envChanged: envAction === "written" || envAction === "removed",
       gitconfigSeeded: git?.action === "written" || git?.action === "unchanged",
       guidanceWritten: guide?.action === "written",
+      gone: false,
       notes,
     };
   }

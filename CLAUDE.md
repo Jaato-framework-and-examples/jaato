@@ -7259,7 +7259,11 @@ BFF side (`jaato-web-coder-server`): `GitHubService` writes locally when
 says sessions there will not get `GH_TOKEN`. On every bind-channel
 (re)connect it re-writes every recorded binding and reloads the sessions of
 users whose `.env` changed, so existing bindings are repaired without picking
-the account again. The web client shows the bind note at workspace
+the account again. The same pass drops a binding that can never work: one keyed
+by a workspace name (from before bindings were keyed by path), and one whose
+workspace the daemon answers `not_found` for. Deleting a workspace never
+reaches the BFF, so without this its binding outlived it, refused at every
+resync and inherited by a later workspace at the same path. The web client shows the bind note at workspace
 creation, and says so when it cannot bind at all. `MIN_WORKSPACE_APP_WRITE_PROTOCOL`
 in the TS SDK. Guard:
 `server/tests/test_an_application_writes_its_reference_through_the_daemon.py`,
