@@ -135,7 +135,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/core.py::JaatoServer.execute_command": 27,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,
-    "jaato-server/jaato_server/server/core.py::JaatoServer.shutdown": 35,
+    "jaato-server/jaato_server/server/core.py::JaatoServer.shutdown": 30,
     "jaato-server/jaato_server/server/egress_proxy/config.py::validate_allowlist": 22,
     "jaato-server/jaato_server/server/ipc.py::JaatoIPCServer._handle_message": 30,
     # +1 for ``session.get_rendered_system_instruction`` (#787).  This is a
@@ -173,7 +173,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._load_session_impl": 51,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 24,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._run_ephemeral_session_impl": 21,
-    "jaato-server/jaato_server/server/session_manager.py::SessionManager._save_session": 42,
+    "jaato-server/jaato_server/server/session_manager.py::SessionManager._save_session": 41,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._spawn_isolated_runner": 17,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager.attach_session": 16,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager.build_sibling_roster": 18,

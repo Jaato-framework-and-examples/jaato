@@ -836,7 +836,10 @@ class JaatoIPCServer:
         if isinstance(event, CommandListRequest):
             commands = []
             if self._on_command_list_request:
-                commands = self._on_command_list_request()
+                # Off the loop (#1355): the listing asks every runner for
+                # its history and commands through *_threadsafe RPCs.
+                commands = await asyncio.to_thread(
+                    self._on_command_list_request)
             await self._send_to_client(
                 client_id,
                 CommandListEvent(commands=commands)

@@ -9211,6 +9211,80 @@ Guard: `jaato_server/shared/tests/test_coreutils_run_confined_1342.py`, two
 reversions. Where `apparmor_parser` is installed it also compiles the
 rendered profile. Not verified on an enforcing kernel.
 
+### A Save That Waited on Its Own Loop (#1355)
+
+Every `*_threadsafe` wrapper on `RunnerRPCClient` schedules a coroutine on
+the daemon loop and blocks until it finishes. From the loop's own thread
+that waits for work only that thread can do, so the client refuses it
+(`_guard_not_on_loop`, #631). The guard was right; its callers were not.
+The daemon's exit path called `SessionManager.shutdown()` directly inside
+`async def start`, so on every restart, for every dirty session:
+
+| Step | What happened on the loop thread |
+|---|---|
+| the save's history fetch | refused; `_save_session` returned `False`, the state was lost |
+| `session.end` / `session.shutdown` | refused; a pool slot fell through to a cold close |
+| `rpc.close()` | waited on with an unguarded `run_coroutine_threadsafe(...).result(10)`: a 10 s stall |
+
+Measured with a real client and runner over a socketpair: `saved: [False]`,
+no record, 10.0 s, before; record written with its history, after.
+
+The same class was reachable on a live daemon: the IPC and WS
+`CommandListRequest` handlers, the WS workspace inspect and delete handlers,
+and the standalone WS handlers ran sync code that lists sessions and asks
+every runner for its history and commands. There the fetch was refused and
+`get_history` silently fell back to the daemon-side copy.
+
+**The rule: an `async def` never calls sync code that reaches a runner
+wrapper. It hands the call to `asyncio.to_thread` and awaits it**, which
+leaves the loop free to serve the round-trips. One mechanism, applied at
+every site found:
+
+| Site | Change |
+|---|---|
+| `JaatoDaemon.start` exit | `await SessionManager.shutdown_from_loop()` (watchdog stop and shutdown, both off the loop) |
+| WS standalone `start` exit, `StopRequest`, `CommandRequest`, `HistoryPageRequest` | `asyncio.to_thread` |
+| IPC and WS `CommandListRequest` | `asyncio.to_thread` |
+| WS `workspace.inspect` / `workspace.delete` session listing | `asyncio.to_thread` |
+
+Three backstops, none of which skips a save silently:
+
+- **The guard closes the coroutine it refuses.** `_run_threadsafe` builds
+  its coroutine before asking, so a refusal also logged `coroutine ... was
+  never awaited`. The refusal still raises.
+- **`JaatoServer.shutdown` on the loop schedules the close** instead of
+  blocking on it, with a WARNING (`_close_runner_rpc`, lifted out of
+  `shutdown` to keep it on the ratchet).
+- **A save after the runner was released writes nothing.**
+  `JaatoServer.shutdown` sets `_runner_released`, and `_history_for_save`
+  answers "skip" then, so an async save racing an unload cannot write `[]`
+  over the record the pre-release save wrote. A server that never had a
+  runner still saves `[]`, as before. A failed fetch raises and the save
+  writes nothing, as before.
+
+The order is unchanged: save, then `server.shutdown()`, which returns the
+slot or closes it, once.
+
+Guard: `jaato_server/server/tests/test_a_save_on_the_loop_thread_1355.py`,
+five reversions. It drives the real save and shutdown from a running loop
+against a real `RunnerRPC` on its own thread, and carries an AST check that
+no `async def` in `jaato_server/server/` calls a `*_threadsafe` wrapper, or
+a sync entry point known to reach one, without `await`. The entry-point list
+is checked against the call graph, so a name that stops reaching a wrapper
+fails rather than lingering.
+
+Stated limits:
+
+- **The AST check is a list, not the whole call graph.** A name-based graph
+  also flags `_register_client_tools(_ipc)` (which already pushes on its own
+  thread), `drive_pending_wake`, the isolated-runner spawn handler, the WS
+  `ClientConfigRequest` path and the subagent first-turn forward. Those were
+  not verified here and are not changed.
+- **Sync callbacks on the loop are not covered** (the `_read_loop -> cb`
+  shape #631 found). The client guard still refuses them loudly.
+- Not addressed: #693 (SIGTERM skips `SessionManager`) and #1061 (the
+  shutdown triple captured without a lock).
+
 ### A Failure While Reporting a Failure, Discarded (#1077)
 
 The daemon's model thread wound its turn down inside a `finally` holding

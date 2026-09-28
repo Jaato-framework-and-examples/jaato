@@ -1851,7 +1851,8 @@ class JaatoWSServer:
 
         # Cleanup
         if self._jaato_server:
-            self._jaato_server.shutdown()
+            # Off the loop (#1355): shutdown round-trips to this loop.
+            await asyncio.to_thread(self._jaato_server.shutdown)
 
         logger.info("Server stopped")
 
@@ -2853,12 +2854,14 @@ class JaatoWSServer:
             )
 
         elif isinstance(event, StopRequest):
-            self._jaato_server.stop()
+            # Off the loop (#1355): both reach a *_threadsafe runner RPC.
+            await asyncio.to_thread(self._jaato_server.stop)
 
         elif isinstance(event, CommandRequest):
-            result = self._jaato_server.execute_command(
+            result = await asyncio.to_thread(
+                self._jaato_server.execute_command,
                 event.command,
-                event.args
+                event.args,
             )
             # HelpLines results are already emitted via HelpTextEvent, skip
             if not (isinstance(result, dict) and "_pager" in result):
@@ -2874,10 +2877,12 @@ class JaatoWSServer:
         elif isinstance(event, HistoryPageRequest):
             # Paged, rendered history (1.28).  In daemon mode this goes
             # through the CommandRouter; standalone has one server.
-            await self._send_to_client(client_id, self._jaato_server.history_page(
+            page = await asyncio.to_thread(
+                self._jaato_server.history_page,
                 event.agent_id, before=event.before,
                 max_lines=event.max_lines, request_id=event.request_id,
-            ))
+            )
+            await self._send_to_client(client_id, page)
 
         else:
             await self._send_error(client_id, f"Unknown request type: {event.type}")
@@ -3396,7 +3401,10 @@ class JaatoWSServer:
         # Handle CommandListRequest directly (same as IPC path)
         if isinstance(event, CommandListRequest):
             if self._command_router:
-                commands = self._command_router.get_command_list()
+                # Off the loop (#1355): lists sessions and asks each
+                # runner for its history and commands.
+                commands = await asyncio.to_thread(
+                    self._command_router.get_command_list)
                 await self._send_to_client(
                     client_id, CommandListEvent(commands=commands),
                 )
@@ -3889,12 +3897,15 @@ class JaatoWSServer:
         user = self.get_client_user(client_id)
         try:
             path = self._workspace_manager.get_workspace_path(name)
-            in_use = self._sessions_loaded_in(str(path)) if path else []
+            # Off the loop (#1355): listing asks each runner for history.
+            in_use = (await asyncio.to_thread(
+                self._sessions_loaded_in, str(path)) if path else [])
             if stop_sessions and in_use:
                 self._workspace_manager.check_deletable(
                     name, user=user, client_id=client_id)
                 await asyncio.to_thread(self._delete_sessions, in_use)
-                in_use = self._sessions_loaded_in(str(path))
+                in_use = await asyncio.to_thread(
+                    self._sessions_loaded_in, str(path))
             self._workspace_manager.delete_workspace(
                 name, user=user, in_use_by=in_use, client_id=client_id,
             )
@@ -3950,7 +3961,7 @@ class JaatoWSServer:
             await self._send_to_client(client_id, WorkspaceInspectEvent(
                 name=name, request_id=request_id, ok=False, error=str(e)))
             return
-        rows = self._session_rows()
+        rows = await asyncio.to_thread(self._session_rows)  # off the loop (#1355)
 
         async def run() -> None:
             try:

@@ -820,8 +820,9 @@ class JaatoDaemon:
             # Stop the #812 sweep before the manager tears sessions down, so
             # a sweep in flight cannot stop a session that is already being
             # unloaded and log a verdict about it.
-            self._session_manager.stop_lifetime_watchdog()
-            self._session_manager.shutdown()
+            # Both run on a worker thread (#1355): saving and tearing
+            # down a session round-trips to THIS loop.
+            await self._session_manager.shutdown_from_loop()
 
         # Pool PR 3: tear down idle pool slots BEFORE template.  Slots
         # were forked from template; killing template first orphans

@@ -1876,7 +1876,7 @@ class RunnerRPCClient:
 
     # --------- threadsafe wrapper for the cli plugin's sync stub ---------
 
-    def _guard_not_on_loop(self, method: str) -> None:
+    def _guard_not_on_loop(self, method: str, coro: Any = None) -> None:
         """Refuse a blocking threadsafe call made FROM the loop thread.
 
         Every ``*_threadsafe`` wrapper schedules a coroutine onto
@@ -1899,12 +1899,24 @@ class RunnerRPCClient:
         anyone ever adds to a loop-side path that makes a threadsafe
         round-trip -- from a silent, recurring, timeout-width stall into a
         loud one-time failure at the exact line.
+
+        *coro* is the coroutine a wrapper already BUILT before asking
+        (``_run_threadsafe`` receives one as its argument).  It is closed
+        on refusal: left alone it is garbage that Python reports as
+        ``RuntimeWarning: coroutine ... was never awaited``, which is how
+        #1355 showed up in the logs beside the real failure.  A refusal
+        here is still a failure for the caller -- the fix for a caller
+        that hits it is to run off the loop (``asyncio.to_thread``) or
+        await the async variant, never to swallow it.
         """
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             return                       # not on any loop thread: fine
         if running is self._loop:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             raise RuntimeError(
                 f"{method} called from the event-loop thread it targets. "
                 f"This self-deadlocks: the call blocks the loop waiting for "
@@ -3979,7 +3991,7 @@ class RunnerRPCClient:
     ) -> Any:
         """Synchronous wrapper for the named-method coroutines from
         worker threads.  Mirrors ``bootstrap_session_threadsafe``."""
-        self._guard_not_on_loop("_run_threadsafe")
+        self._guard_not_on_loop("_run_threadsafe", coro)
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return _result_from_loop(
             future,
