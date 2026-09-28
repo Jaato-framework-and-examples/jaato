@@ -108,12 +108,10 @@ refused, not read):
 | `github.workspace_root` | optional: the root managed workspaces live under, when THIS server can write there. Set = the bind writes `GH_TOKEN=app://github`, `.home/.gitconfig` and the GitHub guidance itself, contained within it (symlinks resolved). Unset, or a workspace outside it = the **daemon** writes them (`workspace.app_write`, daemon protocol 1.30), which is the only way when this server runs as an account that cannot reach the daemon's workspaces. The `.env` line is not optional: the daemon resolves `app://github` only when it finds it there, so a binding with no line gives sessions no `GH_TOKEN`. Every recorded binding is re-written when the bind channel (re)connects, so a binding made while no write was possible is repaired without picking the account again. The same pass drops a binding that can never work: one recorded by workspace name rather than path, and one whose workspace the daemon answers `not_found` for (deleted, or not this user's). Deleting a workspace is a browser-to-daemon verb this server never sees, so this is what keeps its binding from outliving it. Each drop is logged; a wrongly dropped one costs picking the account again |
 | `github.oauth_base_url`, `api_base_url` | optional: point at a GitHub Enterprise host (default `https://github.com` / `https://api.github.com`) |
 | `github.noreply_domain` | optional: the commit-email domain seeded into `.gitconfig` (default `users.noreply.github.com`) |
-| `environment.workspace_root` | optional block, **required key**: the root managed workspaces live under. The toolchain routes install into a workspace, so THIS server must reach it; the daemon does not install on its behalf. Absent block = off: `config.json` names no `environmentUrl` and the page shows no toolchain chips |
-| `environment.tools` | the operator's allow-list: toolchain → versions, e.g. `node: ["22", "20"]`, `go: ["1.23"]`, `bun: ["1.2"]`. Only `node`, `go` and `bun` can be listed (Rust and Java are not supported, see below). A major-only entry installs mise's latest of that line at bind time; list an exact version to pin it |
-| `environment.lsp` | pinned language-server versions: `basedpyright` (also what makes the `python` toolchain bindable), `typescript-language-server` (needs `typescript_version`), `gopls` (e.g. `v0.20.0`). An unpinned server is never installed |
-| `environment.mise`, `python` | the binaries used to install (default `mise` / `python3` on `PATH`) |
+| `environment.tools` | optional block: the operator's allow-list, toolchain → versions, e.g. `node: ["22", "20"]`, `java: {versions: ["21"]}`. `node`, `go`, `bun`, `java`, `maven` and `gradle` can be listed. A major-only entry installs mise's latest of that line at bind time; list an exact version to pin it. Absent block = off: `config.json` names no `environmentUrl` and the page shows no toolchain chips |
+| `environment.lsp` | pinned language-server versions: `basedpyright` (also what makes the `python` toolchain bindable), `typescript-language-server` (needs `typescript`), `gopls` (e.g. `v0.20.0`), `jdtls` (`java`, `max_heap`, `mirror`). Each entry is a version, or a mapping `{version, ...}` carrying that server's own keys. An unpinned server is never installed |
 | `environment.paranoid` | `true` sets `MISE_PARANOID=1` for installs (stricter verification; default `false`, mise's own checksum verification still applies) |
-| `environment.install_timeout` | per-step deadline (default `15m`) |
+| `environment.install_timeout` | per-step deadline for the plugin's installs (default `15m`, 30s to 2h) |
 | `environment.state_file` | where "Not now" answers are remembered per user and workspace (default `environment-state.json`, 0600) |
 
 ### Keys a user has used before
@@ -167,73 +165,112 @@ reload the user's loaded sessions so a live `gh` call then fails. Design:
 ### Toolchains, language servers and repository guidance (#1344)
 
 With an `environment:` block, a workspace owner can bind toolchains to a
-workspace from the page. Detection only proposes: after a New workspace's
-clones are checked out, the page asks this server to scan them for markers
-(`.nvmrc`, `package.json` engines, `go.mod`, `.tool-versions`,
-`pyproject.toml`, …) and shows *"Node 22 detected (from `api/.nvmrc`). Bind
-it?"*; mid-session, a command that failed with `<name>: command not found`
-raises the same chip in the rail's Toolchains section. Nothing is installed
-without a click, and "Not now" is remembered.
+workspace from the page. **This server only holds the policy.** It never
+installs, scans or writes anything in a workspace, so it works whatever
+account it runs as, including beside a root daemon. The installs are done by
+the web coder's toolchains plugin ([`plugin/`](plugin/README.md), shipped in
+this package), which runs in each session's runner, as the session's account
+and under its confinement. It must be installed into the DAEMON's Python
+environment, with its AppArmor fragment: [`plugin/INSTALL.md`](plugin/INSTALL.md).
 
 ```yaml
 environment:
-  workspace_root: /srv/jaato/workspaces
   tools:
     node: ["22", "20"]
     go: ["1.23"]
+    java:                        # long form: {versions: [...]}
+      versions: ["21", "temurin-17"]   # any mise java spelling
+    maven: ["3.9.9"]
+    gradle: ["8.10"]
   lsp:
-    basedpyright: "1.31.6"
-    typescript-language-server: "4.4.0"
+    basedpyright: "1.31.6"       # short form: just the version
     gopls: "v0.20.0"
-  typescript_version: "5.9.3"
+    typescript-language-server:  # long form: the version and this server's own keys
+      version: "4.4.0"
+      typescript: "5.9.3"        # required: the typescript installed beside it
+    jdtls:
+      version: "1.40.0"          # an Eclipse milestone
+      java: "21"                 # the JDK that RUNS jdtls (default 21)
+      max_heap: 1G               # -Xmx (default 1G); see #806 below
+      # mirror: https://...      # default https://download.eclipse.org/jdtls/milestones
+  # install_timeout: 15m         # per install step, 30s..2h
+  # paranoid: false              # MISE_PARANOID for every install
 ```
 
-A bind runs, as THIS process and never inside a confined session:
+`workspace_root`, `mise` and `python` are refused by name: they configured
+installs this process no longer runs.
+
+**Who does what.**
+
+| Party | Does |
+|---|---|
+| this server | answers `/api/environment` with the allow-list, this user's "Not now" answers, and the content of the **offer** (`.jaato/toolchain-offer.json`) |
+| the page | stages the offer into the session's workspace through the daemon (`StageFilesRequest`); sends the plugin's `toolchain bind|unbind|scan|cancel` user command; reads `.jaato/environment.json` through the daemon (`workspace.file.fetch`) |
+| the plugin, in the runner | installs, writes the derived files, proposes from the repositories' markers, contributes the instruction section, and turns a `command not found` into a hint for the model and the page's Bind chip |
+
+A bind, as the plugin runs it:
 
 1. `mise install <tool>@<version>` with HOME, XDG and mise's directories
    under `<ws>/.home`, a clean environment (only proxy and CA variables pass
    through), and `MISE_CEILING_PATHS=<ws>/.home` so a repository's own
-   `mise.toml` cannot choose what is downloaded;
+   `mise.toml` cannot choose what is downloaded. Every step execs through the
+   session's `//child` AppArmor transition, since an installer runs a
+   vendor's code;
 2. relative symlinks from the install's `bin/` into `<ws>/.home/.local/bin`,
-   which is on every command's `PATH` and granted exec under confinement
-   (#1273/#1274). A file there that is not one of these links is never
-   replaced;
+   which is on every command's `PATH` (#1273/#1274). A file there that is not
+   one of these links is never replaced;
 3. the pinned language server: basedpyright into its own venv under
-   `.home/.local/share/jaato-lsp/` (not the model's tool-venv, which may not
-   exist yet and is the model's to change), typescript-language-server with
-   the linked `npm` (started through the linked `node`, so its `.mjs` entry is
-   read rather than exec'd), gopls with `GOBIN=.home/.local/bin`;
-4. four managed files: `.jaato/environment.json` (read by
-   `get_environment(aspect="runtime")`), `.home/.config/mise/config.toml`,
-   `.lsp.json` (read by the `lsp` plugin, whose tools appear once a server is
-   configured, #1345) and `.jaato/instructions/45-environment.md`. A file whose
-   `jaato-managed` marker the user removed is left alone and reported.
+   `.home/.local/share/jaato-lsp/`, typescript-language-server with the linked
+   `npm` (started through the linked `node`), gopls with
+   `GOBIN=.home/.local/bin`, jdtls as a milestone checked against its
+   published `.sha256` and started with `java -jar` on its own mise JDK
+   (`lsp.jdtls.java`), heap capped at `lsp.jdtls.max_heap`, `-data` at the
+   framework's `${jdtlsStateRoot}`;
+4. the derived files: `.jaato/environment.json` (the record the page reads,
+   also read by `get_environment(aspect="runtime")`),
+   `.home/.config/mise/config.toml`, and `.lsp.json` (read by the `lsp`
+   plugin, whose tools appear once a server is configured, #1345). A mise
+   config or `.lsp.json` without the `jaato-managed` marker is the user's and
+   is left alone.
 
-**Ownership, not only containment.** Every route asks the daemon, over the
-bind channel, whether the signed-in user owns the workspace (an empty
-`workspace.app_write`, daemon protocol 1.30). A daemon that cannot answer
-refuses the request.
+The plugin runs one install at a time per workspace (a lock under
+`.home/.cache`), and an install stops if its session ends. The page follows
+the job by polling the manifest.
 
-**The uid layout matters and is not checked for you.** Installs are written
-by this server's account and run by the runner's. If they differ, `.home`
-must be writable here and the installed files readable and executable
-there; the runner's profile grants no `dac_override`, so even a root runner
-is bound by file permissions. A BFF that runs as an account which cannot
-reach the daemon's workspaces (the `workspace.app_write` deployment above)
-cannot use this feature.
+**Proposals and guidance** come from the plugin's scan of the workspace root
+and its immediate subdirectories (`.nvmrc`, `package.json` engines, `go.mod`,
+`.tool-versions`, `.java-version`, `pom.xml`, Gradle files, `pyproject.toml`,
+…) at session start, and on `toolchain scan` (the Toolchains section's
+*Rescan*). A proposal names only a toolchain the operator allows, with the
+allowed version its pin maps to. The repositories' `AGENTS.md`, `CLAUDE.md`,
+`CONTRIBUTING.md`, `.github/copilot-instructions.md` and `.cursor/rules` are
+named in the plugin's instruction section, never their contents; the root's
+own files are the framework's (#1347).
 
-**Unbind** removes the links, the server's binaries and the tool's entry in
-the managed files; the download under `.home/.local/share/mise` is kept, so a
+**Binding needs a session.** The plugin runs in a session's runner, so on the
+New workspace plate, before any session exists, a choice is remembered in
+this browser and bound when the first session in that workspace starts.
+
+**The offer is protected where it can be.** The plugin's AppArmor fragment
+denies a confined session writing `.jaato/toolchain-offer.json`, so the agent
+cannot widen the allow-list. An unconfined session is not covered; the plugin
+validates every field anyway, and an unconfined agent could run mise itself.
+
+**jdtls and #806.** The daemon does not reap a language server at session
+end; it lives until its runner slot exits. With `lsp.jdtls` set this server
+logs a WARNING at startup saying so, and `lsp.jdtls.max_heap` bounds what each
+one left behind can hold (plus the JVM's own overhead). Two sessions in one
+workspace share a `${jdtlsStateRoot}`, so the second jdtls finds it locked.
+
+**Ownership.** Every route asks the daemon, over the bind channel, whether
+the signed-in user owns the workspace (an empty `workspace.app_write`,
+daemon protocol 1.30). A daemon that cannot answer refuses the request.
+
+**Unbind** removes the links, the server's binaries and the tool's entries in
+the derived files; the download under `.home/.local/share/mise` is kept, so a
 rebind is quick. Not supported: Rust (rustup keeps its homes outside mise and
-its proxies need `RUSTUP_HOME` at run time), Java (until #806), a shared
-read-only toolchain cache (phase 5 of #1344; it needs an operator-installed
-AppArmor user-tier fragment granting `r`/`ix` on the cache directory).
-
-The repository-guidance pointer is written on the same scan:
-`.jaato/instructions/30-repo-guidance.md` names each cloned repository's
-`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `.github/copilot-instructions.md`
-and `.cursor/rules`, never their contents. The workspace root's own files are
-the framework's (#1347).
+its proxies need `RUSTUP_HOME` at run time), a shared read-only toolchain
+cache (phase 5 of #1344).
 
 ## Routes
 
@@ -246,9 +283,8 @@ the framework's (#1347).
 | `/api/session` | GET | `{user, expiresAt}` or 401 |
 | `/api/ticket` | POST | one single-use ticket; same-origin only (`Sec-Fetch-Site` / `Origin`) |
 | `/api/logout` | GET | ends the session, revokes, redirects through the issuer's logout |
-| `/api/environment?workspace=` | GET | bound toolchains, the allow-list, proposals and the latest install (`environment:` only) |
-| `/api/environment/bind`, `unbind`, `decline`, `refresh` | POST | `{workspace, tool[, version]}`; same-origin only |
-| `/api/environment/jobs/<id>` | GET | one install's progress; `…/cancel` (POST) stops it |
+| `/api/environment?workspace=` | GET | the allow-list, this user's declines, and the offer's content (`environment:` only) |
+| `/api/environment/decline`, `undecline` | POST | `{workspace, tool}`; same-origin only |
 | `/api/credentials?provider=` | GET | the user's stored keys for a provider: `{entries: [{id, provider, label, hint, createdAt}]}` |
 | `/api/credentials` | POST | store `{provider, secret, label?}` → 201 `{entry}`; same-origin only |
 | `/api/credentials/<id>/reveal` | POST | `{secret}`; same-origin only |

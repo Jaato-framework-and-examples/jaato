@@ -546,7 +546,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # reach the workspace itself.  A NEW verb: an older daemon answers it with an
 # error frame and never the result, so an application checks the daemon's
 # protocol before relying on it.
-PROTOCOL_VERSION = "1.30"
+# 1.31 -- ``tool.result_enriched`` (``ToolResultEnrichedEvent``): a structured
+# notice an enrichment plugin attached to a tool result, for the CLIENT.
+# Enrichment changes the result the MODEL reads; before this nothing of it
+# reached a client but a formatted ``source="enrichment"`` line, so a client
+# that wanted to act on what a plugin found (a missing toolchain, say) had to
+# detect it again on its own.  A plugin returns ``metadata["client_notice"] =
+# {"kind", "data"}``; the daemon emits one event per notice after the result
+# is built, on the runner path as a ``tool_result_enriched`` notification.
+# A NEW event type: an older client does not know it, logs it and continues
+# (the 1.8 shape), so nothing is refused.
+PROTOCOL_VERSION = "1.31"
 
 
 # =============================================================================
@@ -601,6 +611,7 @@ class EventType(str, Enum):
     TOOL_CALL_START = "tool.call_start"
     TOOL_CALL_END = "tool.call_end"
     TOOL_OUTPUT = "tool.output"  # Live output chunk from running tool
+    TOOL_RESULT_ENRICHED = "tool.result_enriched"  # A plugin's structured notice about a result (1.31)
 
     # Permission flow (Server <-> Client)
     PERMISSION_REQUESTED = "permission.requested"
@@ -1225,6 +1236,30 @@ class ToolCallStartEvent(Event):
     # daemon-emitted key an SDK model does not declare is silently dropped
     # on ingest rather than reaching the client.
     tool_class: Optional[str] = None
+
+
+class ToolResultEnrichedEvent(Event):
+    """An enrichment plugin's structured notice about one tool result (1.31).
+
+    Tool-result enrichment rewrites what the MODEL reads.  A plugin that also
+    has something to tell the CLIENT returns it in its enrichment metadata as
+    ``{"client_notice": {"kind": ..., "data": {...}}}``, and the daemon emits
+    it here once the result is built, so a client acts on the plugin's finding
+    instead of re-deriving it.  The framework does not interpret ``kind`` or
+    ``data``: a client matches the kinds it knows and ignores the rest.
+
+    Emitted after the call's ``tool.call_end``.  ``data`` is a JSON object of
+    at most 4 KiB; a notice that is not is dropped daemon-side with a WARNING.
+    """
+    type: EventType = Field(default=EventType.TOOL_RESULT_ENRICHED)
+    agent_id: str = ""
+    call_id: Optional[str] = None
+    tool_name: str = ""
+    #: The enrichment plugin that attached the notice.
+    plugin: str = ""
+    #: What the notice is, in the plugin's vocabulary (``[a-z][a-z0-9_]*``).
+    kind: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCallEndEvent(Event):
@@ -4970,6 +5005,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
+    EventType.TOOL_RESULT_ENRICHED.value: ToolResultEnrichedEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
     EventType.PERMISSION_REQUESTED.value: PermissionRequestedEvent,
     EventType.PERMISSION_INPUT_MODE.value: PermissionInputModeEvent,

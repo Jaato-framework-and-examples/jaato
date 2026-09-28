@@ -483,6 +483,12 @@ jobs:
               pytest -q --continue-on-collection-errors jaato-server/jaato_server/shared/scaffold/tests/ || rc=1
               pytest -q -m conformance jaato-sdk/jaato_sdk/conformance/ || rc=1
               pytest -q --continue-on-collection-errors jaato-eval/tests/ || rc=1
+              # The web coder's toolchain_offer enrichment plugin is installed
+              # LAST and only here: an installed entry point is discovered by
+              # every registry, so installing it before the suites above would
+              # put an extra plugin in every session they build.
+              pip install ./jaato-web-coder-server/plugin || rc=1
+              pytest -q --continue-on-collection-errors jaato-web-coder-server/plugin/tests/ || rc=1
               exit $rc
 
     steps:

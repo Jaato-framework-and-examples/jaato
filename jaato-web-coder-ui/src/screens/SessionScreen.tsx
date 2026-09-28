@@ -31,6 +31,7 @@ import { applySessionKey, resolveKeyChoice } from "@/app/sessionKey";
 import type { ModelChoice } from "@/app/newSession";
 import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
 import { EnvironmentPanel } from "@/components/workspace/EnvironmentPanel";
+import { currentWorkspacePath } from "@/app/toolchainOffer";
 import { memoriesSummary } from "@/app/memories";
 import { DiagnosticsPanel } from "@/components/panels/DiagnosticsPanel";
 import { diagnosticsSummary } from "@/app/diagnostics";
@@ -169,8 +170,7 @@ function ToolchainsBadgeIcon() {
  */
 function ToolchainsRailPanel() {
   const url = useJaato((s) => s.environmentUrl);
-  const path = useJaato((s) => s.workspace.list.find((w) => w.name === s.workspace.selected)?.path
-    ?? s.sessions.find((x) => x.isCurrent)?.workspacePath ?? "");
+  const path = useJaato(currentWorkspacePath);
   const hint = useJaato((s) => s.environmentHint);
   const setHint = useJaato((s) => s.setEnvironmentHint);
   if (!url) return null;

@@ -69,6 +69,11 @@ journalctl -u jaato-web-coder-server -f     # "issuer … discovered", "bind cha
 Both units run in the foreground (`Type=simple`); the daemon is started
 **without** `--daemon`, which would double-fork and fight systemd.
 
+With an `environment:` block (toolchains), also install the
+`web_coder_toolchains` plugin, its AppArmor fragment and `mise` for the
+daemon before starting it:
+[`../plugin/INSTALL.md`](../plugin/INSTALL.md).
+
 ## 4. The proxy
 
 `Caddyfile` (automatic TLS) or `nginx.conf` (bring your certificates). The

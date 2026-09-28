@@ -1920,24 +1920,40 @@ reversions.
 ### Toolchains a Workspace Owner Binds (#1344)
 
 The rest of the epic is application-side, in the web coder: the framework
-already runs what lands under `<ws>/.home` (#1225, #1273/#1274, v38), so the
-BFF installs there, with the owner's consent. Off unless the BFF config has
-an `environment:` block; design and departures in
+already runs what lands under `<ws>/.home` (#1225, #1273/#1274, v38). Off
+unless the web coder server's config has an `environment:` block; design in
 [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md).
+
+The web coder server may run as an account that cannot read or write the
+workspaces (an ordinary user beside a root daemon), so it holds POLICY only
+and never touches a workspace. Everything that does runs in the session's
+runner, in the out-of-tree `web_coder_toolchains` plugin, as the session's
+account and under its confinement:
 
 | Piece | Where |
 |---|---|
-| detection (markers in the root and each clone; proposes only) | `jaato-web-coder-server/src/environment/detect.ts` |
-| install: `mise install` with every mise dir under `.home`, a clean env, `MISE_CEILING_PATHS` so a repo's `mise.toml` cannot choose downloads; relative links into `.home/.local/bin`; the pinned server | `src/environment/installer.ts` |
-| the four managed files (`.jaato/environment.json` for the `runtime` aspect, the mise config, `.lsp.json` for #1345, `45-environment.md`) and the `30-repo-guidance.md` pointer | `src/environment/files.ts`, `guidance.ts` |
-| operator allow-list of pinned versions; one job per workspace; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30), refused when it cannot answer | `src/environment/service.ts`, `src/config.ts`, `BindChannel.owns` |
-| the clone-time chip, the rail's Toolchains section, the mid-session `command not found` chip | `jaato-web-coder-ui/src/components/workspace/EnvironmentPanel.tsx`, `app/environment.ts` |
+| policy: the allow-list of pinned versions, server pins, "Not now" per user; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30) | `jaato-web-coder-server/src/environment/service.ts`, `src/config.ts` |
+| the offer (`.jaato/toolchain-offer.json`, schema 2): computed by the server, **staged by the page** through the daemon (`StageFilesRequest`), read by the plugin as its policy | `src/environment/files.ts`, `jaato-web-coder-ui/src/app/toolchainOffer.ts`, `plugin/…/offer.py`; one fixture pins it from both sides |
+| binding: the `toolchain bind|unbind|scan|cancel` user command, sent by the PAGE; a bind starts a plugin-owned job thread and returns at once (the executor's auto-background is built for the model, and a user command's RPC times out at 60 s). `mise install` with every mise dir under `.home`, a clean env and `MISE_CEILING_PATHS`; every step execs through the session's `//child` transition (installers run vendor code); relative links into `.home/.local/bin`; the pinned server; `.lsp.json` (for #1345) and the mise config; one job per workspace (`flock` under `.home/.cache`) | `plugin/jaato_web_coder_toolchains/plugin.py`, `installer.py`, `state.py` |
+| the record: `.jaato/environment.json` (bound toolchains for the `runtime` aspect, the job with its log, proposals, guidance), read by the page with `workspace.file.fetch` (1.20) | `state.py`, `jaato-web-coder-ui/src/app/toolchains.ts` |
+| proposals from repository markers (root and each clone), limited to what is allowed, at session start and on `scan`; the environment and repository-guidance instruction section | `detect.py`, the plugin's `get_system_instructions` |
+| the mid-session hint: a `cli` / `interactive_shell` / `notebook` result naming a missing command gets one line for the model and a `tool.result_enriched` notice, the page's only source for the chip | the plugin's `enrich_tool_result`, `store.ts` `noteToolchainOffer` |
+| the Toolchains panel; a choice made before any session exists (the New workspace plate) is kept in the browser and bound when the first session starts | `EnvironmentPanel.tsx`, `app/toolchains.ts` `flushPending` |
+| AppArmor: one user-tier fragment the deployer installs with the plugin, denying a confined session writes to the offer and granting a mise JDK `m` on its `.so` files and `ix` on `lib/jspawnhelper` (globs; a scoped profile names `jaato-web-coder-toolchains`) | `plugin/apparmor/jaato-web-coder-toolchains.rules`, `INSTALL.md` |
 
-`managed-files.ts` now spells its marker per type (`html`, `hash` for TOML,
-a `_jaato_managed` JSON key) and gains `generated`: a derived file refreshes
-when its content differs. Not verified on an enforcing kernel (phase 0), and
-no shared toolchain cache (phase 5). Guards: `test/environment.test.ts`,
-`test/environment-routes.test.ts`, `EnvironmentPanel.test.tsx`.
+Toolchains: Node, Go, Bun, Python (basedpyright only), Java, Maven and
+Gradle. Java ships although #806 is open: jdtls is a checksum-verified
+Eclipse milestone started with `java -jar` on its own mise JDK, heap capped
+by `environment.lsp.jdtls.max_heap`, `-data` at `${jdtlsStateRoot}` (which the
+lsp plugin grants `rw` from `.lsp.json`), and the server warns at startup.
+`mise` must be on the daemon host's system `PATH` (or `JAATO_TOOLCHAINS_MISE`).
+No framework change beyond the 1.31 client notice.
+
+Not verified on an enforcing kernel (phase 0), and no shared toolchain cache
+(phase 5). Guards: `plugin/tests/` (a fake mise through a real
+`ToolExecutor`, the fragment through `AppArmorManager._render_profile`),
+`test/environment.test.ts`, `test/environment-routes.test.ts`,
+`EnvironmentPanel.test.tsx`, `toolchainOffer.test.ts`.
 
 ### Pre-warm Runner Pool
 
@@ -3815,6 +3831,35 @@ Three properties follow, each attached to a way the old path went wrong:
 
 Nested payloads are deliberately not rendered into the view — handing an
 enricher a whole structured result is what the two traits above are for.
+
+### What an Enrichment Plugin Found, Told to the Client (protocol 1.31)
+
+Enrichment rewrites the result the MODEL reads. A client saw none of it
+except the formatted `source="enrichment"` line, which has no fields to key
+on, so a client that wanted to act on a plugin's finding had to detect the
+same thing again. A plugin now returns, in its enrichment metadata,
+
+```python
+{"client_notice": {"kind": "toolchain_offer", "data": {"command": "javac", "tool": "java"}}}
+```
+
+(or a list of them), and the client receives `ToolResultEnrichedEvent`
+`{agent_id, call_id, tool_name, plugin, kind, data}` after that call's
+`tool.call_end`.
+
+| Piece | Where |
+|---|---|
+| what is well-formed: `kind` `[a-z][a-z0-9_]{0,63}`, `data` a JSON object of at most 4 KiB; anything else dropped with a WARNING naming the plugin | `shared/enrichment_notice.py` |
+| the call site, on both result shapes, after enrichment | `JaatoSession._emit_enrichment_client_notices`, from `_build_tool_result` |
+| the hook, optional (looked up with `getattr`) | `AgentUIHooks.on_tool_result_enriched` |
+| runner path: a `tool_result_enriched` notification; daemon: a `_PURE_NOTIFICATION_EVENTS` builder | `runner/rpc.py` shim, `server/core.py` |
+
+The framework never interprets `kind` or `data`. A client matches the kinds
+it knows and ignores the rest; an older client does not know the event type,
+logs it and continues, so nothing is refused. The first user is the web
+coder's `web_coder_toolchains` plugin (#1344). Guard:
+`shared/tests/test_an_enrichment_notice_reaches_the_client.py`, three
+reversions.
 
 ### A Guard That Only Binds When Nothing Needs Bounding
 
@@ -11512,6 +11557,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Every mechanism it names is shipped: the `regulatory:` profile block, the `disclosure` piece and the first-interaction announcement, `generated_by` plus the `TRAIT_OUTPUT_MARKER` hook, one audit-record contract with `record_keeping:` retention and a sha256 chain, the incident register, memory provenance, and the Annex IV dossier generator with its `jaato-eval` accuracy section. What remains is recorded there as a decision rather than a gap. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
 - [Per-User GitHub Credentials](docs/design/per-user-github-credentials.md) - Proposed (#1225–#1228): how a multi-user web deployment on a root daemon gives each session its WUI user's GitHub token. The BFF holds the grant (GitHub App, refresh token encrypted per OIDC `sub`) and binds an account per workspace; the workspace `.env` carries only a reference (`GH_TOKEN=app://github`), which the daemon resolves at every spawn by asking the owning application over its bind channel, so cascade, wake and revived sessions get it too and nothing resolved is persisted. Includes the per-workspace `.home/` for model-driven subprocesses.
 - [GitHub Workspace Guidance](docs/design/github-workspace-guidance.md) - Proposed (#1240, docs-only, application-scoped): how the web coder ships the "use `gh` safely in a shared workspace" rule-set into every workspace it binds a GitHub account to, as application-managed files (no daemon change). The BFF writes `.jaato/instructions/40-github.md` at bind time beside the `.env`/`.gitconfig` it already seeds, so cascade/wake/revive sessions get the rules as they get the token; the UI refreshes on session start. Recommends BFF-as-primary-writer, one gitconfig source of commit identity, a force-push permission blacklist (enforced) plus prose (judgement), helper+prose worktree cleanup, and a generic managed-file mechanism GitLab can later reuse.
-- [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Built except phase 0 (verification on a confined host) and phase 5 (a shared cache); application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The BFF installs it with mise into `<ws>/.home`, where binaries already run under confinement (#1273/#1274, template v38), and writes the results as managed files. Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
+- [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Built except phase 0 (verification on a confined host) and phase 5 (a shared cache); application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The web coder's `web_coder_toolchains` plugin installs it with mise into `<ws>/.home` from inside the session's runner (the BFF holds only the policy, which the page stages as `.jaato/toolchain-offer.json`), where binaries already run under confinement (#1273/#1274, template v38). Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

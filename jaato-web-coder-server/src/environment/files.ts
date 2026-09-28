@@ -1,142 +1,46 @@
 /**
- * The files an environment binding writes, rendered from the manifest
- * (docs/design/web-coder-environment-bootstrap.md §6).
+ * The one file this server produces for a workspace: the toolchain offer.
  *
- * The manifest (``.jaato/environment.json``) is the record of what is bound
- * in a workspace.  It belongs to the WORKSPACE, not to a user: a second
- * person the workspace is shared with sees the same toolchains, which is
- * what the runner sees.  Every other file is derived from it:
+ * ``.jaato/toolchain-offer.json`` is the operator's policy, read by the web
+ * coder's toolchains plugin in the session's runner.  This server does not
+ * write it (it may run as an account that cannot write the workspace): it
+ * returns the content in the environment status and the PAGE stages it
+ * through the daemon (``StageFilesRequest``).  The plugin validates every
+ * field, and the plugin's AppArmor fragment denies a confined session
+ * writing the file.
  *
- * | File | Marker | Read by |
- * |---|---|---|
- * | ``.jaato/environment.json`` | ``"_jaato_managed"`` key | ``get_environment(aspect="runtime")`` (#1346) |
- * | ``.home/.config/mise/config.toml`` | ``#`` comment | mise, for the person who opens a shell |
- * | ``.lsp.json`` | ``"_jaato_managed"`` key | the ``lsp`` plugin (it reads only ``languageServers``) |
- * | ``.jaato/instructions/45-environment.md`` | HTML comment | every session's system prompt |
+ * Schema 2 (the plugin's ``offer.py`` is the reader):
  *
- * All four are *generated* managed files: refreshed whenever their content
- * differs, and never written over a copy whose marker the user removed.
+ * ```json
+ * {"schema": 2,
+ *  "toolchains": [{"tool": "java", "label": "Java", "versions": ["21"]}],
+ *  "servers": {"jdtls": {"version": "1.40.0", "java": "21", "max_heap": "1G"}},
+ *  "install": {"timeout_seconds": 900, "paranoid": false}}
+ * ```
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { ManagedFile } from "../managed-files.js";
-import {
-  ENVIRONMENT_INSTRUCTIONS_PATH,
-  ENVIRONMENT_MANIFEST_PATH,
-  LOCAL_BIN,
-  LSP_CONFIG_PATH,
-  MARKER_ENVIRONMENT,
-  MARKER_LSP,
-  MARKER_TOOLCHAINS,
-  MISE_CONFIG_PATH,
-  TOOLCHAINS,
-  isToolId,
-  type ServerId,
-  type ToolId,
-} from "./catalog.js";
-import type { InstalledServer } from "./installer.js";
+import { MARKER_TOOLCHAIN_OFFER, TOOLCHAIN_OFFER_PATH, type ServerId, type ToolId } from "./catalog.js";
 
-export const MANIFEST_VERSION = 1;
+export const TOOLCHAIN_OFFER_SCHEMA = 2;
+const OFFER_VERSION = 2;
 
-/** One bound toolchain, as the manifest records it. */
-export interface BoundToolchain {
-  tool: ToolId;
-  version: string;
-  installDir: string | null;
-  bin: string[];
-  server: InstalledServer | null;
-  /** Files the server install put in ``.home/.local/bin`` that are not links (gopls), removed on unbind. */
-  serverBin: string[];
-  boundAt: string;
+/** One server's settings as the offer carries them; ``version`` always present. */
+export type ServerSettings = Record<string, string>;
+
+export interface OfferPolicy {
+  allowed: Array<{ tool: ToolId; label: string; versions: string[] }>;
+  servers: Partial<Record<ServerId, ServerSettings>>;
+  installTimeoutSeconds: number;
+  paranoid: boolean;
 }
 
-export interface Manifest {
-  toolchains: BoundToolchain[];
-}
-
-/** The manifest on disk, or an empty one.  Read whatever its marker says: it is the record. */
-export function readManifest(workspace: string): Manifest {
-  let raw: unknown;
-  try { raw = JSON.parse(readFileSync(join(workspace, ENVIRONMENT_MANIFEST_PATH), "utf8")); } catch { return { toolchains: [] }; }
-  const list = (raw as { toolchains?: unknown })?.toolchains;
-  if (!Array.isArray(list)) return { toolchains: [] };
-  const toolchains = list.filter((t): t is BoundToolchain => !!t && typeof t === "object" && isToolId((t as BoundToolchain).tool) && typeof (t as BoundToolchain).version === "string")
-    .map((t) => ({ ...t, bin: Array.isArray(t.bin) ? t.bin.filter((b) => typeof b === "string") : [], serverBin: Array.isArray(t.serverBin) ? t.serverBin.filter((b) => typeof b === "string") : [], server: t.server ?? null, installDir: t.installDir ?? null }));
-  return { toolchains };
-}
-
-export function manifestFile(m: Manifest): ManagedFile {
+/** The offer as a managed JSON file.  An empty ``allowed`` gives an offer with no toolchains, which the plugin reads as "nothing to bind, nothing to hint". */
+export function toolchainOfferFile(p: OfferPolicy): ManagedFile {
   const body = JSON.stringify({
-    note: "Toolchains bound to this workspace by the web coder. Edit them from the web coder, not here.",
-    toolchains: [...m.toolchains].sort((a, b) => a.tool.localeCompare(b.tool)),
+    schema: TOOLCHAIN_OFFER_SCHEMA,
+    toolchains: p.allowed.map((a) => ({ tool: a.tool, label: a.label, versions: a.versions })),
+    servers: p.servers,
+    install: { timeout_seconds: p.installTimeoutSeconds, paranoid: p.paranoid },
   });
-  return { relativePath: ENVIRONMENT_MANIFEST_PATH, markerId: MARKER_ENVIRONMENT, version: MANIFEST_VERSION, body, format: "json", generated: true };
-}
-
-/** TOML string, the one quoting rule this file needs. */
-function tomlString(v: string): string {
-  return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-export function miseConfigFile(m: Manifest): ManagedFile {
-  const lines = ["# Toolchains bound by the web coder; bind or unbind them there.", "[tools]"];
-  for (const t of [...m.toolchains].sort((a, b) => a.tool.localeCompare(b.tool))) {
-    const mise = TOOLCHAINS[t.tool].mise;
-    if (mise) lines.push(`${mise} = ${tomlString(t.version)}`);
-  }
-  return { relativePath: MISE_CONFIG_PATH, markerId: MARKER_TOOLCHAINS, version: MANIFEST_VERSION, body: `${lines.join("\n")}\n`, format: "hash", generated: true };
-}
-
-/** The ``.lsp.json`` for the bound servers, or ``null`` when none is bound (the file is then removed). */
-export function lspConfigFile(m: Manifest): ManagedFile | null {
-  const servers: Record<string, { command: string; args: string[]; languageId: string }> = {};
-  for (const t of m.toolchains) {
-    if (t.server) servers[t.server.language] = { command: t.server.command, args: t.server.args, languageId: t.server.language };
-  }
-  if (Object.keys(servers).length === 0) return null;
-  return { relativePath: LSP_CONFIG_PATH, markerId: MARKER_LSP, version: MANIFEST_VERSION, body: JSON.stringify({ languageServers: servers }), format: "json", generated: true };
-}
-
-export function lspConfigIdentity(): ManagedFile {
-  return { relativePath: LSP_CONFIG_PATH, markerId: MARKER_LSP, version: MANIFEST_VERSION, body: "{}", format: "json", generated: true };
-}
-
-/** The instruction file: what is installed and where more comes from.  ``null`` when nothing is bound. */
-export function environmentInstructionsFile(m: Manifest): ManagedFile | null {
-  if (m.toolchains.length === 0) return null;
-  const rows = [...m.toolchains].sort((a, b) => a.tool.localeCompare(b.tool)).map((t) => {
-    const spec = TOOLCHAINS[t.tool];
-    const bins = t.bin.length ? ` (\`${t.bin.join("`, `")}\`)` : "";
-    const server = t.server ? `; language server: ${t.server.id} ${t.server.version}` : "";
-    const version = t.tool === "python" ? "" : ` ${t.version}`;
-    return `- ${spec.label}${version}${bins}${server}`;
-  });
-  const body = [
-    "# Toolchains in this workspace",
-    "",
-    "The user bound these toolchains to this workspace. Their binaries are",
-    `linked into \`~/${LOCAL_BIN.slice(".home/".length)}\`, which is on every command's \`PATH\`:`,
-    "",
-    ...rows,
-    "",
-    "Do not install another version of these with a system package manager or",
-    "a download. If a toolchain you need is missing, say so: the user binds",
-    "toolchains from the web coder. For what can run right now, including",
-    "anything changed since this prompt was written, call",
-    "`get_environment(aspect=\"runtime\")`.",
-    "",
-  ].join("\n");
-  return { relativePath: ENVIRONMENT_INSTRUCTIONS_PATH, markerId: MARKER_ENVIRONMENT, version: MANIFEST_VERSION, body, generated: true };
-}
-
-export function environmentInstructionsIdentity(): ManagedFile {
-  return { relativePath: ENVIRONMENT_INSTRUCTIONS_PATH, markerId: MARKER_ENVIRONMENT, version: MANIFEST_VERSION, body: "", generated: true };
-}
-
-/** The server a toolchain brings, when the operator pinned it. */
-export function pinnedServer(tool: ToolId, pins: Partial<Record<ServerId, string>>): { id: ServerId; version: string } | null {
-  const id = TOOLCHAINS[tool].server;
-  if (!id) return null;
-  const version = pins[id];
-  return version ? { id, version } : null;
+  return { relativePath: TOOLCHAIN_OFFER_PATH, markerId: MARKER_TOOLCHAIN_OFFER, version: OFFER_VERSION, body, format: "json", generated: true };
 }

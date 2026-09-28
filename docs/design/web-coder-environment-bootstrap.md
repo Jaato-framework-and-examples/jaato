@@ -8,10 +8,11 @@ cache) open.** What was built, and where it departed from this text:
 | hide idle LSP tools (§8.1) | framework, #1345 | — |
 | the `runtime` aspect (§8.2) | framework, #1346 | — |
 | root `AGENTS.md` pointer (§8.3) | framework, #1347 | — |
-| managed files per type (§6) | `jaato-web-coder-server/src/managed-files.ts` | adds a `generated` flag: a derived file (a server table, the manifest) is refreshed when its content differs, where a shipped one keeps the same-version no-op |
-| detection, repo-guidance pointer, install, managed files, routes (§4, §5, §7, §9) | `jaato-web-coder-server/src/environment/` | basedpyright gets its own venv under `.home/.local/share/jaato-lsp/` rather than the tool-venv (§5): the runner creates that venv lazily, and it is the model's to change; typescript-language-server is started through the linked `node`, because its entry script is not under a `bin/` the template grants; Rust is not offered (rustup keeps its homes outside mise, and its proxies need `RUSTUP_HOME` at run time) |
-| ownership (§11) | an EMPTY `workspace.app_write` over the bind channel | no new daemon verb: the daemon checks ownership before anything else and writes nothing for an empty request |
-| the clone-time chip, the rail's Toolchains section, the mid-session `not found` chip (§9) | `jaato-web-coder-ui` | — |
+| policy: allow-list, server pins, "Not now", ownership (§3, §9, §11) | `jaato-web-coder-server/src/environment/` | **the BFF touches no workspace.** It may run as an account that cannot read or write them (beside a root daemon), so it only answers the allow-list and the offer's content; ownership is an EMPTY `workspace.app_write` over the bind channel |
+| the offer (`.jaato/toolchain-offer.json`) | computed by the BFF, **staged by the page** through the daemon (`StageFilesRequest`) | not in the original design: it carries the policy to the runner |
+| detection, install, the derived files, the instruction section, the hint (§4, §5, §6, §7, §9) | the `web_coder_toolchains` plugin, in each session's runner (`jaato-web-coder-server/plugin/`) | **moved from the BFF to the runner.** A bind is the `toolchain` user command the page sends; the plugin installs as the session's account, every step through the session's `//child` transition. Binding therefore needs a session: a choice made before one exists is kept by the page and bound when the first session starts. The environment and repository-guidance text is the plugin's instruction section, not managed files under `.jaato/instructions/` (the runner cannot write there). basedpyright gets its own venv; typescript-language-server is started through the linked `node`; Rust is not offered |
+| the JDK's AppArmor grants | one user-tier fragment the deployer installs with the plugin (globs over `.home/.local/share/mise/installs/`) | not a per-workspace fragment the BFF writes |
+| the Toolchains panel and the mid-session chip (§9) | `jaato-web-coder-ui`: reads `.jaato/environment.json` with `workspace.file.fetch`; the chip comes from the plugin's `tool.result_enriched` notice | — |
 
 Nothing here has been run against an enforcing AppArmor kernel; phase 0 is
 still the proof that mise's binaries run in a confined session.
@@ -170,7 +171,7 @@ route:
 | rust | rust-analyzer | `rustup component add` |
 | java | jdtls | mise or a download; heavy (§11) |
 
-On bind, the BFF installs the server and writes `<ws>/.lsp.json`. That is the
+On bind, the plugin installs the server and writes `<ws>/.lsp.json`. That is the
 file the `lsp` plugin reads for a profile-less workspace, at the workspace
 root, then `~/.lsp.json`. With #1332's clone flow repositories land in
 subdirectories, so the workspace root is not anyone's repo.
@@ -306,7 +307,7 @@ proposes.
 | Signal | Seen by | When | Strength |
 |---|---|---|---|
 | markers after a clone (`package.json`, `go.mod`, `Cargo.toml`, `pom.xml`, `.tool-versions`, `.nvmrc`) | BFF scan, asked by the page when #1332's clone completes | before the first session | best moment to ask |
-| a `cli` result with exit 127 or `<name>: not found` | page (tool events) | mid-session | unambiguous: the agent tried and failed |
+| a `cli`, `interactive_shell` or `notebook` result showing a command was not found | the web coder's `web_coder_toolchains` plugin, in the runner, reading `.jaato/toolchain-offer.json`; the page gets its `tool.result_enriched` notice (protocol 1.31) and detects nothing itself | mid-session | unambiguous: the agent tried and failed. The model reads the plugin's hint in the same result |
 | `WorkspaceFilesChangedEvent` naming a new manifest | page | mid-session | weak: writing a manifest does not mean running it |
 
 The page shows a chip: *"Node 22 detected (from `.nvmrc`). Bind it?"*.
@@ -337,13 +338,19 @@ A detection never installs anything by itself.
   `workspace.list` over the user's own identity. Whether the GitHub bind
   route has the same gap is worth checking separately.
 - **jdtls and memory.** A Java language server uses gigabytes, and #806
-  (servers never reaped) is still open. Java should wait for that.
+  (servers never reaped) is still open. Java ships anyway: jdtls runs with a
+  capped heap (`environment.lsp.jdtls.max_heap`, default 1G), and the BFF warns
+  at startup that each one outlives its session until the runner slot exits.
+  Fixing #806 removes the warning, not the cap.
 - **`proxy` mode and a BFF on another host.** Everything here assumes the
   BFF shares a filesystem with the daemon, as today's `.env` writes already
   do. A split deployment would need a daemon verb instead.
 - **Scoped sessions.** A profile that declares `apparmor_fragments` gets no
-  broad exec. Its fragments must grant the toolchain paths, and a `validate`
-  warning could say so.
+  broad exec. The bootstrap writes a workspace-tier fragment,
+  `jaato-environment`, granting each install directory's `bin/*` (and, for a
+  JDK, `m` on its `.so` files and `ix` on `lib/jspawnhelper`); a scoped
+  profile names it. A `validate` warning for a scoped profile that does not
+  name it could still say so.
 - **Removal.** Unbinding removes the links and the managed files. Whether it
   also deletes the installed data or keeps it for a rebind is open.
 

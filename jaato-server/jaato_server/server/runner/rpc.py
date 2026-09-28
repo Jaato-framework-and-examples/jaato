@@ -4301,6 +4301,8 @@ class RunnerRPC:
     _NOTIF_TOOL_CALL_END = "tool_call_end"
     _NOTIF_TOOL_OUTPUT = "tool_output"
     _NOTIF_TURN_PROGRESS = "turn_progress"
+    # 1.31: an enrichment plugin's structured notice about one result.
+    _NOTIF_TOOL_RESULT_ENRICHED = "tool_result_enriched"
 
     # Path F regression fix (2026-05-12): runner-side
     # ``lifecycle_tools._execute_signal_completion`` calls
@@ -6560,6 +6562,32 @@ class _AgentUIHooksNotificationShim:
             )
         except Exception:  # noqa: BLE001
             logger.exception("tool_call_end notify raised")
+
+    def on_tool_result_enriched(
+        self,
+        agent_id: str,
+        call_id: Optional[str],
+        tool_name: str,
+        plugin: str,
+        kind: str,
+        data: "Dict[str, Any]",
+    ) -> None:
+        """Forward an enrichment plugin's client notice (1.31); the daemon emits ``ToolResultEnrichedEvent``."""
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_TOOL_RESULT_ENRICHED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "call_id": call_id,
+                    "tool_name": str(tool_name or ""),
+                    "plugin": str(plugin or ""),
+                    "kind": str(kind or ""),
+                    "data": dict(data or {}),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tool_result_enriched notify raised")
 
     def on_tool_output(
         self,

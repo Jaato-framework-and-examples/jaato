@@ -1,0 +1,11 @@
+{
+  "type": "tool.result_enriched",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "agent_id": "",
+  "call_id": null,
+  "tool_name": "",
+  "plugin": "",
+  "kind": "",
+  "data": {}
+}

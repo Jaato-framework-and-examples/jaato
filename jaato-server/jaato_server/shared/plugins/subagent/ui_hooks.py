@@ -418,6 +418,24 @@ class AgentUIHooks(Protocol):
         """
         ...
 
+    def on_tool_result_enriched(
+        self,
+        agent_id: str,
+        call_id: Optional[str],
+        tool_name: str,
+        plugin: str,
+        kind: str,
+        data: Dict[str, Any],
+    ) -> None:
+        """Called once per structured notice an enrichment plugin attached to a result (1.31).
+
+        After ``on_tool_call_end`` for the same ``call_id``.  ``kind`` and
+        ``data`` are the plugin's and already validated
+        (``shared/enrichment_notice.py``).  Optional: the session looks it up
+        with ``getattr``, so an implementation without it receives nothing.
+        """
+        ...
+
     def on_tool_output(
         self,
         agent_id: str,

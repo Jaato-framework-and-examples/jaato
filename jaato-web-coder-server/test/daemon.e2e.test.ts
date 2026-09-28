@@ -1,5 +1,5 @@
 /**
- * Against the REAL daemon (protocol 1.10, #1074): spawn `python -m server
+ * Against the REAL daemon (protocol 1.10, #1074): spawn `python -m jaato_server
  * --web-socket … --ws-app-credentials …`, open the bind channel with the
  * app credential, mint a ticket, connect as a browser would with
  * `?token=<ticket>`, and prove the ticket is single-use.
@@ -45,7 +45,7 @@ describe("against the real daemon", { skip: available ? false : `no Python with 
     port = await freePort();
     const dir = mkdtempSync(join(tmpdir(), "jwcs-daemon-"));
     writeFileSync(join(dir, "ws-apps.json"), JSON.stringify({ "jaato-web-coder": APP_CREDENTIAL }), { mode: 0o600 });
-    proc = spawn(PYTHON, ["-m", "server", "--web-socket", `127.0.0.1:${port}`, "--ws-app-credentials", join(dir, "ws-apps.json"), "--pid-file", join(dir, "daemon.pid")],
+    proc = spawn(PYTHON, ["-m", "jaato_server", "--web-socket", `127.0.0.1:${port}`, "--ws-app-credentials", join(dir, "ws-apps.json"), "--pid-file", join(dir, "daemon.pid")],
       { cwd: dir, env: { ...process.env, HOME: dir, JAATO_RUNNER_POOL_ENABLED: "false" }, stdio: ["ignore", "pipe", "pipe"] });
     proc.stderr!.on("data", (c) => { stderr += c; });
     proc.stdout!.on("data", (c) => { stderr += c; });

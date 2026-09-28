@@ -10574,6 +10574,7 @@ NOTES
                 self._check_and_pin_reference(enrichment.metadata, result_data)
                 if enrichment.metadata:
                     enrichment_metadata = enrichment.metadata
+            self._emit_enrichment_client_notices(fc, enrichment_metadata)
 
             return ToolResult(
                 call_id=fc.id,
@@ -10602,6 +10603,7 @@ NOTES
                 # "enrichment didn't run" — both leave None on the
                 # ToolResult so processors don't get a misleading {}.
                 enrichment_metadata = None
+        self._emit_enrichment_client_notices(fc, enrichment_metadata)
 
         return ToolResult(
             call_id=fc.id,
@@ -10835,6 +10837,34 @@ NOTES
             f"INJECT_SYNTHETIC: {len(fcs)} orphaned tool calls cancelled: "
             f"{[fc.name for fc in fcs]}"
         )
+
+    def _emit_enrichment_client_notices(
+        self,
+        fc: FunctionCall,
+        enrichment_metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Hand each enrichment plugin's ``client_notice`` to the UI hooks (1.31).
+
+        Called from :meth:`_build_tool_result` on both result shapes, after
+        enrichment and so after the call's ``on_tool_call_end``.  The hooks
+        become a ``ToolResultEnrichedEvent``: directly on the in-process
+        path, through the runner's notification shim on the default one.
+        ``shared/enrichment_notice.py`` decides what is well-formed.  A hooks
+        object without ``on_tool_result_enriched`` (an older or out-of-tree
+        implementation) receives nothing, which is what it received before.
+        """
+        if not enrichment_metadata or not self._ui_hooks:
+            return
+        hook = getattr(self._ui_hooks, "on_tool_result_enriched", None)
+        if not callable(hook):
+            return
+        from .enrichment_notice import client_notices
+        for plugin, kind, data in client_notices(enrichment_metadata):
+            try:
+                hook(agent_id=self._agent_id, call_id=fc.id, tool_name=fc.name,
+                     plugin=plugin, kind=kind, data=data)
+            except Exception:  # noqa: BLE001 -- a notice must never cost the tool result
+                logger.warning("on_tool_result_enriched raised for %s/%s", plugin, kind, exc_info=True)
 
     def _enrich_tool_result_dict(
         self,

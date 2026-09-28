@@ -96,6 +96,22 @@ function currentLimits(): SizeLimits | null {
   return isConnected() ? getClient().serverLimits : null;
 }
 
+/**
+ * Stage one file the page generated rather than one a person attached
+ * (``.jaato/toolchain-offer.json``): same verb, same serialised chain, but
+ * no chip and no transcript line.  Resolves to whether the daemon reported
+ * the file staged.
+ */
+export function stageGenerated(name: string, content: string): Promise<boolean> {
+  let staged = false;
+  chain = chain.then(async () => {
+    const data = new TextEncoder().encode(content);
+    const result = await getClient().stageFiles("", [{ name, data, contentType: "application/json" }]);
+    staged = (result.staged ?? []).includes(name);
+  }).catch(() => undefined);
+  return chain.then(() => staged);
+}
+
 /** Stage every ``queued`` entry, one request for the batch.  Resolves once the daemon has answered. */
 export function stageQueued(): Promise<void> {
   chain = chain.then(() => stageBatch()).catch(() => undefined);
