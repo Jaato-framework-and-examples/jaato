@@ -20,7 +20,9 @@ from pathlib import Path
 from jaato_web_coder_toolchains import ignores, templates
 
 _SERVER = Path(__file__).resolve().parents[2]
-_PACKAGE = Path(templates.__file__).resolve().parent
+# The SOURCE tree, found from this file: CI installs the plugin non-editable,
+# so the imported module lives in site-packages, which is not what npm packs.
+_PACKAGE = _SERVER / "plugin" / "jaato_web_coder_toolchains"
 
 
 def _covered(rel: str, globs: list) -> bool:
@@ -37,6 +39,7 @@ def _covered(rel: str, globs: list) -> bool:
 
 
 def test_every_plugin_file_is_in_the_npm_files_list():
+    assert (_PACKAGE / "templates.py").is_file(), f"plugin source not found at {_PACKAGE}"
     globs = json.loads((_SERVER / "package.json").read_text())["files"]
     missing = []
     for root, dirs, files in os.walk(_PACKAGE):
