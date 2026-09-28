@@ -49,12 +49,26 @@ REVERSIONS = [
 _DENY = re.compile(r'audit deny "?\{workspace_path\}/\.jaato/(\S+?)"?\s+wlk,')
 
 
+def _template_denied() -> set:
+    """Every ``.jaato/`` subpath the template write-denies, verbatim."""
+    return set(_DENY.findall(APPARMOR.read_text(encoding="utf-8")))
+
+
+def _confined_state(raw: str) -> bool:
+    """Whether a write-denied subpath is declared RUNTIME STATE
+    (``G.CONFINED_STATE``) rather than an authored asset."""
+    return any(raw.startswith(path) for path, _ in G.CONFINED_STATE)
+
+
 def _template_authored() -> set:
     """The ``.jaato/`` subpaths the template write-denies, as AUTHORED
     spells them: a ``x/**`` or ``x/*/`` rule is the directory ``x/``, a
-    file is itself."""
+    file is itself.  Declared runtime state is left out: it is denied
+    for a different reason and is never committed."""
     out = set()
-    for raw in _DENY.findall(APPARMOR.read_text(encoding="utf-8")):
+    for raw in _template_denied():
+        if _confined_state(raw):
+            continue
         head = raw.split("/", 1)[0]
         out.add(head + "/" if "/" in raw else head)
     return out
@@ -109,3 +123,24 @@ def test_no_authored_entry_is_a_credential_file():
     for e in G.AUTHORED:
         assert not e.path.endswith("_auth.json"), e.path
         assert "token" not in e.path, e.path
+
+
+def test_every_confined_state_entry_is_backed_by_the_template():
+    """``CONFINED_STATE`` exempts subpaths from the check above, so an
+    entry must name a deny the template really has.  An exemption nothing
+    backs would be a hole in the guard."""
+    denied = _template_denied()
+    for path, why in G.CONFINED_STATE:
+        assert why.strip(), path
+        assert path.endswith("/"), f"{path}: a directory needs its /"
+        assert any(raw.startswith(path) for raw in denied), (
+            f"G.CONFINED_STATE names .jaato/{path} but server/apparmor.py "
+            f"has no write-deny under it")
+
+
+def test_confined_state_is_never_reincluded():
+    """Runtime state stays ignored: a CONFINED_STATE entry must not be
+    (or sit under) an AUTHORED entry, or the block would commit it."""
+    for path, _ in G.CONFINED_STATE:
+        for e in G.AUTHORED:
+            assert not path.startswith(e.path), (path, e.path)

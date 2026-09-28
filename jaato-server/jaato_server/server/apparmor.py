@@ -619,7 +619,17 @@ class AppArmorManager:
     #       unchanged: that runner is spawned by the daemon in the host
     #       namespace, so it keeps the ``/tmp/jaato-*`` grants and nothing
     #       wider.  No exec from ``/tmp``, as none from the workspace.
-    _TEMPLATE_VERSION = 39
+    #   v40 (#1385): write-deny the CACHE fragment tier,
+    #       ``<ws>/.jaato/.cache/apparmor-fragments/``, beside the
+    #       workspace tier, in base, ``tool_hat``, ``//child`` and the
+    #       isolated sub-runner.  Only the workspace tier was denied, and
+    #       the workspace-wide ``rwkl`` grant covered ``.jaato/.cache/``,
+    #       so a confined session could write a fragment the next
+    #       provisioning composes: allow rules for itself, or a file named
+    #       like a user-tier fragment that shadows it (the cache tier wins
+    #       a basename collision) and drops its denies.  The walker that
+    #       fills the tier runs outside the confined runner.
+    _TEMPLATE_VERSION = 40
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -710,6 +720,14 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # unconfined next).  Same wlk pattern as the other user-authored
   # config subpaths.
   audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
+  # Cache-tier AppArmor fragments (#1385) — the third tier
+  # _render_profile composes, and the one that wins a basename
+  # collision.  Same escalation as the workspace tier, plus one of
+  # its own: a fragment written here under the name of a user- or
+  # workspace-tier fragment SHADOWS it, dropping its denies.  The
+  # walker that fills it runs outside the confined runner; the
+  # workspace-wide rwkl grant would otherwise cover it.
+  audit deny "{workspace_path}/.jaato/.cache/apparmor-fragments/**" wlk,
 
   # ---- shared read-only resources ----
   {venv_path}/           r,
@@ -1981,6 +1999,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # (mirrors base; isolated sub-runner could otherwise plant rules
   # for the next session's profile).
   audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
+  # Cache-tier fragments (#1385) — mirrors base: the tier that
+  # wins a basename collision, so a planted file could also
+  # shadow a user-tier fragment and drop its denies.
+  audit deny "{workspace_path}/.jaato/.cache/apparmor-fragments/**" wlk,
 
   # ---- read-denies on user-authored config ----
   # Information-isolation between agents in a cascade — same as
@@ -3052,6 +3074,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # (mirrors base; a tool execution under tool_hat could otherwise
     # plant rules for the next session's profile).
     audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
+    # Cache-tier fragments (#1385) — mirrors base: the tier that
+    # wins a basename collision, so a planted file could also
+    # shadow a user-tier fragment and drop its denies.
+    audit deny "{workspace_path}/.jaato/.cache/apparmor-fragments/**" wlk,
 
     # ---- tool_hat-specific read-denies on user-authored config ----
     # The whole point of the sub-profile: tool execution can't read
@@ -3295,6 +3321,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # (mirrors base; a //child subprocess could otherwise plant
     # rules for the next session's profile).
     audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
+    # Cache-tier fragments (#1385) — mirrors base: the tier that
+    # wins a basename collision, so a planted file could also
+    # shadow a user-tier fragment and drop its denies.
+    audit deny "{workspace_path}/.jaato/.cache/apparmor-fragments/**" wlk,
 
     # ---- tool_hat-style read-denies (mirrors tool_hat) ----
     # Same information-isolation as the in-process tool_hat: a

@@ -2672,6 +2672,36 @@ handed. Not covered: the flat isolated sub-runner profile, and where a
 walker-generated cache-tier fragment came from (jaato sees only the file).
 Guard: `jaato_server/shared/tests/test_diagnostics_show_apparmor_grants_1326.py`.
 
+### A Fragment Tier a Confined Session Could Write (#1385)
+
+`_render_profile` composes `*.rules` from three tiers: user
+(`~/.jaato/apparmor-fragments/`), workspace
+(`<ws>/.jaato/apparmor-fragments/`) and cache
+(`<ws>/.jaato/.cache/apparmor-fragments/`, walker-generated). The cache
+tier wins a basename collision, and an unscoped session composes every
+fragment it finds. Every body write-denied the workspace tier and none
+named the cache tier, which the workspace-wide `rwkl` grant covered. So a
+confined session could write a fragment the next provisioning composes:
+allow rules for itself, or a file named like a user-tier fragment (the web
+coder's `jaato-web-coder-toolchains.rules`) that shadows it and drops its
+denies.
+
+Template **v40** adds `audit deny "{workspace_path}/.jaato/.cache/apparmor-fragments/**" wlk,`
+beside the workspace-tier deny in base, `tool_hat`, `//child` and the
+isolated sub-runner. Nothing in this tree writes the cache tier; the
+walker that does runs outside the confined runner, and one that ran as a
+persona prefetch inside an in-process subagent (runner-side) would now be
+refused.
+
+The cache tier is runtime state, not an authored asset, so it is not a
+`.gitignore` re-include: `scaffold/gitignore.py` declares it in
+`CONFINED_STATE`, and the authored-set guard skips a deny only when that
+table names it and checks the table against the template.
+
+Guard: `jaato_server/shared/tests/test_cache_fragment_tier_is_write_denied_1385.py`,
+two reversions (base, `//child`). Found by reading the template; not
+reproduced or verified on an enforcing kernel.
+
 ### A Refusal That Named Its Cause (#1348)
 
 A command the `//child` profile refused printed `Permission denied`, the
