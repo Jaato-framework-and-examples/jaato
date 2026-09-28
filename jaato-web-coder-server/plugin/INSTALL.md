@@ -14,7 +14,7 @@ does all of the work, inside each session's runner**:
 - installs a toolchain with `mise` into `<workspace>/.home` when the page
   asks (the `toolchain` user command), links its binaries onto every
   command's `PATH`, installs the pinned language server, and writes
-  `.lsp.json`;
+  `.lsp.json` (and `.home/.mavenrc` while Java or Maven is bound);
 - keeps the record the page reads: `.jaato/environment.json`;
 - proposes toolchains from the repositories' files, and names their
   `AGENTS.md` / `CONTRIBUTING.md` in the session's instructions;

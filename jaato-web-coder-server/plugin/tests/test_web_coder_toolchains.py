@@ -14,7 +14,9 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -28,18 +30,23 @@ FIXTURE = Path(__file__).parent / "fixtures" / "toolchain-offer.json"
 
 FAKE_MISE = textwrap.dedent("""\
     #!/bin/sh
-    # install <tool>@<ver> | where <tool>@<ver>, into $MISE_DATA_DIR like mise.
+    # install | where | bin-paths <tool>@<ver>, into $MISE_DATA_DIR like mise.
     set -e
     ref="$2"; tool="${ref%@*}"; ver="${ref#*@}"
     dir="$MISE_DATA_DIR/installs/$tool/$ver"
     case "$1" in
       install)
         [ "$ver" = "broken" ] && { echo "no such version" >&2; exit 1; }
-        mkdir -p "$dir/bin" "$dir/lib"
-        for b in java javac; do printf '#!/bin/sh\\necho %s\\n' "$b" > "$dir/bin/$b"; chmod +x "$dir/bin/$b"; done
+        # Maven unpacks one level deeper, like the real archive; the rest are flat.
+        case "$tool" in maven) bin="$dir/apache-maven-$ver/bin"; names="mvn mvnDebug";;
+                        *) bin="$dir/bin"; names="java javac";; esac
+        mkdir -p "$bin" "$dir/lib"
+        for b in $names; do printf '#!/bin/sh\\necho %s\\n' "$b" > "$bin/$b"; chmod +x "$bin/$b"; done
         echo "HOME=$HOME CEILING=$MISE_CEILING_PATHS" > "$dir/env.txt"
         echo "installed $ref";;
       where) echo "$dir";;
+      bin-paths)
+        case "$tool" in maven) echo "$dir/apache-maven-$ver/bin";; outside) echo "/usr/bin";; *) echo "$dir/bin";; esac;;
     esac
 """)
 
@@ -123,8 +130,9 @@ def test_bind_installs_links_and_records_it(workspace, tmp_path):
     m = read_manifest(str(workspace))
     assert m["job"]["status"] == "done", m["job"]
     [entry] = m["toolchains"]
-    assert (entry["tool"], entry["version"], entry["bin"]) == ("maven", "3.9.9", ["java", "javac"])
-    link = workspace / ".home/.local/bin/javac"
+    assert (entry["tool"], entry["version"], entry["bin"]) == ("maven", "3.9.9", ["mvn", "mvnDebug"])
+    link = workspace / ".home/.local/bin/mvn"
+    assert os.readlink(link) == "../share/mise/installs/maven/3.9.9/apache-maven-3.9.9/bin/mvn", "the nested bin dir mise reports"
     assert link.is_symlink() and not os.path.isabs(os.readlink(link)), "a relative link"
     env = (workspace / ".home/.local/share/mise/installs/maven/3.9.9/env.txt").read_text()
     assert f"HOME={workspace}/.home" in env and f"CEILING={workspace}/.home" in env, "a clean environment under .home"
@@ -176,7 +184,7 @@ def test_unbind_removes_only_our_links(workspace):
     (workspace / ".jaato/environment.json").write_text(json.dumps(m))
     out = ex.execute("toolchain", {"action": "unbind", "tool": "maven"})[1]
     assert "unbound maven" in out
-    assert not (workspace / ".home/.local/bin/javac").exists() and foreign.exists()
+    assert not (workspace / ".home/.local/bin/mvn").exists() and foreign.exists()
     assert read_manifest(str(workspace))["toolchains"] == []
 
 
@@ -230,7 +238,7 @@ def test_the_instructions_name_what_is_bound_and_the_guidance(workspace):
     _executor(plugin).execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
     _wait(plugin)
     text = plugin.get_system_instructions()
-    assert "- Maven 3.9.9 (`java`, `javac`)" in text and "`api/AGENTS.md`" in text
+    assert "- Maven 3.9.9 (`mvn`, `mvnDebug`)" in text and "`api/AGENTS.md`" in text
 
 
 def test_the_command_is_a_user_command_the_model_never_sees(workspace):
@@ -352,3 +360,42 @@ def test_mise_progress_snapshots_replace_each_other_in_the_job_log():
         "mise maven@3.9.9 ✓ installed",
     ]
     assert clean_line("a 1/2 1s\r\x1b[2Ka 2/2 2s") == "a 2/2 2s"
+
+
+def test_a_bin_path_outside_the_workspace_mise_directory_fails_the_bind(tmp_path):
+    from jaato_web_coder_toolchains.installer import InstallError, Installer
+    import pytest as _pytest
+
+    inst = Installer(str(tmp_path), mise="/bin/true", timeout=5, paranoid=False, preexec=None,
+                     cancel=threading.Event(), log=lambda line: None)
+    inst.step = lambda what, argv, extra_env=None: ["/usr/bin"]
+    with _pytest.raises(InstallError, match="outside the workspace's mise directory"):
+        inst._bin_paths("outside@1", str(tmp_path / ".home/.local/share/mise/installs/outside/1"))
+
+
+def test_mavenrc_points_user_home_at_the_workspace_while_java_or_maven_is_bound(workspace):
+    """Java takes ``user.home`` from the account, so Maven would use ``/root/.m2``."""
+    plugin = _plugin(workspace)
+    ex = _executor(plugin)
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    rc = workspace / ".home/.mavenrc"
+    assert rc.read_text().startswith("# jaato-managed: mavenrc v1")
+    home = str(workspace / ".home")
+    opts = subprocess.run(
+        ["sh", "-c", '. "$HOME/.mavenrc"; printf %s "$MAVEN_OPTS"'],
+        env={"HOME": home, "TMPDIR": home + "/tmp", "MAVEN_OPTS": "-Xmx1g"},
+        capture_output=True, text=True, check=True).stdout
+    assert opts == f"-Duser.home={home} -Djava.io.tmpdir={home}/tmp -Xmx1g", "the way mvn sources it"
+    opts = subprocess.run(["sh", "-c", '. "$HOME/.mavenrc"; printf %s "$MAVEN_OPTS"'],
+                          env={"HOME": home}, capture_output=True, text=True, check=True).stdout
+    assert opts == f"-Duser.home={home}"
+
+    ex.execute("toolchain", {"action": "unbind", "tool": "maven"})
+    assert not rc.exists(), "removed with the last Java or Maven binding"
+
+    rc.write_text("MAVEN_OPTS=mine\n")                      # the user's own file
+    ex.execute("toolchain", {"action": "bind", "tool": "maven", "version": "3.9.9"})
+    _wait(plugin)
+    assert rc.read_text() == "MAVEN_OPTS=mine\n"
+    assert any("kept your own .home/.mavenrc" in n for n in read_manifest(str(workspace))["job"].get("notes") or [])

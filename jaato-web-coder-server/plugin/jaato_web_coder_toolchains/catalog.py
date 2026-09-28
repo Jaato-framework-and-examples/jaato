@@ -61,6 +61,7 @@ JDTLS_MIRROR = "https://download.eclipse.org/jdtls/milestones"
 
 LSP_DIR = ".home/.local/share/jaato-lsp"
 LOCAL_BIN = ".home/.local/bin"
+MAVENRC_PATH = ".home/.mavenrc"
 MISE_DATA_DIR = ".home/.local/share/mise"
 MISE_CONFIG_DIR = ".home/.config/mise"
 MISE_CACHE_DIR = ".home/.cache/mise"

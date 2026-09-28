@@ -250,23 +250,42 @@ class Installer:
         self.cancel.set()
         self._kill()
 
+    def _inside_mise(self, ref: str, path: str) -> str:
+        """``path`` resolved; an :class:`InstallError` when it is not under the workspace's mise directory."""
+        d = os.path.realpath(path)
+        if not d.startswith(os.path.realpath(self.abs(MISE_DATA_DIR)) + os.sep):
+            raise InstallError(f"locating {ref}: {d} is outside the workspace's mise directory")
+        return d
+
     def _mise_install(self, ref: str) -> str:
         self.step(f"installing {ref}", [self.mise, "install", ref])
         where = [ln.strip() for ln in self.step(f"locating {ref}", [self.mise, "where", ref]) if ln.strip()]
         if not where:
             raise InstallError(f"locating {ref}: mise named no directory")
-        d = os.path.realpath(where[-1])
-        if not d.startswith(os.path.realpath(self.abs(MISE_DATA_DIR)) + os.sep):
-            raise InstallError(f"locating {ref}: {d} is outside the workspace's mise directory")
-        return d
+        return self._inside_mise(ref, where[-1])
+
+    def _bin_paths(self, ref: str, install_dir: str) -> List[str]:
+        """The directories holding ``ref``'s executables, as mise reports them.
+
+        Not ``<install dir>/bin``: Maven and Gradle unpack one level deeper
+        (``maven/3.9.9/apache-maven-3.9.9/bin/mvn``), so that guess linked
+        nothing for them.  ``mise bin-paths`` is where mise itself puts them
+        on ``PATH``.  Falls back to ``<install dir>/bin`` when it names none.
+        """
+        lines = [ln.strip() for ln in self.step(f"locating {ref}'s executables", [self.mise, "bin-paths", ref]) if ln.strip()]
+        paths = [self._inside_mise(ref, ln) for ln in lines if os.path.isabs(ln)]
+        return paths or [os.path.join(install_dir, "bin")]
 
     def install_toolchain(self, tool: str, version: str) -> Dict[str, object]:
         spec = TOOLCHAINS[tool]
         os.makedirs(self.abs(LOCAL_BIN), exist_ok=True)
         if not spec.mise:
             return {"installDir": None, "bin": []}
-        d = self._mise_install(f"{spec.mise}@{version}")
-        linked = link_binaries(os.path.join(d, "bin"), self.abs(LOCAL_BIN), self.abs(MISE_DATA_DIR), self.log)
+        ref = f"{spec.mise}@{version}"
+        d = self._mise_install(ref)
+        linked: List[str] = []
+        for src in self._bin_paths(ref, d):
+            linked += [b for b in link_binaries(src, self.abs(LOCAL_BIN), self.abs(MISE_DATA_DIR), self.log) if b not in linked]
         return {"installDir": os.path.relpath(d, self.ws), "bin": linked}
 
     def install_server(self, sid: str, spec: Dict[str, str]) -> Dict[str, object]:
