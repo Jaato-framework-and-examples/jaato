@@ -32,7 +32,7 @@ vi.mock("@/sdk/connection", () => ({
   reassertAfterReconnect: async () => undefined,
 }));
 
-const { EnvironmentPanel, proposalText } = await import("./EnvironmentPanel");
+const { EnvironmentPanel, proposalText, stripState } = await import("./EnvironmentPanel");
 
 function fakeFetch(handler: (url: string, init?: RequestInit) => unknown = () => BASE) {
   const calls: Array<{ url: string; body?: unknown }> = [];
@@ -106,12 +106,19 @@ describe("EnvironmentPanel in a session", () => {
     };
     const { calls, fetchImpl } = fakeFetch();
     render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fetchImpl} pollMs={20} />);
-    expect(await screen.findByText("Node.js 22 detected (from api/.nvmrc). Bind it?")).toBeInTheDocument();
+    expect(await screen.findByText("Node.js 22 detected in api/.nvmrc.")).toBeInTheDocument();
+    expect(screen.getByTestId("environment-strip")).toHaveTextContent("1 suggestion waiting");
+    // The rail badge counts it with the section closed.
+    await waitFor(() => expect(useJaato.getState().environmentWaiting).toBe(1));
     expect(screen.getByText("api/AGENTS.md")).toBeInTheDocument();
     expect(commands).toEqual([]);
     fireEvent.click(screen.getByRole("button", { name: "Bind Node.js" }));
     await waitFor(() => expect(commands).toEqual([["bind", "node", "22"]]));
-    expect(await screen.findByText("node 22 installed.")).toBeInTheDocument();
+    // A finished install is "✓ just now" on its tile, not a banner.
+    expect(await screen.findByText("✓ just now")).toBeInTheDocument();
+    expect(screen.queryByText(/installed\./)).toBeNull();
+    expect(screen.getByTestId("environment-strip")).toHaveTextContent("1 bound · ready");
+    expect(useJaato.getState().environmentWaiting).toBe(0);
     const unbind = await screen.findByRole("button", { name: "Unbind node" });
     await waitFor(() => expect(unbind).not.toBeDisabled());
     fireEvent.click(unbind);
@@ -139,7 +146,11 @@ describe("EnvironmentPanel in a session", () => {
     manifest = { toolchains: [], proposals: [], guidance: [], job };
     onCommand = (args) => { if (args[0] === "cancel") manifest = { ...manifest, job: { ...job, status: "cancelled" } }; };
     render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fakeFetch().fetchImpl} pollMs={20} />);
-    expect(await screen.findByText("Installing node 22…")).toBeInTheDocument();
+    expect(await screen.findByText("Installing Node.js 22…")).toBeInTheDocument();
+    expect(screen.getByTestId("environment-job")).toHaveTextContent("$ mise install node@22");
+    // While installing, everything but Cancel is locked.
+    expect(screen.getByRole("button", { name: "Rescan repositories" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Add toolchain/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Cancel install" }));
     await waitFor(() => expect(commands).toEqual([["cancel"]]));
     expect(await screen.findByRole("button", { name: "Retry node" })).toBeInTheDocument();
@@ -150,10 +161,28 @@ describe("EnvironmentPanel in a session", () => {
     manifest = { toolchains: [], proposals: [], guidance: [], job: null };
     const done = vi.fn();
     render(<EnvironmentPanel url="./api/environment" workspace={WS} hint={{ command: "npx", tool: "node" }} onHintDone={done} fetchImpl={fakeFetch().fetchImpl} pollMs={20} />);
-    expect(await screen.findByTestId("environment-hint")).toHaveTextContent("npx was not found in the last command.");
+    expect(await screen.findByTestId("environment-hint")).toHaveTextContent("“npx” was not found in the last command. Node.js 22 provides it.");
     fireEvent.click(screen.getByRole("button", { name: "Bind Node.js" }));
     await waitFor(() => expect(done).toHaveBeenCalled());
     await waitFor(() => expect(commands).toEqual([["bind", "node", "22"]]));
+  });
+});
+
+describe("the status strip", () => {
+  const label = (t: string) => ({ node: "Node.js", java: "Java" } as Record<string, string>)[t] ?? t;
+  const job = (status: string, extra: Record<string, unknown> = {}) => ({
+    id: "j", action: "bind", tool: "java", version: "21", status, log: [], error: null, notes: [], startedAt: "t", finishedAt: null, ...extra,
+  }) as never;
+  const base = { job: null, label, waiting: 0, live: true, bound: 0, pending: 0 };
+
+  it("derives one state, first match wins", () => {
+    expect(stripState({ ...base, job: job("running"), waiting: 2 })).toMatchObject({ tone: "running", text: "Installing Java 21…", action: "cancel" });
+    expect(stripState({ ...base, job: job("failed", { error: "no mise" }), waiting: 2 })).toMatchObject({ tone: "failed", text: "Java 21 failed: no mise", action: "retry" });
+    expect(stripState({ ...base, job: job("cancelled") })).toMatchObject({ tone: "failed", text: "Install of Java 21 cancelled." });
+    expect(stripState({ ...base, waiting: 2, bound: 1 })).toMatchObject({ tone: "waiting", text: "2 suggestions waiting" });
+    expect(stripState({ ...base, live: false, pending: 2 })).toMatchObject({ tone: "neutral", text: "2 chosen · bound when the first session starts" });
+    expect(stripState({ ...base })).toMatchObject({ tone: "neutral", text: "No toolchains bound" });
+    expect(stripState({ ...base, job: job("done"), bound: 1 })).toMatchObject({ tone: "ready", text: "1 bound · ready", action: null });
   });
 });
 
@@ -162,9 +191,17 @@ describe("EnvironmentPanel with no session yet", () => {
     inSession(false);
     render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fakeFetch().fetchImpl} pollMs={20} />);
     expect(await screen.findByRole("note")).toHaveTextContent("bound when the first session in this workspace starts");
-    fireEvent.change(screen.getByRole("combobox", { name: "Toolchain" }), { target: { value: "node" } });
-    fireEvent.click(screen.getByRole("button", { name: "Choose" }));
-    expect(await screen.findByTestId("environment-pending")).toHaveTextContent("node 22");
+    expect(screen.queryByRole("button", { name: "Rescan repositories" })).toBeNull();
+    const add = screen.getByRole("button", { name: /Add toolchain/ });
+    expect(add).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(add);
+    expect(screen.getByRole("radio", { name: "22" })).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByRole("radio", { name: "20" }));
+    fireEvent.click(screen.getByRole("radio", { name: "22" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose Node.js" }));
+    expect(await screen.findByTestId("environment-pending")).toHaveTextContent("Node.js22");
+    expect(screen.getByTestId("environment-strip")).toHaveTextContent("1 chosen · bound when the first session starts");
+    expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(commands).toEqual([]);
     const { pendingBinds } = await import("@/app/toolchains");
     expect(pendingBinds(WS)).toEqual([{ tool: "node", version: "22" }]);

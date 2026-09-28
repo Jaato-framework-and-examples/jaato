@@ -26,7 +26,7 @@ import { useJaato } from "@/store/store";
 import { isConnected } from "@/sdk/connection";
 import { environmentApi, type EnvironmentStatus } from "@/app/environment";
 import { stageGenerated } from "@/app/staging";
-import { EMPTY_MANIFEST, flushPending, readManifest, toolchainCommand } from "@/app/toolchains";
+import { EMPTY_MANIFEST, flushPending, pendingBinds, readManifest, toolchainCommand, waitingProposals } from "@/app/toolchains";
 
 /** The session's workspace path, as the Toolchains rail resolves it; ``""`` when unknown. */
 export function currentWorkspacePath(s: ReturnType<typeof useJaato.getState>): string {
@@ -70,6 +70,11 @@ useJaato.subscribe((s) => {
       const m = await readManifest();
       if (m !== null && m === EMPTY_MANIFEST) await toolchainCommand("scan");
       await flushPending(path);
+      // The rail badge counts the proposals with the section closed.
+      const after = await readManifest();
+      if (after && currentWorkspacePath(useJaato.getState()) === path) {
+        useJaato.getState().setEnvironmentWaiting(waitingProposals(after, st, pendingBinds(path)).length);
+      }
     } catch {
       if (asked === key) asked = "";
     }

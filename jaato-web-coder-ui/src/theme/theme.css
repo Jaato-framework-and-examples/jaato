@@ -354,3 +354,62 @@ kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(-
   .no-scrollbar { scrollbar-width: none; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
 }
+
+/* ── Toolchains panel (#1344, the "status strip + tiles" design) ─────
+   Colours come from the theme, so a dark theme draws the same states.
+   The strip says what the environment is doing; one tone per state. */
+@layer components {
+  .tc-strip { display: grid; grid-template-columns: 14px 1fr auto; align-items: center; column-gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--c-divider); font-size: 13px; font-weight: 500; }
+  .tc-strip > .glyph { font-family: var(--font-mono); font-size: 13px; }
+  .tc-strip-running { background: color-mix(in srgb, var(--c-steel) 10%, var(--c-surface)); color: color-mix(in srgb, var(--c-steel) 80%, var(--c-text)); }
+  .tc-strip-failed  { background: color-mix(in srgb, var(--c-error) 9%, var(--c-surface)); color: var(--c-error); }
+  .tc-strip-waiting { background: color-mix(in srgb, var(--c-warning) 13%, var(--c-surface)); color: color-mix(in srgb, var(--c-warning) 70%, var(--c-text)); }
+  .tc-strip-neutral { background: var(--c-bg); color: var(--c-text); }
+  .tc-strip-ready   { background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface)); color: var(--c-success); }
+  .tc-strip-action { height: 30px; padding: 0 10px; border: 1px solid currentColor; background: transparent; color: inherit; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+  .tc-strip-action:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .tc-progress { height: 3px; background: color-mix(in srgb, var(--c-steel) 15%, var(--c-surface)); overflow: hidden; }
+  .tc-progress > span { display: block; width: 35%; height: 100%; background: var(--c-steel); animation: tc-slide 1.4s linear infinite; }
+  @keyframes tc-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(286%); } }
+
+  .tc-log { margin: 0; background: var(--c-bg); padding: 8px 10px; font-family: var(--font-mono); font-size: 11px; line-height: 1.5; color: var(--c-text-muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 128px; overflow: auto; }
+
+  .tc-ask { display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 12px; padding: 10px 12px; font-size: 13px; }
+  .tc-ask-hint { background: color-mix(in srgb, var(--c-warning) 13%, var(--c-surface)); border: 1px solid color-mix(in srgb, var(--c-warning) 40%, var(--c-surface)); }
+  .tc-ask-proposal { background: color-mix(in srgb, var(--c-steel) 6%, var(--c-surface)); border: 1px solid color-mix(in srgb, var(--c-steel) 45%, transparent); }
+  .tc-primary { height: 32px; padding: 0 12px; background: var(--c-steel); color: var(--c-surface); border: 0; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; cursor: pointer; }
+  .tc-primary:hover { background: color-mix(in srgb, var(--c-steel) 80%, var(--c-text)); }
+  .tc-x { width: 32px; height: 32px; border: 1px solid color-mix(in srgb, var(--c-text) 35%, transparent); background: transparent; color: var(--c-text); font-family: var(--font-mono); cursor: pointer; }
+  .tc-x:hover { background: color-mix(in srgb, var(--c-text) 6%, transparent); }
+  .tc-primary:disabled, .tc-x:disabled, .tc-text-btn:disabled, .tc-chip:disabled, .tc-add:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* Two columns of tiles; one when the panel is narrow (a container query,
+     so it follows the rail's width, not the window's). */
+  .tc-body { container-type: inline-size; }
+  .tc-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  @container (max-width: 340px) { .tc-tiles { grid-template-columns: minmax(0, 1fr); } }
+  .tc-tile { min-height: 92px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--c-text) 20%, transparent); background: var(--c-surface); display: flex; flex-direction: column; gap: 4px; }
+  .tc-tile-label { font-family: var(--font-heading); font-weight: 600; font-size: 18px; line-height: 1.1; }
+  .tc-tile-version { font-family: var(--font-mono); font-size: 13px; margin-left: 6px; }
+  .tc-tile-sub { font-size: 12px; color: var(--c-text-muted); overflow-wrap: anywhere; }
+  .tc-tile-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: var(--font-mono); font-size: 11px; }
+  .tc-text-btn { background: transparent; border: 0; padding: 2px 0; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-text-muted); cursor: pointer; }
+  .tc-text-btn:hover:not(:disabled) { color: var(--c-error); }
+  .tc-add { min-height: 92px; padding: 10px 12px; border: 1px dashed color-mix(in srgb, var(--c-steel) 50%, transparent); background: var(--c-surface); text-align: left; display: flex; flex-direction: column; justify-content: center; gap: 4px; cursor: pointer; }
+  .tc-add[aria-expanded="true"] { border-style: solid; border-color: var(--c-steel); background: color-mix(in srgb, var(--c-steel) 8%, var(--c-surface)); }
+  .tc-add-label { font-family: var(--font-heading); font-weight: 600; font-size: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-steel); }
+
+  .tc-picker { border: 1px solid var(--c-steel); }
+  .tc-pick-row { display: grid; grid-template-columns: 72px 1fr auto; align-items: center; column-gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--c-divider); }
+  .tc-pick-row:last-child { border-bottom: 0; }
+  .tc-chip { height: 28px; min-width: 40px; padding: 0 8px; font-family: var(--font-mono); font-size: 11px; background: var(--c-surface); color: var(--c-text); border: 1px solid color-mix(in srgb, var(--c-text) 25%, transparent); cursor: pointer; }
+  .tc-chip[aria-checked="true"] { background: var(--c-steel); color: var(--c-surface); border-color: var(--c-steel); }
+
+  .tc-rescan { background: transparent; border: 0; padding: 2px 0; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--c-steel); cursor: pointer; white-space: nowrap; }
+  .tc-rescan:hover:not(:disabled) { color: var(--c-text); }
+  .tc-rescan:disabled { opacity: 0.45; cursor: not-allowed; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tc-progress > span { animation: none; }
+}
