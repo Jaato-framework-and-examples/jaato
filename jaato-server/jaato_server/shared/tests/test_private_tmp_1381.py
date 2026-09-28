@@ -381,10 +381,18 @@ def test_the_files_panel_ignores_the_private_tmp():
 
 
 def test_the_gitignore_block_ignores_the_private_tmp(tmp_path):
+    (tmp_path / ".tmp").mkdir()
     (tmp_path / ".gitignore").write_text(gitignore.render_block())
     assert gitignore.assess(tmp_path).unignored_scratch == ()
     (tmp_path / ".gitignore").write_text("node_modules/\n")
     assert gitignore.assess(tmp_path).unignored_scratch
+
+
+def test_validate_is_quiet_about_a_tmp_that_is_absent_or_self_ignored(tmp_path):
+    (tmp_path / ".gitignore").write_text("node_modules/\n")
+    assert gitignore.assess(tmp_path).unignored_scratch == ()
+    private_tmp.ensure_private_tmp_dir(str(tmp_path / ".tmp"))
+    assert gitignore.assess(tmp_path).unignored_scratch == ()
 
 
 def test_the_runtime_aspect_says_whether_tmp_is_private(monkeypatch):

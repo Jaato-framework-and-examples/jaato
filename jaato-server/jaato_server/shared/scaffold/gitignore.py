@@ -270,8 +270,9 @@ class Assessment:
         unignored_state: ``(probe, what)`` pairs from :data:`STATE_PROBES`
             the file does NOT ignore.  Every probe when there is no file.
         unignored_scratch: ``(probe, what)`` pairs from
-            :data:`WORKSPACE_SCRATCH` (relative to the workspace root) the
-            file does NOT ignore (#1381).
+            :data:`WORKSPACE_SCRATCH` (relative to the workspace root) whose
+            directory exists and is neither ignored by the file nor carries
+            its own ``*`` gitignore (#1381).
     """
 
     exists: bool
@@ -308,7 +309,7 @@ def assess(workspace: Path) -> Assessment:
     ws = Path(workspace)
     exists = (ws / ".gitignore").is_file()
     if not exists:
-        return Assessment(False, False, (), STATE_PROBES, _all_scratch())
+        return Assessment(False, False, (), STATE_PROBES)
     parser = GitignoreParser(ws, include_defaults=False)
     jaato = ws / ".jaato"
     dir_excluded = parser.is_ignored(jaato)
@@ -320,8 +321,27 @@ def assess(workspace: Path) -> Assessment:
     unignored = tuple((probe, what) for probe, what in STATE_PROBES
                       if not parser.is_ignored(jaato / probe))
     scratch = tuple(pair for pair in _all_scratch()
-                    if not parser.is_ignored(ws / pair[0]))
+                    if _scratch_exposed(ws, parser, pair[0]))
     return Assessment(True, dir_excluded, hidden, unignored, scratch)
+
+
+def _scratch_exposed(ws: Path, parser: "GitignoreParser", probe: str) -> bool:
+    """Is a scratch directory present, and committable?
+
+    Only a directory that EXISTS is reported: the private ``/tmp`` is
+    opt-in for a user's own checkout, and a warning about a directory the
+    workspace will never have is noise.  One carrying its own ``*``
+    ``.gitignore`` (what the daemon writes when it creates it) is already
+    out of git whatever the root file says.
+    """
+    top = ws / probe.split("/")[0]
+    if not top.is_dir() or parser.is_ignored(ws / probe):
+        return False
+    nested = top / ".gitignore"
+    try:
+        return "*" not in nested.read_text(encoding="utf-8").split()
+    except OSError:
+        return True
 
 
 def _all_scratch() -> Tuple[Tuple[str, str], ...]:
