@@ -13,18 +13,21 @@
  * | ``.home/.config/mise/config.toml`` | ``#`` comment | mise, for the person who opens a shell |
  * | ``.lsp.json`` | ``"_jaato_managed"`` key | the ``lsp`` plugin (it reads only ``languageServers``) |
  * | ``.jaato/instructions/45-environment.md`` | HTML comment | every session's system prompt |
+ * | ``.jaato/apparmor-fragments/jaato-environment.rules`` | ``#`` comment | the daemon, when it renders a session's AppArmor profile |
  *
- * All four are *generated* managed files: refreshed whenever their content
+ * All five are *generated* managed files: refreshed whenever their content
  * differs, and never written over a copy whose marker the user removed.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ManagedFile } from "../managed-files.js";
 import {
+  APPARMOR_FRAGMENT_PATH,
   ENVIRONMENT_INSTRUCTIONS_PATH,
   ENVIRONMENT_MANIFEST_PATH,
   LOCAL_BIN,
   LSP_CONFIG_PATH,
+  MARKER_APPARMOR,
   MARKER_ENVIRONMENT,
   MARKER_LSP,
   MARKER_TOOLCHAINS,
@@ -139,4 +142,45 @@ export function pinnedServer(tool: ToolId, pins: Partial<Record<ServerId, string
   if (!id) return null;
   const version = pins[id];
   return version ? { id, version } : null;
+}
+
+/** A path AppArmor would read as a glob or could not quote; such a directory gets no rule (and a note). */
+const APPARMOR_UNSAFE = /["*?[\]{}^\\\n\r]/;
+
+/**
+ * The bootstrap's AppArmor fragment: what the confinement template does not
+ * already grant a bound toolchain.  The template gives ``.home`` ``rwkl``
+ * and ``ix`` on ``.local/share/**\/bin/*``, which is enough for a static
+ * binary (Go) or one that loads nothing of its own (Node).  A JDK loads its
+ * own shared objects (``libjli.so``, ``libjvm.so``), which needs ``m``, and
+ * forks through ``lib/jspawnhelper``, which is not under a ``bin/``.  Every
+ * rule names a directory the bootstrap installed, never the workspace at
+ * large.  ``bin/*`` is repeated here so a profile that scopes its fragments
+ * (and so gets no broad exec) can name ``jaato-environment`` and run the
+ * toolchains.  ``null`` when nothing is bound.
+ *
+ * ``notes`` receives one line per directory that could not be expressed.
+ */
+export function apparmorFragmentFile(m: Manifest, workspace: string, notes: string[] = []): ManagedFile | null {
+  const dirs = new Map<string, boolean>();
+  for (const t of m.toolchains) {
+    if (t.installDir) dirs.set(t.installDir, (dirs.get(t.installDir) ?? false) || t.tool === "java");
+    if (t.server?.runtimeDir) dirs.set(t.server.runtimeDir, true);
+  }
+  if (dirs.size === 0) return null;
+  const lines = [
+    "# Grants for the toolchains the web coder bound to this workspace; bind or unbind them there.",
+    "# Profiles that scope apparmor_fragments name this one: jaato-environment.",
+  ];
+  for (const [rel, jdk] of [...dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const abs = join(workspace, rel);
+    if (APPARMOR_UNSAFE.test(abs)) { notes.push(`no AppArmor grant for ${rel}: its path has characters AppArmor reads as a pattern`); continue; }
+    lines.push(`"${abs}/bin/*" ix,`, `"${abs}/**/*.so" m,`, `"${abs}/**/*.so.*" m,`);
+    if (jdk) lines.push(`"${abs}/lib/jspawnhelper" ix,`);
+  }
+  return { relativePath: APPARMOR_FRAGMENT_PATH, markerId: MARKER_APPARMOR, version: MANIFEST_VERSION, body: `${lines.join("\n")}\n`, format: "hash", generated: true };
+}
+
+export function apparmorFragmentIdentity(): ManagedFile {
+  return { relativePath: APPARMOR_FRAGMENT_PATH, markerId: MARKER_APPARMOR, version: MANIFEST_VERSION, body: "", format: "hash", generated: true };
 }

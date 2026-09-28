@@ -7,7 +7,7 @@
  * | Operation | Does |
  * |---|---|
  * | {@link EnvironmentService.status} | what is bound, what the operator allows, what the workspace's files propose (minus what is bound or declined), and the running install |
- * | {@link EnvironmentService.bind} | starts an install job: mise, the links, the pinned language server, then the four managed files |
+ * | {@link EnvironmentService.bind} | starts an install job: mise, the links, the pinned language server, then the five managed files |
  * | {@link EnvironmentService.unbind} | removes the links and the tool from the managed files; the installed data is KEPT, so a rebind is fast |
  * | {@link EnvironmentService.decline} | remembers "not now" for ``(user, workspace, tool)`` |
  * | {@link EnvironmentService.refreshGuidance} | rewrites the repository-guidance pointer; the page calls it after a clone or a pull |
@@ -29,14 +29,14 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { removeManagedFile, writeManagedFile, type ManagedFile, type ManagedWriteOutcome } from "../managed-files.js";
-import { LOCAL_BIN, MISE_DATA_DIR, TOOLCHAINS, TOOL_IDS, matchAllowedVersion, type ServerId, type ToolId } from "./catalog.js";
+import { LOCAL_BIN, MISE_DATA_DIR, TOOLCHAINS, TOOL_IDS, matchToolVersion, type ServerId, type ToolId } from "./catalog.js";
 import { detectWorkspace } from "./detect.js";
 import {
-  environmentInstructionsFile, environmentInstructionsIdentity, lspConfigFile, lspConfigIdentity,
+  apparmorFragmentFile, apparmorFragmentIdentity, environmentInstructionsFile, environmentInstructionsIdentity, lspConfigFile, lspConfigIdentity,
   manifestFile, miseConfigFile, pinnedServer, readManifest, type BoundToolchain, type Manifest,
 } from "./files.js";
 import { findRepoGuidance, repoGuidanceFile, repoGuidanceIdentity } from "./guidance.js";
-import { InstallCancelled, Installer, spawnRunner, unlinkBinaries, type ProcessRunner } from "./installer.js";
+import { InstallCancelled, Installer, spawnRunner, unlinkBinaries, type JdtlsOptions, type ProcessRunner } from "./installer.js";
 import type { FileEnvironmentStore } from "./store.js";
 
 /** Whether ``user`` owns ``workspace`` on the daemon; ``null`` when the daemon could not be asked. */
@@ -57,6 +57,8 @@ export interface EnvironmentOptions {
   lsp: Partial<Record<ServerId, string>>;
   /** The ``typescript`` version installed beside typescript-language-server. */
   typescriptVersion?: string;
+  /** How jdtls is run: its own JDK, its heap ceiling, where it is downloaded from. */
+  jdtls?: JdtlsOptions;
   mise: string;
   python: string;
   paranoid: boolean;
@@ -180,7 +182,7 @@ export class EnvironmentService {
     for (const d of detectWorkspace(real)) {
       const a = allowed.find((x) => x.tool === d.tool);
       if (!a || bound.has(d.tool) || declined.includes(d.tool)) continue;
-      const matched = d.tool === "python" ? "system" : d.pin ? matchAllowedVersion(d.pin, a.versions) : null;
+      const matched = d.tool === "python" ? "system" : d.pin ? matchToolVersion(d.tool, d.pin, a.versions) : null;
       proposals.push({
         tool: d.tool, label: a.label, version: matched ?? a.versions[0]!, pin: d.pin,
         pinAllowed: d.pin === null || matched !== null, source: d.source,
@@ -251,7 +253,7 @@ export class EnvironmentService {
       let installed = null;
       let serverBin: string[] = [];
       if (server) {
-        installed = await inst.installServer(server.id, server.version, { typescriptVersion: this.o.typescriptVersion });
+        installed = await inst.installServer(server.id, server.version, { typescriptVersion: this.o.typescriptVersion, jdtls: this.o.jdtls });
         if (server.id === "gopls") serverBin = ["gopls"];
       }
       const manifest = readManifest(job.workspace);
@@ -268,7 +270,7 @@ export class EnvironmentService {
     }
   }
 
-  /** Write the four managed files from ``manifest``; returns a note for each one not written as asked. */
+  /** Write the five managed files from ``manifest``; returns a note for each one not written as asked. */
   private _writeFiles(real: string, manifest: Manifest): string[] {
     const notes: string[] = [];
     const put = (file: ManagedFile | null, identity: ManagedFile) => {
@@ -280,6 +282,7 @@ export class EnvironmentService {
     put(miseConfigFile(manifest), miseConfigFile(manifest));
     put(lspConfigFile(manifest), lspConfigIdentity());
     put(environmentInstructionsFile(manifest), environmentInstructionsIdentity());
+    put(apparmorFragmentFile(manifest, real, notes), apparmorFragmentIdentity());
     if (manifest.toolchains.length) put(manifestFile(manifest), manifestFile(manifest));
     else put(null, manifestFile(manifest));
     return notes;

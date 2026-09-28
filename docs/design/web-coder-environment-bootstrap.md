@@ -337,13 +337,19 @@ A detection never installs anything by itself.
   `workspace.list` over the user's own identity. Whether the GitHub bind
   route has the same gap is worth checking separately.
 - **jdtls and memory.** A Java language server uses gigabytes, and #806
-  (servers never reaped) is still open. Java should wait for that.
+  (servers never reaped) is still open. Java ships anyway: jdtls runs with a
+  capped heap (`environment.jdtls_max_heap`, default 1G), and the BFF warns
+  at startup that each one outlives its session until the runner slot exits.
+  Fixing #806 removes the warning, not the cap.
 - **`proxy` mode and a BFF on another host.** Everything here assumes the
   BFF shares a filesystem with the daemon, as today's `.env` writes already
   do. A split deployment would need a daemon verb instead.
 - **Scoped sessions.** A profile that declares `apparmor_fragments` gets no
-  broad exec. Its fragments must grant the toolchain paths, and a `validate`
-  warning could say so.
+  broad exec. The bootstrap writes a workspace-tier fragment,
+  `jaato-environment`, granting each install directory's `bin/*` (and, for a
+  JDK, `m` on its `.so` files and `ix` on `lib/jspawnhelper`); a scoped
+  profile names it. A `validate` warning for a scoped profile that does not
+  name it could still say so.
 - **Removal.** Unbinding removes the links and the managed files. Whether it
   also deletes the installed data or keeps it for a rebind is open.
 

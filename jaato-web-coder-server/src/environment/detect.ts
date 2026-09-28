@@ -80,7 +80,34 @@ const TOOL_VERSION_NAMES: Array<[ToolId, string[]]> = [
   ["node", ["node", "nodejs"]],
   ["go", ["go", "golang"]],
   ["bun", ["bun"]],
+  ["java", ["java"]],
+  ["maven", ["maven"]],
+  ["gradle", ["gradle"]],
 ];
+
+/** The Java release a ``pom.xml`` compiles for, in the order Maven itself prefers them. */
+function pomJavaRelease(pom: string): string | null {
+  for (const tag of ["maven.compiler.release", "release", "java.version", "maven.compiler.source", "maven.compiler.target"]) {
+    const m = new RegExp(`<${tag.replace(/\./g, "\\.")}>\\s*([0-9][0-9.]*)\\s*</`).exec(pom);
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
+/** The Java version a Gradle build names: a toolchain first, then the compatibility level. */
+function gradleJavaVersion(build: string): string | null {
+  const patterns = [
+    /JavaLanguageVersion\.of\(\s*["']?(\d+)["']?\s*\)/,
+    /jvmToolchain\(\s*(\d+)\s*\)/,
+    /sourceCompatibility\s*=\s*JavaVersion\.VERSION_(\d+(?:_\d+)?)/,
+    /sourceCompatibility\s*=\s*["']?(\d+(?:\.\d+)?)["']?/,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(build);
+    if (m) return m[1]!.replace(/_/g, ".");
+  }
+  return null;
+}
 
 /** What one directory's files suggest. */
 export function detectDir(workspace: string, dir: string): Detection[] {
@@ -123,6 +150,24 @@ export function detectDir(workspace: string, dir: string): Detection[] {
   if (gomod !== null) {
     const m = /^go\s+(\S+)/m.exec(gomod);
     add("go", m ? m[1]! : null, rel(dir, "go.mod"));
+  }
+  // Java: a version manager's file, then the build; Maven / Gradle only when the repository has no wrapper.
+  const javaVersion = readBounded(join(base, ".java-version"));
+  if (javaVersion !== null) add("java", javaVersion.split("\n")[0] ?? null, rel(dir, ".java-version"));
+  const sdkman = readBounded(join(base, ".sdkmanrc"));
+  if (sdkman !== null) {
+    const m = /^\s*java\s*=\s*(\S+)/m.exec(sdkman);
+    if (m) add("java", m[1]!, rel(dir, ".sdkmanrc"));
+  }
+  const pom = readBounded(join(base, "pom.xml"));
+  if (pom !== null) {
+    add("java", pomJavaRelease(pom), rel(dir, "pom.xml"));
+    if (!isFile(join(base, "mvnw"))) add("maven", null, rel(dir, "pom.xml"));
+  }
+  const gradleFile = ["build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle"].find((f) => isFile(join(base, f)));
+  if (gradleFile) {
+    add("java", gradleJavaVersion(readBounded(join(base, gradleFile)) ?? ""), rel(dir, gradleFile));
+    if (!isFile(join(base, "gradlew"))) add("gradle", null, rel(dir, gradleFile));
   }
   const py = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"].find((f) => isFile(join(base, f)));
   if (py) add("python", null, rel(dir, py));

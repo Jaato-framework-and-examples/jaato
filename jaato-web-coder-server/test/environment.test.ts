@@ -14,13 +14,13 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
-import { matchAllowedVersion } from "../src/environment/catalog.js";
+import { matchAllowedVersion, matchToolVersion, normalizeJavaVersion } from "../src/environment/catalog.js";
 import { detectWorkspace } from "../src/environment/detect.js";
 import { findRepoGuidance, repoGuidanceFile } from "../src/environment/guidance.js";
 import { readManifest } from "../src/environment/files.js";
 import { EnvironmentError, EnvironmentService, type WorkspaceOwnership } from "../src/environment/service.js";
 import { FileEnvironmentStore } from "../src/environment/store.js";
-import type { ProcessRunner, RunSpec } from "../src/environment/installer.js";
+import { JDTLS_FETCH_SCRIPT, jdtlsConfigDir, type ProcessRunner, type RunSpec } from "../src/environment/installer.js";
 import { managedContent, ownerMarker, writeManagedFile } from "../src/managed-files.js";
 import { parseEnvironment, ConfigError } from "../src/config.js";
 
@@ -60,12 +60,18 @@ function fakeRunner(opts: { failOn?: string; hang?: string } = {}): { run: Proce
     if (spec.args[0] === "install" && spec.args[1]?.includes("@") && spec.command.endsWith("mise")) {
       const [tool, ver] = spec.args[1].split("@") as [string, string];
       const dir = join(data, "installs", tool, `${ver}.0.1`);
-      for (const b of tool === "node" ? ["node", "npm", "npx"] : tool === "go" ? ["go", "gofmt"] : [tool]) exe(join(dir, "bin", b));
+      for (const b of tool === "node" ? ["node", "npm", "npx"] : tool === "go" ? ["go", "gofmt"] : tool === "java" ? ["java", "javac"] : [tool]) exe(join(dir, "bin", b));
+      if (tool === "java") { put(join(dir, "lib", "server", "libjvm.so"), "elf\n"); exe(join(dir, "lib", "jspawnhelper")); }
       put(join(dir, "bin", "README"), "not executable\n");
       spec.onLine(`${tool}@${ver} installed`, "stderr");
     } else if (spec.args[0] === "where") {
       const [tool, ver] = spec.args[1]!.split("@") as [string, string];
       spec.onLine(join(data, "installs", tool, `${ver}.0.1`), "stdout");
+    } else if (spec.args[0] === "-c" && spec.args[1] === JDTLS_FETCH_SCRIPT) {
+      const dest = spec.args[4]!;
+      put(join(dest, "plugins", "org.eclipse.equinox.launcher_1.6.900.v20240613-2009.jar"), "jar\n");
+      put(join(dest, "config_linux", "config.ini"), "\n");
+      spec.onLine("extracted jdt-language-server-1.40.0-202409261450.tar.gz", "stdout");
     } else if (spec.args[0] === "-m" && spec.args[1] === "venv") {
       exe(join(spec.args[2]!, "bin", "python"));
     } else if (spec.args.includes("pip")) {
@@ -89,9 +95,10 @@ const owner = (answer: boolean | null): WorkspaceOwnership & { asked: string[] }
 function service(root: string, runner: ProcessRunner, ownership: WorkspaceOwnership = owner(true)) {
   return new EnvironmentService({
     workspaceRoot: root,
-    tools: { node: ["22", "20"], go: ["1.23"] },
-    lsp: { basedpyright: "1.31.6", "typescript-language-server": "4.4.0", gopls: "v0.20.0" },
+    tools: { node: ["22", "20"], go: ["1.23"], java: ["21", "temurin-17"], maven: ["3.9.9"], gradle: ["8.10"] },
+    lsp: { basedpyright: "1.31.6", "typescript-language-server": "4.4.0", gopls: "v0.20.0", jdtls: "1.40.0" },
     typescriptVersion: "5.9.3",
+    jdtls: { runtime: "21", maxHeap: "768m" },
     mise: "/usr/bin/mise", python: "python3", paranoid: false, installTimeoutMs: 60_000,
     store: new FileEnvironmentStore(join(root, "..", `state-${Math.random()}.json`)),
     ownership, run: runner,
@@ -149,6 +156,36 @@ describe("detection", () => {
     assert.deepEqual(byTool.go, { tool: "go", pin: "1.23.4", source: "svc/go.mod" });
     assert.equal(byTool.python?.source, "py/pyproject.toml");
     assert.equal(found.length, 3);
+  });
+
+  test("Java: a version manager's file, then the build; Maven and Gradle only without a wrapper", () => {
+    const { ws } = workspaceRoot();
+    put(join(ws, "a", "pom.xml"), "<project><properties><maven.compiler.release>21</maven.compiler.release></properties></project>");
+    put(join(ws, "b", "build.gradle.kts"), "java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }\n");
+    put(join(ws, "b", "gradlew"), "#!/bin/sh\n");
+    const byTool = Object.fromEntries(detectWorkspace(ws).map((d) => [d.tool, d]));
+    assert.deepEqual(byTool.java, { tool: "java", pin: "21", source: "a/pom.xml" });
+    assert.deepEqual(byTool.maven, { tool: "maven", pin: null, source: "a/pom.xml" });
+    assert.equal(byTool.gradle, undefined, "b has ./gradlew, so it needs no Gradle");
+
+    const { ws: ws2 } = workspaceRoot();
+    put(join(ws2, ".sdkmanrc"), "java=17.0.12-tem\n");
+    put(join(ws2, "pom.xml"), "<project><properties><java.version>21</java.version></properties></project>");
+    put(join(ws2, "mvnw"), "#!/bin/sh\n");
+    const two = Object.fromEntries(detectWorkspace(ws2).map((d) => [d.tool, d]));
+    assert.deepEqual(two.java, { tool: "java", pin: "17.0.12-tem", source: ".sdkmanrc" });
+    assert.equal(two.maven, undefined);
+  });
+
+  test("Java pins and allowed entries are matched without their vendor spelling", () => {
+    assert.equal(normalizeJavaVersion("temurin-21.0.2"), "21.0.2");
+    assert.equal(normalizeJavaVersion("17.0.12-tem"), "17.0.12");
+    assert.equal(normalizeJavaVersion("1.8"), "8");
+    assert.equal(normalizeJavaVersion("1.8.0_392"), "8.0_392");
+    assert.equal(matchToolVersion("java", "17.0.12-tem", ["21", "temurin-17"]), "temurin-17");
+    assert.equal(matchToolVersion("java", "21", ["21", "temurin-17"]), "21");
+    assert.equal(matchToolVersion("java", "11", ["21", "temurin-17"]), null);
+    assert.equal(matchToolVersion("node", "temurin-21", ["21"]), null, "only Java is normalized");
   });
 
   test("a pin maps to the most specific allowed version at a component boundary", () => {
@@ -259,6 +296,69 @@ describe("EnvironmentService", () => {
     assert.equal(lsp.languageServers.python.command, join(ws, ".home/.local/share/jaato-lsp/basedpyright/bin/basedpyright-langserver"));
   });
 
+  test("bind java: the JDK, jdtls on its own JDK with a bounded heap, and the AppArmor fragment", async () => {
+    const { root, ws } = workspaceRoot();
+    const { run, calls } = fakeRunner();
+    const svc = service(root, run);
+    const done = await svc.waitFor((await svc.bind("sub", "alice", ws, "java", "temurin-17")).id);
+    assert.equal(done?.status, "done", done?.error);
+
+    assert.ok(calls.some((c) => c.args[0] === "install" && c.args[1] === "java@temurin-17"), "the project's JDK");
+    assert.ok(calls.some((c) => c.args[0] === "install" && c.args[1] === "java@21"), "jdtls's own runtime");
+    const fetch = calls.find((c) => c.args[1] === JDTLS_FETCH_SCRIPT)!;
+    assert.deepEqual(fetch.args.slice(2), ["https://download.eclipse.org/jdtls/milestones", "1.40.0", join(ws, ".home/.local/share/jaato-lsp/jdtls/1.40.0")]);
+    assert.equal(fetch.command, "python3");
+
+    const java = JSON.parse(readFileSync(join(ws, ".lsp.json"), "utf8")).languageServers.java;
+    const runtime = join(ws, ".home/.local/share/mise/installs/java/21.0.1");
+    assert.equal(java.command, join(runtime, "bin", "java"));
+    assert.equal(java.languageId, "java");
+    assert.ok(java.args.includes("-Xmx768m"));
+    assert.ok(java.args.includes(`-Djava.io.tmpdir=${join(ws, ".home/.cache/jdtls")}`));
+    assert.ok(existsSync(join(ws, ".home/.cache/jdtls")), "the JVM wants its temp directory to exist at start");
+    assert.ok(java.args.includes("-jar"));
+    assert.ok(java.args[java.args.indexOf("-jar") + 1].endsWith("plugins/org.eclipse.equinox.launcher_1.6.900.v20240613-2009.jar"));
+    assert.deepEqual(java.args.slice(-2), ["-data", "${jdtlsStateRoot}"], "the framework's state root: never nested in a project, and granted rw by the lsp plugin");
+    assert.ok(java.args.includes(`-Dosgi.sharedConfiguration.area=${join(ws, ".home/.local/share/jaato-lsp/jdtls/1.40.0", jdtlsConfigDir())}`));
+    assert.equal(jdtlsConfigDir("linux", "x64"), "config_linux");
+    assert.equal(jdtlsConfigDir("linux", "arm64"), "config_linux_arm");
+    assert.equal(jdtlsConfigDir("darwin", "arm64"), "config_mac_arm");
+
+    const rules = readFileSync(join(ws, ".jaato/apparmor-fragments/jaato-environment.rules"), "utf8");
+    assert.ok(rules.startsWith("# jaato-managed: apparmor v1"));
+    const jdk = join(ws, ".home/.local/share/mise/installs/java/temurin-17.0.1");
+    for (const dir of [jdk, runtime]) {
+      assert.ok(rules.includes(`"${dir}/**/*.so" m,`), `m on ${dir}'s shared objects`);
+      assert.ok(rules.includes(`"${dir}/lib/jspawnhelper" ix,`));
+      assert.ok(rules.includes(`"${dir}/bin/*" ix,`));
+    }
+    assert.ok(!rules.includes(`"${ws}/**`), "never the workspace at large");
+    assert.ok(realpathSync(join(ws, ".home/.local/bin/javac")).startsWith(jdk));
+
+    // Maven gets bin/* but no JDK-only rules; unbinding everything removes the fragment.
+    assert.equal((await svc.waitFor((await svc.bind("sub", "alice", ws, "maven", "3.9.9")).id))?.status, "done");
+    const withMaven = readFileSync(join(ws, ".jaato/apparmor-fragments/jaato-environment.rules"), "utf8");
+    const mvn = join(ws, ".home/.local/share/mise/installs/maven/3.9.9.0.1");
+    assert.ok(withMaven.includes(`"${mvn}/bin/*" ix,`));
+    assert.ok(!withMaven.includes(`"${mvn}/lib/jspawnhelper"`));
+    await svc.unbind("sub", "alice", ws, "java");
+    await svc.unbind("sub", "alice", ws, "maven");
+    assert.ok(!existsSync(join(ws, ".jaato/apparmor-fragments/jaato-environment.rules")));
+    assert.ok(!existsSync(join(ws, ".lsp.json")));
+  });
+
+  test("a directory AppArmor would read as a pattern gets no rule, and the job says so", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "jwcs-env-")));
+    const ws = join(root, "ws[1]");
+    mkdirSync(join(ws, ".home"), { recursive: true });
+    const svc = service(root, fakeRunner().run);
+    const done = await svc.waitFor((await svc.bind("sub", "alice", ws, "go", "1.23")).id);
+    assert.equal(done?.status, "done");
+    assert.ok(done?.notes.some((n) => n.includes("characters AppArmor reads as a pattern")));
+    const rules = readFileSync(join(ws, ".jaato/apparmor-fragments/jaato-environment.rules"), "utf8");
+    assert.ok(!rules.includes("ws[1]"));
+  });
+
   test("a failed install writes no manifest entry and says why", async () => {
     const { root, ws } = workspaceRoot();
     const svc = service(root, fakeRunner({ failOn: "install node@22" }).run);
@@ -347,5 +447,10 @@ describe("config: the environment block", () => {
     assert.throws(() => parseEnvironment({ workspace_root: "/w", tools: { rust: ["1"] } }, "/"), /not a toolchain/);
     assert.throws(() => parseEnvironment({ workspace_root: "/w", tools: { node: ["22; rm -rf /"] } }, "/"), /not a version/);
     assert.throws(() => parseEnvironment({ workspace_root: "/w", lsp: { "typescript-language-server": "4" } }, "/"), /typescript_version is required/);
+    assert.deepEqual(e.jdtls, { runtime: "21", maxHeap: "1G" });
+    const j = parseEnvironment({ workspace_root: "/w", tools: { java: ["temurin-21"], maven: ["3.9.9"] }, lsp: { jdtls: "1.40.0" }, jdtls_java: 25, jdtls_max_heap: "2G", jdtls_mirror: "https://mirror.example/jdtls" }, "/")!;
+    assert.deepEqual(j.jdtls, { runtime: "25", maxHeap: "2G", mirror: "https://mirror.example/jdtls" });
+    assert.throws(() => parseEnvironment({ workspace_root: "/w", jdtls_max_heap: "lots" }, "/"), /heap size/);
+    assert.throws(() => parseEnvironment({ workspace_root: "/w", jdtls_mirror: "http://mirror.example" }, "/"), /https/);
   });
 });

@@ -86,12 +86,16 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
   if (config.environment) {
     const env = config.environment;
     environment = new EnvironmentService({
-      workspaceRoot: env.workspaceRoot, tools: env.tools, lsp: env.lsp, typescriptVersion: env.typescriptVersion,
+      workspaceRoot: env.workspaceRoot, tools: env.tools, lsp: env.lsp, typescriptVersion: env.typescriptVersion, jdtls: env.jdtls,
       mise: env.mise, python: env.python, paranoid: env.paranoid, installTimeoutMs: env.installTimeoutSeconds * 1000,
       store: new FileEnvironmentStore(env.stateFile), ownership: bind, log,
     });
     const offered = environment.allowedTools().map((t) => `${t.tool}[${t.versions.join(",")}]${t.server ? `+${t.server.id}` : ""}`);
     log(`environment bootstrap enabled under ${env.workspaceRoot}: ${offered.length ? offered.join(" ") : "no toolchain allowed yet (environment.tools / environment.lsp are empty)"}`);
+    if (env.lsp.jdtls && env.tools.java?.length) {
+      // #806: the daemon does not reap a language server at session end.  Say what that costs here.
+      log(`WARNING: jdtls is enabled. A language server outlives its session until its runner slot exits (jaato #806), so each workspace's jdtls may hold up to -Xmx${env.jdtls.maxHeap} plus JVM overhead after the session that started it. Set environment.jdtls_max_heap to bound it.`);
+    }
   } else {
     log("environment bootstrap not configured (no environment: block)");
   }

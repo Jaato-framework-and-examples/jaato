@@ -34,6 +34,8 @@ describe("not-found detection", () => {
     expect(notFoundCommand("/usr/bin/env: 'node': No such file or directory")).toBe("node");
     expect(notFoundCommand("cat: missing.txt: No such file or directory")).toBeNull();
     expect(toolForCommand("npx")).toBe("node");
+    expect(toolForCommand("javac")).toBe("java");
+    expect(toolForCommand("mvn")).toBe("maven");
     expect(toolForCommand("cargo")).toBeNull();
   });
 

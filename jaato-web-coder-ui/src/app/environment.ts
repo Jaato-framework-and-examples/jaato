@@ -23,7 +23,7 @@
  */
 import { SignInRequiredError } from "./tickets";
 
-export type ToolId = "python" | "node" | "go" | "bun";
+export type ToolId = "python" | "node" | "go" | "bun" | "java" | "maven" | "gradle";
 
 export interface AllowedTool {
   tool: ToolId;
@@ -164,6 +164,8 @@ export const COMMAND_TOOLS: Record<string, ToolId> = {
   go: "go", gofmt: "go", gopls: "go",
   bun: "bun", bunx: "bun",
   basedpyright: "python", "basedpyright-langserver": "python", pyright: "python",
+  java: "java", javac: "java", jar: "java", jshell: "java", javadoc: "java", jlink: "java", jpackage: "java", keytool: "java",
+  mvn: "maven", gradle: "gradle",
 };
 
 export function toolForCommand(command: string): ToolId | null {

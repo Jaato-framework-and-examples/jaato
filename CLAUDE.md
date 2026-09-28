@@ -1929,9 +1929,20 @@ an `environment:` block; design and departures in
 |---|---|
 | detection (markers in the root and each clone; proposes only) | `jaato-web-coder-server/src/environment/detect.ts` |
 | install: `mise install` with every mise dir under `.home`, a clean env, `MISE_CEILING_PATHS` so a repo's `mise.toml` cannot choose downloads; relative links into `.home/.local/bin`; the pinned server | `src/environment/installer.ts` |
-| the four managed files (`.jaato/environment.json` for the `runtime` aspect, the mise config, `.lsp.json` for #1345, `45-environment.md`) and the `30-repo-guidance.md` pointer | `src/environment/files.ts`, `guidance.ts` |
+| the five managed files (`.jaato/environment.json` for the `runtime` aspect, the mise config, `.lsp.json` for #1345, `45-environment.md`, and the workspace-tier AppArmor fragment `jaato-environment.rules`) and the `30-repo-guidance.md` pointer | `src/environment/files.ts`, `guidance.ts` |
 | operator allow-list of pinned versions; one job per workspace; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30), refused when it cannot answer | `src/environment/service.ts`, `src/config.ts`, `BindChannel.owns` |
 | the clone-time chip, the rail's Toolchains section, the mid-session `command not found` chip | `jaato-web-coder-ui/src/components/workspace/EnvironmentPanel.tsx`, `app/environment.ts` |
+
+Toolchains: Node, Go, Bun, Python (basedpyright only), Java, Maven and
+Gradle. Java ships although #806 is open: jdtls is a checksum-verified
+Eclipse milestone started with `java -jar` on its own mise JDK, heap capped
+by `environment.jdtls_max_heap`, `-data` at `${jdtlsStateRoot}` (which the
+lsp plugin grants `rw` from `.lsp.json`), and the BFF warns at startup. The
+JDK needs what the template does not give `.home` (`m` on its `.so` files,
+`ix` on `lib/jspawnhelper`), so the BFF owns a fragment in
+`<ws>/.jaato/apparmor-fragments/`, which the runner cannot write and every
+unscoped session composes; a scoped profile names `jaato-environment`. No
+framework change.
 
 `managed-files.ts` now spells its marker per type (`html`, `hash` for TOML,
 a `_jaato_managed` JSON key) and gains `generated`: a derived file refreshes

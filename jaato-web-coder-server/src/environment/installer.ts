@@ -12,6 +12,17 @@
  * | basedpyright | its own venv under ``.home/.local/share/jaato-lsp/`` | as above |
  * | typescript-language-server | ``npm -g --prefix .home/.local/share/jaato-lsp/npm`` | started through the linked ``node``, so its ``.mjs`` entry is read, not exec'd |
  * | gopls | ``GOBIN=.home/.local/bin`` | as above |
+ * | jdtls | a checksum-verified Eclipse milestone under ``.home/.local/share/jaato-lsp/jdtls/<v>/``, run by a mise JDK | its ``java`` is under ``.local/share/**\/bin/``; the JDK's ``.so`` files need the ``m`` grant the bootstrap's AppArmor fragment carries |
+ *
+ * jdtls is started with ``java -jar <launcher>`` rather than its Python
+ * wrapper: one exec fewer under confinement, and every flag the wrapper
+ * would add is stated here, the heap ceiling above all (#806: nothing reaps
+ * a language server at session end, so a bounded heap is what bounds the
+ * cost of each one left running).  Its ``-data`` directory is
+ * ``${jdtlsStateRoot}``, the framework's sibling-of-the-workspace state
+ * directory: Eclipse refuses a ``-data`` nested inside an imported project,
+ * and the lsp plugin grants that path ``rw`` because it sees it in
+ * ``.lsp.json``.
  *
  * basedpyright deliberately gets its OWN venv rather than the workspace
  * tool-venv (``.jaato/tool-venv``): that venv is created by the runner on
@@ -31,6 +42,7 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import {
+  JDTLS_MIRROR,
   LOCAL_BIN,
   LSP_DIR,
   MISE_CACHE_DIR,
@@ -119,6 +131,16 @@ export interface InstalledToolchain {
   bin: string[];
 }
 
+/** What a jdtls install needs besides its own version. */
+export interface JdtlsOptions {
+  /** The mise ``java`` version that RUNS jdtls (recent jdtls needs 21+), independent of the project's JDK. */
+  runtime: string;
+  /** ``-Xmx`` for the server, e.g. ``1G``. */
+  maxHeap: string;
+  /** Base URL of the milestone tree; defaults to {@link JDTLS_MIRROR}. */
+  mirror?: string;
+}
+
 /** A language server as installed, and how ``.lsp.json`` starts it (absolute paths). */
 export interface InstalledServer {
   id: ServerId;
@@ -126,6 +148,64 @@ export interface InstalledServer {
   language: string;
   command: string;
   args: string[];
+  /** A runtime the server brings of its own (jdtls's JDK), workspace-relative, so the AppArmor fragment can cover it. */
+  runtimeDir?: string;
+}
+
+/**
+ * Downloads a jdtls milestone, checks it against the ``.sha256`` published
+ * beside it, and extracts it (members that would land outside the target
+ * refused).  Python rather than Node's ``fetch``: ``urllib`` honours
+ * ``HTTPS_PROXY`` and ``SSL_CERT_FILE``, which the clean environment passes
+ * through, and it runs as one step the job can cancel.
+ */
+export const JDTLS_FETCH_SCRIPT = String.raw`
+import hashlib, os, re, shutil, sys, tarfile, tempfile, urllib.request
+mirror, version, dest = sys.argv[1:4]
+base = mirror.rstrip("/") + "/" + version + "/"
+def get(url):
+    with urllib.request.urlopen(url, timeout=300) as r:
+        return r.read()
+try:
+    name = get(base + "latest.txt").decode().strip()
+except Exception:
+    listing = get(base).decode("utf-8", "replace")
+    names = sorted(set(re.findall(r"jdt-language-server-" + re.escape(version) + r"-\d+\.tar\.gz(?![.\w])", listing)))
+    name = names[-1] if names else ""
+if not re.fullmatch(r"jdt-language-server-[\w.-]+\.tar\.gz", name or ""):
+    sys.exit("no jdtls " + version + " archive found under " + base)
+print("downloading " + base + name, flush=True)
+data = get(base + name)
+want = get(base + name + ".sha256").decode().split()[0].lower()
+got = hashlib.sha256(data).hexdigest()
+if got != want:
+    sys.exit("checksum mismatch for " + name + ": got " + got + ", published " + want)
+os.makedirs(os.path.dirname(dest), exist_ok=True)
+tmp = tempfile.mkdtemp(prefix=".jdtls-", dir=os.path.dirname(dest))
+try:
+    arc = os.path.join(tmp, name)
+    with open(arc, "wb") as f:
+        f.write(data)
+    out = os.path.join(tmp, "x")
+    with tarfile.open(arc) as t:
+        root = os.path.realpath(out)
+        for m in t.getmembers():
+            p = os.path.realpath(os.path.join(out, m.name))
+            if not (p == root or p.startswith(root + os.sep)) or m.issym() or m.islnk() or m.isdev():
+                sys.exit("refusing archive member " + m.name)
+        t.extractall(out)
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    os.replace(out, dest)
+    print("extracted " + name, flush=True)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`;
+
+/** jdtls's shared configuration directory for this host. */
+export function jdtlsConfigDir(platform: string = process.platform, arch: string = process.arch): string {
+  const os = platform === "darwin" ? "mac" : platform === "win32" ? "win" : "linux";
+  return arch === "arm64" && os !== "win" ? `config_${os}_arm` : `config_${os}`;
 }
 
 export class Installer {
@@ -185,21 +265,71 @@ export class Installer {
     const spec = TOOLCHAINS[tool];
     mkdirSync(this.abs(LOCAL_BIN), { recursive: true });
     if (!spec.mise) return { tool, version, installDir: null, bin: [] };
-    const ref = `${spec.mise}@${version}`;
-    await this.step(`installing ${ref}`, this.o.mise, ["install", ref]);
-    const where = (await this.step(`locating ${ref}`, this.o.mise, ["where", ref])).map((l) => l.trim()).filter(Boolean).pop();
-    if (!where) throw new InstallError(`locating ${ref}: mise named no directory`);
-    const installDir = resolve(where);
+    const installDir = await this._miseInstall(`${spec.mise}@${version}`);
     const miseRoot = this.abs(MISE_DATA_DIR);
-    if (!installDir.startsWith(miseRoot + sep)) throw new InstallError(`locating ${ref}: ${installDir} is outside the workspace's mise directory`);
     const bin = linkBinaries(join(installDir, "bin"), this.abs(LOCAL_BIN), miseRoot, this.o.log);
     return { tool, version, installDir: relative(this.o.workspace, installDir), bin };
   }
 
   /** Install one pinned language server; ``null`` when it has no install route for this toolchain. */
-  async installServer(id: ServerId, version: string, extra: { typescriptVersion?: string } = {}): Promise<InstalledServer> {
+  /** ``mise install`` + ``mise where``; the directory, which must be under the workspace's mise data directory. */
+  private async _miseInstall(ref: string): Promise<string> {
+    await this.step(`installing ${ref}`, this.o.mise, ["install", ref]);
+    const where = (await this.step(`locating ${ref}`, this.o.mise, ["where", ref])).map((l) => l.trim()).filter(Boolean).pop();
+    if (!where) throw new InstallError(`locating ${ref}: mise named no directory`);
+    const dir = resolve(where);
+    if (!dir.startsWith(this.abs(MISE_DATA_DIR) + sep)) throw new InstallError(`locating ${ref}: ${dir} is outside the workspace's mise directory`);
+    return dir;
+  }
+
+  /** jdtls: its runtime JDK, the verified milestone, and the ``java -jar`` command line. */
+  private async _installJdtls(version: string, o: JdtlsOptions): Promise<InstalledServer> {
+    const javaHome = await this._miseInstall(`java@${o.runtime}`);
+    const dir = join(this.abs(LSP_DIR), "jdtls", version);
+    const launcher = () => {
+      try { return readdirSync(join(dir, "plugins")).filter((n) => /^org\.eclipse\.equinox\.launcher_.*\.jar$/.test(n)).sort().pop() ?? null; } catch { return null; }
+    };
+    if (!launcher()) {
+      await this.step(`downloading jdtls ${version}`, this.o.python, ["-c", JDTLS_FETCH_SCRIPT, o.mirror ?? JDTLS_MIRROR, version, dir]);
+    }
+    const jar = launcher();
+    if (!jar) throw new InstallError(`jdtls ${version}: the archive has no equinox launcher under plugins/`);
+    // The JVM ignores TMPDIR and wants its temp directory to exist at start; /tmp is denied under confinement.
+    const tmp = this.abs(".home/.cache/jdtls");
+    mkdirSync(tmp, { recursive: true });
+    return {
+      id: "jdtls", version, language: "java",
+      command: join(javaHome, "bin", "java"),
+      args: [
+        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+        "-Dosgi.bundles.defaultStartLevel=4",
+        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+        "-Dosgi.checkConfiguration=true",
+        `-Dosgi.sharedConfiguration.area=${join(dir, jdtlsConfigDir())}`,
+        "-Dosgi.sharedConfiguration.area.readOnly=true",
+        "-Dosgi.configuration.cascaded=true",
+        `-Djava.io.tmpdir=${tmp}`,
+        "-Xms100m", `-Xmx${o.maxHeap}`,
+        "-XX:+UseParallelGC", "-XX:GCTimeRatio=4", "-XX:AdaptiveSizePolicyWeight=90", "-XX:-UsePerfData",
+        "-Dsun.zip.disableMemoryMapping=true",
+        "--add-modules=ALL-SYSTEM",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "-jar", join(dir, "plugins", jar),
+        "-configuration", "${jdtlsStateRoot}/.jaato-config",
+        "-data", "${jdtlsStateRoot}",
+      ],
+      runtimeDir: relative(this.o.workspace, javaHome),
+    };
+  }
+
+  async installServer(id: ServerId, version: string, extra: { typescriptVersion?: string; jdtls?: JdtlsOptions } = {}): Promise<InstalledServer> {
     const lspDir = this.abs(LSP_DIR);
     mkdirSync(lspDir, { recursive: true });
+    if (id === "jdtls") {
+      if (!extra.jdtls) throw new InstallError("jdtls: no runtime configured");
+      return this._installJdtls(version, extra.jdtls);
+    }
     if (id === "basedpyright") {
       const venv = join(lspDir, "basedpyright");
       if (!existsSync(join(venv, "bin", "python"))) await this.step("creating the basedpyright venv", this.o.python, ["-m", "venv", venv]);

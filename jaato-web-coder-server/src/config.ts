@@ -97,6 +97,8 @@ export interface ServerConfig {
     tools: Partial<Record<ToolId, string[]>>;
     lsp: Partial<Record<ServerId, string>>;
     typescriptVersion?: string;
+    /** How jdtls runs: its own mise ``java`` version, its ``-Xmx``, where milestones are downloaded from. */
+    jdtls: { runtime: string; maxHeap: string; mirror?: string };
     mise: string;
     python: string;
     paranoid: boolean;
@@ -323,9 +325,21 @@ export function parseEnvironment(raw: unknown, baseDir: string): ServerConfig["e
   if (lsp["typescript-language-server"] && !typescriptVersion) {
     throw new ConfigError("environment.typescript_version is required with environment.lsp.typescript-language-server (the server needs a pinned typescript beside it)");
   }
+  const jdtlsRuntime = e.jdtls_java === undefined || e.jdtls_java === null ? "21" : str(String(e.jdtls_java), "environment.jdtls_java");
+  if (!VERSION_RE.test(jdtlsRuntime)) throw new ConfigError(`environment.jdtls_java: '${jdtlsRuntime}' is not a version`);
+  const maxHeap = e.jdtls_max_heap === undefined || e.jdtls_max_heap === null ? "1G" : str(String(e.jdtls_max_heap), "environment.jdtls_max_heap");
+  if (!/^[1-9][0-9]{0,5}[mMgG]$/.test(maxHeap)) throw new ConfigError(`environment.jdtls_max_heap: '${maxHeap}' is not a JVM heap size such as 768m or 2G`);
+  let mirror: string | undefined;
+  if (e.jdtls_mirror !== undefined && e.jdtls_mirror !== null) {
+    mirror = str(e.jdtls_mirror, "environment.jdtls_mirror");
+    let u: URL;
+    try { u = new URL(mirror); } catch { throw new ConfigError(`environment.jdtls_mirror: '${mirror}' is not a URL`); }
+    if (u.protocol !== "https:") throw new ConfigError("environment.jdtls_mirror must be an https URL");
+  }
   const timeout = parseDuration(e.install_timeout ?? "15m", "environment.install_timeout");
   return {
     workspaceRoot, stateFile, tools, lsp, typescriptVersion,
+    jdtls: { runtime: jdtlsRuntime, maxHeap, ...(mirror ? { mirror } : {}) },
     mise: e.mise ? str(e.mise, "environment.mise") : "mise",
     python: e.python ? str(e.python, "environment.python") : "python3",
     paranoid: e.paranoid === undefined ? false : e.paranoid === true,

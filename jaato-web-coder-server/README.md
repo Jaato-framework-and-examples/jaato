@@ -181,11 +181,18 @@ environment:
   tools:
     node: ["22", "20"]
     go: ["1.23"]
+    java: ["21", "temurin-17"]   # any mise java spelling
+    maven: ["3.9.9"]
+    gradle: ["8.10"]
   lsp:
     basedpyright: "1.31.6"
     typescript-language-server: "4.4.0"
     gopls: "v0.20.0"
+    jdtls: "1.40.0"              # an Eclipse milestone
   typescript_version: "5.9.3"
+  jdtls_java: "21"               # the JDK that RUNS jdtls (default 21)
+  jdtls_max_heap: 1G             # -Xmx for jdtls (default 1G); see #806 below
+  # jdtls_mirror: https://...    # default https://download.eclipse.org/jdtls/milestones
 ```
 
 A bind runs, as THIS process and never inside a confined session:
@@ -206,8 +213,29 @@ A bind runs, as THIS process and never inside a confined session:
 4. four managed files: `.jaato/environment.json` (read by
    `get_environment(aspect="runtime")`), `.home/.config/mise/config.toml`,
    `.lsp.json` (read by the `lsp` plugin, whose tools appear once a server is
-   configured, #1345) and `.jaato/instructions/45-environment.md`. A file whose
+   configured, #1345), `.jaato/instructions/45-environment.md`, and the AppArmor
+   fragment `.jaato/apparmor-fragments/jaato-environment.rules`. A file whose
    `jaato-managed` marker the user removed is left alone and reported.
+
+**The AppArmor fragment.** The confinement template already runs anything
+under `.home/.local/share/**/bin/`, which covers a static binary (Go) or
+one that loads nothing of its own (Node). A JDK loads its own shared objects
+(`libjvm.so`), which needs `m`, and forks through `lib/jspawnhelper`, which
+is not under a `bin/`. The fragment grants exactly that, per install
+directory the bootstrap made, never the workspace at large. The daemon
+composes the workspace's fragments into every session of a profile that
+scopes none (web-coder sessions are profile-less) and denies the runner
+writes to that directory, so a session cannot author its own boundary. A
+profile that scopes `apparmor_fragments` names `jaato-environment` to get
+the toolchains, `bin/*` included. A directory whose path AppArmor would read
+as a pattern (`*`, `[`, `{`, …) gets no rule, and the job says so.
+
+**jdtls and #806.** The daemon does not reap a language server at session
+end; it lives until its runner slot exits. With `lsp.jdtls` set this server
+logs a WARNING at startup saying so, and `jdtls_max_heap` bounds what each
+one left behind can hold (plus the JVM's own overhead). Two sessions in one
+workspace share a `${jdtlsStateRoot}`, so the second jdtls finds it locked.
+The state directory is outside the workspace and is not removed with it.
 
 **Ownership, not only containment.** Every route asks the daemon, over the
 bind channel, whether the signed-in user owns the workspace (an empty
@@ -225,7 +253,7 @@ cannot use this feature.
 **Unbind** removes the links, the server's binaries and the tool's entry in
 the managed files; the download under `.home/.local/share/mise` is kept, so a
 rebind is quick. Not supported: Rust (rustup keeps its homes outside mise and
-its proxies need `RUSTUP_HOME` at run time), Java (until #806), a shared
+its proxies need `RUSTUP_HOME` at run time), a shared
 read-only toolchain cache (phase 5 of #1344; it needs an operator-installed
 AppArmor user-tier fragment granting `r`/`ix` on the cache directory).
 
