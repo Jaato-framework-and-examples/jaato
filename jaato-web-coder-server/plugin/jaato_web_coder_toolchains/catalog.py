@@ -36,17 +36,29 @@ class Toolchain:
     server: Optional[str]
     #: Names whose "command not found" suggests this toolchain.
     commands: Tuple[str, ...]
+    #: What it leaves in a repository while it is used (caches, build output):
+    #: gitignore patterns :mod:`.ignores` puts in each checkout's
+    #: ``.git/info/exclude`` while it is bound.
+    ignores: Tuple[str, ...] = ()
 
 
 TOOLCHAINS: Dict[str, Toolchain] = {t.id: t for t in (
-    Toolchain("python", None, (), "basedpyright", ("basedpyright", "basedpyright-langserver", "pyright")),
-    Toolchain("node", "node", ("node", "nodejs"), "typescript-language-server", ("node", "npm", "npx", "corepack", "tsc")),
-    Toolchain("go", "go", ("go", "golang"), "gopls", ("go", "gofmt", "gopls")),
-    Toolchain("bun", "bun", ("bun",), None, ("bun", "bunx")),
-    Toolchain("java", "java", ("java",), "jdtls", ("java", "javac", "jar", "jshell", "javadoc", "jlink", "jpackage", "keytool")),
-    # Launcher scripts that run on the bound Java; a repository with ./mvnw or ./gradlew needs neither.
-    Toolchain("maven", "maven", ("maven",), None, ("mvn",)),
-    Toolchain("gradle", "gradle", ("gradle",), None, ("gradle",)),
+    Toolchain("python", None, (), "basedpyright", ("basedpyright", "basedpyright-langserver", "pyright"),
+              ("__pycache__/", "*.py[cod]", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+               "*.egg-info/", ".coverage", ".coverage.*", "htmlcov/", ".tox/", ".nox/")),
+    Toolchain("node", "node", ("node", "nodejs"), "typescript-language-server", ("node", "npm", "npx", "corepack", "tsc"),
+              ("node_modules/", "*.tsbuildinfo", ".eslintcache", "npm-debug.log*", "yarn-error.log*")),
+    Toolchain("go", "go", ("go", "golang"), "gopls", ("go", "gofmt", "gopls"),
+              ("*.test", "cover.out", "coverage.out")),
+    Toolchain("bun", "bun", ("bun",), None, ("bun", "bunx"),
+              ("node_modules/", "*.tsbuildinfo")),
+    # .project/.classpath/.settings/.factorypath are what jdtls writes into an Eclipse-less project.
+    Toolchain("java", "java", ("java",), "jdtls", ("java", "javac", "jar", "jshell", "javadoc", "jlink", "jpackage", "keytool"),
+              ("*.class", "hs_err_pid*.log", "replay_pid*.log", ".project", ".classpath", ".settings/", ".factorypath")),
+    # Launcher scripts that run on the bound Java; a repository with ./mvnw or ./gradlew needs neither
+    # (:mod:`.ignores` then adds these patterns for that checkout while Java is bound).
+    Toolchain("maven", "maven", ("maven",), None, ("mvn",), ("target/",)),
+    Toolchain("gradle", "gradle", ("gradle",), None, ("gradle",), (".gradle/", "build/", ".kotlin/")),
 )}
 
 #: server id -> the ``.lsp.json`` language (also its ``languageId``).
@@ -59,6 +71,7 @@ LANGUAGE_SERVERS: Dict[str, str] = {
 
 JDTLS_MIRROR = "https://download.eclipse.org/jdtls/milestones"
 
+HOME_DIR = ".home"
 LSP_DIR = ".home/.local/share/jaato-lsp"
 LOCAL_BIN = ".home/.local/bin"
 MAVENRC_PATH = ".home/.mavenrc"
