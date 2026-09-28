@@ -6,6 +6,7 @@
 | ``.home/.config/mise/config.toml`` | ``# jaato-managed: toolchains v1`` | mise, for a person who opens a shell |
 | ``.lsp.json`` | ``"_jaato_managed": "lsp v1"`` | the ``lsp`` plugin (it reads only ``languageServers``) |
 | ``.home/.mavenrc`` | ``# jaato-managed: mavenrc v1`` | Maven's ``mvn`` script (and ``./mvnw``), while Java or Maven is bound |
+| ``.home/.config/go/env`` | ``# jaato-managed: goenv v1`` | the go command (``go env``), while Go is bound |
 
 ``environment.json`` is the record: the bound toolchains, the proposals the
 last scan found, the repository guidance files, and the current or last job.
@@ -13,7 +14,7 @@ It is in the workspace, where the model can write, so nothing read back from
 it is trusted beyond what it names: a link is removed only if it resolves
 into the workspace's mise directory, and a name with a ``/`` is ignored.
 
-The mise config, ``.lsp.json`` and ``.mavenrc`` are managed files: written when absent or
+The mise config, ``.lsp.json``, ``.mavenrc`` and the Go env file are managed files: written when absent or
 still carrying their marker, never over a copy whose marker the user removed.
 Every write is a temp file plus ``os.replace``.
 """
@@ -25,7 +26,7 @@ import os
 import secrets
 from typing import Any, Dict, List, Optional
 
-from .catalog import LSP_CONFIG_PATH, MANIFEST_PATH, MAVENRC_PATH, MISE_CONFIG_PATH, TOOLCHAINS, VERSION_RE
+from .catalog import GOENV_PATH, GOTMP_DIR, LSP_CONFIG_PATH, MANIFEST_PATH, MAVENRC_PATH, MISE_CONFIG_PATH, TOOLCHAINS, VERSION_RE
 
 MARKER_KEY = "_jaato_managed"
 ENVIRONMENT_MARKER = "environment v1"
@@ -45,6 +46,21 @@ MAVENRC_BODY = "\n".join([
     'MAVEN_OPTS="-Duser.home=$HOME${TMPDIR:+ -Djava.io.tmpdir=$TMPDIR}${MAVEN_OPTS:+ $MAVEN_OPTS}"',
     "export MAVEN_OPTS",
 ]) + "\n"
+
+GOENV_MARKER = "# jaato-managed: goenv v1 — delete this line to keep your own edits"
+
+
+def goenv_body(workspace: str) -> str:
+    """The Go env file: build and test binaries go under the workspace.
+
+    ``go test`` and ``go run`` build into ``$GOTMPDIR``, which defaults to
+    ``$TMPDIR`` (the session tmpdir, where the profile grants no exec); the
+    workspace is exec-granted on a managed workspace, so they build there.
+    The go command skips a line that does not start with a capital letter,
+    so the marker is safe in this file.
+    """
+    return "\n".join([GOENV_MARKER, f"GOTMPDIR={os.path.join(os.path.realpath(workspace), GOTMP_DIR)}"]) + "\n"
+
 
 #: The toolchains whose Maven (a bound one, or a repository's ``./mvnw``) reads ``.mavenrc``.
 MAVENRC_TOOLS = ("java", "maven")
@@ -169,6 +185,19 @@ def write_derived(workspace: str, m: Dict[str, Any]) -> List[str]:
         atomic_write(lsp_path, json.dumps({MARKER_KEY: LSP_MARKER, "languageServers": servers}, indent=2) + "\n")
     elif owned:
         os.unlink(lsp_path)
+
+    go_path = os.path.join(workspace, GOENV_PATH)
+    owned = _ours_hash(go_path, "# jaato-managed: goenv v")
+    wanted = any(t["tool"] == "go" for t in chains)
+    if owned is False:
+        if wanted:
+            notes.append(f"kept your own {GOENV_PATH} (its jaato-managed marker was removed); "
+                         f"go test builds into $GOTMPDIR, which must be inside the workspace to run")
+    elif wanted:
+        os.makedirs(os.path.join(workspace, GOTMP_DIR), exist_ok=True)
+        atomic_write(go_path, goenv_body(workspace))
+    elif owned:
+        os.unlink(go_path)
 
     rc_path = os.path.join(workspace, MAVENRC_PATH)
     owned = _ours_hash(rc_path, "# jaato-managed: mavenrc v")

@@ -3535,14 +3535,15 @@ def _plugin_configs_with_managed_defaults(
     profile: Optional[Any],
     workspace_path: str,
     managed_workspace_root: Optional[str],
-) -> Tuple[Dict[str, Any], bool]:
+) -> Tuple[Dict[str, Any], bool, Optional[str]]:
     """The profile's ``plugin_configs`` with the managed defaults folded in.
 
     A copy, per section, so folding a default never writes into the profile
     object the rest of the session reads.  The folds are the envelope's own
     (``inject_workspace_home`` #1225, ``inject_workspace_venv`` #1274), so
     the rules are resolved against the values the runner will use.  Returns
-    ``(configs, whether any default applied)``.
+    ``(configs, whether any default applied, the managed workspace home or
+    None)``.
     """
     from jaato_server.shared.plugins.workspace_home import inject_workspace_home
     from jaato_server.shared.plugins.workspace_venv import inject_workspace_venv
@@ -3554,7 +3555,23 @@ def _plugin_configs_with_managed_defaults(
     }
     home = inject_workspace_home(configs, workspace_path, managed_workspace_root)
     venv = inject_workspace_venv(configs, workspace_path, managed_workspace_root)
-    return configs, bool(home or venv)
+    return configs, bool(home or venv), home or None
+
+
+def _rule_config(cfg: Any, managed_home: Optional[str]) -> Dict[str, Any]:
+    """A plugin's config as its rule contributor sees it.
+
+    On a managed workspace every contributor gets ``workspace_home``, not
+    only the three surfaces the envelope folds it into: that is how an
+    out-of-tree plugin (the web coder's toolchains) grants what its installs
+    need on managed workspaces and nothing on a user's own checkout.  A value
+    the section already carries wins.  Resolution only; the envelope is
+    unchanged.
+    """
+    out = dict(cfg) if isinstance(cfg, dict) else {}
+    if managed_home:
+        out.setdefault("workspace_home", managed_home)
+    return out
 
 
 class PluginRules(list):
@@ -3695,6 +3712,9 @@ def resolve_plugin_apparmor_rules(
     A confined runner missing one plugin's rules beats a session that
     fails to start.
 
+    On a managed workspace every contributor's ``plugin_config`` also carries
+    that ``workspace_home`` (:func:`_rule_config`).
+
     ``managed_workspace_root`` (the WS server's provisioning root) folds in
     the same managed defaults the envelope carries -- ``workspace_home``
     (#1225) and ``workspace_venv`` (#1274) -- so the grants follow the
@@ -3703,7 +3723,7 @@ def resolve_plugin_apparmor_rules(
     plugin rules at all; one on a managed workspace now gets them, because
     the runner loads the same plugins either way.
     """
-    plugin_configs, defaulted = _plugin_configs_with_managed_defaults(
+    plugin_configs, defaulted, managed_home = _plugin_configs_with_managed_defaults(
         profile, workspace_path, managed_workspace_root,
     )
     if profile is None and not defaulted:
@@ -3746,7 +3766,7 @@ def resolve_plugin_apparmor_rules(
                     workspace_path=workspace_path,
                     session_id=session_id,
                     config_root=config_root,
-                    plugin_config=plugin_configs.get(plugin_name, {}),
+                    plugin_config=_rule_config(plugin_configs.get(plugin_name), managed_home),
                 )
             except Exception:  # noqa: BLE001 — boundary surface
                 logger.exception(

@@ -497,3 +497,50 @@ def test_gopls_is_built_with_its_own_go_not_the_projects(tmp_path):
     raw = json.loads(FIXTURE.read_text())
     raw["servers"]["gopls"] = {"version": "v0.20.0"}
     assert parse_offer(raw).servers["gopls"]["go"] == "latest", "an offer without go builds with the latest"
+
+
+# ------------------------------------------------ running what the workspace builds
+
+def test_a_managed_workspace_may_run_and_map_what_it_holds(tmp_path):
+    rules = WebCoderToolchainsPlugin.get_apparmor_rules(
+        workspace_path=str(tmp_path), session_id="s1", config_root=None,
+        plugin_config={"workspace_home": ".home"})
+    assert rules == [f'"{os.path.realpath(tmp_path)}/**" mix,']
+
+
+def test_a_users_own_checkout_gets_no_grant(tmp_path):
+    """The TUI on the same daemon: no managed home, the template as it is."""
+    assert WebCoderToolchainsPlugin.get_apparmor_rules(
+        workspace_path=str(tmp_path), session_id="s1", config_root=None, plugin_config={}) == []
+
+
+def test_the_framework_hands_every_contributor_the_managed_home(tmp_path):
+    """Resolution gives the plugin ``workspace_home`` on a managed workspace, and only there."""
+    from jaato_server.server.apparmor import resolve_plugin_apparmor_rules
+    from jaato_server.shared.plugins.registry import PluginRegistry
+
+    registry = PluginRegistry()
+    registry.register_plugin(WebCoderToolchainsPlugin(), expose=False)
+    server = type("S", (), {"registry": registry})()
+    ws = tmp_path / "workspaces" / "w1"
+    ws.mkdir(parents=True)
+    managed = resolve_plugin_apparmor_rules(server, None, "s1", str(ws), None, managed_workspace_root=str(tmp_path / "workspaces"))
+    assert f'"{os.path.realpath(ws)}/**" mix,' in (managed or [])
+    assert not resolve_plugin_apparmor_rules(server, None, "s1", str(ws), None)
+
+
+@pytest.mark.skipif(not shutil.which("go"), reason="needs a go command")
+def test_go_reads_the_managed_env_file_and_builds_tests_in_the_workspace(workspace):
+    from jaato_web_coder_toolchains.state import write_derived
+
+    m = read_manifest(str(workspace))
+    m["toolchains"] = [{"tool": "go", "version": "1.23", "bin": ["go"], "server": None}]
+    write_derived(str(workspace), m)
+    home = workspace / ".home"
+    out = subprocess.run([shutil.which("go"), "env", "GOTMPDIR"], capture_output=True, text=True, check=True,
+                         env={"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "PATH": os.environ["PATH"]}).stdout
+    assert out.strip() == f"{os.path.realpath(workspace)}/.home/.cache/go-tmp"
+    assert (home / ".cache/go-tmp").is_dir()
+    m["toolchains"] = []
+    write_derived(str(workspace), m)
+    assert not (home / ".config/go/env").exists()

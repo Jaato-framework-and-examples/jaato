@@ -155,6 +155,37 @@ class WebCoderToolchainsPlugin:
         if isinstance(config.get("workspace_path"), str) and config["workspace_path"]:
             self.set_workspace_path(config["workspace_path"])
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Let a web coder workspace run what it builds and installs.
+
+        The template grants a workspace ``rwkl`` and no ``x`` or ``m``, so
+        nothing a project puts there could run: ``node_modules/.bin/*`` (every
+        ``npm run`` / ``bun run`` of a local CLI), a ``.node`` addon, a
+        ``bun build --compile`` output, a Go test binary.  ``mix`` on the
+        workspace changes nothing a confined session could not already do: it
+        may write any file into ``.home/.local/bin`` and run it (#1273), and
+        what runs stays in the same profile (``ix``).  Denials beat it, so
+        ``.jaato`` stays closed.
+
+        Only on a MANAGED workspace (the framework hands every rule
+        contributor ``workspace_home`` there): a user's own checkout, driven
+        from the TUI on the same daemon, keeps the template as it is.
+        """
+        if not plugin_config.get("workspace_home") or not workspace_path:
+            return []
+        ws = os.path.realpath(workspace_path)
+        if '"' in ws or "\n" in ws:
+            return []
+        return [f'"{ws}/**" mix,']
+
     def shutdown(self) -> None:
         """Session end: stop a running job (the manifest records it cancelled)."""
         job = self._job
