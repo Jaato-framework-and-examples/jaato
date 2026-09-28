@@ -8728,7 +8728,7 @@ already holds for other reasons:
 |---|---|---|
 | `waiting` | a pending permission / clarification / reference for that agent | a person is blocked — outranks everything |
 | `tool` | an open `tool.call_start` with no end, oldest first, plus the batch count | names what is running |
-| `thinking` | the daemon's `active` | |
+| `thinking` | the daemon's `active`; its clock starts at the later of the turn's start and the last `tool.call_end` (`toolEndedAt`), so it restarts after every tool call | |
 | `sending` | `busySince` stamped by the composer, no daemon word yet | the one optimistic piece |
 | `idle` | — | |
 

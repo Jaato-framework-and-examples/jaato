@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useJaato, MAIN_AGENT, runningToolCallIds, uploadScope } from "./store";
 import { agentPhase, anyBusy, isBusy } from "./phase";
 import type { JaatoEvent } from "@jaato/sdk";
@@ -604,6 +604,30 @@ describe("phase — what the agent is doing", () => {
     expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "tool", toolName: "readFile", running: 1 });
     d()([ev({ type: "tool.call_end", agent_id: "main", call_id: "c2", success: true })]);
     expect(agentPhase(useJaato.getState(), MAIN_AGENT).kind).toBe("thinking");
+  });
+
+  it("restarts the thinking clock when a tool call ends, not at the turn's start", () => {
+    // A long agentic turn is many model calls separated by tool calls.  The
+    // clock counted from the turn's first ``active``, so the model call after
+    // a tool read 49 minutes when it was ten seconds old.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+      expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "thinking", since: 1_000_000 });
+      vi.setSystemTime(1_600_000);
+      d()([ev({ type: "tool.call_start", agent_id: "main", tool_name: "cli_based_tool", call_id: "t1" })]);
+      vi.setSystemTime(1_700_000);
+      d()([ev({ type: "tool.call_end", agent_id: "main", call_id: "t1", success: true })]);
+      expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "thinking", since: 1_700_000 });
+      // The next turn starts its own clock: the earlier tool end is older.
+      d()([ev({ type: "agent.status_changed", agent_id: "main", status: "done" })]);
+      vi.setSystemTime(2_000_000);
+      d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+      expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "thinking", since: 2_000_000 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a tool call whose end never arrived cannot pin the indicator", () => {
