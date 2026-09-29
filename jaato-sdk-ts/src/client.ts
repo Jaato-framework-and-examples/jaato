@@ -67,6 +67,7 @@ import {
   type PermissionSetDefaultRequest,
   type PermissionPolicySnapshotRequest,
   type WorkspaceFileContentEvent,
+  type WorkspaceFilesSearchResultEvent,
   type WorkspaceFileFetchRequest,
   type MemoryListEvent,
   type MemoryGetResultEvent,
@@ -158,6 +159,13 @@ export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
  * refused below this version rather than left to time out.
  */
 export const MIN_FILE_FETCH_PROTOCOL = "1.20";
+
+/**
+ * Protocol floor for {@link JaatoClient.searchWorkspaceFiles}.  A missing
+ * VERB (the 1.7 rule): an older daemon never answers
+ * ``workspace.files.search``, so the call is refused rather than timed out.
+ */
+export const MIN_FILE_SEARCH_PROTOCOL = "1.32";
 
 /**
  * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
@@ -1432,6 +1440,38 @@ export class JaatoClient {
       metadata_only: options.metadataOnly ?? false,
     } as WorkspaceFileFetchRequest);
     return answer;
+  }
+
+  /**
+   * Find files in this connection's workspace by name (protocol 1.32, WS
+   * only).  Every whitespace-separated term of ``query`` must appear,
+   * ignoring case, in a file's workspace-relative path; dotfiles,
+   * gitignored files and files the Files panel hides are all searched.
+   * Each match's ``path`` is what {@link fetchWorkspaceFile} takes.
+   *
+   * ``truncated`` on the answer means the daemon's walk stopped at its
+   * bound, so "no match" then is not "no such file".
+   *
+   * @throws Error against a daemon below {@link MIN_FILE_SEARCH_PROTOCOL},
+   *   on timeout, or on a closed connection.
+   */
+  async searchWorkspaceFiles(
+    query: string,
+    options: { maxResults?: number; timeoutMs?: number } = {},
+  ): Promise<WorkspaceFilesSearchResultEvent> {
+    return this._quietRequest<WorkspaceFilesSearchResultEvent>(
+      "searchWorkspaceFiles",
+      {
+        type: EventTypeValue.WORKSPACE_FILES_SEARCH_REQUEST,
+        query,
+        max_results: options.maxResults ?? 100,
+      },
+      EventTypeValue.WORKSPACE_FILES_SEARCH_RESULT,
+      options.timeoutMs ?? 30_000,
+      MIN_FILE_SEARCH_PROTOCOL,
+      "workspace.files.search (upgrade the daemon to search workspace files)",
+      "fs",
+    );
   }
 
   /**

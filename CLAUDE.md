@@ -10069,6 +10069,28 @@ core.hooksPath=/dev/null`); `check-ignore` reads the repository's own
 Guard: `jaato_server/server/test_files_panel_agrees_with_git.py`, one
 reversion, plus a case that a repo-configured program is not run.
 
+### Any File, Hidden or Not (protocol 1.32)
+
+The Files panel lists what CHANGED, so a file nobody touched this session,
+one the user hid, or one git ignores could not be reached from the web
+client. `workspace.files.search` (WS only) finds any workspace file by
+name, and the panel draws a **Find any file…** field over it.
+
+| Piece | Where |
+|---|---|
+| what is searched: the whole tree (dotfiles, gitignored paths, entries the panel hides), every term in the relative path ignoring case, a match in the NAME ranked first; the contents of `.git` skipped; a directory symlink not followed; bounded at 200k entries or 5 s | `server/workspace_file_search.py` |
+| the verb: the workspace `workspace.file.fetch` reads, so every path it answers with is one that verb can be asked for; the walk runs off the event loop | `JaatoWSServer._handle_file_search_request` |
+| the answer: `matches` (`{path, size, credential}`), `total` before the cap, `truncated` when the walk stopped at its bound | `WorkspaceFilesSearchResultEvent` |
+| the client: `searchWorkspaceFiles`, refused below `MIN_FILE_SEARCH_PROTOCOL` (the 1.7 missing-verb rule) | `jaato-sdk-ts` |
+| the finder: asks after a 250 ms pause and 2 characters, drops an answer to an older query, marks a panel-hidden file `H`, offers view and download | `components/panels/FileFinder.tsx`, `app/fileSearch.ts` |
+
+A credential file (`.env`, a stored `*_auth.json`) is listed and marked,
+never offered: a path is not a secret, and the fetch verb refuses the bytes
+anyway. `truncated` is said in words, because "no match" from a walk that
+stopped early is not "no such file". Guard:
+`server/tests/test_any_workspace_file_can_be_found.py`, four reversions;
+`FileFinder.test.tsx`, and an e2e case against the mock.
+
 ### Bytecode a Clone Never Sees
 
 A model running a project's Python (`pytest`, `python -m`) wrote

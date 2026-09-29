@@ -3242,16 +3242,52 @@ class JaatoWSServer:
         (``WorkspaceFileFetchRequest``) both move raw binary frames beside a
         TEXT event, so both must be handled HERE, on the receive loop, before
         anything else reads a frame -- and never reach the command router,
-        which has no binary channel.
+        which has no binary channel.  The name search (protocol 1.32) rides
+        here too: it moves no bytes, but it answers in the same workspace
+        the fetch it feeds will read from, so the two share one resolution.
         """
-        from jaato_sdk.events import StageFilesRequest, WorkspaceFileFetchRequest
+        from jaato_sdk.events import (
+            StageFilesRequest, WorkspaceFileFetchRequest, WorkspaceFilesSearchRequest,
+        )
         if isinstance(event, StageFilesRequest):
             await self._handle_stage_files_request(client_id, event)
             return True
         if isinstance(event, WorkspaceFileFetchRequest):
             await self._handle_file_fetch_request(client_id, event)
             return True
+        if isinstance(event, WorkspaceFilesSearchRequest):
+            await self._handle_file_search_request(client_id, event)
+            return True
         return False
+
+    async def _handle_file_search_request(self, client_id: str, event) -> None:
+        """Handle ``WorkspaceFilesSearchRequest`` -- find workspace files by name.
+
+        Searches the workspace :meth:`_handle_file_fetch_request` would read
+        from, so every path it answers with is one that verb can be asked
+        for.  What is searched and returned is
+        :func:`jaato_server.server.workspace_file_search.search_workspace`'s
+        decision; the walk runs off the event loop, because a large tree
+        must not stall every other connection.
+        """
+        from jaato_sdk.events import WorkspaceFilesSearchResultEvent
+        from .workspace_file_search import search_workspace
+
+        workspace_path = self._resolve_staging_workspace(client_id, "")
+        if workspace_path is None:
+            await self._send_to_client(client_id, WorkspaceFilesSearchResultEvent(
+                request_id=event.request_id, ok=False, query=event.query,
+                category="workspace_not_found",
+                error=f"No workspace selected for client {client_id}",
+            ))
+            return
+        found = await asyncio.to_thread(
+            search_workspace, workspace_path, event.query, event.max_results,
+        )
+        await self._send_to_client(client_id, WorkspaceFilesSearchResultEvent(
+            request_id=event.request_id, ok=True, query=event.query,
+            matches=found.matches, total=found.total, truncated=found.truncated,
+        ))
 
     async def _handle_file_fetch_request(self, client_id: str, event) -> None:
         """Handle ``WorkspaceFileFetchRequest`` -- download one workspace file.
