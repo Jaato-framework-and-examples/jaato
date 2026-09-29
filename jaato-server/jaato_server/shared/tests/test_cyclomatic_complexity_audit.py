@@ -93,6 +93,9 @@ PACKAGES: Tuple[str, ...] = ("jaato-server", "jaato-sdk", "jaato-tui")
 BASELINE: Dict[str, int] = {
     "jaato-sdk/jaato_sdk/client/ipc.py::IPCClient.connect": 24,
     "jaato-sdk/jaato_sdk/doctor.py::check_session": 20,
+    # Moved from jaato-server/.../scaffold/build.py by #1267, scores unchanged.
+    "jaato-sdk/jaato_sdk/scaffold/build.py::_new_client_archetype": 17,
+    "jaato-sdk/jaato_sdk/scaffold/build.py::_new_profile_set": 25,
     "jaato-server/jaato_server/server/__main__.py::JaatoDaemon.start": 25,
     "jaato-server/jaato_server/server/__main__.py::main": 33,
     # 33 -> 30 by #812.  The two orphan-management verbs needed a branch in
@@ -493,9 +496,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/retry_utils.py::is_context_limit_error": 22,
     "jaato-server/jaato_server/shared/retry_utils.py::with_retry": 23,
     "jaato-server/jaato_server/shared/rewind.py::detect_truncated_tool_call": 16,
-    "jaato-server/jaato_server/shared/scaffold/__main__.py::_cmd_validate": 16,
-    "jaato-server/jaato_server/shared/scaffold/build.py::_new_client_archetype": 17,
-    "jaato-server/jaato_server/shared/scaffold/build.py::_new_profile_set": 25,
+    "jaato-server/jaato_server/shared/scaffold/introspection_verbs.py::_cmd_validate": 16,
     "jaato-server/jaato_server/shared/scaffold/explain.py::event": 21,
     "jaato-server/jaato_server/shared/scaffold/explain.py::events": 17,
     "jaato-server/jaato_server/shared/scaffold/explain.py::profile_cost": 23,

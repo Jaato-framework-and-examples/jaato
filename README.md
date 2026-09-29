@@ -20,7 +20,7 @@
 </p>
 
 > **🤖 Building on jaato with an AI coding agent? Point it at the skill and let it drive.**
-> jaato ships a self-describing toolkit: the [`jaato-sdk` skill](jaato-server/jaato_server/shared/scaffold/integrations/claude-code/payload/SKILL.md) plus two executable tools — **`jaato-scaffold`** (interrogate · validate · scaffold) and **`jaato-doctor`** (preflight · debug). They **introspect the _installed_ framework**, so your agent gets _current_ answers — providers, plugins, knobs, profiles, runtime + log layout — without reading the source and without drifting from the code. Install the skill for Claude Code or Pi, say what you want to build, and let the agent scaffold a client, validate a profile, and debug a running session for you.
+> jaato ships a self-describing toolkit: the [`jaato-sdk` skill](jaato-sdk/jaato_sdk/scaffold/integrations/claude-code/payload/SKILL.md) plus two executable tools — **`jaato-scaffold`** (interrogate · validate · scaffold) and **`jaato-doctor`** (preflight · debug). They **introspect the _installed_ framework**, so your agent gets _current_ answers — providers, plugins, knobs, profiles, runtime + log layout — without reading the source and without drifting from the code. Install the skill for Claude Code or Pi, say what you want to build, and let the agent scaffold a client, validate a profile, and debug a running session for you.
 
 ```bash
 jaato-scaffold integration claude-code  # install under ~/.claude/skills/

@@ -479,7 +479,7 @@ class AppArmorManager:
     #       storage backend, whose defaults (``./todo_plans.yaml`` in the
     #       process cwd, or an explicit ``storage_path``) are never under
     #       this directory, so no write the plugin makes is denied.
-    #       Strictly a narrowing.  ``shared/scaffold/gitignore.AUTHORED``
+    #       Strictly a narrowing.  ``jaato_sdk.scaffold.gitignore.AUTHORED``
     #       gains ``plans/`` in lockstep, enforced by
     #       ``test_gitignore_authored_set_tracks_apparmor.py``.
     #  34 — (2026-09-23) the ``//child`` sub-profile grants the broad

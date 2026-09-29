@@ -320,7 +320,7 @@ def test_dry_run_over_an_existing_workspace_reports_updates(tmp_path):
 def test_new_help_epilog_names_the_output_of_every_archetype():
     """`new --help` listed every flag and zero lines about the output.  A
     reader who never leaves --help must still learn what lands."""
-    from jaato_server.shared.scaffold.__main__ import _new_epilog
+    from jaato_sdk.scaffold.cli import _new_epilog
     epilog = _new_epilog()
     for name, doc in A.ARCHETYPES.items():
         assert name in epilog

@@ -58,7 +58,7 @@ _APPARMOR = "jaato-server/jaato_server/server/apparmor.py"
 _PRIVATE = "jaato-server/jaato_server/shared/private_tmp.py"
 _RS = "jaato-server/jaato_server/server/runner/session.py"
 _SPAWN = "jaato-server/jaato_server/server/runner_spawn.py"
-_GITIGNORE = "jaato-server/jaato_server/shared/scaffold/gitignore.py"
+_GITIGNORE = "jaato-sdk/jaato_sdk/scaffold/gitignore.py"
 
 REVERSIONS = [
     Reversion(

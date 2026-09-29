@@ -629,6 +629,7 @@
    "default": null
   }
  },
+ "jaato_server_version": "1.2.0",
  "providers": {
   "anthropic": {
    "auth": [

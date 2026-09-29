@@ -59,11 +59,14 @@ _FIELD_CASES = [pytest.param(t, s, id=t) for t, s in sorted(SPELLINGS.items())]
 def _skill_reference() -> Path:
     """The profiles reference shipped in the claude-code skill payload.
 
-    Located from ``explain.__file__`` rather than from the repo root so the
-    meta-guard's sandboxed copy is the one that resolves, like every other
-    import in a sandboxed run.
+    Located from ``jaato_sdk.scaffold.__file__`` (the payload ships with the
+    SDK since #1267) rather than from the repo root so the meta-guard's
+    sandboxed copy is the one that resolves, like every other import in a
+    sandboxed run.
     """
-    here = Path(explain.__file__).resolve().parent
+    import jaato_sdk.scaffold as sdk_scaffold
+
+    here = Path(sdk_scaffold.__file__).resolve().parent
     return (here / "integrations" / "claude-code" / "payload"
             / "references" / "profiles.md")
 
@@ -144,7 +147,7 @@ from jaato_server.shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 
-_SKILL_REF = ("jaato-server/jaato_server/shared/scaffold/integrations/claude-code/"
+_SKILL_REF = ("jaato-sdk/jaato_sdk/scaffold/integrations/claude-code/"
               "payload/references/profiles.md")
 
 REVERSIONS = [

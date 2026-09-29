@@ -72,7 +72,7 @@ from jaato_server.shared.tests.test_lifecycle_tools import StubSession
 #: reads as "the checker did not run".
 REVERSIONS = [
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/_gate_templates.py",
+        target="jaato-sdk/jaato_sdk/scaffold/_gate_templates.py",
         find="    exit __EX_CONFIG__\nfi",
         replace="    exit 0\nfi",
         test="test_an_unconfigured_gate_refuses_rather_than_passes",
@@ -89,7 +89,7 @@ REVERSIONS = [
     #: entirely and grades on the ledger check alone, so a set that LOOKS
     #: complete accepts an arm nobody checked.
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/build.py",
+        target="jaato-sdk/jaato_sdk/scaffold/build.py",
         find="checks_command=_gate.CHECKS_COMMAND,\n"
              "                                 wiring=wiring),",
         replace="wiring=wiring),",

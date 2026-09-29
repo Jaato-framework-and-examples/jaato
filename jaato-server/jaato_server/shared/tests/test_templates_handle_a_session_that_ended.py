@@ -156,7 +156,7 @@ from jaato_server.shared.tests.reversion import (  # noqa: E402
 
 REVERSIONS = [
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/_client_templates.py",
+        target="jaato-sdk/jaato_sdk/scaffold/_client_templates.py",
         find='''    except SessionEnded as exc:
         # ask() raises when a terminal cuts the turn short''',
         replace='''    except _RemovedByReversion as exc:
@@ -170,7 +170,7 @@ REVERSIONS = [
         test="test_a_turn_verb_template_catches_session_ended",
     ),
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/_client_templates.py",
+        target="jaato-sdk/jaato_sdk/scaffold/_client_templates.py",
         find="        return payload, stage.terminus",
         replace="        return payload, None",
         because=(

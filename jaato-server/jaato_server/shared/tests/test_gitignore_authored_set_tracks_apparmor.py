@@ -37,7 +37,7 @@ APPARMOR = REPO / "jaato-server" / "jaato_server" / "server" / "apparmor.py"
 #: guard exists to notice.
 REVERSIONS = [
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/gitignore.py",
+        target="jaato-sdk/jaato_sdk/scaffold/gitignore.py",
         find='    AuthoredEntry("reactors.json", "reactor rules", confined=True),\n',
         replace='    # reactors.json: dropped\n',
         test="test_every_apparmor_write_denied_subpath_is_authored",

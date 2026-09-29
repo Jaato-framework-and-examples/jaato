@@ -33,7 +33,7 @@ from jaato_server.shared.utils.gitignore import GitignoreParser
 
 REVERSIONS = [
     Reversion(
-        target="jaato-server/jaato_server/shared/utils/gitignore.py",
+        target="jaato-sdk/jaato_sdk/gitignore_parser.py",
         find='        if c == "*":\n            out.append("[^/]*")',
         replace='        if c == "*":\n            out.append(".*")',
         test="test_star_does_not_cross_a_slash",

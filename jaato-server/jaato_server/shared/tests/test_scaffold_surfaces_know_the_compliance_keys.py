@@ -20,9 +20,9 @@ from types import SimpleNamespace
 
 from jaato_server.shared.tests.reversion import Reversion
 
-_BUILD = "jaato-server/jaato_server/shared/scaffold/build.py"
+_BUILD = "jaato-sdk/jaato_sdk/scaffold/build.py"
 _VALIDATE = "jaato-server/jaato_server/shared/scaffold/validate.py"
-_SKILL = "jaato-server/jaato_server/shared/scaffold/integrations/claude-code/payload/SKILL.md"
+_SKILL = "jaato-sdk/jaato_sdk/scaffold/integrations/claude-code/payload/SKILL.md"
 
 REVERSIONS = [
     Reversion(
@@ -139,7 +139,7 @@ def test_the_finding_reaches_validate_workspace_on_a_scaffolded_set(tmp_path):
 # --------------------------------------------------------------- skill
 
 def _skill_text() -> str:
-    import jaato_server.shared.scaffold as scaffold
+    import jaato_sdk.scaffold as scaffold   # the payload ships with the SDK (#1267)
     return (Path(scaffold.__file__).parent / "integrations" / "claude-code" / "payload"
             / "SKILL.md").read_text(encoding="utf-8")
 

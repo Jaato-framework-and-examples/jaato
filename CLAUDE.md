@@ -4536,14 +4536,104 @@ holds every `provider:<x>` env var and every other var with a non-empty
 default, because that is what `_compose_env` can render; an edit elsewhere
 does not change it. A snapshot is never generated from itself.
 
-`__main__.py` still imports `explain` and `validate` at module level: the
-`explain` scope table is built from them, and splitting the CLI shell belongs
-to the move itself.
-
 Guard: `jaato_server/shared/tests/test_authoring_does_not_load_introspection_1267.py`,
 five reversions. Import footprints are measured in a fresh interpreter. The
 snapshot must equal the live projection, and `new` must write the same
 `.env` and set-profile text for every provider from either source.
+
+### `jaato-scaffold` Ships With the SDK (#1267, tier 1)
+
+The move step 1 prepared. `jaato-scaffold` is now jaato-sdk's console
+script, so an application that installs only the SDK has `new` and
+`integration` on its PATH. The four verbs that read the installed framework
+stay with jaato-server and reach the shell through the existing
+`jaato.scaffold_verbs` entry-point group.
+
+| Moved to jaato-sdk | From |
+|---|---|
+| `jaato_sdk/scaffold/cli.py`: the shell (verb discovery, `new`, `integration`) | the `new` / `integration` half of `shared/scaffold/__main__.py` |
+| `jaato_sdk/scaffold/`: `build`, `archetypes`, `_client_templates`, `_gate_templates`, `_processor_template`, `integrations` + its payloads, `gitignore`, `authoring_contracts`, `authoring_facts`, `authoring_snapshot.json`, `remote` | `shared/scaffold/` |
+| `jaato_sdk/gitignore_parser.py` (`GitignoreParser`, beside `gitignore_toggle.py`: gitignore semantics, read by the daemon and the scaffold alike) | `shared/utils/gitignore.py` |
+
+Each old path is a shim that sets `sys.modules[__name__]` to the SDK module,
+so imports, attribute reads and monkeypatches through it reach the one
+implementation. `shared/scaffold/__main__` is likewise an alias of
+`shared/scaffold/introspection_verbs.py` (the `explain` table, `render_topic`,
+`_cmd_validate` and the four verb classes); run with `-m`, it starts the SDK
+shell with those verbs handed in directly, so it works without installed
+entry points. `remote.py` moved because `render_from_daemon`, the one
+`scaffold.explain` fallback, is now called from both sides.
+
+**One owner.** `jaato-scaffold` is declared in `jaato-sdk/pyproject.toml` and
+nowhere else; jaato-server registers `explain`, `validate`, `dependencies`
+and `releases` under `[project.entry-points."jaato.scaffold_verbs"]`
+(`dependencies` and `releases` are new as verbs: the `explain ...
+dependencies` facet and the `explain releases` topic, same renderers). The
+shell's rules:
+
+| Name | Answered by |
+|---|---|
+| `new`, `integration` | the shell; a contributed verb claiming one is ignored |
+| `explain`, `validate`, `dependencies`, `releases` | code under `jaato_server` only (checked on the entry point's module); anyone else is refused with a warning. Nothing contributed → a refusal naming the fix |
+| anything else | an extension verb, first discovered wins |
+
+**The refusal.** In an SDK-only environment each of the four answers exit 2
+with *"install jaato-server in this environment (pip install
+jaato-server), or ..."*, never an `ImportError`. `explain` first asks a
+running daemon (the protocol 1.18 path, unchanged: `--connect`, or a daemon
+listening on the default socket); `releases` points at `jaato-doctor`, whose
+release check needs only the SDK; `validate` and `dependencies` have no
+daemon verb yet. The authoring invocations that still need jaato-server
+refuse by name before writing anything (`build._server_need`): `new
+profile-set` (re-validates with the framework validator), `new client
+--profile` (resolves the name with `discover_profiles`, whose ImportError
+would otherwise be read as "cannot enumerate" and accept any name), `new
+processor` and gated `new sweep` (the self-probe; `--no-gate` needs no
+server), and `new dossier`.
+
+**The floor (#1055).** jaato-server now imports `jaato_sdk.scaffold`, so it
+needs the SDK cut that contains it. That is 0.29.0: not yet on PyPI, so by the
+held-version rule it absorbs this work, and the declared floor
+`jaato-sdk>=0.29.0.dev0` (guarded by `test_sdk_floor_is_the_sdk_we_ship.py`)
+already names it. The release bump raises the SDK version and all three
+floors in one commit, as it always has. Stated cost: TestPyPI's `0.29.0rc1`
+to `rc4` predate the shell and satisfy the floor, so a staged pair must use
+an SDK candidate cut after this change (pip picks the newest, so the default
+resolution is right).
+
+**Snapshot provenance.** The snapshot records `jaato_server_version`, read
+from the `pyproject.toml` beside the tree it was projected from. In a wheel
+nothing else ties it to the installed server, so when the snapshot answers
+and an installed jaato-server's metadata names another version, `new` warns
+once on stderr, naming both. Because the version is part of the projection,
+a jaato-server version bump makes the checked-in snapshot stale: the
+pre-commit hook now also runs on `jaato-server/pyproject.toml`, and the
+guard fails CI until the release bump regenerates it
+(`python -m jaato_server.shared.scaffold.authoring_contracts --write`, which
+needs both packages importable). There is no release workflow step for it;
+the guard is what makes it part of the release.
+
+The integration stamp names `jaato-sdk`'s version
+(`integrations.PAYLOAD_DIST`), since the payload is SDK package data. A copy
+applied before this change carries jaato-server's version and reads `stale`
+once; `integration <name> --refresh` re-applies it (nothing local is lost).
+
+Not done, and why:
+
+- **Tier 2**: moving `subagent.config`, `model_tiers`, `budget_control` and
+  the rest into the SDK, and adding pyyaml to it. An open decision; the four
+  refusals above are what it would lift.
+- **A daemon `scaffold.validate`**: it must read the caller's workspace,
+  which the daemon may not be able to (another user, another host), so it
+  needs the peer-entitlement check or the client sending `.jaato/` content.
+- The scaffold tests stay in `shared/scaffold/tests/`, importing through the
+  shims.
+
+Guard: `jaato_server/shared/tests/test_scaffold_ships_with_the_sdk_1267.py`,
+seven reversions. The SDK-only cases run the shell in a subprocess whose
+meta path refuses `jaato_server` and whose entry points omit jaato-server's
+verbs; an AST scan fails any module-level `jaato_server` import under
+`jaato_sdk/scaffold/` or in `gitignore_parser.py`.
 
 ### An Integration Declares Its Own Paths, and Its Own Harness
 
@@ -6083,7 +6173,7 @@ ignored `.jaato/` wholesale and lost the profiles its sessions ran under;
 the TUI's own `.jaato.example/README.md` documented the second posture as
 the default, with a hand-typed re-include list as the remedy.
 
-`jaato_server/shared/scaffold/gitignore.py` declares the split as data (`AUTHORED`,
+`jaato_sdk/scaffold/gitignore.py` (in `shared/scaffold/` before #1267) declares the split as data (`AUTHORED`,
 each entry carrying what it holds and whether the template write-denies
 it), and three consumers read it so they cannot disagree:
 
