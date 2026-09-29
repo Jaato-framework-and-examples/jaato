@@ -35,6 +35,7 @@ from jaato_sdk.plugins.base import (
     PromptEnrichmentResult,
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.framework_note import FRAMEWORK_NOTE_MARKER
 
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
@@ -531,7 +532,7 @@ always navigate back to where you were.
         if files_restored:
             files_list = ", ".join(files_restored)
             restore_info = (
-                f"<hidden><waypoint-restore>\n"
+                f"<hidden>{FRAMEWORK_NOTE_MARKER} <waypoint-restore>\n"
                 f"The user has restored files to waypoint {waypoint_id} ({description}).\n"
                 f"Files restored to their previous state: {files_list}\n"
                 f"Any changes you made to these files after this waypoint have been undone.\n"
@@ -539,7 +540,7 @@ always navigate back to where you were.
             )
         else:
             restore_info = (
-                f"<hidden><waypoint-restore>\n"
+                f"<hidden>{FRAMEWORK_NOTE_MARKER} <waypoint-restore>\n"
                 f"The user has restored to waypoint {waypoint_id} ({description}).\n"
                 f"File state has been reverted to this waypoint.\n"
                 f"</waypoint-restore></hidden>\n\n"

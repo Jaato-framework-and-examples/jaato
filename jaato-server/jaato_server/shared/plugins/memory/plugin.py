@@ -6,6 +6,7 @@ validated knowledge or promotes them to reference entries.
 """
 
 import json
+from jaato_sdk.framework_note import framework_note
 import logging
 import os
 import subprocess
@@ -1330,7 +1331,8 @@ class MemoryPlugin(RunnerForwardingMixin):
         ids_list = [m.id for m in matches]
         hint_lines = [
             "",
-            "💡 **Available Memories** — fetch them in ONE call:",
+            framework_note(
+                "💡 **Available Memories** — fetch them in ONE call:"),
             f"  retrieve_memories(ids={ids_list!r})",
             "",
             "  Listed below for reference:",

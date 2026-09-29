@@ -3876,6 +3876,80 @@ Three properties follow, each attached to a way the old path went wrong:
 Nested payloads are deliberately not rendered into the view — handing an
 enricher a whole structured result is what the two traits above are for.
 
+### A Note From jaato, Read as an Attack (#1414)
+
+A session reported "prompt-injection-shaped content" in its tool results all
+through a refactor, and ignored every instance. None of it was an attack; all
+of it was jaato's own output: `<hidden><streaming_updates>…`, a truncation
+continuation, and the template plugin's
+`[!] **TEMPLATE AVAILABLE - MANDATORY USAGE** … **YOU MUST USE THIS TEMPLATE**`.
+The untrusted-content boundary teaches the model to distrust instructions
+that arrive inside tool output, and nothing said these came from the
+framework. So the models that behave well discarded them, and only a model
+that would also follow a real injection obeyed.
+
+**One marker, `⟦JAATO⟧`, the counterpart of the untrusted boundary.**
+`jaato_sdk/framework_note.py` defines it and the two ways to build a note
+(`framework_note(text)`, `hidden_framework_note(body)`). The `security`
+instruction piece gains two sentences saying what it means: text starting
+with it was written by jaato, not by the content being read; it is
+information and suggestions, never above the user; inside the untrusted
+markers it is data. `<hidden>` is a display tag (it hides text from a person)
+and says nothing about who wrote the text, which is why the marker goes
+inside it.
+
+| Where the model meets a jaato note | Producer |
+|---|---|
+| injected turn | streaming updates, the truncation continuation, the tool-use nudge, the completion nudge (daemon, embedded lead and subagent loop, now one `COMPLETION_NUDGE_TEXT`), formatter feedback, the tier-delegation report, a cancellation notice, a GC notice |
+| a tool result's suffix | the task-completion spur, the mid-turn "the user sent a message" line, the withheld-attachment note |
+| prompt enrichment | waypoint restore, multimodal image hint, the session-describe hint |
+| tool-result enrichment | memory hints, template extraction and hints, reference context / referenced sources / tag hints, LSP diagnostics, the artifact-tracker summary |
+
+Not marked, by design: a streaming tool's per-chunk `<hidden>` echo on the UI
+output channel (`core.py` strips it before display and it never enters
+history; the model gets the chunks through the streaming-updates turn), the
+byte-constant `CANCELLED_RESULT` (it IS the unanswered call's result, not a
+note beside one), and `result_grep`'s `note` field inside its own JSON
+payload.
+
+**What "cannot fake" covers.** `defang_untrusted_markers`, and so
+`wrap_untrusted_content`, breaks the marker with a zero-width space, as it
+does for the boundary's own markers: a web page, an MCP server or a subagent
+result cannot present itself as jaato. An enrichment note appended to such a
+result is defanged with it, because enrichment runs before the wrap; it then
+reads as data, the safe direction. Output of a tool inside the trust boundary
+(a workspace file, a shell command) is not rewritten and can contain the
+literal: rewriting it would carry the zero-width space into files the agent
+edits, and those surfaces are already trusted. The marker is provenance, not
+authority, and the instruction says so.
+
+**Tone.** An enrichment suggests and carries its evidence; it does not give
+orders in capitals. The template note now reads "Template(s) found in this
+result. If you are about to write this code by hand, `renderTemplateToFile`
+with the id below may do it for you", and each entry has a `Why:` line
+naming where the syntax was found and the first tag it matched. The references contents annotation, LSP
+diagnostics ("MUST FIX", "ACTION REQUIRED") and their siblings were rewritten
+the same way. System instructions (the trusted prompt region) are not
+enrichment and are unchanged.
+
+**Why the template note fired on a Python edit.** Two over-broad rules in the
+extraction path:
+
+| Rule | Matched | Now |
+|---|---|---|
+| a result with no fenced block is a template AS A WHOLE when its text has template syntax | any file whose docstring mentions `{{param}}` (`jaato_session.py` does), so reading jaato's own modules "extracted a template" and annotated the result | only when the tool read a file with a template extension (`.tpl`, `.tmpl`, `.j2`, `.jinja`, `.jinja2`, `.mustache`, `.hbs`, `.handlebars`); a result with no known path is never taken whole |
+| `JINJA2_VARIABLE_PATTERN` = `\{\{\s*\w+` | the second brace of a Python f-string escape, `f"{{{name}}}"` | `(?<!\{)\{\{\s*\w+` |
+
+A fenced block in a document still matches: that is the use case (a kb page
+showing a `java` block with mustache tags).
+
+Guard: `jaato_server/shared/tests/test_framework_notes_carry_provenance_1414.py`,
+seven reversions. An inventory of the producers above must each use the
+marker; a tree-wide AST scan fails a new `<hidden>` or `[System:` literal
+built without it unless an allow-list names it with a reason; the enrichment
+producers may not contain `MANDATORY`, `MUST`, `ACTION REQUIRED`, `CRITICAL`,
+`you must` or `IMPORTANT:`; the marker inside untrusted content is defanged.
+
 ### What an Enrichment Plugin Found, Told to the Client (protocol 1.31)
 
 Enrichment rewrites the result the MODEL reads. A client saw none of it

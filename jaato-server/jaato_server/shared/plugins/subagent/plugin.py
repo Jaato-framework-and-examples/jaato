@@ -24,7 +24,10 @@ from .config import (
     INHERIT_PROFILE_NAME, parse_plugin_entry,
     profile_from_snapshot, profile_to_snapshot,
 )
-from jaato_server.shared.completion_nudge import resolve_max_completion_nudges
+from jaato_server.shared.completion_nudge import (
+    COMPLETION_NUDGE_TEXT,
+    resolve_max_completion_nudges,
+)
 from jaato_server.shared.instruction_suppression import suppression_to_wire
 from jaato_server.shared.spawn_schema_loader import validate_spawn_params
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
@@ -4293,15 +4296,7 @@ class SubagentPlugin:
                     "signal_completion (nudge %d/%d) — re-prompting",
                     agent_id, nudges_fired, MAX_COMPLETION_NUDGES,
                 )
-                nudge = (
-                    "Your session is about to end without calling "
-                    "`signal_completion`. The loop cannot close cleanly "
-                    "until you either continue the work with another "
-                    "tool call, or call `signal_completion` per your "
-                    "profile's payload schema with the appropriate "
-                    "decision and evidence. Please proceed with one of "
-                    "those two paths."
-                )
+                nudge = COMPLETION_NUDGE_TEXT
                 response = session.send_message(
                     nudge,
                     on_output=subagent_output_callback,

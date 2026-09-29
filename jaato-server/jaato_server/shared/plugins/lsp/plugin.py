@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import json
+from jaato_sdk.framework_note import framework_note
 import logging
 import os
 import queue
@@ -1907,8 +1908,9 @@ This returns:
 - Code style issues
 - Any problems the language server detects
 
-**Important**: If you see "❌ Error(s) - MUST FIX" in the automatic diagnostics,
-you MUST fix those errors before reporting success to the user.
+**Important**: If you see "❌ Error(s)" in the automatic diagnostics (a
+note starting with the framework marker), you MUST fix those errors before
+reporting success to the user.
 
 **Validation workflow:**
 1. Generate or modify code (automatic diagnostics will run)
@@ -2233,10 +2235,11 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     infos.append(entry)
 
         # Build diagnostic summary
-        lines = [original_result, "\n\n---\n## LSP Diagnostics (auto-check)"]
+        lines = [original_result, "\n\n---\n" + framework_note(
+            "## LSP Diagnostics (auto-check)")]
 
         if errors:
-            lines.append(f"\n### ❌ {len(errors)} Error(s) - MUST FIX:")
+            lines.append(f"\n### ❌ {len(errors)} Error(s):")
             for e in errors[:10]:  # Limit to first 10
                 lines.append(f"- {e['file']}:{e['line']}: {e['message']}")
             if len(errors) > 10:
@@ -2253,7 +2256,10 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             lines.append("\n✅ No errors or warnings detected.")
 
         if errors:
-            lines.append("\n**ACTION REQUIRED**: Fix the errors above before proceeding.")
+            lines.append(
+                "\nThe language server reports these errors after this "
+                "change; they are likely yours to fix before you report "
+                "success.")
 
         return "\n".join(lines)
 

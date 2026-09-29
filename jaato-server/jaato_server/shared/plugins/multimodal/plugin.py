@@ -35,6 +35,7 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from jaato_sdk.plugins.base import PromptEnrichmentResult, UserCommand
+from jaato_sdk.framework_note import framework_note
 
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
@@ -199,7 +200,7 @@ class MultimodalPlugin(RunnerForwardingMixin):
 
         # Build enrichment text
         image_list = ", ".join(detected_images.keys())
-        enrichment = (
+        enrichment = framework_note(
             f"\n\n[System: The following image files are referenced: {image_list}. "
             f"Use the viewImage(path) tool if you need to see the visual content of any image. "
             f"Only call viewImage if understanding the image content is necessary for the task.]"
