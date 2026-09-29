@@ -6,7 +6,7 @@ claim under ``<workspace>/.jaato/references-claims/``
 catalog: every AppArmor body is ``audit deny ... wlk`` on
 ``<workspace>/.jaato/references/**``.  This module is the other half, run by
 the DAEMON for the person on a connection (``reference.promote`` /
-``reference.dismiss``, protocol 1.32), and it is the only in-tree code that
+``reference.dismiss``, protocol 1.33), and it is the only in-tree code that
 turns a claim into a catalog entry.
 
 What a promotion does, in order, and why each step is here:

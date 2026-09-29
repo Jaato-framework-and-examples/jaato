@@ -1,6 +1,6 @@
-"""The Python SDK's reference-claim verbs (protocol 1.32).
+"""The Python SDK's reference-claim verbs (protocol 1.33).
 
-* a daemon below 1.32 is refused with nothing sent (the 1.7 missing-verb
+* a daemon below 1.33 is refused with nothing sent (the 1.7 missing-verb
   rule: it would drop the request, and "promoted" would describe a catalog
   nobody changed);
 * each answer is matched by ``request_id``, so another event arriving first
@@ -44,7 +44,7 @@ def _answering(client, answer_for):
 
 
 def test_the_floor_is_the_version_that_introduced_the_verbs():
-    assert IPCClient.MIN_REFERENCE_CURATION_PROTOCOL == "1.32"
+    assert IPCClient.MIN_REFERENCE_CURATION_PROTOCOL == "1.33"
     assert tuple(int(p) for p in PROTOCOL_VERSION.split(".")) >= (1, 32)
 
 
@@ -56,7 +56,7 @@ def test_the_floor_is_the_version_that_introduced_the_verbs():
 def test_an_older_daemon_is_refused_with_nothing_sent(call):
     client = _client("1.31")
     sent = _answering(client, lambda e, rid: ReferenceClaimsEvent(request_id=rid))
-    with pytest.raises(ValueError, match="1.32"):
+    with pytest.raises(ValueError, match="1.33"):
         asyncio.run(call(client))
     assert sent == []
 

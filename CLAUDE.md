@@ -578,7 +578,7 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
-- `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.32, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-132)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
+- `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.33, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-133)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
@@ -4188,7 +4188,7 @@ Guard: `shared/tests/test_an_agent_proposes_a_reference.py`, six reversions,
 including two checked against the RENDERED profile with the #1348 rule
 matcher: claims writable, catalog still denied. No kernel.
 
-### A Person Promotes the Claim; the Daemon Writes the Catalog (protocol 1.32)
+### A Person Promotes the Claim; the Daemon Writes the Catalog (protocol 1.33)
 
 `reference.promote <claim_id>` turns a claim into
 `<workspace>/.jaato/references/<id>.json`; `reference.dismiss <claim_id>`
@@ -4213,7 +4213,7 @@ that are not a showable claim are named under `unreadable`, and
 `IPCClient.list_reference_claims` / `promote_reference_claim` /
 `dismiss_reference_claim` and `listReferenceClaims` /
 `promoteReferenceClaim` / `dismissReferenceClaim` await the answer and
-refuse a daemon below 1.32 (the 1.7 missing-verb rule). The web coder's
+refuse a daemon below 1.33 (the 1.7 missing-verb rule). The web coder's
 **Proposals** rail section is built on them.
 
 | Rule | Why |
@@ -10320,6 +10320,28 @@ core.hooksPath=/dev/null`); `check-ignore` reads the repository's own
 
 Guard: `jaato_server/server/test_files_panel_agrees_with_git.py`, one
 reversion, plus a case that a repo-configured program is not run.
+
+### Any File, Hidden or Not (protocol 1.32)
+
+The Files panel lists what CHANGED, so a file nobody touched this session,
+one the user hid, or one git ignores could not be reached from the web
+client. `workspace.files.search` (WS only) finds any workspace file by
+name, and the panel draws a **Find any file…** field over it.
+
+| Piece | Where |
+|---|---|
+| what is searched: the whole tree (dotfiles, gitignored paths, entries the panel hides), every term in the relative path ignoring case, a match in the NAME ranked first; the contents of `.git` skipped; a directory symlink not followed; bounded at 200k entries or 5 s | `server/workspace_file_search.py` |
+| the verb: the workspace `workspace.file.fetch` reads, so every path it answers with is one that verb can be asked for; the walk runs off the event loop | `JaatoWSServer._handle_file_search_request` |
+| the answer: `matches` (`{path, size, credential}`), `total` before the cap, `truncated` when the walk stopped at its bound | `WorkspaceFilesSearchResultEvent` |
+| the client: `searchWorkspaceFiles`, refused below `MIN_FILE_SEARCH_PROTOCOL` (the 1.7 missing-verb rule) | `jaato-sdk-ts` |
+| the finder: asks after a 250 ms pause and 2 characters, drops an answer to an older query, marks a panel-hidden file `H`, offers view and download | `components/panels/FileFinder.tsx`, `app/fileSearch.ts` |
+
+A credential file (`.env`, a stored `*_auth.json`) is listed and marked,
+never offered: a path is not a secret, and the fetch verb refuses the bytes
+anyway. `truncated` is said in words, because "no match" from a walk that
+stopped early is not "no such file". Guard:
+`server/tests/test_any_workspace_file_can_be_found.py`, four reversions;
+`FileFinder.test.tsx`, and an e2e case against the mock.
 
 ### Bytecode a Clone Never Sees
 

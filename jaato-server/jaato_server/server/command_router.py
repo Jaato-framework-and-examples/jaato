@@ -44,7 +44,7 @@ _SESSION_MESSAGING_VERBS = {
 _ROUTED_REQUEST_HANDLERS = {
     "HistoryRequest": "_handle_history_request",
     "HistoryPageRequest": "_handle_history_page_request",
-    # Reference claims (1.32): the curator's listing and the correlated
+    # Reference claims (1.33): the curator's listing and the correlated
     # promote / dismiss.  Daemon-level, like the typable commands.
     "ReferenceClaimsRequest": "_handle_reference_claims_request",
     "ReferenceCurationRequest": "_handle_reference_curation_request",
@@ -597,7 +597,7 @@ class CommandRouter:
             return
 
         # Correlated daemon-level requests: HistoryRequest /
-        # HistoryPageRequest (1.28), the reference-claim verbs (1.32).
+        # HistoryPageRequest (1.28), the reference-claim verbs (1.33).
         from jaato_sdk.events import (
             HistoryPageRequest,
             HistoryRequest,
@@ -822,7 +822,7 @@ class CommandRouter:
         self, client_id: str, cmd: str, args: list,
         client_workspace: Optional[str], session_id: Optional[str] = None,
     ) -> None:
-        """Handle the typable ``reference.promote|dismiss <claim_id>`` (1.32).
+        """Handle the typable ``reference.promote|dismiss <claim_id>`` (1.33).
 
         The command form of :meth:`_handle_reference_curation_request`; its
         answer carries no ``request_id``.  ``reference.promote <claim_id>
@@ -840,7 +840,7 @@ class CommandRouter:
     def _handle_reference_curation_request(
         self, client_id: str, event, session_id: Optional[str] = None,
     ) -> None:
-        """Handle ``ReferenceCurationRequest`` (1.32), echoing ``request_id``."""
+        """Handle ``ReferenceCurationRequest`` (1.33), echoing ``request_id``."""
         self._answer_reference_curation(
             client_id, event.action, event.claim_id,
             self._event_sink.get_client_workspace(client_id), session_id,
@@ -853,7 +853,7 @@ class CommandRouter:
         client_workspace: Optional[str], session_id: Optional[str], *,
         request_id: str, label: str, bundle: str = "",
     ) -> None:
-        """Promote or dismiss one claim and send the one answer (1.32).
+        """Promote or dismiss one claim and send the one answer (1.33).
 
         Daemon-level: the catalog is write-denied to a confined runner, so
         the daemon, which is not confined, is where a claim becomes a catalog
@@ -926,7 +926,7 @@ class CommandRouter:
     def _handle_reference_claims_request(
         self, client_id: str, event, session_id: Optional[str] = None,
     ) -> None:
-        """Answer ``ReferenceClaimsRequest`` with one ``ReferenceClaimsEvent`` (1.32).
+        """Answer ``ReferenceClaimsRequest`` with one ``ReferenceClaimsEvent`` (1.33).
 
         Lists the claims in :meth:`resolve_caller_workspace`'s workspace
         (:func:`~.reference_curation.list_claims`), and says whether this

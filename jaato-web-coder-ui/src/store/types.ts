@@ -517,7 +517,7 @@ export interface MemoriesState {
 
 /**
  * One reference CLAIM as the daemon's ``reference.claims`` answer lists it
- * (protocol 1.32): a catalog entry an agent PROPOSED with
+ * (protocol 1.33): a catalog entry an agent PROPOSED with
  * ``proposeReference`` and nobody has promoted.  ``name``, ``description``
  * and ``content`` were written by a model and reviewed by nobody -- the
  * panel renders them as text, never as markup.  ``problems`` is why the
@@ -569,7 +569,7 @@ export interface ReferenceClaimLink {
  * claims in the session's workspace, and -- for the workspace owner --
  * Promote / Dismiss.  ``status`` follows {@link MemoriesState}: an ``error``
  * keeps the rows it had, because an empty list is how "nothing proposed"
- * looks, and ``unsupported`` is a daemon below protocol 1.32.
+ * looks, and ``unsupported`` is a daemon below protocol 1.33.
  */
 export interface ReferenceClaimsState {
   rows: ReferenceClaimRow[];

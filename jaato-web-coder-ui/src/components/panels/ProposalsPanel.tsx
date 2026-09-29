@@ -151,7 +151,7 @@ export function ProposalsPanel() {
   const mayCurate = r.mayCurate === true;
   if (!sessionId) return <p className="m-0 px-3.5 py-2 text-[13px] text-text-muted">No session attached.</p>;
   if (r.status === "unsupported") {
-    return <p className="m-0 px-3.5 py-2 text-[13px] text-text-muted">This daemon is older than protocol 1.32 and cannot list reference proposals.</p>;
+    return <p className="m-0 px-3.5 py-2 text-[13px] text-text-muted">This daemon is older than protocol 1.33 and cannot list reference proposals.</p>;
   }
   return (
     <div className="px-3.5 py-2 text-[13px]">

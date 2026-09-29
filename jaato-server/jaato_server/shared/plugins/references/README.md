@@ -244,7 +244,7 @@ in.
 ### Promoting a claim
 
 A claim becomes a catalog entry only when a person promotes it, through the
-daemon (protocol 1.32): `reference.promote <claim_id>` writes
+daemon (protocol 1.33): `reference.promote <claim_id>` writes
 `.jaato/references/<id>.json`, and `reference.dismiss <claim_id>` removes the
 claim. SDK: `IPCClient.promote_reference_claim` / `dismiss_reference_claim`
 (TypeScript: `promoteReferenceClaim` / `dismissReferenceClaim`). Only the

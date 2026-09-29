@@ -67,6 +67,7 @@ import {
   type PermissionSetDefaultRequest,
   type PermissionPolicySnapshotRequest,
   type WorkspaceFileContentEvent,
+  type WorkspaceFilesSearchResultEvent,
   type WorkspaceFileFetchRequest,
   type MemoryListEvent,
   type ReferenceClaimsEvent,
@@ -162,13 +163,20 @@ export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
 export const MIN_FILE_FETCH_PROTOCOL = "1.20";
 
 /**
+ * Protocol floor for {@link JaatoClient.searchWorkspaceFiles}.  A missing
+ * VERB (the 1.7 rule): an older daemon never answers
+ * ``workspace.files.search``, so the call is refused rather than timed out.
+ */
+export const MIN_FILE_SEARCH_PROTOCOL = "1.32";
+
+/**
  * Protocol floor for {@link JaatoClient.listReferenceClaims},
  * {@link JaatoClient.promoteReferenceClaim} and
  * {@link JaatoClient.dismissReferenceClaim}.  Same rule as
  * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verbs,
  * and "promoted" would describe a catalog nobody changed.
  */
-export const MIN_REFERENCE_CURATION_PROTOCOL = "1.32";
+export const MIN_REFERENCE_CURATION_PROTOCOL = "1.33";
 
 /**
  * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
@@ -1213,7 +1221,7 @@ export class JaatoClient {
 
   /**
    * List the reference claims agents proposed in this workspace (protocol
-   * 1.32).  An agent's ``proposeReference`` writes a CLAIM under
+   * 1.33).  An agent's ``proposeReference`` writes a CLAIM under
    * ``.jaato/references-claims/``, never a catalog entry; this is the
    * curator's view of them, read by the daemon.  Each row carries the
    * proposed entry, its recorded ``origin`` (who proposed it, and
@@ -1238,7 +1246,7 @@ export class JaatoClient {
 
   /**
    * Promote an agent's reference claim into the workspace catalog
-   * (protocol 1.32).  The daemon re-validates it, writes
+   * (protocol 1.33).  The daemon re-validates it, writes
    * ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamped
    * with this connection's identity as ``origin.curated_by``, and removes
    * the claim.  When the destination bundle has a vector index the daemon
@@ -1261,7 +1269,7 @@ export class JaatoClient {
   }
 
   /**
-   * Drop an agent's reference claim without promoting it (protocol 1.32).
+   * Drop an agent's reference claim without promoting it (protocol 1.33).
    *
    * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
    */
@@ -1524,6 +1532,38 @@ export class JaatoClient {
       metadata_only: options.metadataOnly ?? false,
     } as WorkspaceFileFetchRequest);
     return answer;
+  }
+
+  /**
+   * Find files in this connection's workspace by name (protocol 1.32, WS
+   * only).  Every whitespace-separated term of ``query`` must appear,
+   * ignoring case, in a file's workspace-relative path; dotfiles,
+   * gitignored files and files the Files panel hides are all searched.
+   * Each match's ``path`` is what {@link fetchWorkspaceFile} takes.
+   *
+   * ``truncated`` on the answer means the daemon's walk stopped at its
+   * bound, so "no match" then is not "no such file".
+   *
+   * @throws Error against a daemon below {@link MIN_FILE_SEARCH_PROTOCOL},
+   *   on timeout, or on a closed connection.
+   */
+  async searchWorkspaceFiles(
+    query: string,
+    options: { maxResults?: number; timeoutMs?: number } = {},
+  ): Promise<WorkspaceFilesSearchResultEvent> {
+    return this._quietRequest<WorkspaceFilesSearchResultEvent>(
+      "searchWorkspaceFiles",
+      {
+        type: EventTypeValue.WORKSPACE_FILES_SEARCH_REQUEST,
+        query,
+        max_results: options.maxResults ?? 100,
+      },
+      EventTypeValue.WORKSPACE_FILES_SEARCH_RESULT,
+      options.timeoutMs ?? 30_000,
+      MIN_FILE_SEARCH_PROTOCOL,
+      "workspace.files.search (upgrade the daemon to search workspace files)",
+      "fs",
+    );
   }
 
   /**

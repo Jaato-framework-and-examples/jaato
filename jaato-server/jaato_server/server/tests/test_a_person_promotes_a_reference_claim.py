@@ -2,7 +2,7 @@
 
 ``proposeReference`` writes a CLAIM and never a catalog entry, because every
 AppArmor body denies the runner writes to ``.jaato/references/**``.  The
-other half is ``reference.promote`` / ``reference.dismiss`` (protocol 1.32),
+other half is ``reference.promote`` / ``reference.dismiss`` (protocol 1.33),
 run by the daemon (:mod:`jaato_server.server.reference_curation`).  What it
 must get right, each its own failure if dropped:
 

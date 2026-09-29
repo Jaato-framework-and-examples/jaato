@@ -1,4 +1,4 @@
-"""A curator can SEE the reference claims agents proposed (protocol 1.32).
+"""A curator can SEE the reference claims agents proposed (protocol 1.33).
 
 ``reference.promote`` / ``reference.dismiss`` turned a claim into a catalog
 entry or dropped it, and nothing listed claims to a client: the only

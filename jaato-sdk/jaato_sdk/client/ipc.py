@@ -2206,15 +2206,15 @@ class IPCClient:
             args=[path],
         ))
 
-    #: Floor for ``reference.promote`` / ``reference.dismiss`` (1.32).  A
+    #: Floor for ``reference.promote`` / ``reference.dismiss`` (1.33).  A
     #: missing verb (the 1.7 rule): an older daemon ignores the command, and
     #: "promoted" would describe a catalog nobody changed.
-    MIN_REFERENCE_CURATION_PROTOCOL = "1.32"
+    MIN_REFERENCE_CURATION_PROTOCOL = "1.33"
 
     async def list_reference_claims(
         self, *, timeout: float = 10.0,
     ) -> ReferenceClaimsEvent:
-        """List the reference claims agents proposed in this workspace (1.32).
+        """List the reference claims agents proposed in this workspace (1.33).
 
         An agent proposes a reference with ``proposeReference``; that writes
         a CLAIM under ``.jaato/references-claims/``, never a catalog entry.
@@ -2238,7 +2238,7 @@ class IPCClient:
     async def promote_reference_claim(
         self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
     ) -> ReferenceCurationResultEvent:
-        """Promote an agent's reference claim into the workspace catalog (1.32).
+        """Promote an agent's reference claim into the workspace catalog (1.33).
 
         The daemon re-validates the claim, writes
         ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamping
@@ -2267,7 +2267,7 @@ class IPCClient:
     async def dismiss_reference_claim(
         self, claim_id: str, *, timeout: float = 10.0,
     ) -> ReferenceCurationResultEvent:
-        """Drop an agent's reference claim without promoting it (1.32).
+        """Drop an agent's reference claim without promoting it (1.33).
 
         Same gate and answer as :meth:`promote_reference_claim`; the claim
         file is removed and the catalog is not touched.
@@ -2287,7 +2287,7 @@ class IPCClient:
     def _require_reference_curation_protocol(self, method: str) -> None:
         """Refuse a daemon that would ignore the reference-claim verbs.
 
-        One below 1.32 drops the request silently: the caller would wait
+        One below 1.33 drops the request silently: the caller would wait
         out its timeout, or read "promoted" about a catalog nobody changed.
         """
         if not _protocol_compatible(

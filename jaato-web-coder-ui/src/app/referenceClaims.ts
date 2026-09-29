@@ -8,7 +8,7 @@
  * cannot write the catalog.  The daemon lists the claims
  * (``listReferenceClaims``) and does the write (``promoteReferenceClaim`` /
  * ``dismissReferenceClaim``), all three correlated request/answer pairs of
- * protocol 1.32 that print nothing to the transcript.
+ * protocol 1.33 that print nothing to the transcript.
  *
  * WHO MAY PROMOTE is the daemon's decision: the list carries ``may_curate``
  * and a refused action answers ``category: "not_owner"``.  The panel hides

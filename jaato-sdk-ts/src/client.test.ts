@@ -22,6 +22,7 @@ import {
   MIN_FILE_FETCH_PROTOCOL,
   MIN_WORKSPACE_PICKER_PROTOCOL,
   MIN_MEMORY_VERBS_PROTOCOL,
+  MIN_FILE_SEARCH_PROTOCOL,
   MIN_SESSION_MESSAGE_PROTOCOL,
   MIN_SESSION_MESSAGE_FILES_PROTOCOL,
   MIN_PROTOCOL_VERSION,
@@ -709,7 +710,7 @@ describe("JaatoClient session management", () => {
     }
   });
 
-  test("reference claim verbs are refused below protocol 1.32", async () => {
+  test("reference claim verbs are refused below protocol 1.33", async () => {
     await assert.rejects(() => client.listReferenceClaims(), /listReferenceClaims/);
     await assert.rejects(() => client.promoteReferenceClaim("x"), /promoteReferenceClaim/);
     await assert.rejects(() => client.dismissReferenceClaim("x"), /dismissReferenceClaim/);
@@ -1916,5 +1917,49 @@ describe("JaatoClient workspace/session pickers (1.27)", () => {
     assert.equal(ev.type, "workspace.clone");
     assert.equal(ev.request_id, rid);
     assert.deepEqual(ev.repos, [{ repo: "octo/one", branch: "main", forge: "github" }]);
+  });
+});
+
+describe("JaatoClient.searchWorkspaceFiles (protocol 1.32)", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_FILE_SEARCH_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  test("sends the query and resolves with the answer carrying ITS request_id", async () => {
+    const promise = client.searchWorkspaceFiles("report", { maxResults: 20 });
+    await tick();
+    const req = JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+    assert.equal(req.type, EventTypeValue.WORKSPACE_FILES_SEARCH_REQUEST);
+    assert.equal(req.query, "report");
+    assert.equal(req.max_results, 20);
+    lastInstance!.emit({ type: EventTypeValue.WORKSPACE_FILES_SEARCH_RESULT, request_id: "other", ok: true, matches: [] });
+    lastInstance!.emit({
+      type: EventTypeValue.WORKSPACE_FILES_SEARCH_RESULT, request_id: req.request_id, ok: true,
+      matches: [{ path: "docs/report.md", size: 5, credential: false }], total: 1, truncated: false,
+    });
+    const got = await promise;
+    assert.deepEqual(got.matches, [{ path: "docs/report.md", size: 5, credential: false }]);
+  });
+
+  test("is refused below 1.32 with nothing sent", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, "1.31");
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(() => client.searchWorkspaceFiles("report"), /workspace\.files\.search/);
+    assert.equal(lastInstance!.sent.length, 0);
   });
 });

@@ -880,7 +880,7 @@ class IPCRecoveryClient:
 
     async def list_reference_claims(self, *, timeout: float = 10.0):
         """See :meth:`IPCClient.list_reference_claims`; the inner client
-        refuses a daemon below protocol 1.32."""
+        refuses a daemon below protocol 1.33."""
         return await self._memory_client("list_reference_claims").list_reference_claims(
             timeout=timeout)
 

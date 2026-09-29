@@ -235,7 +235,7 @@ function answerMemoryRequest(c: Client, ev: Record<string, unknown>): void {
   }
 }
 /**
- * The reference claims the 1.32 verbs answer from, in the daemon's row
+ * The reference claims the 1.33 verbs answer from, in the daemon's row
  * shape (``reference_curation.claim_row``).  Keyed by session like the
  * memories; seeded with one promotable claim a person approved at the
  * prompt, and one whose id is already in the catalog (``problems``).
@@ -459,11 +459,46 @@ function answerFileFetch(c: Client, ev: Record<string, unknown>): void {
   if (!path || path.startsWith("/") || path.split("/").includes("..")) { answer({ ok: false, path, category: "unsafe_path", error: `${path} is outside the workspace` }); return; }
   const name = path.split("/").pop() ?? path;
   if (name === ".env") { answer({ ok: false, path, category: "credential", error: `${path} holds credentials and cannot be downloaded` }); return; }
-  const status = monitorFor(c).files.get(path)?.status;
+  const status = monitorFor(c).files.get(path)?.status ?? (path in UNTOUCHED_FILES ? "present" : undefined);
   if (!status || status === "deleted") { answer({ ok: false, path, category: "not_found", error: `no file at ${path}` }); return; }
   const data = MOCK_BINARY[path] ?? Buffer.from(MOCK_TEXT[path] ?? MOCK_DOCS[path] ?? `mock content of ${path}\n`);
   answer({ ok: true, path, name, size: data.length, mime_type: name.endsWith(".txt") ? "text/plain" : "application/octet-stream" });
   if (!metadataOnly && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
+}
+
+/**
+ * Files present in the mock workspace that no tool touched this session, so
+ * the monitor never reports them -- what the finder exists to reach.  A
+ * dotfile and a gitignored path are here on purpose: the daemon searches
+ * both.
+ */
+const UNTOUCHED_FILES: Record<string, number> = {
+  "docs/claimcascade-bundle.tgz": 2048,
+  "docs/design.md": 512,
+  ".editorconfig": 64,
+  "node_modules/left-pad/index.js": 128,
+  ".env": 24,
+};
+
+/**
+ * ``workspace.files.search`` (protocol 1.32), with the daemon's rules
+ * (``server/workspace_file_search.py``): every term must appear, ignoring
+ * case, in the relative path; a match in the NAME ranks first; ``.env`` is
+ * listed and marked ``credential``.
+ */
+function answerFileSearch(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  const query = String(ev.query ?? "");
+  const answer = (fields: Record<string, unknown>) => send(c, { type: "workspace.files.search_result", request_id: requestId, query, ...fields });
+  if (!c.selected && !c.provisioned && !c.sessionId) { answer({ ok: false, category: "workspace_not_found", error: "No workspace selected", matches: [], total: 0, truncated: false }); return; }
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const sizes: Record<string, number> = { ...UNTOUCHED_FILES };
+  for (const [path, entry] of monitorFor(c).files) if (entry.status !== "deleted") sizes[path] ??= 0;
+  const found = terms.length ? Object.keys(sizes).filter((p) => terms.every((t) => p.toLowerCase().includes(t))) : [];
+  const inName = (p: string) => terms.filter((t) => (p.split("/").pop() ?? p).toLowerCase().includes(t)).length;
+  found.sort((a, b) => inName(b) - inName(a) || a.split("/").length - b.split("/").length || a.localeCompare(b));
+  const max = Number(ev.max_results ?? 100) || 100;
+  answer({ ok: true, total: found.length, truncated: false, matches: found.slice(0, max).map((path) => ({ path, size: sizes[path], credential: (path.split("/").pop() ?? "") === ".env" })) });
 }
 
 function finishStaging(c: Client): void {
@@ -936,7 +971,7 @@ wss.on("connection", (ws, req) => {
     installedIntegrations: new Set(),
     deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.32", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.33", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -972,6 +1007,9 @@ wss.on("connection", (ws, req) => {
       }
       case "workspace.file.fetch":
         answerFileFetch(c, ev);
+        break;
+      case "workspace.files.search":
+        answerFileSearch(c, ev);
         break;
       case "memory.list.request":
       case "memory.get.request":

@@ -69,6 +69,7 @@ import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
 import { downloadFromPanel, servesDownloads } from "@/app/downloads";
+import { FileFinder } from "./FileFinder";
 import { getClient } from "@/sdk/connection";
 import { imageMimeFor, isMarkdownPath } from "@/protocol/workspacePaths";
 import { isLogPath } from "@/protocol/logParse";
@@ -525,6 +526,7 @@ export function WorkspacePanel() {
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
       {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} onOpen={followLink} onBack={goBack} onOpenDiagram={openDiagram} onReload={() => refreshFile(viewer.path)} />}
+      <FileFinder onView={(p) => openFile(p)} />
       <ResetBar total={total} isReset={isReset} />
       {total === 0 ? (
         <div className="text-xs text-text-muted italic">

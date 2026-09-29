@@ -574,7 +574,7 @@ the same tool:
 `agent` origin kind, the fenced `proposed` listing, `require_curation`,
 and the plugin's own AppArmor grant for the claims directory
 (`CLAUDE.md`, *An Agent Proposes a Reference*). Step 3 — promotion —
-too: `reference.promote` / `reference.dismiss` (protocol 1.32), a
+too: `reference.promote` / `reference.dismiss` (protocol 1.33), a
 daemon-level verb gated by `may_curate` that re-validates the claim,
 re-derives `created_by` from the daemon's own session record, stamps
 `curated_by`, and writes through `contained_write` (`CLAUDE.md`, *A Person

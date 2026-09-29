@@ -5,7 +5,7 @@
  *   • a failed list is REPORTED and keeps the rows it had -- an empty list
  *     reads as "nothing proposed";
  *   • an answer for a session this client has left is dropped;
- *   • a daemon below 1.32 is "unsupported", not "empty", and is never asked;
+ *   • a daemon below 1.33 is "unsupported", not "empty", and is never asked;
  *   • a refusal from the owner gate is shown in words, and the list is
  *     re-read afterwards;
  *   • the origin line says whether a person approved the proposal, and
@@ -20,7 +20,7 @@ import type { ReferenceClaimRow } from "@/store/types";
 const listReferenceClaims = vi.fn();
 const promoteReferenceClaim = vi.fn();
 const dismissReferenceClaim = vi.fn();
-let protocol = "1.32";
+let protocol = "1.33";
 let connected = true;
 
 vi.mock("@/sdk/connection", () => ({
@@ -43,7 +43,7 @@ beforeEach(() => {
   useJaato.getState().resetSessionState();
   useJaato.setState({ sessionId: "s1" });
   for (const f of [listReferenceClaims, promoteReferenceClaim, dismissReferenceClaim]) f.mockReset();
-  protocol = "1.32";
+  protocol = "1.33";
   connected = true;
 });
 
@@ -83,7 +83,7 @@ describe("the list", () => {
     expect(useJaato.getState().referenceClaims.rows).toEqual([]);
   });
 
-  it("a daemon below 1.32 is unsupported, not empty, and is never asked", async () => {
+  it("a daemon below 1.33 is unsupported, not empty, and is never asked", async () => {
     protocol = "1.31";
     await rc.refreshReferenceClaims();
     expect(useJaato.getState().referenceClaims.status).toBe("unsupported");

@@ -1547,6 +1547,23 @@ test("a file in the Files panel downloads when its name is clicked (protocol 1.2
   expect(Buffer.concat(body).toString()).toBe("mock content of out/report.txt\n");
 });
 
+test("the Files panel finds a file nobody touched, and downloads it (protocol 1.32)", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Open Files" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await panel.getByRole("searchbox", { name: "Find a file in the workspace" }).fill("bundle");
+  const results = panel.getByRole("list", { name: "Matching files" });
+  await expect(results.getByText("docs/claimcascade-bundle.tgz")).toBeVisible();
+  await expect(panel.getByText("1 match")).toBeVisible();
+  const downloading = page.waitForEvent("download");
+  await results.getByRole("button", { name: "Download docs/claimcascade-bundle.tgz" }).click();
+  expect((await downloading).suggestedFilename()).toBe("claimcascade-bundle.tgz");
+  // A credential file is listed but cannot be taken out.
+  await panel.getByRole("searchbox", { name: "Find a file in the workspace" }).fill(".env");
+  await expect(results.getByText(".env", { exact: true })).toBeVisible();
+  await expect(results.getByRole("button", { name: /\.env/ })).toHaveCount(0);
+});
+
 test("the model offers a file with offer_download and the chat draws a button that downloads it", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("please offer out/report.txt");

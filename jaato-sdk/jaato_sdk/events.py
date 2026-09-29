@@ -556,18 +556,29 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # is built, on the runner path as a ``tool_result_enriched`` notification.
 # A NEW event type: an older client does not know it, logs it and continues
 # (the 1.8 shape), so nothing is refused.
-# 1.32 -- reference claims, the curator's half of the agent write path.
+#
+# 1.32 -- ``workspace.files.search`` / ``workspace.files.search_result``
+# (WS only): find files in the caller's workspace by name.  The Files panel
+# lists what CHANGED; a file nobody touched, one the user hid or one git
+# ignores had no way to be reached.  The daemon walks the workspace this
+# connection is in (the ``workspace.file.fetch`` resolution) and answers
+# with ranked relative paths, a ``total`` before the cap and ``truncated``
+# when the walk stopped at its bound, so a partial search never reads as
+# "no such file".  A missing VERB (the 1.7 rule): an older daemon never
+# answers, so the TS SDK refuses below ``MIN_FILE_SEARCH_PROTOCOL``.
+#
+# 1.33 -- reference claims, the curator's half of the agent write path.
 # ``ReferenceClaimsRequest`` -> ``ReferenceClaimsEvent`` lists the agent
 # proposals (``proposeReference`` claims) in the caller's workspace, with
 # ``may_curate``; ``ReferenceCurationRequest`` (or the typable
-# ``reference.promote <claim_id>`` / ``reference.dismiss <claim_id>``
+# ``reference.promote <claim_id> [--bundle <name>]`` / ``reference.dismiss``
 # commands) -> ``ReferenceCurationResultEvent`` turns one into a catalog
 # entry or drops it.  The daemon does the write, because a confined runner
 # is write-denied on the catalog.  Gated by the memory rail's owner rule.
 # NEW verbs: an older daemon ignores them silently, and "promoted" would
 # describe a catalog nobody changed, so the SDKs refuse below
 # ``MIN_REFERENCE_CURATION_PROTOCOL``.
-PROTOCOL_VERSION = "1.32"
+PROTOCOL_VERSION = "1.33"
 
 
 # =============================================================================
@@ -779,6 +790,8 @@ class EventType(str, Enum):
     # by ONE raw BINARY frame of ``size`` bytes.  See docs/sdk-file-staging.md.
     WORKSPACE_FILE_FETCH_REQUEST = "workspace.file.fetch"  # Client -> Server
     WORKSPACE_FILE_CONTENT = "workspace.file.content"  # Server -> Client
+    WORKSPACE_FILES_SEARCH_REQUEST = "workspace.files.search"  # Client -> Server
+    WORKSPACE_FILES_SEARCH_RESULT = "workspace.files.search_result"  # Server -> Client
 
     # Agent profiles (Client <-> Server)
     SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
@@ -787,10 +800,10 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
-    REFERENCE_CURATION_RESULT = "reference.curation.result"  # Answer to `reference.promote|dismiss` (1.32)
-    REFERENCE_CLAIMS = "reference.claims"  # Answer to ReferenceClaimsRequest (1.32)
-    REFERENCE_CLAIMS_REQUEST = "reference.claims.request"  # Client -> Server (1.32)
-    REFERENCE_CURATION_REQUEST = "reference.curation.request"  # Client -> Server (1.32)
+    REFERENCE_CURATION_RESULT = "reference.curation.result"  # Answer to `reference.promote|dismiss` (1.33)
+    REFERENCE_CLAIMS = "reference.claims"  # Answer to ReferenceClaimsRequest (1.33)
+    REFERENCE_CLAIMS_REQUEST = "reference.claims.request"  # Client -> Server (1.33)
+    REFERENCE_CURATION_REQUEST = "reference.curation.request"  # Client -> Server (1.33)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
@@ -2787,7 +2800,7 @@ class WorkspaceIgnoreResultEvent(Event):
 
 
 class ReferenceCurationResultEvent(Event):
-    """Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.32).
+    """Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.33).
 
     An agent PROPOSES a reference with ``proposeReference``; the result is a
     claim under ``<workspace>/.jaato/references-claims/``, never a catalog
@@ -2843,7 +2856,7 @@ class ReferenceCurationResultEvent(Event):
 
 
 class ReferenceClaimsEvent(Event):
-    """The reference claims agents proposed in the caller's workspace (1.32).
+    """The reference claims agents proposed in the caller's workspace (1.33).
 
     Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
     A claim is what ``proposeReference`` wrote under
@@ -2885,7 +2898,7 @@ class ReferenceClaimsEvent(Event):
 
 
 class ReferenceClaimsRequest(Event):
-    """List the reference claims in the caller's workspace (1.32).
+    """List the reference claims in the caller's workspace (1.33).
 
     Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
     Writes nothing; any connection whose workspace it is may list.
@@ -2895,7 +2908,7 @@ class ReferenceClaimsRequest(Event):
 
 
 class ReferenceCurationRequest(Event):
-    """Promote or dismiss one reference claim (1.32).
+    """Promote or dismiss one reference claim (1.33).
 
     The correlated form of the ``reference.promote`` / ``reference.dismiss``
     commands: answered by :class:`ReferenceCurationResultEvent` carrying this
@@ -4410,6 +4423,48 @@ class WorkspaceFileContentEvent(Event):
     error: str = ""
 
 
+class WorkspaceFilesSearchRequest(Event):
+    """Find files in the caller's workspace by name (WS only, protocol 1.32).
+
+    ``query`` is split on whitespace and every term must appear, ignoring
+    case, in a file's workspace-relative path.  The whole tree is searched --
+    dotfiles, gitignored paths and entries the Files panel hides -- except the
+    contents of ``.git`` directories.  ``max_results`` caps the answer
+    (default 100, at most 500).  Answered by one
+    :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SEARCH_REQUEST)
+    request_id: str = ""
+    query: str = ""
+    max_results: int = 100
+
+
+class WorkspaceFilesSearchResultEvent(Event):
+    """Server's answer to :class:`WorkspaceFilesSearchRequest` (protocol 1.32).
+
+    ``matches`` is ranked best first (a match in the file NAME before one in
+    a directory, shallower paths first); each is ``{"path", "size",
+    "credential"}`` with ``path`` relative to the workspace root, the key
+    ``workspace.file.fetch`` takes.  ``credential`` marks a file the fetch
+    verb refuses (a ``.env``, a stored ``*_auth.json``), so a client does not
+    offer to download it.  ``total`` is how many matched before the cap.
+    ``truncated`` means the walk stopped at its entry or time bound, so files
+    beyond it were not looked at.
+
+    On failure ``ok`` is false and ``category`` is ``"workspace_not_found"``
+    (this connection is in no workspace).
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SEARCH_RESULT)
+    request_id: str = ""
+    ok: bool = False
+    query: str = ""
+    matches: List[Dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+    truncated: bool = False
+    category: str = ""
+    error: str = ""
+
+
 class ClientType(str, Enum):
     """Presentation-layer categories for PresentationContext.
 
@@ -5254,6 +5309,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file download (TEXT header + one BINARY frame, 1.20)
     EventType.WORKSPACE_FILE_FETCH_REQUEST.value: WorkspaceFileFetchRequest,
     EventType.WORKSPACE_FILE_CONTENT.value: WorkspaceFileContentEvent,
+    EventType.WORKSPACE_FILES_SEARCH_REQUEST.value: WorkspaceFilesSearchRequest,
+    EventType.WORKSPACE_FILES_SEARCH_RESULT.value: WorkspaceFilesSearchResultEvent,
     # Peer channel
     EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
     EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,
