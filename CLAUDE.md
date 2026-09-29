@@ -4347,7 +4347,10 @@ link followed) with its `links` (a dangling one marked), `linked_from` and
 web coder's **References** rail section lists the catalog (the badge is
 `!` while any reference holds a dangling edge) and gives the owner an
 editor per reference; a promotion from Proposals re-lists it. A running
-session sees an edit at its next catalog reload.
+session sees an edit at its next catalog reload. Like promotion into a bundle, the
+write is daemon-side only because no runner profile may write the catalog;
+#1422 (a real `tool_hat`) moves it back to the runner, with the daemon
+keeping the owner gate.
 
 Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
 `server/tests/test_a_proposal_carries_typed_links.py` (five) and

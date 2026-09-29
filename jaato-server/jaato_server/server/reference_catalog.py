@@ -237,6 +237,37 @@ def _fail(outcome: LinksOutcome, category: str, error: str) -> LinksOutcome:
     return outcome
 
 
+def _request_refusal(
+    reference_id: Any, links: Any, owner: Optional[str], user_id: Optional[str],
+) -> Optional[Tuple[str, str]]:
+    """``(category, error)`` when the request itself is refused, before any read.
+
+    Checked in order: the request's shape, the owner gate, then the links.
+    """
+    if not valid_id(reference_id) or not isinstance(links, list):
+        return ("invalid_request",
+                "usage: reference.links <reference_id> with a list of {to, rel, note?}")
+    if not may_curate(owner, user_id):
+        return ("not_owner", "only the workspace owner may change its references' links")
+    errors = link_errors(links, source_id=reference_id)
+    if errors:
+        return ("invalid_links", "; ".join(errors))
+    return None
+
+
+def _match_refusal(
+    reference_id: str, matches: List[Tuple[str, Dict[str, Any]]],
+) -> Optional[Tuple[str, str]]:
+    """``(category, error)`` unless exactly one catalog file declares the id."""
+    if not matches:
+        return ("not_found", f"no reference '{reference_id}' in {CATALOG_REL}")
+    if len(matches) > 1:
+        return ("ambiguous",
+                f"'{reference_id}' is defined in {', '.join(r for r, _ in matches)}; "
+                "remove the duplicate first")
+    return None
+
+
 def update_links(
     workspace: str, reference_id: str, links: Any, *,
     owner: Optional[str], user_id: Optional[str],
@@ -256,27 +287,18 @@ def update_links(
         A :class:`LinksOutcome`; this never raises for a refusal.
     """
     outcome = LinksOutcome(ok=False, reference_id=reference_id)
-    if not valid_id(reference_id) or not isinstance(links, list):
-        return _fail(outcome, "invalid_request",
-                     "usage: reference.links <reference_id> with a list of {to, rel, note?}")
-    if not may_curate(owner, user_id):
-        return _fail(outcome, "not_owner",
-                     "only the workspace owner may change its references' links")
-    errors = link_errors(links, source_id=reference_id)
-    if errors:
-        return _fail(outcome, "invalid_links", "; ".join(errors))
+    refusal = _request_refusal(reference_id, links, owner, user_id)
+    if refusal:
+        return _fail(outcome, *refusal)
     root = os.path.realpath(workspace)
     try:
         entries, _unreadable = catalog_files(root)
     except PathLeavesRoot as exc:
         return _fail(outcome, "unsafe_path", str(exc))
     matches = [(rel, data) for rel, data in entries if data["id"] == reference_id]
-    if not matches:
-        return _fail(outcome, "not_found", f"no reference '{reference_id}' in {CATALOG_REL}")
-    if len(matches) > 1:
-        return _fail(outcome, "ambiguous",
-                     f"'{reference_id}' is defined in {', '.join(r for r, _ in matches)}; "
-                     "remove the duplicate first")
+    refusal = _match_refusal(reference_id, matches)
+    if refusal:
+        return _fail(outcome, *refusal)
     rel, data = matches[0]
     normalised = [link.to_dict() for link in parse_links(links)]
     updated = dict(data)

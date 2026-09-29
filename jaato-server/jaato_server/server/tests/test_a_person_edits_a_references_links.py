@@ -51,8 +51,7 @@ REVERSIONS = [
     Reversion(
         target=_CATALOG,
         find="    if not may_curate(owner, user_id):\n"
-             "        return _fail(outcome, \"not_owner\",\n"
-             "                     \"only the workspace owner may change its references' links\")\n",
+             "        return (\"not_owner\", \"only the workspace owner may change its references' links\")\n",
         replace="",
         because="anyone on the connection could reroute the owner's catalog",
         test="TestOnlyTheOwnerEdits::test_another_user_is_refused",
