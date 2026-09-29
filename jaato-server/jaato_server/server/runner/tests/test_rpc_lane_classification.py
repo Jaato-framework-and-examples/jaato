@@ -116,6 +116,8 @@ _CONTROL_PLANE = frozenset({
     "session.get_all_session_state",
     "session.get_auth_info",
     "session.get_permission_status",
+    "session.get_permission_persistence",
+    "session.restore_permission_persistence",
     "session.get_budget_exhausted",
     "session.get_budget_usage",
     "session.get_context_limit",

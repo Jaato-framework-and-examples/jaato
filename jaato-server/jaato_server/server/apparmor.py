@@ -1197,7 +1197,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         # sessions for profile discovery and instruction assembly.
         self._premium_root: Optional[Path] = None
         try:
-            from jaato_server.shared.jaato_runtime import _get_premium_content_path
+            from jaato_server.shared.premium_content import _get_premium_content_path
             premium_profiles = _get_premium_content_path("profiles")
             if premium_profiles:
                 # Content paths are like <pkg>/profiles — parent is the package root

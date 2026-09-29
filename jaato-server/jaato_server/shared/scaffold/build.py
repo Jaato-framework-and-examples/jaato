@@ -6,10 +6,20 @@ output is valid **by construction** — there is no separate "is the generated
 profile ok" path, and a generator bug that emits an unknown knob fails loudly
 at scaffold time instead of being silently dropped at runtime.
 
-``new`` also consults :mod:`introspect` while emitting — it only writes knobs
-the target provider actually declares (e.g. ``api_key`` is emitted only if the
-provider has an ``api_key`` top-level knob), so the emit step can't author a
-key the validate step would then reject.
+``new`` also consults the providers' declared contracts while emitting — it
+only writes knobs the target provider actually declares (e.g. ``api_key`` is
+emitted only if the provider has an ``api_key`` top-level knob), so the emit
+step can't author a key the validate step would then reject.
+
+**What this module imports, and why it matters (#1267).**  Only the authoring
+modules, at module level: :mod:`archetypes`, :mod:`authoring_facts` and
+:mod:`authoring_contracts`.  Provider and env-var facts go through
+:mod:`authoring_contracts`, which reads the live tree through
+:mod:`introspect` when it is installed and a checked-in snapshot when it is
+not.  :mod:`validate` (the profile-set re-check) and :mod:`dossier` are
+imported inside the functions that use them.  So the archetypes that need no
+introspection (clients, ``gitignore``) do not load it, which is the
+precondition for shipping ``new`` with the SDK.
 
 Fail-loud, no hardcoded fallbacks: required inputs (workspace / set / provider
 / model / agents) must be supplied; an unknown provider is a hard error, not a
@@ -25,9 +35,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import archetypes as _archetypes
-from . import explain as _explain
-from . import introspect
-from . import validate as _validate
+from . import authoring_contracts as _contracts
+from . import authoring_facts as _facts
 
 # --------------------------------------------------------------- secrets mode
 #
@@ -235,9 +244,9 @@ def _compose_env(provider: Optional[str], active: list) -> str:
     misleading default into the one file a reader treats as configuration
     (jaato #820).
     """
-    info = introspect.resolve_provider(provider) if provider else None
+    info = _contracts.resolve_provider(provider) if provider else None
     pdir = info.dir_name if info else provider
-    EV = introspect.env_vars()
+    EV = _contracts.env_vars()
     # names already set in the active block — never re-emit them as knobs
     active_names = {ln.split("=", 1)[0].strip()
                     for ln in active if "=" in ln and not ln.startswith("#")}
@@ -878,7 +887,7 @@ def _env_profile_set(ws: Path) -> Optional[str]:
     # One definition, in ``explain``: the generator and the explain pages
     # must not disagree about which set a workspace is on, and the pages
     # need the same answer to resolve a profile the daemon would load.
-    return _explain.workspace_profile_set(str(ws))
+    return _facts.workspace_profile_set(str(ws))
 
 
 def _profile_sets(ws: Path) -> List[str]:
@@ -1004,8 +1013,8 @@ def _resolve_client_binding(args, archetype: str, transport: str):
               f"(got only --{'provider' if provider else 'model'}); "
               f"supply both, or neither and point the stages at a profile")
         return 2, None, None
-    if provider and introspect.resolve_provider(provider) is None:
-        known = ", ".join(sorted(introspect.providers()))
+    if provider and _contracts.resolve_provider(provider) is None:
+        known = ", ".join(sorted(_contracts.providers()))
         print(f"new {archetype}: unknown provider '{provider}' (have: {known})")
         return 2, None, None
     return None, provider, model
@@ -1158,7 +1167,7 @@ def _binding_substitutions(archetype: str, provider, model,
         # Correct per-provider key var from the declared AuthSource chain
         # (ZHIPUAI_API_KEY, ANTHROPIC_API_KEY, …), not a guessed template.
         "__KEY_ENV__": (_primary_key_env_var(
-            introspect.resolve_provider(provider), provider)
+            _contracts.resolve_provider(provider), provider)
             if provider else ""),
     }
 
@@ -1399,7 +1408,7 @@ def _print_next_steps(args, ws: Path, env_file: Path, py_file: Path,
     cred_note = ""
     if provider:
         key_env_var = _primary_key_env_var(
-            introspect.resolve_provider(provider), provider)
+            _contracts.resolve_provider(provider), provider)
         if ckind == "uri":
             secret_hint = (f" --secret {cscheme}://"
                            f"{csecret_path.format(provider=provider)}")
@@ -1903,12 +1912,12 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     env discoverability named only the lower-precedence route (jaato #752).
     The bar is that high on purpose: a generated profile where every knob has
     a commented example is noise nobody reads.  The ``env:`` facts come from
-    :data:`explain.PROFILE_ENV_FACTS` rather than being restated here, so this
+    :data:`authoring_facts.PROFILE_ENV_FACTS` rather than being restated here, so this
     half and ``explain env`` cannot drift apart; the worked example's value
-    comes from :data:`explain.ENV_EXAMPLE_VALUE` for the same reason, and is
+    comes from :data:`authoring_facts.ENV_EXAMPLE_VALUE` for the same reason, and is
     relative rather than absolute on purpose (see that constant).
     """
-    info = introspect.resolve_provider(provider)
+    info = _contracts.resolve_provider(provider)
     lines = [
         f"# {agent} — {provider} set: {model}.",
         f"name: {agent}",
@@ -1949,7 +1958,7 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
         "# catalog decides.  See `jaato-scaffold explain tiers`.",
         "# Optional per-SESSION env vars.  This block:",
     ]
-    lines += [f"#   - {fact}" for fact in _explain.PROFILE_ENV_FACTS]
+    lines += [f"#   - {fact}" for fact in _facts.PROFILE_ENV_FACTS]
     lines += [
         "#     — the trace vars resolve theirs against the session workspace,",
         "#     so the RELATIVE form below writes one file per session, in its",
@@ -1957,7 +1966,7 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
         "#     profile and shared by every session using it.",
         "#     See `jaato-scaffold explain env`.",
         "# env:",
-        f"#   {_explain.ENV_EXAMPLE_VAR}: {_explain.ENV_EXAMPLE_VALUE}",
+        f"#   {_facts.ENV_EXAMPLE_VAR}: {_facts.ENV_EXAMPLE_VALUE}",
     ]
     knobs = info.knobs if info else None
     if knobs is not None:
@@ -2068,8 +2077,8 @@ def _new_profile_set(args) -> int:
         return 2
 
     provider = args.provider
-    if introspect.resolve_provider(provider) is None:
-        known = ", ".join(sorted(introspect.providers()))
+    if _contracts.resolve_provider(provider) is None:
+        known = ", ".join(sorted(_contracts.providers()))
         print(f"new profile-set: unknown provider '{provider}' (have: {known})")
         return 2
 
@@ -2095,7 +2104,7 @@ def _new_profile_set(args) -> int:
               f"will FAIL to resolve its key at connect (is the plugin that "
               f"provides it, e.g. jaato-premium, installed?). Use --secrets env "
               f"for a public checkout.")
-    key_env_var = _primary_key_env_var(introspect.resolve_provider(provider),
+    key_env_var = _primary_key_env_var(_contracts.resolve_provider(provider),
                                        provider)
 
     plan = _Plan(ws, doc, dry_run=dry_run)
@@ -2150,5 +2159,9 @@ def _new_profile_set(args) -> int:
 
     # --- emit-then-validate: the same validator the `validate` verb runs -
     print("\nre-validating scaffolded set …")
+    # Imported here, not at module level: the re-check is introspection
+    # (plugin discovery, provider imports), and the archetypes that need none
+    # of it must not load it (#1267).
+    from . import validate as _validate
     return _report_revalidation(
         _validate.validate_workspace(str(ws), profile_set=args.set))

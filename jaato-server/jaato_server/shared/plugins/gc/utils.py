@@ -27,6 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
 # it rather than a second author (#674).  Import direction is safe:
 # ``history_invariant`` depends only on the SDK types, never on GC.
 from jaato_server.shared.history_invariant import repair_history
+from jaato_sdk.framework_note import framework_note
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .base import GCConfig, GCTriggerReason
@@ -421,7 +422,7 @@ def create_gc_notification_message(message: str) -> Message:
     Returns:
         A Message object with the notification.
     """
-    formatted_message = f"[System: {message}]"
+    formatted_message = framework_note(f"[System: {message}]")
 
     return Message(
         role=Role.USER,

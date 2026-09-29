@@ -161,6 +161,12 @@ if TYPE_CHECKING:
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
+from jaato_sdk.framework_note import (
+    FRAMEWORK_NOTE_MARKER,
+    framework_note,
+    hidden_framework_note,
+    strip_framework_note_marker,
+)
 
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
@@ -2342,8 +2348,9 @@ class JaatoSession:
         if not updates:
             return ""
 
-        # Wrap in <hidden> so user doesn't see raw streaming data, only model sees it
-        parts = ["<hidden><streaming_updates>"]
+        # Wrap in <hidden> so user doesn't see raw streaming data, only
+        # model sees it; the marker says jaato wrote it (#1414).
+        parts = [f"<hidden>{FRAMEWORK_NOTE_MARKER} <streaming_updates>"]
         for update in updates:
             parts.append(f"\n[Stream: {update.tool_name} (stream_id={update.stream_id})]")
             if update.new_chunks:
@@ -4416,6 +4423,7 @@ class JaatoSession:
             hidden_matches = re.findall(r'<hidden>(.*?)</hidden>', text, re.DOTALL)
             hidden_types_found = set()
             for hidden_content in hidden_matches:
+                hidden_content = strip_framework_note_marker(hidden_content)
                 if "<streaming_updates>" in hidden_content or hidden_content.startswith("["):
                     hidden_types_found.add("streaming")
                 elif "<waypoint-restore>" in hidden_content:
@@ -6291,7 +6299,8 @@ NOTES
             gets.
         """
         lines = [
-            "<hidden>[System: your previous response was cut off by the "
+            f"<hidden>{FRAMEWORK_NOTE_MARKER} [System: your previous "
+            "response was cut off by the "
             "output-token limit (max_tokens) before you finished it. "
             "Nothing in it is complete -- do not assume any part of it "
             "took effect.",
@@ -6671,11 +6680,11 @@ NOTES
                 f"NUDGE_REQUIRED: {reason} ({context}, "
                 f"attempt {attempt}/{max_attempts})"
             )
-            nudge_prompt = (
-                "<hidden>Your previous response was incomplete or empty. "
+            nudge_prompt = hidden_framework_note(
+                "Your previous response was incomplete or empty. "
                 "You were in the middle of a task. Continue executing your plan. "
                 "Do NOT describe or re-read files. Execute the next tool call directly. "
-                "Your next response MUST continue the task, not restart or summarize.</hidden>"
+                "Your next response MUST continue the task, not restart or summarize."
             )
             self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
             nudge_response = self._check_and_handle_mid_turn_prompt(
@@ -8839,7 +8848,7 @@ NOTES
         # serialization time (render_result_for_model).
         if tool_results:
             last = tool_results[-1]
-            hidden = f"<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+            hidden = hidden_framework_note(_TASK_COMPLETION_INSTRUCTION)
             combined = f"{last.model_suffix}\n\n{hidden}" if last.model_suffix else hidden
             tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
 
@@ -8872,8 +8881,10 @@ NOTES
             # Model-facing suffix (keep ``result`` structured — see above).
             piggyback = (
                 f"<user_message>{combined_prompt}</user_message>\n"
-                f"The user has sent a new message during your tool execution. "
-                f"Please address their input in your next response."
+                + framework_note(
+                    "The user has sent a new message during your tool "
+                    "execution. Please address their input in your next "
+                    "response.")
             )
             combined = (
                 f"{last.model_suffix}\n\n{piggyback}"
@@ -9909,7 +9920,8 @@ NOTES
             notes.append(self._build_tier_role_withheld_note(
                 {k: withheld[k] for k in tier_refused},
                 retry_action=retry_action))
-        return "  ".join(notes)
+        # One marker for the whole note: jaato wrote it, not the tool (#1414).
+        return framework_note("  ".join(notes))
 
     def _build_tier_role_withheld_note(
         self,
@@ -13461,9 +13473,9 @@ NOTES
 
         # Create a note for the model about what happened
         if partial_text:
-            note = f"[System: Your previous response was cancelled by the user after: \"{partial_text[:100]}{'...' if len(partial_text) > 100 else ''}\"]"
+            note = framework_note(f"[System: Your previous response was cancelled by the user after: \"{partial_text[:100]}{'...' if len(partial_text) > 100 else ''}\"]")
         else:
-            note = "[System: Your previous response was cancelled by the user before any output was generated.]"
+            note = framework_note("[System: Your previous response was cancelled by the user before any output was generated.]")
 
         user_message = Message(
             role=Role.USER,
@@ -14820,7 +14832,7 @@ NOTES
             body += f"  ({media_chunks} media chunk(s) were delivered to the client.)"
         body += "  You are back in control; continue."
         self._message_queue.put(
-            f"<hidden>{body}</hidden>", "tier-delegation", SourceType.SYSTEM)
+            hidden_framework_note(body), "tier-delegation", SourceType.SYSTEM)
         self._trace(f"TIER_DELEGATION_REPORT: queued outcome from {tier}")
 
     def _connect_tier_entry(self, entry) -> None:

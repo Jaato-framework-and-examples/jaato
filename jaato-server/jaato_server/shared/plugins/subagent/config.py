@@ -5317,7 +5317,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
     Returns an empty dict if no premium package is installed.
     """
     try:
-        from jaato_server.shared.jaato_runtime import _get_premium_content_path
+        from jaato_server.shared.premium_content import _get_premium_content_path
     except ImportError:
         return {}
 

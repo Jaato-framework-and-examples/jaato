@@ -41,7 +41,7 @@ the workspace with **no daemon change**.
 
 ## 3. The rule-set (`.jaato/instructions/40-github.md`)
 
-The issue's 13 candidate rules, refined and grouped, each with a one-line
+The issue's 13 candidate rules (plus a 14th added with #1415), refined and grouped, each with a one-line
 rationale and cross-checked against what the epic actually delivers. This is
 the content of the shipped instruction file.
 
@@ -77,6 +77,7 @@ the content of the shipped instruction file.
 | 11 | **Never force-push**, and never rewrite a branch you did not create. | *Enforceable*, not merely stated — a permission blacklist on `git push --force` / `-f` / `--force-with-lease` (see Q4). |
 | 12 | **Confirm before anything other people see or that cannot be undone:** merging, closing, deleting a branch or release, commenting on someone else's issue or PR. | Judgement the model exercises per situation; partly enforceable, partly prose (see Q4). |
 | 13 | **Only touch repositories the user named.** The token may reach more repositories than the task needs. | A GitHub App token's reach is the intersection of the user and the App's installations (#1225 §4); that can be more than one repo. |
+| 14 | **Before pushing, run the checks CI will run.** Rebase onto the base branch, then run the repository's own local check if it has one (jaato's `scripts/check.py`, else what `AGENTS.md` / `CONTRIBUTING.md` names). | Added with #1415: a session that ran only the tests near its change pushed past a required check it never ran, against a stale base. The rule names no jaato internals because the workspace's repository is usually not jaato. |
 
 Every rule is satisfiable with what the epic delivers. None assumes a
 capability that is not there — the two that could (the session id for rule 1,

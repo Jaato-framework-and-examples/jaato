@@ -47,6 +47,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from jaato_sdk.framework_note import framework_note
+
 logger = logging.getLogger(__name__)
 
 #: How many times the framework re-prompts a session that settled without
@@ -60,6 +62,17 @@ logger = logging.getLogger(__name__)
 #: is a reporting ceiling, not a budget, and is stale in exactly one
 #: direction against a profile that raised its own.
 DEFAULT_MAX_COMPLETION_NUDGES = 2
+
+#: The nudge itself.  It was written out three times (daemon, embedded
+#: lead, subagent loop) like the budget was; one definition now, carrying
+#: the framework-note marker so the model can tell jaato asked (#1414).
+COMPLETION_NUDGE_TEXT = framework_note(
+    "Your session is about to end without calling `signal_completion`. "
+    "The loop cannot close cleanly until you either continue the work "
+    "with another tool call, or call `signal_completion` per your "
+    "profile's payload schema with the appropriate decision and "
+    "evidence. Please proceed with one of those two paths."
+)
 
 
 def resolve_max_completion_nudges(profile: Any) -> int:

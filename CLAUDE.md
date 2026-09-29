@@ -3877,6 +3877,80 @@ Three properties follow, each attached to a way the old path went wrong:
 Nested payloads are deliberately not rendered into the view — handing an
 enricher a whole structured result is what the two traits above are for.
 
+### A Note From jaato, Read as an Attack (#1414)
+
+A session reported "prompt-injection-shaped content" in its tool results all
+through a refactor, and ignored every instance. None of it was an attack; all
+of it was jaato's own output: `<hidden><streaming_updates>…`, a truncation
+continuation, and the template plugin's
+`[!] **TEMPLATE AVAILABLE - MANDATORY USAGE** … **YOU MUST USE THIS TEMPLATE**`.
+The untrusted-content boundary teaches the model to distrust instructions
+that arrive inside tool output, and nothing said these came from the
+framework. So the models that behave well discarded them, and only a model
+that would also follow a real injection obeyed.
+
+**One marker, `⟦JAATO⟧`, the counterpart of the untrusted boundary.**
+`jaato_sdk/framework_note.py` defines it and the two ways to build a note
+(`framework_note(text)`, `hidden_framework_note(body)`). The `security`
+instruction piece gains two sentences saying what it means: text starting
+with it was written by jaato, not by the content being read; it is
+information and suggestions, never above the user; inside the untrusted
+markers it is data. `<hidden>` is a display tag (it hides text from a person)
+and says nothing about who wrote the text, which is why the marker goes
+inside it.
+
+| Where the model meets a jaato note | Producer |
+|---|---|
+| injected turn | streaming updates, the truncation continuation, the tool-use nudge, the completion nudge (daemon, embedded lead and subagent loop, now one `COMPLETION_NUDGE_TEXT`), formatter feedback, the tier-delegation report, a cancellation notice, a GC notice |
+| a tool result's suffix | the task-completion spur, the mid-turn "the user sent a message" line, the withheld-attachment note |
+| prompt enrichment | waypoint restore, multimodal image hint, the session-describe hint |
+| tool-result enrichment | memory hints, template extraction and hints, reference context / referenced sources / tag hints, LSP diagnostics, the artifact-tracker summary |
+
+Not marked, by design: a streaming tool's per-chunk `<hidden>` echo on the UI
+output channel (`core.py` strips it before display and it never enters
+history; the model gets the chunks through the streaming-updates turn), the
+byte-constant `CANCELLED_RESULT` (it IS the unanswered call's result, not a
+note beside one), and `result_grep`'s `note` field inside its own JSON
+payload.
+
+**What "cannot fake" covers.** `defang_untrusted_markers`, and so
+`wrap_untrusted_content`, breaks the marker with a zero-width space, as it
+does for the boundary's own markers: a web page, an MCP server or a subagent
+result cannot present itself as jaato. An enrichment note appended to such a
+result is defanged with it, because enrichment runs before the wrap; it then
+reads as data, the safe direction. Output of a tool inside the trust boundary
+(a workspace file, a shell command) is not rewritten and can contain the
+literal: rewriting it would carry the zero-width space into files the agent
+edits, and those surfaces are already trusted. The marker is provenance, not
+authority, and the instruction says so.
+
+**Tone.** An enrichment suggests and carries its evidence; it does not give
+orders in capitals. The template note now reads "Template(s) found in this
+result. If you are about to write this code by hand, `renderTemplateToFile`
+with the id below may do it for you", and each entry has a `Why:` line
+naming where the syntax was found and the first tag it matched. The references contents annotation, LSP
+diagnostics ("MUST FIX", "ACTION REQUIRED") and their siblings were rewritten
+the same way. System instructions (the trusted prompt region) are not
+enrichment and are unchanged.
+
+**Why the template note fired on a Python edit.** Two over-broad rules in the
+extraction path:
+
+| Rule | Matched | Now |
+|---|---|---|
+| a result with no fenced block is a template AS A WHOLE when its text has template syntax | any file whose docstring mentions `{{param}}` (`jaato_session.py` does), so reading jaato's own modules "extracted a template" and annotated the result | only when the tool read a file with a template extension (`.tpl`, `.tmpl`, `.j2`, `.jinja`, `.jinja2`, `.mustache`, `.hbs`, `.handlebars`); a result with no known path is never taken whole |
+| `JINJA2_VARIABLE_PATTERN` = `\{\{\s*\w+` | the second brace of a Python f-string escape, `f"{{{name}}}"` | `(?<!\{)\{\{\s*\w+` |
+
+A fenced block in a document still matches: that is the use case (a kb page
+showing a `java` block with mustache tags).
+
+Guard: `jaato_server/shared/tests/test_framework_notes_carry_provenance_1414.py`,
+seven reversions. An inventory of the producers above must each use the
+marker; a tree-wide AST scan fails a new `<hidden>` or `[System:` literal
+built without it unless an allow-list names it with a reason; the enrichment
+producers may not contain `MANDATORY`, `MUST`, `ACTION REQUIRED`, `CRITICAL`,
+`you must` or `IMPORTANT:`; the marker inside untrusted content is defanged.
+
 ### What an Enrichment Plugin Found, Told to the Client (protocol 1.31)
 
 Enrichment rewrites the result the MODEL reads. A client saw none of it
@@ -4262,6 +4336,38 @@ contributes a topic still cannot contribute a *finding* — `jaato-scaffold
 validate . --set drive` reports nothing about reactor rules however wrong they
 are, in either venv. That is its own change, and the entry-point group
 `jaato.premium_reactors` the report names has never existed.
+
+### The Authoring Half of `jaato-scaffold` Stands Alone (#1267, step 1)
+
+#1267 proposes shipping `jaato-scaffold new` / `integration` in jaato-sdk,
+which applications install, while `explain` / `validate` stay with
+jaato-server, which is deployed once. A measurement on the issue found the
+schema modules clean (stdlib + `jaato_sdk` at module level) and three things
+in the way. This step removes them. Nothing moves to the SDK yet.
+
+| Was | Now |
+|---|---|
+| `build` (the `new` verb) imported `explain`, `introspect`, `validate` at module level | it imports `archetypes`, `authoring_facts`, `authoring_contracts`. `validate` (the profile-set re-check) is imported inside that function. A cold import of `build` loads 8 `jaato_server` modules and no introspection |
+| `new` parsed jaato-server's SOURCE with `ast` for provider contracts (27 provider `__init__.py`) and env vars (~630 modules): nothing in `sys.modules`, and nothing on disk in an SDK-only install | `scaffold/authoring_contracts.py` answers from the live tree when `introspect` imports and the provider directory exists, and from `authoring_snapshot.json` (~32 KB, only the fields `build` reads) otherwise |
+| `workspace_profile_set` and the profile `env:` facts lived in `explain` | `scaffold/authoring_facts.py`; `explain` re-exports them |
+| `subagent.config` loaded the whole subagent plugin through an eager package `__init__`, and `jaato_runtime` (provider loading, token accounting, telemetry) to find a premium directory | the `__init__` is lazy (`__getattr__`); the helper is `shared/premium_content.py`, re-exported by `jaato_runtime`. A cold import of `config` loads 10 modules instead of 20 |
+
+The snapshot is regenerated with
+`python -m jaato_server.shared.scaffold.authoring_contracts --write`, which
+`.githooks/pre-commit` runs and stages on any commit touching non-test
+jaato-server source (`git config core.hooksPath .githooks` once per clone). It
+holds every `provider:<x>` env var and every other var with a non-empty
+default, because that is what `_compose_env` can render; an edit elsewhere
+does not change it. A snapshot is never generated from itself.
+
+`__main__.py` still imports `explain` and `validate` at module level: the
+`explain` scope table is built from them, and splitting the CLI shell belongs
+to the move itself.
+
+Guard: `jaato_server/shared/tests/test_authoring_does_not_load_introspection_1267.py`,
+five reversions. Import footprints are measured in a fresh interpreter. The
+snapshot must equal the live projection, and `new` must write the same
+`.env` and set-profile text for every provider from either source.
 
 ### An Integration Declares Its Own Paths, and Its Own Harness
 
@@ -8154,6 +8260,53 @@ a test that stubbed enough of a server to run it would be asserting the
 stubs — and what the defect was is a missing call site, which is exactly
 what a walk of the call sites can answer.
 
+### Decisions Saved From the Copy Nobody Changed (#1412)
+
+#706 made the operator's runtime permission decisions survive an unload:
+`permissions allow|deny|default` and an `always` / `never` answer.
+`PermissionPlugin` declares `TRAIT_SESSION_PERSISTENT`, and the session
+manager's generic loop saved `get_persistence_state()` into
+`metadata['plugin_states']` and called `restore_persistence_state()` on a
+revive. Both through the **daemon's** registry, which is the copy the section
+above is about: on a runner-served session it decides nothing and nothing
+mutates it.
+
+| Step | Before | Now |
+|---|---|---|
+| save | the daemon's copy answered `None`, nothing was written | `session.get_permission_persistence` (control lane, in `_SESSION_READS`) asks the enforcer |
+| restore | into the daemon's copy; the runner came back on the profile's `ask` | `session.restore_permission_persistence` (control lane, in `NAMED_METHOD_HANDLERS`) into the enforcer, then `emit_permission_status()` from the runner's value |
+
+A reattach inside the #1106 unload grace kept the runner and lost nothing,
+which is why it read as intermittent. A real unload lost everything: an
+expired grace, a daemon restart, a `session.wake` from disk. A lost `never`
+is worse than a lost grant.
+
+| Rule | Why |
+|---|---|
+| **a failed ask keeps the last known snapshot** | `Session.permission_state` holds it (set from the record at revive, replaced by every answered ask). Writing nothing would erase a denial; #1355's rule for history, applied here. Logged at WARNING. An answered `None` (after `permissions clear`) is a decision and is written as no key |
+| **the restore runs after `server.initialize()`** | the runner's `session.bootstrap` has returned, so the enforcer's `initialize()` has loaded `permissions.json` and the snapshot layers on top, the order #706 required. It is the same place and shape as the conversation-budget restore, which is why an RPC was chosen over carrying the snapshot on `SessionInitEnvelope`: no envelope version, no second route for the daemon-local path |
+| **a pool slot cannot leak one session's decisions into the next** | `build_session_permission_plugin` (bootstrap Step 8) constructs a new `PermissionPlugin` on every bootstrap, and `permission` is not `TRAIT_SLOT_SCOPED`, so the next session's verbs reach a different object. `reset_for_next_session` runs at the outgoing session's end, before the restore, and does not touch the session rules anyway |
+| **daemon-local is unchanged** | with no `_runner_rpc` (embedded, standalone WS, legacy) the daemon's plugin is the enforcer and the loop saves and restores it as before |
+
+Decided, not inherited:
+
+- **Suspensions stay unpersisted**, per #706: they are time-scoped.
+- **Scoped subagent policies (#957) are not persisted.** A scoped policy is
+  keyed by the `permission_scope` a `JaatoSession` mints at construction, so
+  a revive has no key to bind a snapshot to. A revived subagent reinstalls
+  its policy from its own profile's `plugin_configs.permission` block; an
+  `always` answered for a subagent is lost on unload.
+
+Still open: the other `TRAIT_SESSION_PERSISTENT` plugins (`reliability`,
+`service_connector`) are saved and restored through the daemon registry
+the same way, and the `a` / `t` / `i` re-emit gap above.
+
+Guard: `jaato_server/server/tests/test_permission_decisions_survive_a_revive_1412.py`,
+five reversions. It drives a real `RunnerRPCClient` over a socketpair to a
+real `RunnerRPC`, with the enforcer built by the bootstrap's own function:
+decide through the command path on runner A, save, revive on runner B, and
+B enforces both decisions and announces `allow`.
+
 ### A Memory Store Nobody Could See From the Browser (#1232)
 
 The web client had no view of the session's memories. The only route was
@@ -9956,6 +10109,36 @@ the rules of the plugins the runner loads either way.
 Not verified here: no AppArmor kernel. The exec grants and the resolved-path
 reasoning are exercised as rendered strings, not against an enforcing host.
 
+### A Checkout the Notebook Does Not Import (#1413)
+
+#1322 keeps one process on the daemon's jaato: the notebook kernel, which is
+launched with the daemon's import dirs (`_kernel_argv`). So a cell's
+`import jaato_server`, `pytest.main([...])` or `importlib.reload` resolves to
+the daemon's install, whatever the workspace holds. A session developing
+jaato inside jaato ran `pip install -e ./jaato-server` (rc=0) and then spent
+several rounds on "the edit didn't land", because its in-cell tests ran the
+daemon's code. What the kernel imports is unchanged; the model is now told.
+
+`jaato_server/shared/jaato_self_shadowing.py` (stdlib-only) is the one
+answer. The workspace holds jaato when `jaato-server/jaato_server`,
+`jaato-sdk/jaato_sdk` or `jaato-premium/jaato_premium` (or `jaato_premium`)
+has an `__init__.py` at the root or in an immediate clone, or a workspace
+venv (the configured `workspace_venv`, `.jaato/tool-venv`, `.venv`) has an
+editable install of one of them (`direct_url.json`). A source that IS the
+package the daemon imports is not reported.
+
+| Surface | What it gains, only when the workspace holds jaato |
+|---|---|
+| the notebook boundary notice in the system prompt | one line: cells import the daemon's jaato from `<path>`; run tests with `!python -m pytest` or `cli` |
+| the first `notebook_execute` result of a kernel | the same line in `execution_boundary.notes` |
+| `get_environment(aspect="runtime")` | `notebook: {imports_daemon_jaato, daemon_paths, workspace_paths, note}`, and the note under `aspect="all"` |
+
+An ordinary workspace gets nothing, so its prompt-cache prefix is unchanged.
+Not done: a per-cell warning when a cell imports `jaato_server` or calls
+`pytest.main` (`_execute_code` is on the complexity ratchet). Guard:
+`jaato_server/shared/tests/test_notebook_discloses_the_daemons_jaato_1413.py`,
+four reversions.
+
 ### The Files Panel Asks Git What a Clone Ignores
 
 The workspace monitor filtered paths through `GitignoreParser`, which reads
@@ -11674,6 +11857,58 @@ cannot quietly disable redaction. All five vars leave the `AWAITING_TYPED_KEY`
 ratchet for a resolving `typed_key`.
 
 ## Coding Policies
+
+### Run What CI Runs Before Pushing (#1415)
+
+```bash
+.venv/bin/python scripts/check.py                # contract-guards + suite legs the diff touches
+.venv/bin/python scripts/check.py --reversions   # + meta-guard cases of changed guard modules
+.venv/bin/python scripts/check.py --all          # every pytest leg, as CI runs it
+.venv/bin/python scripts/check.py --list         # pre-flight + plan, run nothing
+```
+
+A session ran all 2,048 `server/tests`, reported green, and pushed past the
+complexity ratchet, which lives in the required `contract-guards` job it never
+ran; it also never ran the reversion meta-guard, and opened against a stale
+base. Each cost a review round. The list of "which checks to run" lived only in
+`.github/workflows/`, so every delegated session had to be told it file by
+file, and that list drifted.
+
+**The commands are read from the workflows, never restated.**
+`scripts/ci_workflows.py` is the ONE parser: `test_ci_runs_every_test_file.py`
+uses it to prove every test file is run by CI, and `scripts/check.py` uses it
+to decide what to run. Each command is a step's `run:` text with
+`${{ matrix.* }}` substituted, run under `bash --noprofile --norc -eo
+pipefail` with the invoking interpreter's `bin/` first on `PATH`. The only
+names in `check.py` are the two job ids that have a role (`contract-guards`
+always runs, `reversion-guard` is scoped), and it refuses to run if either
+leaves the workflows. `test_check_runs_what_ci_runs.py` (in `contract-guards`)
+asserts that the pytest invocations `--all` would run equal, as a multiset,
+the ones the coverage scan finds.
+
+| Mode | Runs |
+|---|---|
+| default | `contract-guards` in full, plus each suite leg whose SCOPE a changed file lies under |
+| `--reversions` | also the meta-guard, limited to the parametrized cases of changed guard modules that declare `REVERSIONS`, plus its two up-front checks (nodeid resolution, import failures). No hook in the meta-guard: its ids are `<module>::<test>`, so the nodeids are picked from a collection pass |
+| `--all` | every pytest leg of every commit-triggered workflow, `reversion-guard` included |
+
+"Changed" is everything that differs from the merge base with `origin/main`:
+commits, uncommitted edits and untracked files. A leg's scope is each path it
+hands pytest, with `<pkg>/tests/` widened to `<pkg>/` so a source change
+selects the leg that tests it (not widened to a distribution root holding
+another leg's scope, e.g. `jaato-server/`). That selection is a heuristic;
+`--all` is the claim the guard backs, and CI is the authority over both
+(CI installs `[all]`, has AppArmor, runs Linux on 3.12).
+
+The pre-flight fetches the base (`--no-fetch` to skip) and WARNS when HEAD is
+behind it or when `git merge-tree --write-tree` finds a conflict.
+`--show-commit` prints each commit on the branch with its message beside its
+`--stat`, and the uncommitted files separately, so a message describing
+changes that are not in the commit is visible before pushing. It exits with
+the first failing leg's status after printing that leg's name as the checks
+list shows it (`suite (shared/tests)`). The Node jobs (`web-client`,
+`web-coder-server`) have no pytest step and are not run; they are named, with
+a note when the diff touches their directories.
 
 ### Cyclomatic Complexity
 

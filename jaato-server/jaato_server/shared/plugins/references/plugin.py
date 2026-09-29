@@ -16,6 +16,7 @@ Enrichment Support:
 """
 
 import json
+from jaato_sdk.framework_note import framework_note
 import logging
 import os
 import re
@@ -5384,7 +5385,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         contents = source.contents
         sections: List[str] = []
 
-        sections.append(f"---\n**Reference Context: {source.name}**")
+        sections.append(
+            "---\n" + framework_note(f"**Reference Context: {source.name}**"))
 
         # Templates annotation
         if contents.templates:
@@ -5394,7 +5396,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             )
             if template_files:
                 lines = [
-                    "**Mandatory Templates** — Use `renderTemplateToFile` with these template IDs:"
+                    "**Templates** — this reference ships these; "
+                    "`renderTemplateToFile` renders them by id:"
                 ]
                 for tpl in template_files:
                     lines.append(f"  - `{tpl}`")
@@ -5408,7 +5411,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             )
             if policy_files:
                 lines = [
-                    "**Implementation Policies** — You must read and follow these constraints:"
+                    "**Implementation Policies** — this reference declares "
+                    "these constraints for work that uses it:"
                 ]
                 for pol in policy_files:
                     lines.append(f"  - `{os.path.join(policies_dir, pol)}`")
@@ -5432,7 +5436,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             validation_files = self._list_subfolder_files(validation_dir)
             if validation_files:
                 lines = [
-                    "**Post-Implementation Validation** — You MUST run these checks after implementation:"
+                    "**Post-Implementation Validation** — this reference "
+                    "provides these checks to run after implementing:"
                 ]
                 for val in validation_files:
                     lines.append(f"  - `{os.path.join(validation_dir, val)}`")
@@ -5641,7 +5646,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     source.to_instruction() for source in new_mentioned_sources
                 ]
                 reference_block = (
-                    "\n\n---\n**Referenced Sources:**\n\n" +
+                    "\n\n---\n" + framework_note("**Referenced Sources:**")
+                    + "\n\n" +
                     "\n\n".join(instructions) +
                     "\n---"
                 )
@@ -5757,7 +5763,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
                     hint_block = (
                         "\n\n---\n"
-                        "**Reference sources available** — use `selectReferences` with IDs or tags to select:\n\n" +
+                        + framework_note(
+                            "**Reference sources available** — use "
+                            "`selectReferences` with IDs or tags to select:")
+                        + "\n\n" +
                         "\n".join(hint_lines) +
                         "\n---"
                     )

@@ -361,7 +361,6 @@ def _configure_runtime_plugins(
         caller, which wraps it as ``BootstrapError("plugins", ...)``.
     """
     from jaato_server.shared.bootstrap_timing import BootstrapTimer
-    from jaato_server.shared.plugins.permission.plugin import PermissionPlugin
     from jaato_server.shared.plugins.registry import PluginRegistry
 
     timer = BootstrapTimer()
@@ -517,21 +516,9 @@ def _configure_runtime_plugins(
     # merge: top-level keys from the profile (most commonly ``policy``)
     # replace defaults.  Mirrors daemon-side ``permission_init_config.update(...)``.
     with timer.stage("permission_init"):
-        permission_init_config: Dict[str, Any] = {
-            "channel_type": "queue",
-            "channel_config": {"use_colors": False},
-            "workspace_path": workspace_path,
-            "policy": {
-                "defaultPolicy": "ask",
-                "whitelist": {"tools": [], "patterns": []},
-                "blacklist": {"tools": [], "patterns": []},
-            },
-        }
-        profile_perm_config = envelope.plugin_configs.get("permission")
-        if profile_perm_config:
-            permission_init_config.update(profile_perm_config)
-        permission_plugin = PermissionPlugin()
-        permission_plugin.initialize(permission_init_config)
+        permission_plugin = build_session_permission_plugin(
+            envelope, workspace_path,
+        )
 
     # Step 9: wire onto the runtime, with a ledger of the runner's own.
     # ``None`` here was the reason a runner-served session -- the default
@@ -1467,6 +1454,42 @@ def _maybe_install_child_callback(
             "than running with the escape vector open.  Operator "
             "escape hatch: JAATO_RUNNER_DISABLE_CONFINE=1.",
         ) from exc
+
+
+def build_session_permission_plugin(
+    envelope: SessionInitEnvelope, workspace_path: Optional[str],
+) -> Any:
+    """Construct and initialize THIS session's permission enforcer (Step 8).
+
+    A NEW ``PermissionPlugin`` on every bootstrap, never one carried over:
+    a pool slot serves several sessions in turn, and the runtime decisions a
+    session made (``permissions allow|deny|default``, ``always`` /
+    ``never`` answers) belong to that session alone.  A revived session gets
+    its own back afterwards, through ``session.restore_permission_
+    persistence`` (#1412) -- after ``initialize()`` here has loaded
+    ``permissions.json``, which is the order #706 requires.
+
+    The default policy mirrors the daemon side; a profile's
+    ``plugin_configs.permission`` block (Phase 4 §C) replaces top-level keys.
+    """
+    from jaato_server.shared.plugins.permission.plugin import PermissionPlugin
+
+    permission_init_config: Dict[str, Any] = {
+        "channel_type": "queue",
+        "channel_config": {"use_colors": False},
+        "workspace_path": workspace_path,
+        "policy": {
+            "defaultPolicy": "ask",
+            "whitelist": {"tools": [], "patterns": []},
+            "blacklist": {"tools": [], "patterns": []},
+        },
+    }
+    profile_perm_config = (envelope.plugin_configs or {}).get("permission")
+    if profile_perm_config:
+        permission_init_config.update(profile_perm_config)
+    permission_plugin = PermissionPlugin()
+    permission_plugin.initialize(permission_init_config)
+    return permission_plugin
 
 
 def bootstrap_session(

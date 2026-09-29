@@ -718,6 +718,16 @@ class Session:
     # the ORIGINAL inputs; handing it an empty dict is the #787 defect.
     # NEVER a place for a credential -- see SessionState.agent_params.
     agent_params: Optional[Dict[str, str]] = None
+    #: The last KNOWN snapshot of this session's runtime permission
+    #: decisions (#1412) -- ``PermissionPlugin.get_persistence_state()`` as
+    #: the ENFORCER answered it.  Set from the record at revive and from
+    #: every successful ask at save.  It exists for the one case a save
+    #: cannot answer: the runner did not reply.  Writing nothing then would
+    #: erase a ``never`` the operator made, and a lost denial is worse than
+    #: a lost grant (#706), so the save re-persists this instead -- the
+    #: rule #1355 applies to history.  ``None`` = nothing decided (or never
+    #: learned).
+    permission_state: Optional[Dict[str, Any]] = None
     # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
     # ID stamped at session creation.  Consumed by
     # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
@@ -12631,21 +12641,11 @@ class SessionManager:
         # Restore TODO plugin state (agent-plan mapping, blocked steps)
         self._load_todo_state(server, session_dir)
 
-        # Generic plugin state restoration: iterate plugin_states saved by
-        # the generic persistence loop and call restore_persistence_state()
-        # on each plugin that implements it.
-        if state.metadata.get('plugin_states') and server.registry:
-            for plugin_name, plugin_state in state.metadata['plugin_states'].items():
-                plugin = server.registry.get_plugin(plugin_name)
-                if plugin and hasattr(plugin, 'restore_persistence_state'):
-                    try:
-                        plugin.restore_persistence_state(plugin_state)
-                        logger.debug(f"Restored persistence state for plugin: {plugin_name}")
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to restore persistence state for plugin "
-                            f"'{plugin_name}': {e}"
-                        )
+        # Generic plugin state restoration (see _restore_plugin_states:
+        # the permission snapshot goes to the ENFORCER, #1412).
+        restored_permission_state = self._restore_plugin_states(
+            server, state.metadata.get('plugin_states'),
+        )
 
         # Check for and recover from interrupted turn
         recovered_count = 0
@@ -12715,6 +12715,9 @@ class SessionManager:
             # denying them (defer-and-flush posture).  Cleared in
             # ``attach_session`` after emitting SessionRestoredEvent.
             restored_pending_attach=True,
+            # #1412: what was restored is the last known snapshot, so a save
+            # whose runner does not answer re-persists it, not nothing.
+            permission_state=restored_permission_state,
         )
 
         # #1157: a wake is not re-announced, and the ledger says so -- and
@@ -13061,6 +13064,163 @@ class SessionManager:
             return None
         return []
 
+    #: Plugins whose state ``_save_session`` persists through a dedicated
+    #: file of their own, and which the generic loop therefore skips.
+    _DEDICATED_PERSISTENCE_PLUGINS = frozenset({'subagent', 'todo'})
+
+    @staticmethod
+    def _runner_serves(server: Any) -> bool:
+        """Is the permission ENFORCER in a runner, rather than this process?
+
+        On a runner-served session -- the default -- the daemon's own
+        ``PermissionPlugin`` decides nothing: ``check_permission`` and every
+        ``permissions`` command reach the runner's copy (#1412, and CLAUDE.md
+        "A Policy the Enforcer Did Not Hold").  With no runner (embedded,
+        standalone WS, the legacy daemon-local path) the daemon's plugin IS
+        the enforcer and the pre-#1412 code is right.
+        """
+        return getattr(server, "_runner_rpc", None) is not None
+
+    def _collect_plugin_states(self, session: "Session") -> Dict[str, Any]:
+        """The ``metadata['plugin_states']`` a save writes.
+
+        Every exposed plugin implementing ``get_persistence_state()`` on the
+        DAEMON's registry, except the dedicated ones -- and, on a
+        runner-served session, except ``permission``, whose snapshot is
+        asked of the runner instead (:meth:`_runner_permission_state`).
+        The daemon's copy there was never mutated, so #706's loop wrote
+        nothing for it and every runtime decision was lost on unload.
+        """
+        server = session.server
+        plugin_states: Dict[str, Any] = {}
+        runner_served = self._runner_serves(server)
+        registry = getattr(server, "registry", None) if server else None
+        for plugin_name in (registry.list_exposed() if registry else []):
+            if plugin_name in self._DEDICATED_PERSISTENCE_PLUGINS:
+                continue
+            if runner_served and plugin_name == "permission":
+                continue
+            plugin = registry.get_plugin(plugin_name)
+            if not (plugin and hasattr(plugin, 'get_persistence_state')):
+                continue
+            try:
+                pstate = plugin.get_persistence_state()
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get persistence state for plugin "
+                    f"'{plugin_name}': {e}"
+                )
+                continue
+            if pstate:
+                plugin_states[plugin_name] = pstate
+        if runner_served:
+            pstate = self._runner_permission_state(session)
+            if pstate:
+                plugin_states["permission"] = pstate
+        return plugin_states
+
+    def _runner_permission_state(
+        self, session: "Session",
+    ) -> Optional[Dict[str, Any]]:
+        """The enforcer's permission snapshot, or the last one known.
+
+        Asks the runner (``session.get_permission_persistence``, control
+        lane).  An answer -- including ``None``, "nothing decided" -- is a
+        fact and replaces the cache.  A FAILED ask is not an answer: it
+        returns ``session.permission_state`` unchanged and logs at WARNING,
+        because writing nothing would silently erase a ``never`` the
+        operator made.  That is #1355's rule for history, applied here.
+        """
+        rpc = getattr(session.server, "_runner_rpc", None)
+        reader = getattr(
+            rpc, "session_get_permission_persistence_threadsafe", None,
+        )
+        if not callable(reader):
+            return session.permission_state
+        try:
+            state = reader(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001 -- keep the last good value
+            logger.warning(
+                "session %s: could not read the runner's permission "
+                "decisions (%s: %s); re-persisting the last known snapshot "
+                "rather than erasing it",
+                session.session_id, type(exc).__name__, exc,
+            )
+            return session.permission_state
+        session.permission_state = state
+        return state
+
+    def _restore_plugin_states(
+        self, server: Any, plugin_states: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Re-apply a revived record's ``plugin_states``; return the permission snapshot.
+
+        Runs after ``server.initialize()``, i.e. after the runner's
+        ``session.bootstrap`` returned, so the enforcer's ``initialize()``
+        has loaded ``permissions.json`` and the snapshot layers on top of
+        it -- the order #706 required.  On a runner-served session the
+        ``permission`` entry goes to the runner (#1412); every other entry,
+        and ``permission`` on a daemon-local session, goes to the daemon's
+        registry as before.
+
+        Returns the persisted permission snapshot whatever became of the
+        restore, so the revived ``Session`` knows it as the last known
+        value: a restore that failed must not lead the next save to erase
+        the decisions from the record as well.
+        """
+        if not plugin_states:
+            return None
+        permission_state = plugin_states.get("permission")
+        runner_served = self._runner_serves(server)
+        for plugin_name, plugin_state in plugin_states.items():
+            if runner_served and plugin_name == "permission":
+                self._restore_runner_permission_state(server, plugin_state)
+                continue
+            registry = getattr(server, "registry", None)
+            plugin = registry.get_plugin(plugin_name) if registry else None
+            if not (plugin and hasattr(plugin, 'restore_persistence_state')):
+                continue
+            try:
+                plugin.restore_persistence_state(plugin_state)
+                logger.debug(f"Restored persistence state for plugin: {plugin_name}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to restore persistence state for plugin "
+                    f"'{plugin_name}': {e}"
+                )
+        return permission_state if isinstance(permission_state, dict) else None
+
+    @staticmethod
+    def _restore_runner_permission_state(server: Any, state: Any) -> None:
+        """Hand the snapshot to the runner's plugin, then announce the result.
+
+        ``PermissionStatusEvent`` is emitted through
+        ``server.emit_permission_status()``, which asks the runner, so the
+        status bar shows the restored default as the ENFORCER holds it.  A
+        failed restore is logged at WARNING and announces nothing new.
+        """
+        if not isinstance(state, dict):
+            return
+        restorer = getattr(
+            server._runner_rpc,
+            "session_restore_permission_persistence_threadsafe", None,
+        )
+        if not callable(restorer):
+            return
+        try:
+            restorer(state, timeout=5.0)
+        except Exception as exc:  # noqa: BLE001 -- best-effort, but audible
+            logger.warning(
+                "could not restore the persisted permission decisions into "
+                "the runner (%s: %s); the session runs on its profile's "
+                "policy until they are made again",
+                type(exc).__name__, exc,
+            )
+            return
+        emit_status = getattr(server, "emit_permission_status", None)
+        if callable(emit_status):
+            emit_status()
+
     def _save_session(self, session: Session) -> bool:
         """Save a session to disk.
 
@@ -13148,23 +13308,8 @@ class SessionManager:
                 # and collect state from any that implement get_persistence_state().
                 # Plugins with dedicated persistence (subagent, todo) are skipped
                 # since they're handled above with their own file-based storage.
-                plugin_states = {}
-                _DEDICATED_PLUGINS = {'subagent', 'todo'}
-                if session.server and session.server.registry:
-                    for plugin_name in session.server.registry.list_exposed():
-                        if plugin_name in _DEDICATED_PLUGINS:
-                            continue
-                        plugin = session.server.registry.get_plugin(plugin_name)
-                        if plugin and hasattr(plugin, 'get_persistence_state'):
-                            try:
-                                pstate = plugin.get_persistence_state()
-                                if pstate:
-                                    plugin_states[plugin_name] = pstate
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to get persistence state for plugin "
-                                    f"'{plugin_name}': {e}"
-                                )
+                # The permission snapshot comes from the ENFORCER (#1412).
+                plugin_states = self._collect_plugin_states(session)
                 if plugin_states:
                     subagent_metadata['plugin_states'] = plugin_states
 

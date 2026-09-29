@@ -986,13 +986,8 @@ class InProcessClient:
         should, _ = try_nudge(MAX_COMPLETION_NUDGES)
         if not should:
             return None
-        return (
-            "Your session is about to end without calling `signal_completion`. "
-            "The loop cannot close cleanly until you either continue the work "
-            "with another tool call, or call `signal_completion` per your "
-            "profile's payload schema with the appropriate decision and "
-            "evidence. Please proceed with one of those two paths."
-        )
+        from jaato_server.shared.completion_nudge import COMPLETION_NUDGE_TEXT
+        return COMPLETION_NUDGE_TEXT
 
     async def respond_to_permission(self, request_id: str, response: str) -> None:
         # Resolve the parked permission request (set by the InProcessChannel on
