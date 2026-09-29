@@ -3,9 +3,21 @@
 Status: **brainstorm, not a spec.** Nothing here is scheduled, and §5 is
 deliberately the only section that says what the framework would owe.
 
-Tree claims verified at `afd067a` (2026-09-17). Re-verify file:line
-citations before relying on them — two of the three documents this one
-builds on record being overtaken by the tree while they were written.
+Tree claims verified at `afd067a` (2026-09-17), **re-verified at
+`781f0ef` (2026-09-29)**. Re-verify file:line citations before relying on
+them — two of the three documents this one builds on record being
+overtaken by the tree while they were written, and this one was too:
+three of its "not built" claims were closed by work that arrived for
+other reasons, and are corrected in place below rather than left
+standing. That is §4's own argument turned on this document — a claim
+true at one commit, read at another.
+
+| Since 2026-09-17 | Where |
+|---|---|
+| the transitive expansion gained a **cost** bound, and the diagnosis was measured | §5, Seam 3 |
+| memory gained **model and curator provenance** (EU AI Act Art. 15(4), #1123) | §5, Seam 4 |
+| the binding became **durably stamped** | §8 |
+| `ReferenceSource` is **unchanged** — no provenance, no links | §5, Seams 3 and 4 |
 
 Prior art in this repo, and the relationship to each:
 
@@ -290,13 +302,34 @@ both land on the same dataclass:
    | **effectively local-file only** | an edge needs `_get_reference_content` to return a body, so URL sources pay a network read and MCP sources largely do not participate |
 
    The one that bites in practice is none of those individually. It is
-   that **expansion is bounded in depth and not in cost**: depth 10, any
+   that **expansion was bounded in depth and not in cost**: depth 10, any
    fan-out, no edge weights, no relevance ranking, no token budget. In a
    densely cross-referencing catalog, *pull in the neighbourhood* is
    *pull in the catalog*. Depth 10 is a runaway guard, not a relevance
    bound — the same distinction §7 draws about the index, and the same
    one `CLAUDE.md` draws about `max_completion_nudges` being a per-turn
    and not a per-session budget.
+
+   **That half is closed, and was measured rather than argued** (#1131,
+   *A Guard That Only Binds When Nothing Needs Bounding*). On a 200-entry
+   catalog, varying only mentions per document: out-degree 1 resolves 4
+   references, 2 resolves 147, and **3 resolves all 200** — so the depth
+   guard binds only on the one shape that never needed bounding, because
+   depth is a logarithmic control over an exponential quantity. The fix
+   is `max_transitive_references` (**default unbounded**, plus a WARNING
+   once per session at 50+, because capping by default would silently cut
+   neighbourhoods every existing workspace relies on), a sorted frontier
+   (with a cap, set-iteration order decides WHICH references survive —
+   six of 25 differed across `PYTHONHASHSEED`), a 130x faster matcher,
+   and a `truncated` record carrying no fabricated "dropped" count.
+
+   **What remains open is the typed half**, and #1131 states this
+   section's finding back in its own words — *"an edge is a MENTION, not
+   a link: nobody authors it"* — while explicitly deferring the
+   refinement: *"deliberately not done: ranking the frontier."* A count
+   bound is blunt where an edge type is not: it cuts by arrival order
+   where `rel` would cut by meaning. So the ask below stands, now with
+   measurement behind it rather than argument.
 
    **The ask is a `links` field with a small closed `rel` vocabulary**,
    and inference is *kept* beside it: an inferred edge can never go
@@ -345,9 +378,25 @@ both land on the same dataclass:
    answered by git. It stops being coherent the moment an agent writes
    one, which is the whole wikiLLM turn.
 
-   Memory is the contrast and the cautionary tale. It persists
-   `source_agent` and `source_session` (`memory/models.py:104-105`,
-   `storage.py:117` writes the whole dataclass with `asdict`) — and that
+   Memory is the contrast and the cautionary tale, and the contrast has
+   **widened since this was written**. It persists `source_agent` and
+   `source_session` (`storage.py` writes the whole dataclass with
+   `asdict`), and since #1123 also `generated_by` — `{kind, provider,
+   model, session_id, agent_id}`, minted by `ai_generated_by` and
+   resolved from `JaatoSession._model_provenance`, the one definition —
+   and `curated_by`, stamped on every promotion path and **cleared on
+   demotion**, because an approval that was withdrawn must not keep
+   reading as one. Four provenance fields against a reference's zero.
+
+   Its reasoning converged with §8 independently, which is the strongest
+   argument that the shape is right: *"a SECOND field rather than an
+   overwrite of `generated_by`: who wrote it and who approved it are two
+   facts, and collapsing them loses the one an auditor asks for"*, and
+   *"stamped by the PLUGIN, never by the model — provenance a subject
+   asserts about itself is not provenance"*. An AST guard fails any
+   future writer of `maturity` that does not stamp.
+
+   The cautionary half is unchanged, and that
    field was **null for every cascade session** after PR-196, because the
    registry-shared plugin read whichever sibling bootstrapped last, so
    one sibling's id leaked into another's memories and the runner-side
@@ -582,17 +631,35 @@ populated from `SessionInitEnvelope.created_by`
 
 **And exactly one thing must NOT be symmetric with its neighbour.**
 `get_session_env` falls back to `os.environ`, correctly — an env var has
-a legitimate ambient source. **A user identity has none.** Giving
-`get_session_user()` any env fallback would relocate the
-`_resolve_telemetry_user_id` hole (`jaato_session.py:1603`, whose
-precedence drops to `JAATO_TELEMETRY_USER_ID` from the per-session env)
-into the SDK, where it would look sanctioned — a workspace `.env` forging
-authorship on a shared knowledge artifact. So: no fallback, `None`
-outside session context, and absence means *the transport authenticated
-nobody*, never *guess*. Positive evidence only, the posture #1014 and
-#1023 take about confinement labels. Telemetry keeps its env fallback,
-which is legitimate there and is the whole reason the two accessors must
-not be the same function.
+a legitimate ambient source. **A user identity has none.** So:
+no fallback, `None` outside session context, and absence means *the
+transport authenticated nobody*, never *guess*. Positive evidence only,
+the posture #1014 and #1023 take about confinement labels.
+
+**Two corrections to an earlier draft of this paragraph**, kept rather
+than edited away because each was wrong in a way worth not repeating.
+
+It said an env fallback would let a workspace `.env` **forge
+authorship** through `_resolve_telemetry_user_id`. Overstated: that
+method's precedence is `self._client_user_id` FIRST and
+`JAATO_TELEMETRY_USER_ID` only after it, so the env can fill a vacancy
+and can never override an authenticated identity — and filling it is the
+intended behaviour for a keyless deployment that still wants attributable
+spend. What is true, and narrower, is that a provenance accessor must be
+able to say WHICH source answered: *a person the transport authenticated*
+and *a string the workspace chose about itself* carry different weight on
+a durable, shareable artifact, even though neither is a forgery.
+
+And it treated that env fallback as a hazard **of the attribution path**.
+It is not on that path at all. `EventSink.get_client_user` →
+`created_by` → `SessionInitEnvelope` → `set_client_user_id` →
+`_client_user_id` reads no environment anywhere: IPC derives it from
+`SO_PEERCRED`, WS from a bound ticket, and `set_client_user` on IPC is a
+deliberate no-op so a client cannot claim to be somebody else on the one
+transport where the claim is checkable. `_resolve_telemetry_user_id` is a
+*reader* that adds a fallback of its own — and not a telemetry-only one,
+since it also feeds the ledger's `response` record (#859). The
+conclusion survives both corrections; only its justification changes.
 
 **One ContextVar, one definition.** `jaato_server/shared/session_context.py` imports
 the trio rather than declaring its own (`:82-86`), because — its
@@ -609,9 +676,12 @@ approve this tool call* — and comes from the permission decision, where
 answering both would re-perform exactly the collapse this section exists
 to prevent.
 
-The binding is the one that is genuinely new: `_observe_binding_usage`
-has `(provider, model, tier)` but only as per-response spend, stamped on
-nothing durable.
+**The binding is no longer the missing one.** When this was written
+`_observe_binding_usage` had `(provider, model, tier)` only as
+per-response spend, stamped on nothing durable. #1123 closed that:
+`JaatoSession._model_provenance` is the one definition of the stamp, and
+`Memory.generated_by` persists it. So §8's binding axis exists and has a
+reader — on memory. On a reference it still has neither, which is Seam 4.
 
 **What it buys** is a promotion rule the current model cannot express at
 all: a **human-witnessed** claim clears a lower notability bar. One
