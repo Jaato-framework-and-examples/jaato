@@ -573,7 +573,7 @@ export function emptyMemories(): MemoriesState {
 
 /** The Proposals section before anything was asked. */
 export function emptyReferenceClaims(): ReferenceClaimsState {
-  return { rows: [], status: "idle", error: null, unreadable: [], mayCurate: null, expanded: null, busy: {}, notice: null };
+  return { rows: [], status: "idle", error: null, unreadable: [], mayCurate: null, expanded: null, busy: {}, notice: null, bundles: [] };
 }
 
 /** The Diagnostics section before anything was asked (and after a session change). */

@@ -83,8 +83,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_ROUTER,
-        find="            may_curate=may_curate(self._workspace_owner(workspace), user_id)))\n",
-        replace="            may_curate=True))\n",
+        find="            may_curate=may_curate(self._workspace_owner(workspace), user_id),\n",
+        replace="            may_curate=True,\n",
         because=(
             "every connection is told it may curate, so a client offers "
             "Promote to a user the daemon then refuses"

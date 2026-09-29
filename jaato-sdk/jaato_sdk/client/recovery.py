@@ -884,10 +884,12 @@ class IPCRecoveryClient:
         return await self._memory_client("list_reference_claims").list_reference_claims(
             timeout=timeout)
 
-    async def promote_reference_claim(self, claim_id: str, *, timeout: float = 10.0):
+    async def promote_reference_claim(
+        self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
+    ):
         """See :meth:`IPCClient.promote_reference_claim`."""
         return await self._memory_client("promote_reference_claim").promote_reference_claim(
-            claim_id, timeout=timeout)
+            claim_id, bundle=bundle, timeout=timeout)
 
     async def dismiss_reference_claim(self, claim_id: str, *, timeout: float = 10.0):
         """See :meth:`IPCClient.dismiss_reference_claim`."""

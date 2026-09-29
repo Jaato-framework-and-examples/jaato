@@ -10,13 +10,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useJaato, emptyReferenceClaims } from "@/store/store";
-import type { ReferenceClaimRow } from "@/store/types";
+import type { ReferenceBundleOption, ReferenceClaimRow } from "@/store/types";
 
-const promote = vi.fn(async (_id: string) => true);
+const promote = vi.fn(async (_id: string, _bundle?: string) => true);
 const dismiss = vi.fn(async (_id: string) => true);
 vi.mock("@/app/referenceClaims", async (orig) => ({
   ...(await orig<typeof import("@/app/referenceClaims")>()),
-  promoteReferenceClaim: (id: string) => promote(id),
+  promoteReferenceClaim: (id: string, bundle?: string) => promote(id, bundle),
   dismissReferenceClaim: (id: string) => dismiss(id),
   refreshReferenceClaims: vi.fn(async () => undefined),
 }));
@@ -28,8 +28,8 @@ const row = (id: string, extra: Partial<ReferenceClaimRow> = {}): ReferenceClaim
   type: "local", path: `docs/${id}.md`, problems: [], ...extra,
 });
 
-function load(rows: ReferenceClaimRow[], mayCurate: boolean) {
-  useJaato.setState({ sessionId: "s1", referenceClaims: { ...emptyReferenceClaims(), rows, status: "loaded", mayCurate } });
+function load(rows: ReferenceClaimRow[], mayCurate: boolean, bundles: ReferenceBundleOption[] = []) {
+  useJaato.setState({ sessionId: "s1", referenceClaims: { ...emptyReferenceClaims(), rows, status: "loaded", mayCurate, bundles } });
 }
 
 beforeEach(() => { promote.mockClear(); dismiss.mockClear(); });
@@ -55,7 +55,23 @@ describe("ProposalsPanel", () => {
     load([row("a")], true);
     render(<ProposalsPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Promote proposal Doc a" }));
-    expect(promote).toHaveBeenCalledWith("c-a");
+    expect(promote).toHaveBeenCalledWith("c-a", "");
+  });
+
+  it("offers no bundle selector when the workspace has no sub-bundle", () => {
+    load([row("a")], true);
+    render(<ProposalsPanel />);
+    expect(screen.queryByRole("combobox", { name: "Promote proposal Doc a into" })).toBeNull();
+  });
+
+  it("promotes into the bundle chosen, and marks the indexed one", () => {
+    load([row("a")], true, [{ name: "ops", indexed: true, model: "m" }, { name: "notes", indexed: false }]);
+    render(<ProposalsPanel />);
+    const select = screen.getByRole("combobox", { name: "Promote proposal Doc a into" }) as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["catalog", "ops (indexed)", "notes"]);
+    fireEvent.change(select, { target: { value: "ops" } });
+    fireEvent.click(screen.getByRole("button", { name: "Promote proposal Doc a" }));
+    expect(promote).toHaveBeenCalledWith("c-a", "ops");
   });
 
   it("a claim promotion would refuse says why and cannot be promoted", () => {

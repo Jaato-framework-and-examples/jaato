@@ -8,5 +8,6 @@
   "error": "",
   "claims": [],
   "unreadable": [],
-  "may_curate": false
+  "may_curate": false,
+  "bundles": []
 }

@@ -1,6 +1,9 @@
 /**
  * The rail's Proposals section: reference CLAIMS agents proposed with
  * ``proposeReference``, and -- for the workspace owner -- Promote / Dismiss.
+ * When the workspace has sub-bundles, Promote has a selector naming where
+ * the entry goes (the catalog root by default); an indexed bundle is
+ * reconciled by the daemon and the notice says if its index was not.
  *
  * The data and every action live in ``app/referenceClaims.ts``; this
  * component draws the store slice.  What it shows, per claim:
@@ -25,7 +28,7 @@
  */
 import { useEffect, useState } from "react";
 import { useJaato } from "@/store/store";
-import type { ReferenceClaimRow } from "@/store/types";
+import type { ReferenceBundleOption, ReferenceClaimRow } from "@/store/types";
 import {
   describeClaimLink,
   describeClaimOrigin,
@@ -42,10 +45,13 @@ function when(ts: unknown): string {
   return Number.isNaN(d.getTime()) ? ts : d.toISOString().slice(0, 16).replace("T", " ");
 }
 
-export function ProposalRow({ row, mayCurate }: { row: ReferenceClaimRow; mayCurate: boolean }) {
+export function ProposalRow({ row, mayCurate, bundles = [] }: {
+  row: ReferenceClaimRow; mayCurate: boolean; bundles?: ReferenceBundleOption[];
+}) {
   const expanded = useJaato((s) => s.referenceClaims.expanded === row.claim_id);
   const busy = useJaato((s) => s.referenceClaims.busy[row.claim_id]);
   const [confirmDismiss, setConfirmDismiss] = useState(false);
+  const [bundle, setBundle] = useState("");
   const title = row.name || row.id;
   const blocked = row.problems.length > 0;
   const witnessed = !!row.origin?.witnessed_by;
@@ -105,7 +111,21 @@ export function ProposalRow({ row, mayCurate }: { row: ReferenceClaimRow; mayCur
       )}
       {mayCurate && (
         <div className="pl-6 pb-2 flex flex-wrap gap-1.5" aria-label={`Curate proposal ${row.claim_id}`}>
-          <button type="button" disabled={!!busy || blocked} onClick={() => { void promoteReferenceClaim(row.claim_id); }} className="btn btn-sm btn-steel" aria-label={`Promote proposal ${title}`}>Promote</button>
+          {bundles.length > 0 && (
+            <select
+              value={bundle}
+              onChange={(e) => setBundle(e.target.value)}
+              disabled={!!busy || blocked}
+              aria-label={`Promote proposal ${title} into`}
+              className="font-mono text-[11px] bg-transparent border hairline px-1"
+            >
+              <option value="">catalog</option>
+              {bundles.map((b) => (
+                <option key={b.name} value={b.name}>{b.indexed ? `${b.name} (indexed)` : b.name}</option>
+              ))}
+            </select>
+          )}
+          <button type="button" disabled={!!busy || blocked} onClick={() => { void promoteReferenceClaim(row.claim_id, bundle); }} className="btn btn-sm btn-steel" aria-label={`Promote proposal ${title}`}>Promote</button>
           {confirmDismiss ? (
             <>
               <button type="button" disabled={!!busy} onClick={() => { setConfirmDismiss(false); void dismissReferenceClaim(row.claim_id); }} className="btn btn-sm btn-quiet text-error" aria-label={`Confirm dismiss proposal ${title}`}>Confirm dismiss</button>
@@ -141,7 +161,7 @@ export function ProposalsPanel() {
         <button type="button" onClick={() => { void refreshReferenceClaims(); }} className="btn btn-sm btn-quiet" aria-label="Refresh proposals">Refresh</button>
       </div>
       {r.status === "error" && <p className="m-0 py-1 text-error" role="alert">Could not read the proposals: {r.error}</p>}
-      {r.notice && <p className={`m-0 py-1 ${r.notice.error ? "text-error" : "text-text-muted"}`} role="status">{r.notice.text}</p>}
+      {r.notice && <p className={`m-0 py-1 ${r.notice.error ? "text-error" : r.notice.warning ? "text-warning" : "text-text-muted"}`} role="status">{r.notice.text}</p>}
       {r.mayCurate === false && r.rows.length > 0 && (
         <p className="m-0 py-1 text-[11px] text-text-muted">Only the owner of this workspace can promote or dismiss these.</p>
       )}
@@ -150,7 +170,7 @@ export function ProposalsPanel() {
       ) : r.rows.length === 0 ? (
         <p className="m-0 py-2 text-text-muted">{r.status === "loaded" ? "Nothing proposed." : ""}</p>
       ) : (
-        r.rows.map((row) => <ProposalRow key={row.claim_id} row={row} mayCurate={mayCurate} />)
+        r.rows.map((row) => <ProposalRow key={row.claim_id} row={row} mayCurate={mayCurate} bundles={r.bundles} />)
       )}
       {r.unreadable.length > 0 && (
         <p className="m-0 py-1 text-[11px] text-warning">

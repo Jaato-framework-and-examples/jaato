@@ -25,7 +25,7 @@
 import { EventTypeValue, MIN_REFERENCE_CURATION_PROTOCOL, isProtocolCompatible, type JaatoClient, type JaatoEvent } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
 import { getClient, isConnected } from "@/sdk/connection";
-import type { ReferenceClaimRow, ReferenceClaimsState } from "@/store/types";
+import type { ReferenceBundleOption, ReferenceClaimRow, ReferenceClaimsState } from "@/store/types";
 
 /** The tool whose success means a claim was written. */
 export const PROPOSE_TOOL = "proposeReference";
@@ -47,6 +47,7 @@ export function refusalText(category: string | undefined, error: string | undefi
     case "not_owner": return "Only the owner of this workspace can promote or dismiss proposals.";
     case "not_found": return "That proposal no longer exists -- the list has been refreshed.";
     case "collision": return "A reference with that id is already in the catalog.";
+    case "unknown_bundle": return `There is no such bundle: ${error || "the list has been refreshed."}`;
     case "invalid_claim": return `The proposal cannot be promoted: ${error || "it is not valid any more."}`;
     case "unsafe_path": return `Refused: ${error || "a path leaves the workspace."}`;
     case "no_workspace": return "This connection has no workspace.";
@@ -95,6 +96,27 @@ export function describeClaimLink(link: { to: string; rel: string; note?: string
   return link.note ? `${rel} ${link.to} — ${link.note}` : `${rel} ${link.to}`;
 }
 
+/**
+ * The caveat a promotion carries about its destination bundle's vector
+ * index, or ``null`` when there is none to report.  ``updated`` / ``clean``
+ * / ``none`` (no index) say nothing; anything else means the reference is
+ * in the catalog but similarity matching cannot find it yet.
+ */
+export function reconcileCaveat(reconcile: string | undefined, detail: string | undefined): string | null {
+  if (!reconcile || reconcile === "updated" || reconcile === "clean" || reconcile === "none") return null;
+  const why = detail ? ` (${detail})` : "";
+  switch (reconcile) {
+    case "busy": return `The bundle's vector index is being updated by something else, so this reference has no vector yet${why}.`;
+    case "unavailable": return `The bundle's vector index was not updated${why}; similarity matching will not find this reference until it is.`;
+    default: return `Updating the bundle's vector index failed${why}; similarity matching will not find this reference until it is.`;
+  }
+}
+
+/** Where a promotion wrote, in words: ``the catalog`` or ``bundle ops``. */
+export function promotionTarget(bundle: string | undefined): string {
+  return bundle ? `bundle ${bundle}` : "the catalog";
+}
+
 /** Whether promoting a claim with this edge changes what OTHER requests get. */
 export function isRoutingLink(link: { rel: string }): boolean {
   return link.rel === "supersedes";
@@ -133,6 +155,7 @@ export async function refreshReferenceClaims(): Promise<void> {
       unreadable: (answer.unreadable ?? []).map(String),
       mayCurate: typeof answer.may_curate === "boolean" ? answer.may_curate : null,
       expanded: r.expanded && ids.has(r.expanded) ? r.expanded : null,
+      bundles: ((answer as { bundles?: unknown }).bundles ?? []) as ReferenceBundleOption[],
     }));
   } catch (err) {
     if (!current()) return;
@@ -167,15 +190,21 @@ function withoutKey<T>(rec: Record<string, T>, key: string): Record<string, T> {
 async function curate(
   claimId: string,
   action: "promote" | "dismiss",
-  run: (client: JaatoClient) => Promise<{ ok?: boolean; category?: string; error?: string; reference_id?: string }>,
+  run: (client: JaatoClient) => Promise<{
+    ok?: boolean; category?: string; error?: string; reference_id?: string;
+    bundle?: string; reconcile?: string; reconcile_detail?: string;
+  }>,
 ): Promise<boolean> {
   patch((r) => ({ busy: { ...r.busy, [claimId]: action }, notice: null }));
   let ok = false;
   try {
     const answer = await run(getClient());
     ok = answer.ok !== false;
-    const done = action === "promote" ? `Promoted into the catalog as ${answer.reference_id || "a reference"}.` : "Dismissed.";
-    patch({ notice: ok ? { text: done } : { text: refusalText(answer.category, answer.error), error: true } });
+    const caveat = action === "promote" ? reconcileCaveat(answer.reconcile, answer.reconcile_detail) : null;
+    const done = action === "promote"
+      ? `Promoted into ${promotionTarget(answer.bundle)} as ${answer.reference_id || "a reference"}.${caveat ? ` ${caveat}` : ""}`
+      : "Dismissed.";
+    patch({ notice: ok ? { text: done, warning: !!caveat } : { text: refusalText(answer.category, answer.error), error: true } });
   } catch (err) {
     patch({ notice: { text: err instanceof Error ? err.message : String(err), error: true } });
   } finally {
@@ -185,9 +214,14 @@ async function curate(
   return ok;
 }
 
-/** Promote: the daemon writes the catalog entry and removes the claim. */
-export function promoteReferenceClaim(claimId: string): Promise<boolean> {
-  return curate(claimId, "promote", (c) => c.promoteReferenceClaim(claimId));
+/**
+ * Promote: the daemon writes the catalog entry and removes the claim.
+ * ``bundle`` names a sub-bundle from the listing (``""``: the catalog root);
+ * an indexed one is reconciled by the daemon, which may take a while the
+ * first time the session loads its embedding model.
+ */
+export function promoteReferenceClaim(claimId: string, bundle = ""): Promise<boolean> {
+  return curate(claimId, "promote", (c) => c.promoteReferenceClaim(claimId, bundle ? { bundle } : {}));
 }
 
 /** Dismiss: the claim file is removed; the catalog is not touched. */

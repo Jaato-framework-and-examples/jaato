@@ -546,6 +546,17 @@ export interface ReferenceClaimRow {
   warnings?: string[];
 }
 
+/**
+ * A workspace-tier sub-bundle a promotion may name (the listing's
+ * ``bundles``).  ``indexed`` bundles have a vector index the daemon
+ * reconciles after the promotion; ``model`` is the index's embedding model.
+ */
+export interface ReferenceBundleOption {
+  name: string;
+  indexed: boolean;
+  model?: string;
+}
+
 /** One declared edge on a reference claim; ``note`` is model-written text. */
 export interface ReferenceClaimLink {
   to: string;
@@ -572,8 +583,13 @@ export interface ReferenceClaimsState {
   expanded: string | null;
   /** Claim id -> the action in flight on it, so its buttons disable. */
   busy: Record<string, string>;
-  /** One-line outcome of the last action. */
-  notice: { text: string; error?: boolean } | null;
+  /**
+   * One-line outcome of the last action.  ``warning``: it succeeded with a
+   * caveat (promoted, but the bundle's vector index was not updated).
+   */
+  notice: { text: string; error?: boolean; warning?: boolean } | null;
+  /** The sub-bundles a promotion may name; empty when the workspace has none. */
+  bundles: ReferenceBundleOption[];
 }
 
 /**

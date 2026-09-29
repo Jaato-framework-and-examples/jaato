@@ -99,7 +99,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_CURATION,
-        find='        out["path"] = os.path.relpath(target, os.path.join(root, CATALOG_REL)).replace(os.sep, "/")\n',
+        find='        out["path"] = os.path.relpath(target, os.path.join(root, dest_rel)).replace(os.sep, "/")\n',
         replace="        pass\n",
         because=(
             "the catalog loader resolves a relative path against the "

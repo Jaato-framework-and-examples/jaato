@@ -578,7 +578,7 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
-- `reference.promote <claim_id>` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry, or drop it (→ `ReferenceCurationResultEvent`; protocol 1.32, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-132)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
+- `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.32, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-132)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
@@ -4240,9 +4240,34 @@ AS RECORDED: it is as trustworthy as the rule deciding who else may write
 the claims directory (above: only the tool on a confined host, anything on
 an unconfined one); `curated_by` is the stamp the daemon makes itself.
 
-Not done: promotion into a named sub-bundle (it would need the bundle
-manifest updated). A running session sees the new entry at its next
-catalog reload.
+**Into a named bundle, and its vector index.** `reference.promote
+<claim_id> --bundle <name>` (or `ReferenceCurationRequest.bundle`) writes
+the entry into a workspace-tier sub-bundle instead of the catalog root;
+`ReferenceClaimsEvent.bundles` lists the ones a promotion may name
+(`{name, indexed, model?}`), and the web Proposals panel offers them
+beside Promote. When the destination bundle (root included) has a vector
+index, the new entry has no row in it, so the promotion reconciles it and
+reports how (`ReferenceCurationResultEvent.reconcile`: `none`, `updated`,
+`clean`, `busy`, `unavailable`, `error`, with `reconcile_detail`). The
+reference is placed whatever that says.
+
+| Piece | Where, and why there |
+|---|---|
+| the write and `reconcile_bundle` | the **daemon** (`reference_curation.reconcile_destination`): on a confined host every runner body denies `.jaato/references/**`, the base profile included, and in-process tools run in base because `tool_hat` is never entered |
+| the vectors | the caller's **runner** (`session.embed_texts`, work lane, `ReferencesPlugin.embed_texts`), because the embedding model is loaded there; the daemon wraps it as `RunnerEmbeddingProvider`, so the code that writes an index is unchanged |
+| the model check | a probe with no texts first: a session embedding with a model other than the index's is `unavailable`, never written into it |
+
+Stated limits: with no session attached in the workspace, no embedding
+provider, or no numpy in the daemon's environment, the index is
+`unavailable` and similarity matching cannot find the entry until it is
+reconciled; and `references bundle reconcile` typed in a confined session
+still cannot write the index (the same base-profile deny). This split is a
+**stopgap**: #1422 makes `tool_hat` real, lets the runner write its own
+catalog, and lists what to remove from here. A running session sees the new
+entry at its next catalog reload.
+
+Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
+reversions (the numpy-backed reconcile tests skip without numpy).
 
 Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
 reversions), `server/tests/test_a_curator_lists_reference_claims.py`

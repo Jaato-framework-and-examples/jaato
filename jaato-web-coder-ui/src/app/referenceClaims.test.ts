@@ -108,6 +108,30 @@ describe("curation", () => {
     listReferenceClaims.mockResolvedValue({ ok: true, claims: [], may_curate: true });
     expect(await rc.promoteReferenceClaim("c-a")).toBe(true);
     expect(useJaato.getState().referenceClaims.notice?.text).toBe("Promoted into the catalog as runbook.");
+    expect(promoteReferenceClaim).toHaveBeenCalledWith("c-a", {});
+  });
+
+  it("a promotion into a bundle names the bundle and sends it", async () => {
+    promoteReferenceClaim.mockResolvedValue({ ok: true, reference_id: "runbook", bundle: "ops", reconcile: "updated" });
+    listReferenceClaims.mockResolvedValue({ ok: true, claims: [], may_curate: true });
+    expect(await rc.promoteReferenceClaim("c-a", "ops")).toBe(true);
+    expect(promoteReferenceClaim).toHaveBeenCalledWith("c-a", { bundle: "ops" });
+    expect(useJaato.getState().referenceClaims.notice).toEqual({ text: "Promoted into bundle ops as runbook.", warning: false });
+  });
+
+  it("an index that was not updated is a warning, with the daemon's reason", async () => {
+    promoteReferenceClaim.mockResolvedValue({ ok: true, reference_id: "runbook", bundle: "ops", reconcile: "unavailable", reconcile_detail: "no embedding provider" });
+    listReferenceClaims.mockResolvedValue({ ok: true, claims: [], may_curate: true });
+    await rc.promoteReferenceClaim("c-a", "ops");
+    const notice = useJaato.getState().referenceClaims.notice;
+    expect(notice?.warning).toBe(true);
+    expect(notice?.text).toContain("vector index was not updated (no embedding provider)");
+  });
+
+  it("keeps the listing's bundles", async () => {
+    listReferenceClaims.mockResolvedValue({ ok: true, claims: [], may_curate: true, bundles: [{ name: "ops", indexed: true }] });
+    await rc.refreshReferenceClaims();
+    expect(useJaato.getState().referenceClaims.bundles).toEqual([{ name: "ops", indexed: true }]);
   });
 
   it("dismiss calls the dismiss verb", async () => {

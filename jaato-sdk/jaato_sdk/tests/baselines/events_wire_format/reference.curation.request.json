@@ -4,5 +4,6 @@
   "session_id": "",
   "request_id": "",
   "action": "",
-  "claim_id": ""
+  "claim_id": "",
+  "bundle": ""
 }

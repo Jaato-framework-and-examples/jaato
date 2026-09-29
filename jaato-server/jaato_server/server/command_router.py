@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import os
 import pathlib
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.events import Event
 from jaato_server.server.event_sink import EventSink, client_peer
@@ -49,6 +49,25 @@ _ROUTED_REQUEST_HANDLERS = {
     "ReferenceClaimsRequest": "_handle_reference_claims_request",
     "ReferenceCurationRequest": "_handle_reference_curation_request",
 }
+
+
+def _curation_args(args: List[str]) -> "tuple[str, str]":
+    """``(claim_id, bundle)`` from a typed ``reference.promote|dismiss``.
+
+    ``<claim_id> [--bundle <name> | --bundle=<name>]``.  Anything else makes
+    the claim id empty, which :func:`~.reference_curation.curate_claim`
+    answers with the usage line rather than acting on half a command.
+    """
+    if not args:
+        return "", ""
+    claim_id, rest, bundle = args[0], args[1:], ""
+    if len(rest) == 2 and rest[0] == "--bundle":
+        bundle = rest[1]
+    elif len(rest) == 1 and rest[0].startswith("--bundle="):
+        bundle = rest[0].split("=", 1)[1]
+    elif rest:
+        return "", ""
+    return claim_id, bundle
 
 
 def _describe_sources(sources: Dict[str, Optional[str]]) -> str:
@@ -806,13 +825,17 @@ class CommandRouter:
         """Handle the typable ``reference.promote|dismiss <claim_id>`` (1.32).
 
         The command form of :meth:`_handle_reference_curation_request`; its
-        answer carries no ``request_id``.
+        answer carries no ``request_id``.  ``reference.promote <claim_id>
+        --bundle <name>`` (or ``--bundle=<name>``) promotes into a
+        workspace-tier sub-bundle; anything else after the claim id is a
+        usage error, never ignored.
         """
         from .reference_curation import CURATION_COMMANDS
 
+        claim_id, bundle = _curation_args(list(args))
         self._answer_reference_curation(
-            client_id, CURATION_COMMANDS[cmd], args[0] if args else "",
-            client_workspace, session_id, request_id="", label=cmd)
+            client_id, CURATION_COMMANDS[cmd], claim_id,
+            client_workspace, session_id, request_id="", label=cmd, bundle=bundle)
 
     def _handle_reference_curation_request(
         self, client_id: str, event, session_id: Optional[str] = None,
@@ -822,12 +845,13 @@ class CommandRouter:
             client_id, event.action, event.claim_id,
             self._event_sink.get_client_workspace(client_id), session_id,
             request_id=event.request_id,
-            label=f"reference.{event.action or '?'}")
+            label=f"reference.{event.action or '?'}",
+            bundle=getattr(event, "bundle", "") or "")
 
     def _answer_reference_curation(
         self, client_id: str, action: str, claim_id: str,
         client_workspace: Optional[str], session_id: Optional[str], *,
-        request_id: str, label: str,
+        request_id: str, label: str, bundle: str = "",
     ) -> None:
         """Promote or dismiss one claim and send the one answer (1.32).
 
@@ -839,7 +863,9 @@ class CommandRouter:
         request.  The work itself is
         :func:`~.reference_curation.curate_claim`, which refuses an unknown
         ``action``.  Every outcome, refusals included, answers with one
-        ``ReferenceCurationResultEvent``.
+        ``ReferenceCurationResultEvent``.  When the destination bundle has a
+        vector index, its vectors come from the caller's own session in this
+        workspace (:meth:`_workspace_embedder`).
         """
         from jaato_sdk.events import ReferenceCurationResultEvent
 
@@ -860,15 +886,42 @@ class CommandRouter:
         outcome = curate_claim(
             workspace, action, claim_id,
             owner=self._workspace_owner(workspace), user_id=user_id,
-            creator_in_workspace=self._session_manager.creator_in_workspace)
-        logger.info("%s: client=%s user=%s claim=%s ok=%s category=%s ref=%s",
-                    label, client_id, user_id or "-", claim_id, outcome.ok,
-                    outcome.category or "-", outcome.reference_id or "-")
+            creator_in_workspace=self._session_manager.creator_in_workspace,
+            bundle=bundle,
+            embed=self._workspace_embedder(client_id, session_id, workspace))
+        logger.info("%s: client=%s user=%s claim=%s ok=%s category=%s ref=%s "
+                    "bundle=%s reconcile=%s", label, client_id, user_id or "-",
+                    claim_id, outcome.ok, outcome.category or "-",
+                    outcome.reference_id or "-", outcome.bundle or "-",
+                    outcome.reconcile or "-")
         self._event_sink.send_event(client_id, answer(
             ok=outcome.ok, category=outcome.category, error=outcome.error,
             reference_id=outcome.reference_id,
             reference_file=outcome.reference_file,
-            warnings=list(outcome.warnings)))
+            warnings=list(outcome.warnings), bundle=outcome.bundle,
+            reconcile=outcome.reconcile,
+            reconcile_detail=outcome.reconcile_detail))
+
+    def _workspace_embedder(
+        self, client_id: str, session_id: Optional[str], workspace: str,
+    ) -> Optional[Callable[[List[str]], Dict[str, Any]]]:
+        """``JaatoServer.embed_texts`` of the caller's session in ``workspace``.
+
+        The caller's attached session first, then the one the transport
+        names; only a session whose workspace IS the promotion's, so the
+        vectors come from the model configured for that workspace.  ``None``
+        when there is none, which the promotion reports as ``unavailable``.
+        """
+        candidates = [self._session_manager.get_client_session(client_id)]
+        if session_id and hasattr(self._session_manager, "get_session"):
+            candidates.append(self._session_manager.get_session(session_id))
+        target = os.path.realpath(workspace)
+        for session in candidates:
+            ws = getattr(session, "workspace_path", None) if session else None
+            server = getattr(session, "server", None) if session else None
+            if ws and os.path.realpath(ws) == target and hasattr(server, "embed_texts"):
+                return server.embed_texts
+        return None
 
     def _handle_reference_claims_request(
         self, client_id: str, event, session_id: Optional[str] = None,
@@ -901,7 +954,8 @@ class CommandRouter:
             request_id=event.request_id, ok=listing.ok,
             category=listing.category, error=listing.error,
             claims=listing.claims, unreadable=listing.unreadable,
-            may_curate=may_curate(self._workspace_owner(workspace), user_id)))
+            may_curate=may_curate(self._workspace_owner(workspace), user_id),
+            bundles=listing.bundles))
 
     def _workspace_owner(self, workspace: str) -> Optional[str]:
         """The workspace's qualified owner, ``None`` when unowned or unknown."""

@@ -2807,14 +2807,25 @@ class ReferenceCurationResultEvent(Event):
         claim_id: The claim acted on, as the caller named it.
         ok: Whether the verb did what was asked.
         category: ``""`` on success; else ``invalid_request``,
-            ``no_workspace``, ``not_owner``, ``not_found``,
-            ``invalid_claim``, ``collision``, ``unsafe_path`` or
-            ``io_error``.  Branch on this, not on ``error``.
+            ``no_workspace``, ``not_owner``, ``unknown_bundle``,
+            ``not_found``, ``invalid_claim``, ``collision``,
+            ``unsafe_path`` or ``io_error``.  Branch on this, not on
+            ``error``.
         error: The reason, for a person.
         reference_id: The catalog id a promotion wrote.
         reference_file: The workspace-relative catalog file it wrote.
         warnings: Anything that happened beside success -- a promoted claim
-            whose file could not be removed afterwards.
+            whose file could not be removed afterwards, or a destination
+            index that was not updated.
+        bundle: The bundle promoted into; ``""`` for the catalog root.
+        reconcile: What happened to the destination bundle's vector index
+            after a promotion: ``none`` (it has none), ``updated``,
+            ``clean``, ``busy``, ``unavailable`` (no session to embed with,
+            no provider, a different model, no numpy) or ``error``.  The
+            reference is placed whatever this says; until the index holds
+            its row, similarity matching cannot find it.
+        reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
+            ``updated`` / ``clean``.
     """
     type: EventType = Field(default=EventType.REFERENCE_CURATION_RESULT)
     request_id: str = ""
@@ -2826,6 +2837,9 @@ class ReferenceCurationResultEvent(Event):
     reference_id: str = ""
     reference_file: str = ""
     warnings: List[str] = Field(default_factory=list)
+    bundle: str = ""
+    reconcile: str = ""
+    reconcile_detail: str = ""
 
 
 class ReferenceClaimsEvent(Event):
@@ -2853,6 +2867,11 @@ class ReferenceClaimsEvent(Event):
 
     ``may_curate`` says whether THIS connection may promote or dismiss --
     the workspace-owner rule the daemon also enforces.
+
+    ``bundles`` are the workspace-tier sub-bundles a promotion may name:
+    ``[{"name", "indexed", "model"?}]``, ``model`` only for a bundle with a
+    vector index.  The catalog root is the default destination and is not
+    listed.
     """
     type: EventType = Field(default=EventType.REFERENCE_CLAIMS)
     request_id: str = ""
@@ -2862,6 +2881,7 @@ class ReferenceClaimsEvent(Event):
     claims: List[Dict[str, Any]] = Field(default_factory=list)
     unreadable: List[str] = Field(default_factory=list)
     may_curate: bool = False
+    bundles: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ReferenceClaimsRequest(Event):
@@ -2879,12 +2899,15 @@ class ReferenceCurationRequest(Event):
 
     The correlated form of the ``reference.promote`` / ``reference.dismiss``
     commands: answered by :class:`ReferenceCurationResultEvent` carrying this
-    ``request_id``.  ``action`` is ``promote`` or ``dismiss``.
+    ``request_id``.  ``action`` is ``promote`` or ``dismiss``.  ``bundle``
+    names a workspace-tier sub-bundle to promote into (``""``: the catalog
+    root); ``dismiss`` ignores it.
     """
     type: EventType = Field(default=EventType.REFERENCE_CURATION_REQUEST)
     request_id: str = ""
     action: str = ""
     claim_id: str = ""
+    bundle: str = ""
 
 
 class SessionMessageResultEvent(Event):

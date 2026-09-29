@@ -17870,6 +17870,9 @@ export type Error18 = string;
 export type ReferenceId = string;
 export type ReferenceFile = string;
 export type Warnings1 = string[];
+export type Bundle = string;
+export type Reconcile = string;
+export type ReconcileDetail = string;
 /**
  * All event types in the protocol.
  */
@@ -18039,6 +18042,9 @@ export type Claims = {
 }[];
 export type Unreadable = string[];
 export type MayCurate1 = boolean;
+export type Bundles = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -18363,6 +18369,7 @@ export type SessionId109 = string;
 export type RequestId41 = string;
 export type Action3 = string;
 export type ClaimId1 = string;
+export type Bundle1 = string;
 /**
  * All event types in the protocol.
  */
@@ -27778,14 +27785,25 @@ export interface WorkspaceIgnoreResultEvent {
  *     claim_id: The claim acted on, as the caller named it.
  *     ok: Whether the verb did what was asked.
  *     category: ``""`` on success; else ``invalid_request``,
- *         ``no_workspace``, ``not_owner``, ``not_found``,
- *         ``invalid_claim``, ``collision``, ``unsafe_path`` or
- *         ``io_error``.  Branch on this, not on ``error``.
+ *         ``no_workspace``, ``not_owner``, ``unknown_bundle``,
+ *         ``not_found``, ``invalid_claim``, ``collision``,
+ *         ``unsafe_path`` or ``io_error``.  Branch on this, not on
+ *         ``error``.
  *     error: The reason, for a person.
  *     reference_id: The catalog id a promotion wrote.
  *     reference_file: The workspace-relative catalog file it wrote.
  *     warnings: Anything that happened beside success -- a promoted claim
- *         whose file could not be removed afterwards.
+ *         whose file could not be removed afterwards, or a destination
+ *         index that was not updated.
+ *     bundle: The bundle promoted into; ``""`` for the catalog root.
+ *     reconcile: What happened to the destination bundle's vector index
+ *         after a promotion: ``none`` (it has none), ``updated``,
+ *         ``clean``, ``busy``, ``unavailable`` (no session to embed with,
+ *         no provider, a different model, no numpy) or ``error``.  The
+ *         reference is placed whatever this says; until the index holds
+ *         its row, similarity matching cannot find it.
+ *     reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
+ *         ``updated`` / ``clean``.
  */
 export interface ReferenceCurationResultEvent {
   type?: EventType106;
@@ -27800,6 +27818,9 @@ export interface ReferenceCurationResultEvent {
   reference_id?: ReferenceId;
   reference_file?: ReferenceFile;
   warnings?: Warnings1;
+  bundle?: Bundle;
+  reconcile?: Reconcile;
+  reconcile_detail?: ReconcileDetail;
 }
 /**
  * The reference claims agents proposed in the caller's workspace (1.32).
@@ -27826,6 +27847,11 @@ export interface ReferenceCurationResultEvent {
  *
  * ``may_curate`` says whether THIS connection may promote or dismiss --
  * the workspace-owner rule the daemon also enforces.
+ *
+ * ``bundles`` are the workspace-tier sub-bundles a promotion may name:
+ * ``[{"name", "indexed", "model"?}]``, ``model`` only for a bundle with a
+ * vector index.  The catalog root is the default destination and is not
+ * listed.
  */
 export interface ReferenceClaimsEvent {
   type?: EventType107;
@@ -27838,6 +27864,7 @@ export interface ReferenceClaimsEvent {
   claims?: Claims;
   unreadable?: Unreadable;
   may_curate?: MayCurate1;
+  bundles?: Bundles;
 }
 /**
  * List the reference claims in the caller's workspace (1.32).
@@ -27856,7 +27883,9 @@ export interface ReferenceClaimsRequest {
  *
  * The correlated form of the ``reference.promote`` / ``reference.dismiss``
  * commands: answered by :class:`ReferenceCurationResultEvent` carrying this
- * ``request_id``.  ``action`` is ``promote`` or ``dismiss``.
+ * ``request_id``.  ``action`` is ``promote`` or ``dismiss``.  ``bundle``
+ * names a workspace-tier sub-bundle to promote into (``""``: the catalog
+ * root); ``dismiss`` ignores it.
  */
 export interface ReferenceCurationRequest {
   type?: EventType109;
@@ -27865,6 +27894,7 @@ export interface ReferenceCurationRequest {
   request_id?: RequestId41;
   action?: Action3;
   claim_id?: ClaimId1;
+  bundle?: Bundle1;
 }
 /**
  * One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).

@@ -262,12 +262,18 @@ function answerReferenceClaims(c: Client, ev: Record<string, unknown>): void {
   const requestId = String(ev.request_id ?? "");
   const list = claimsFor(c);
   if (ev.type === "reference.claims.request") {
-    send(c, { type: "reference.claims", request_id: requestId, ok: true, category: "", error: "", claims: list, unreadable: [], may_curate: true });
+    send(c, { type: "reference.claims", request_id: requestId, ok: true, category: "", error: "", claims: list, unreadable: [], may_curate: true,
+      bundles: [{ name: "ops", indexed: true, model: "mock-embed" }, { name: "notes", indexed: false }] });
     return;
   }
   const action = String(ev.action ?? "");
   const claimId = String(ev.claim_id ?? "");
-  const answer = { type: "reference.curation.result", request_id: requestId, action, claim_id: claimId, warnings: [] as string[] };
+  const bundle = action === "promote" ? String(ev.bundle ?? "") : "";
+  const answer = { type: "reference.curation.result", request_id: requestId, action, claim_id: claimId, warnings: [] as string[], bundle, reconcile: "", reconcile_detail: "" };
+  if (bundle && bundle !== "ops" && bundle !== "notes") {
+    send(c, { ...answer, ok: false, category: "unknown_bundle", error: `no bundle '${bundle}' in .jaato/references`, reference_id: "", reference_file: "" });
+    return;
+  }
   const index = list.findIndex((x) => x.claim_id === claimId);
   if (index < 0) {
     send(c, { ...answer, ok: false, category: "not_found", error: `no claim '${claimId}'`, reference_id: "", reference_file: "" });
@@ -280,7 +286,13 @@ function answerReferenceClaims(c: Client, ev: Record<string, unknown>): void {
   }
   list.splice(index, 1);
   const promoted = action === "promote";
-  send(c, { ...answer, ok: true, category: "", error: "", reference_id: promoted ? String(claim.id) : "", reference_file: promoted ? `.jaato/references/${String(claim.id)}.json` : "" });
+  // The daemon reconciles an INDEXED destination; in the mock, "ops" is
+  // indexed and the session "has no provider", so its index is reported
+  // not updated -- the caveat the panel must show.
+  const reconcile = !promoted ? "" : bundle === "ops" ? "unavailable" : "none";
+  const dir = bundle ? `.jaato/references/${bundle}` : ".jaato/references";
+  send(c, { ...answer, ok: true, category: "", error: "", reference_id: promoted ? String(claim.id) : "", reference_file: promoted ? `${dir}/${String(claim.id)}.json` : "",
+    reconcile, reconcile_detail: reconcile === "unavailable" ? "no embedding provider is available in this session" : "" });
 }
 /**
  * Answer ``session.diagnostics.request`` (#1294) the way

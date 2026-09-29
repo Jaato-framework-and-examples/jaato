@@ -2236,26 +2236,33 @@ class IPCClient:
             "list_reference_claims", ReferenceClaimsRequest(), timeout, "refc")
 
     async def promote_reference_claim(
-        self, claim_id: str, *, timeout: float = 10.0,
+        self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
     ) -> ReferenceCurationResultEvent:
         """Promote an agent's reference claim into the workspace catalog (1.32).
 
         The daemon re-validates the claim, writes
-        ``.jaato/references/<id>.json`` stamping ``origin.curated_by`` from
-        this connection's identity, and removes the claim.  Only the
-        workspace owner may, on an owned workspace.  Returns the daemon's
-        answer; a refusal is ``ok=False`` with a ``category``.
+        ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamping
+        ``origin.curated_by`` from this connection's identity, and removes
+        the claim.  When the destination bundle has a vector index, the
+        daemon reconciles it with vectors from this connection's session and
+        reports the outcome in ``reconcile``.  Only the workspace owner may,
+        on an owned workspace.  Returns the daemon's answer; a refusal is
+        ``ok=False`` with a ``category``.
 
         Args:
             claim_id: The claim's id, as :meth:`list_reference_claims` or
                 ``listReferences`` shows it.
+            bundle: A workspace-tier sub-bundle to promote into (one of the
+                listing's ``bundles``); ``""`` for the catalog root.
+            timeout: Generous by default: reconciling an index may wait on
+                the session loading its embedding model.
 
         Raises:
             ValueError: Against a daemon below
                 :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
             TimeoutError / ConnectionError: No answer arrived.
         """
-        return await self._send_reference_curation("promote", claim_id, timeout)
+        return await self._send_reference_curation("promote", claim_id, timeout, bundle)
 
     async def dismiss_reference_claim(
         self, claim_id: str, *, timeout: float = 10.0,
@@ -2268,12 +2275,13 @@ class IPCClient:
         return await self._send_reference_curation("dismiss", claim_id, timeout)
 
     async def _send_reference_curation(
-        self, action: str, claim_id: str, timeout: float,
+        self, action: str, claim_id: str, timeout: float, bundle: str = "",
     ) -> ReferenceCurationResultEvent:
         method = f"{action}_reference_claim"
         self._require_reference_curation_protocol(method)
         return await self._correlated_request(  # type: ignore[return-value]
-            method, ReferenceCurationRequest(action=action, claim_id=claim_id),
+            method,
+            ReferenceCurationRequest(action=action, claim_id=claim_id, bundle=bundle),
             timeout, "refc")
 
     def _require_reference_curation_protocol(self, method: str) -> None:

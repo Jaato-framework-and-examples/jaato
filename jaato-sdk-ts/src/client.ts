@@ -1239,18 +1239,25 @@ export class JaatoClient {
   /**
    * Promote an agent's reference claim into the workspace catalog
    * (protocol 1.32).  The daemon re-validates it, writes
-   * ``.jaato/references/<id>.json`` stamped with this connection's identity
-   * as ``origin.curated_by``, and removes the claim.  Only the workspace
-   * owner may, on an owned workspace.  Resolves with the daemon's answer; a
-   * refusal is ``ok === false`` with a ``category``.
+   * ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamped
+   * with this connection's identity as ``origin.curated_by``, and removes
+   * the claim.  When the destination bundle has a vector index the daemon
+   * reconciles it with vectors from this connection's session and says how
+   * in ``reconcile``.  Only the workspace owner may, on an owned workspace.
+   * Resolves with the daemon's answer; a refusal is ``ok === false`` with a
+   * ``category``.  The default timeout is generous (180 s): reconciling may
+   * wait on the session loading its embedding model.  Mirror of Python
+   * ``IPCClient.promote_reference_claim``.
    *
    * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
    */
   async promoteReferenceClaim(
     claimId: string,
-    options: { timeoutMs?: number } = {},
+    options: { bundle?: string; timeoutMs?: number } = {},
   ): Promise<ReferenceCurationResultEvent> {
-    return this._sendReferenceCuration("promote", claimId, options.timeoutMs);
+    return this._sendReferenceCuration(
+      "promote", claimId, options.timeoutMs ?? 180_000, options.bundle ?? "",
+    );
   }
 
   /**
@@ -1269,10 +1276,14 @@ export class JaatoClient {
     action: "promote" | "dismiss",
     claimId: string,
     timeoutMs?: number,
+    bundle = "",
   ): Promise<ReferenceCurationResultEvent> {
     return this._quietRequest<ReferenceCurationResultEvent>(
       `${action}ReferenceClaim`,
-      { type: EventTypeValue.REFERENCE_CURATION_REQUEST, action, claim_id: claimId },
+      {
+        type: EventTypeValue.REFERENCE_CURATION_REQUEST, action, claim_id: claimId,
+        ...(bundle ? { bundle } : {}),
+      },
       EventTypeValue.REFERENCE_CURATION_RESULT,
       timeoutMs ?? 10_000,
       MIN_REFERENCE_CURATION_PROTOCOL,

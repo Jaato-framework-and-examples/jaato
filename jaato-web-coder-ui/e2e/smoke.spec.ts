@@ -1607,8 +1607,13 @@ test("proposals rail lists reference claims, explains a blocked one, promotes an
   // Nothing is printed into the transcript: the verbs are quiet.
   await expect(page.getByText("mock: executed reference")).toHaveCount(0);
 
+  // Promote into the indexed "ops" bundle.  The mock's session has no
+  // embedding provider, so the daemon places the reference and says its
+  // index was not updated -- a warning, not a failure.
+  await runbook.getByRole("combobox", { name: /^Promote proposal .* into$/ }).selectOption("ops");
   await runbook.getByRole("button", { name: /^Promote proposal/ }).click();
-  await expect(panel.getByRole("status")).toHaveText("Promoted into the catalog as deploy-runbook.");
+  await expect(panel.getByRole("status")).toContainText("Promoted into bundle ops as deploy-runbook.");
+  await expect(panel.getByRole("status")).toContainText("vector index was not updated (no embedding provider is available in this session)");
   await expect(panel.getByTestId("proposal-row")).toHaveCount(1);
 
   // Dismiss is two steps.

@@ -587,8 +587,10 @@ at all: `ReferenceClaimsRequest` → `ReferenceClaimsEvent` (each claim's
 recorded origin and the `problems` a promotion would raise) with correlated
 promote / dismiss, and the web coder's Proposals rail on top. `links` waits
 on Seam 3. Three departures from the table below: the promoted entry goes to
-the workspace catalog root, not a named bundle (a bundle would need its
-manifest updated); `created_by` is derived from the session the claim
+the workspace catalog root unless the curator names a sub-bundle (the daemon
+then reconciles that bundle's vector index with vectors from the caller's
+runner, a stopgap until #1422 lets the runner write its own catalog);
+`created_by` is derived from the session the claim
 NAMES, never read from the claim; and `witnessed_by` is written by the
 runner into the claim, so promotion carries it as recorded rather than
 re-checking it. What makes that acceptable on a confined host is that only
