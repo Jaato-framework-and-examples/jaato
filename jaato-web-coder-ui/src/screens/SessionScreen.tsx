@@ -3,7 +3,7 @@
  * header (brand, one tab per agent, workspace / model / context on the
  * right), the selected agent's output with pending prompts and the
  * composer under it, one persistent rail on the right whose Plan /
- * Budget / Files / Sessions / Memories / Diagnostics sections open and
+ * Budget / Files / Sessions / Memories / Proposals / Diagnostics sections open and
  * close, and the status bar.  On mount
  * it asks the daemon for its command list and profiles, then creates (or
  * reattaches) a session.
@@ -30,9 +30,11 @@ import { NewSessionColumn, stageDrafts, type SessionKey, type StagedDraft } from
 import { applySessionKey, resolveKeyChoice } from "@/app/sessionKey";
 import type { ModelChoice } from "@/app/newSession";
 import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
+import { ProposalsPanel } from "@/components/panels/ProposalsPanel";
 import { EnvironmentPanel } from "@/components/workspace/EnvironmentPanel";
 import { currentWorkspacePath } from "@/app/toolchainOffer";
 import { memoriesSummary } from "@/app/memories";
+import { proposalsSummary } from "@/app/referenceClaims";
 import { DiagnosticsPanel } from "@/components/panels/DiagnosticsPanel";
 import { diagnosticsSummary } from "@/app/diagnostics";
 import { AgentTabs } from "@/components/panels/AgentTabs";
@@ -154,6 +156,17 @@ function MemoriesBadgeIcon() {
   );
 }
 
+/** Proposals: a document with a question mark -- references waiting for review. */
+function ProposalsBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <path d="M4.75 2.25h6l3.5 3.5v10h-9.5Z" />
+      <path d="M7.75 8.25a1.5 1.5 0 1 1 2 1.4c-.45.2-.75.55-.75 1.05v.3" />
+      <path d="M9 12.75v.25" />
+    </svg>
+  );
+}
+
 /** Toolchains: a wrench. */
 function ToolchainsBadgeIcon() {
   return (
@@ -213,6 +226,7 @@ const RAIL_BADGES: { id: RailPanelId; title: string; Icon: () => React.ReactElem
   { id: "budget", title: "Budget", Icon: BudgetBadgeIcon },
   { id: "sessions", title: "Sessions", Icon: SessionsBadgeIcon },
   { id: "memories", title: "Memories", Icon: MemoriesBadgeIcon },
+  { id: "proposals", title: "Proposals", Icon: ProposalsBadgeIcon },
   { id: "diagnostics", title: "Diagnostics", Icon: DiagnosticsBadgeIcon },
   { id: "environment", title: "Toolchains", Icon: ToolchainsBadgeIcon },
 ];
@@ -258,6 +272,7 @@ function Rail({ agentId }: { agentId: string }) {
   const sessions = useJaato((s) => s.sessions);
   const notes = useJaato((s) => s.notes);
   const memories = useJaato((s) => s.memories);
+  const referenceClaims = useJaato((s) => s.referenceClaims);
   const diagnostics = useJaato((s) => s.diagnostics);
   const environmentUrl = useJaato((s) => s.environmentUrl);
   const environmentHint = useJaato((s) => s.environmentHint);
@@ -270,6 +285,7 @@ function Rail({ agentId }: { agentId: string }) {
     budget,
     sessions: notedSummary(sessions, notes),
     memories: memoriesSummary(memories),
+    proposals: proposalsSummary(referenceClaims),
     diagnostics: diagnosticsSummary(diagnostics),
     // A missing command the last run hit outranks a count of repository proposals.
     environment: environmentHint ? "!" : environmentWaiting > 0 ? String(environmentWaiting) : null,
@@ -280,6 +296,7 @@ function Rail({ agentId }: { agentId: string }) {
     budget: <BudgetPanel agentId={agentId} />,
     sessions: <SessionsPanel />,
     memories: <MemoriesPanel />,
+    proposals: <ProposalsPanel />,
     diagnostics: <DiagnosticsPanel />,
     environment: <ToolchainsRailPanel />,
   };
@@ -311,7 +328,7 @@ function Rail({ agentId }: { agentId: string }) {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-[13px] text-text-muted italic px-4 text-center">
-            Pick a panel from the rail — Plan, Files, Budget, Sessions, Memories or Diagnostics.
+            Pick a panel from the rail — Plan, Files, Budget, Sessions, Memories, Proposals or Diagnostics.
           </div>
         )}
       </div>

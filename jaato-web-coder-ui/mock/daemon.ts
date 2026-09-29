@@ -235,6 +235,52 @@ function answerMemoryRequest(c: Client, ev: Record<string, unknown>): void {
   }
 }
 /**
+ * The reference claims the 1.32 verbs answer from, in the daemon's row
+ * shape (``reference_curation.claim_row``).  Keyed by session like the
+ * memories; seeded with one promotable claim a person approved at the
+ * prompt, and one whose id is already in the catalog (``problems``).
+ */
+const CLAIMS = new Map<string, Record<string, unknown>[]>();
+function claimsFor(c: Client): Record<string, unknown>[] {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let list = CLAIMS.get(key);
+  if (!list) {
+    list = [
+      { claim_id: "20260929T100000Z-aaaa1111", id: "deploy-runbook", name: "Deploy runbook", description: "How to ship the service", tags: ["ops"], type: "local", path: "docs/deploy.md", problems: [],
+        origin: { kind: "agent", at: ts(), claim_id: "20260929T100000Z-aaaa1111", created_by: "mock:tester", generated_by: { kind: "ai", provider: "mock", model: "mock-1", agent_id: "main" }, witnessed_by: { via: "permission-prompt", method: "user_approved", user: "mock:tester" } } },
+      { claim_id: "20260929T100001Z-bbbb2222", id: "adr-1", name: "ADR 1 again", description: "", tags: [], type: "inline", content: "Use pnpm.", problems: ["'adr-1' is already in the catalog; propose a different id, or ask a curator to revise the existing reference."],
+        origin: { kind: "agent", at: ts(), claim_id: "20260929T100001Z-bbbb2222", generated_by: { kind: "ai", provider: "mock", model: "mock-1", agent_id: "main" } } },
+    ];
+    CLAIMS.set(key, list);
+  }
+  return list;
+}
+/** Answer ``reference.claims.request`` / ``reference.curation.request`` as ``CommandRouter`` does. */
+function answerReferenceClaims(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  const list = claimsFor(c);
+  if (ev.type === "reference.claims.request") {
+    send(c, { type: "reference.claims", request_id: requestId, ok: true, category: "", error: "", claims: list, unreadable: [], may_curate: true });
+    return;
+  }
+  const action = String(ev.action ?? "");
+  const claimId = String(ev.claim_id ?? "");
+  const answer = { type: "reference.curation.result", request_id: requestId, action, claim_id: claimId, warnings: [] as string[] };
+  const index = list.findIndex((x) => x.claim_id === claimId);
+  if (index < 0) {
+    send(c, { ...answer, ok: false, category: "not_found", error: `no claim '${claimId}'`, reference_id: "", reference_file: "" });
+    return;
+  }
+  const claim = list[index]!;
+  if (action === "promote" && (claim.problems as string[]).length) {
+    send(c, { ...answer, ok: false, category: "collision", error: (claim.problems as string[])[0], reference_id: "", reference_file: "" });
+    return;
+  }
+  list.splice(index, 1);
+  const promoted = action === "promote";
+  send(c, { ...answer, ok: true, category: "", error: "", reference_id: promoted ? String(claim.id) : "", reference_file: promoted ? `.jaato/references/${String(claim.id)}.json` : "" });
+}
+/**
  * Answer ``session.diagnostics.request`` (#1294) the way
  * ``diagnostics_verbs.answer_diagnostics_request`` does: cached record
  * fields the daemon already tracked, plus a live re-probe measured on
@@ -876,7 +922,7 @@ wss.on("connection", (ws, req) => {
     installedIntegrations: new Set(),
     deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.29", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.32", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -921,6 +967,10 @@ wss.on("connection", (ws, req) => {
         break;
       case "session.diagnostics.request":
         answerDiagnosticsRequest(c, ev);
+        break;
+      case "reference.claims.request":
+      case "reference.curation.request":
+        answerReferenceClaims(c, ev);
         break;
       case "tools.register_client":
         for (const t of (ev.tools as { name?: string }[] | undefined) ?? []) if (t.name) c.clientTools.add(t.name);

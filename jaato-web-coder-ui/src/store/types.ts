@@ -516,6 +516,53 @@ export interface MemoriesState {
 }
 
 /**
+ * One reference CLAIM as the daemon's ``reference.claims`` answer lists it
+ * (protocol 1.32): a catalog entry an agent PROPOSED with
+ * ``proposeReference`` and nobody has promoted.  ``name``, ``description``
+ * and ``content`` were written by a model and reviewed by nobody -- the
+ * panel renders them as text, never as markup.  ``problems`` is why the
+ * daemon would refuse a promotion right now (empty when it would pass);
+ * ``origin`` is what the claim recorded (``generated_by``, ``created_by``,
+ * ``witnessed_by``, ``at``).
+ */
+export interface ReferenceClaimRow {
+  claim_id: string;
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  /** ``local`` (a workspace file at ``path``) or ``inline`` (``content``). */
+  type: string;
+  path?: string;
+  content?: string;
+  origin?: Record<string, unknown> | null;
+  problems: string[];
+}
+
+/**
+ * The rail's Proposals section (``app/referenceClaims.ts``): the reference
+ * claims in the session's workspace, and -- for the workspace owner --
+ * Promote / Dismiss.  ``status`` follows {@link MemoriesState}: an ``error``
+ * keeps the rows it had, because an empty list is how "nothing proposed"
+ * looks, and ``unsupported`` is a daemon below protocol 1.32.
+ */
+export interface ReferenceClaimsState {
+  rows: ReferenceClaimRow[];
+  status: "idle" | "loading" | "loaded" | "error" | "unsupported";
+  error: string | null;
+  /** Claim files the daemon could not show (a link, bad JSON, not a claim). */
+  unreadable: string[];
+  /** Whether THIS connection may promote / dismiss -- the daemon's owner gate. */
+  mayCurate: boolean | null;
+  /** The claim whose details are showing. */
+  expanded: string | null;
+  /** Claim id -> the action in flight on it, so its buttons disable. */
+  busy: Record<string, string>;
+  /** One-line outcome of the last action. */
+  notice: { text: string; error?: boolean } | null;
+}
+
+/**
  * One thread the runner's live re-probe scanned (#1294): ``label`` is the
  * AppArmor profile that thread's kernel task reported, or ``(unreadable)``
  * when the scan could not read it.

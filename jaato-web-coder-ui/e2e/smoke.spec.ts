@@ -1580,6 +1580,38 @@ test("the jaato-sdk skill is bootstrapped into the workspace on session start (#
   await expect(page.getByText(/claude-code skill installed \(jaato-server mock-0\.0\.1\)/)).toBeVisible();
 });
 
+test("proposals rail lists reference claims, explains a blocked one, promotes and dismisses", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Open Proposals" }).click();
+  const panel = page.getByRole("region", { name: "Proposals" });
+
+  // Two seeded claims: one a person approved at the prompt, one whose id
+  // is already in the catalog.
+  await expect(panel.getByTestId("proposal-row")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Close Proposals" })).toContainText("2");
+  const runbook = panel.locator('[data-claim-id="20260929T100000Z-aaaa1111"]');
+  const blocked = panel.locator('[data-claim-id="20260929T100001Z-bbbb2222"]');
+  await expect(runbook).toContainText("unreviewed");
+  await runbook.getByRole("button", { name: /^Show proposal/ }).click();
+  await expect(runbook).toContainText("approved at the prompt by mock:tester");
+
+  // The daemon's reason is shown before Promote, which is disabled.
+  await expect(blocked).toContainText("already in the catalog");
+  await expect(blocked.getByRole("button", { name: /^Promote proposal/ })).toBeDisabled();
+
+  // Nothing is printed into the transcript: the verbs are quiet.
+  await expect(page.getByText("mock: executed reference")).toHaveCount(0);
+
+  await runbook.getByRole("button", { name: /^Promote proposal/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Promoted into the catalog as deploy-runbook.");
+  await expect(panel.getByTestId("proposal-row")).toHaveCount(1);
+
+  // Dismiss is two steps.
+  await blocked.getByRole("button", { name: /^Dismiss proposal/ }).click();
+  await blocked.getByRole("button", { name: /^Confirm dismiss proposal/ }).click();
+  await expect(panel.getByText("Nothing proposed.")).toBeVisible();
+});
+
 test("memories rail lists the store, re-lists on a store_memory, and approves and removes (#1232)", async ({ page }) => {
   await openSession(page);
   await page.getByRole("button", { name: "Open Memories" }).click();

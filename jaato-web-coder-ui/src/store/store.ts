@@ -52,6 +52,7 @@ import type {
   GcState,
   ContextState,
   MemoriesState,
+  ReferenceClaimsState,
   DiagnosticsState,
   InitProgress,
   OutputBlock,
@@ -307,6 +308,8 @@ export interface JaatoState {
   environmentWaiting: number;
   /** The rail's Memories section (#1232, ``app/memories.ts``). */
   memories: MemoriesState;
+  /** The rail's Proposals section (reference claims, ``app/referenceClaims.ts``). */
+  referenceClaims: ReferenceClaimsState;
   /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
   diagnostics: DiagnosticsState;
   /**
@@ -425,6 +428,8 @@ export interface JaatoState {
   setStallThreshold: (ms: number) => void;
   /** Merge into the Memories section's state (``app/memories.ts`` is its one writer). */
   patchMemories: (patch: Partial<MemoriesState> | ((m: MemoriesState) => Partial<MemoriesState>)) => void;
+  /** Merge into the Proposals section's state (``app/referenceClaims.ts`` is its one writer). */
+  patchReferenceClaims: (patch: Partial<ReferenceClaimsState> | ((r: ReferenceClaimsState) => Partial<ReferenceClaimsState>)) => void;
   /** Merge into the Diagnostics section's state (``app/diagnostics.ts`` is its one writer). */
   patchDiagnostics: (patch: Partial<DiagnosticsState> | ((d: DiagnosticsState) => Partial<DiagnosticsState>)) => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
@@ -508,6 +513,7 @@ const emptySessionState = () => ({
   environmentHint: null as { command: string; tool: string } | null,
   environmentWaiting: 0,
   memories: emptyMemories(),
+  referenceClaims: emptyReferenceClaims(),
   diagnostics: emptyDiagnostics(),
   lastEventAt: {} as Record<string, number>,
 });
@@ -563,6 +569,11 @@ export function emptyMemories(): MemoriesState {
     rows: [], status: "idle", error: null, mayCurate: null, thisSessionOnly: false,
     expanded: null, details: {}, busy: {}, editing: {}, notice: null,
   };
+}
+
+/** The Proposals section before anything was asked. */
+export function emptyReferenceClaims(): ReferenceClaimsState {
+  return { rows: [], status: "idle", error: null, unreadable: [], mayCurate: null, expanded: null, busy: {}, notice: null };
 }
 
 /** The Diagnostics section before anything was asked (and after a session change). */
@@ -1534,6 +1545,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   patchMemories: (patch) => set((st) => ({
     memories: { ...st.memories, ...(typeof patch === "function" ? patch(st.memories) : patch) },
+  })),
+  patchReferenceClaims: (patch) => set((st) => ({
+    referenceClaims: { ...st.referenceClaims, ...(typeof patch === "function" ? patch(st.referenceClaims) : patch) },
   })),
   patchDiagnostics: (patch) => set((st) => ({
     diagnostics: { ...st.diagnostics, ...(typeof patch === "function" ? patch(st.diagnostics) : patch) },

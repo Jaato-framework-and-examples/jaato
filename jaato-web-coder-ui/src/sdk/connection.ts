@@ -24,6 +24,7 @@ import { useJaato } from "@/store/store";
 import type { WorkspaceInfo } from "@/store/types";
 import { wireDownloadTool } from "@/app/downloads";
 import { wireMemoryRail } from "@/app/memories";
+import { wireReferenceClaimsRail } from "@/app/referenceClaims";
 import { HISTORY_PAGE_LINES } from "@/app/historyPaging";
 
 export interface ConnectOptions {
@@ -130,6 +131,8 @@ export async function connect(opts: ConnectOptions): Promise<JaatoClient> {
   // The Memories rail's refresh triggers (#1232): session.info, a memory
   // tool's success, the `memory` command's push.
   wireMemoryRail(c);
+  // The Proposals rail's triggers: session.info, a proposeReference success.
+  wireReferenceClaimsRail(c);
   client = c;
   try {
     await c.connect();
