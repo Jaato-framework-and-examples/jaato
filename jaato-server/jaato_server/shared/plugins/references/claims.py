@@ -17,13 +17,14 @@ proposing SESSION -- never from the tool's arguments.  ``mode`` is always
 ``selectable``: an ``auto`` reference is injected into every system prompt,
 which is a curator's decision and not the writing agent's.
 
-**What a claim's origin is worth.**  The claims directory is writable by
-the runner, so anything the model can drive with a file tool can also write
-a claim file with an origin of its own choosing.  That is the same trust
-tier as memory's ``raw/`` queue, and it is why a claim is listed as
-*unreviewed* and fenced as untrusted content (``listReferences``).  Making
-the stamp tamper-evident belongs to the promotion step, which runs in the
-daemon; nothing here pretends otherwise.
+**What a claim's origin is worth.**  On a confined host only this tool
+writes the claims directory: the file tools and ``cli`` refuse
+``.jaato/...``, and the template write-denies it in ``//child`` (v43), so
+no subprocess the model drives can write one by hand.  On an unconfined
+host, or from the flat isolated sub-runner profile, a script still can,
+with an origin of its own choosing.  That is why a claim is listed as
+*unreviewed* and fenced as untrusted content (``listReferences``), and
+why the stamp promotion makes (``curated_by``) is the daemon's own.
 """
 
 from __future__ import annotations

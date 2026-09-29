@@ -179,6 +179,10 @@ CONFINED_STATE: Tuple[Tuple[str, str], ...] = (
      "walker-generated AppArmor fragments (the cache tier, #1385): "
      "written outside the confined runner, denied to it because the next "
      "provisioning composes them"),
+    ("references-claims/",
+     "reference claims written by proposeReference (in-process, in the "
+     "runner's base profile): denied to //child so a subprocess the model "
+     "drives cannot write a claim, or its recorded witness, by hand"),
 )
 
 #: Workspace-root scratch the framework writes OUTSIDE ``.jaato/``, which

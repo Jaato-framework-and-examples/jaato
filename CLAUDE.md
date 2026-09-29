@@ -4166,11 +4166,23 @@ file per call under `<workspace>/.jaato/references-claims/`
 | **withheld is counted** | `plugin_configs.references.require_curation: true` hides claims and reports `proposed_withheld: N`; an unreadable claim file is named under `proposed_unreadable` |
 | **the plugin declares its write** | `ReferencesPlugin.get_apparmor_rules` grants `"<ws>/.jaato/references-claims/{,**}" rw` itself rather than leaning on the template's workspace-wide `rwkl` |
 
-**What a claim's origin is worth.** The directory is writable by anything
-the model drives with a file tool, so a hand-written claim can carry any
-origin: the same trust tier as memory's `raw/` queue. That is why a claim is
-listed as unreviewed and fenced, and why the stamp is made trustworthy only
-by promotion, below.
+**What a claim's origin is worth.** On a confined host only
+`proposeReference` can write a claim. The file tools refuse `.jaato/...`
+(`check_path_with_jaato_containment`), `cli` runs a bare `.jaato/...` token
+through the same rule (before, `path_like` skipped a token with no `/`,
+`./`, `~` or `..`, so `echo > .jaato/references-claims/c.json` and
+`cat .jaato/profiles/p.yaml` passed), and template **v43** write-denies
+the directory in `//child`, which covers what no string check sees
+(`python -c`, a script, a notebook cell). Base keeps the grant, because
+the tool runs in-process there. Two places a hand-written claim, and so a
+forged `witnessed_by`, is still possible: an **unconfined** host (no kernel
+boundary, and the runner has the daemon's uid, so no file the daemon writes
+is out of its reach either) and the flat **isolated sub-runner** profile,
+whose subprocesses share one body with its in-process tools. That is why a
+claim is still listed as unreviewed and fenced, and why `curated_by` is the
+stamp promotion makes itself. Guard:
+`shared/tests/test_a_claim_is_written_only_by_its_tool.py`, three
+reversions; `references-claims/` is in `gitignore.CONFINED_STATE`.
 
 Guard: `shared/tests/test_an_agent_proposes_a_reference.py`, six reversions,
 including two checked against the RENDERED profile with the #1348 rule
@@ -4223,14 +4235,14 @@ approver?, edited?}`) only when a person was asked and approved; a policy
 approval, or an out-of-tree engine that reports no `asked`, is no witness.
 `proposeReference` is auto-approved, so this is opt-in:
 `plugin_configs.references.witness_proposals: true` takes it off the
-auto-approved list and the session's policy decides. Like every field of a
-claim it is written into a model-writable file, so promotion carries it AS
-RECORDED; `curated_by` is the stamp the daemon makes itself.
+auto-approved list and the session's policy decides. Promotion carries it
+AS RECORDED: it is as trustworthy as the rule deciding who else may write
+the claims directory (above: only the tool on a confined host, anything on
+an unconfined one); `curated_by` is the stamp the daemon makes itself.
 
 Not done: promotion into a named sub-bundle (it would need the bundle
-manifest updated), and a daemon-side check of `witnessed_by` against the
-prompt it names. A running session sees the new entry at its next catalog
-reload.
+manifest updated). A running session sees the new entry at its next
+catalog reload.
 
 Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
 reversions), `server/tests/test_a_curator_lists_reference_claims.py`

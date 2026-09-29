@@ -650,7 +650,19 @@ class AppArmorManager:
     #       runner-side attachment handling alike.  The file is a public
     #       extension table; ``/etc/os-release`` needs no rule because
     #       it resolves into ``/usr/lib``.
-    _TEMPLATE_VERSION = 42
+    #   v43: write-deny ``<ws>/.jaato/references-claims/`` in ``//child``
+    #       ONLY.  ``proposeReference`` writes a claim in-process, in the
+    #       runner's base profile, and its ``origin.witnessed_by`` says
+    #       whether a person approved the call at the prompt.  The
+    #       workspace-wide ``rwkl`` (and the references plugin's own
+    #       contributed grant, which lands in every body) let a subprocess
+    #       the model drives write a claim by hand -- ``echo > …``,
+    #       ``python -c``, a script, a notebook cell -- forging that field.
+    #       Base and ``tool_hat`` keep the grant (the tool needs it), and
+    #       so does the flat isolated sub-runner, whose subprocesses and
+    #       in-process tools share one body: there a hand-written claim is
+    #       still possible.
+    _TEMPLATE_VERSION = 43
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -3365,6 +3377,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # wins a basename collision, so a planted file could also
     # shadow a user-tier fragment and drop its denies.
     audit deny "{workspace_path}/.jaato/.cache/apparmor-fragments/**" wlk,
+    # Reference claims (v43) — //child ONLY.  ``proposeReference``
+    # writes them in-process (base profile); a subprocess writing one
+    # by hand could forge its recorded ``witnessed_by``.  A deny beats
+    # the references plugin's contributed grant, which lands here too.
+    audit deny "{workspace_path}/.jaato/references-claims/" wlk,
+    audit deny "{workspace_path}/.jaato/references-claims/**" wlk,
 
     # ---- tool_hat-style read-denies (mirrors tool_hat) ----
     # Same information-isolation as the in-process tool_hat: a

@@ -591,7 +591,12 @@ the workspace catalog root, not a named bundle (a bundle would need its
 manifest updated); `created_by` is derived from the session the claim
 NAMES, never read from the claim; and `witnessed_by` is written by the
 runner into the claim, so promotion carries it as recorded rather than
-re-checking it.
+re-checking it. What makes that acceptable on a confined host is that only
+`proposeReference` can write the claims directory: the file tools and `cli`
+refuse `.jaato/...`, and template v43 write-denies it in `//child`. On an
+unconfined host a script can still write a claim, and no daemon-kept record
+fixes that fully: the runner has the daemon's uid, so anything the daemon
+writes to disk it can write too.
 
 `proposeReference` takes what a catalog entry carries — `id`, `name`,
 `description`, `tags`, `links` (Seam 3) — plus the document itself, as a

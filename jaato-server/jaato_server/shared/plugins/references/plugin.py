@@ -358,6 +358,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         a rule it does not control -- a narrower workspace grant would
         otherwise break proposals with an EACCES nothing named.
 
+        The rule lands in every body, ``//child`` included, but template
+        v43 write-denies the directory in ``//child`` and a deny wins: the
+        tool writes in-process (base profile), and a subprocess the model
+        drives must not write a claim by hand, which would let it forge
+        ``origin.witnessed_by``.
+
         The catalog itself, ``.jaato/references/**``, stays under the
         template's ``audit deny ... wlk``: ``references-claims`` is a
         SIBLING directory, never a carve-out beneath the deny, because
