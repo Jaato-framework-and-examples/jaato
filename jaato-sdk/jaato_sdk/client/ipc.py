@@ -93,8 +93,12 @@ from jaato_sdk.events import (
     PermissionPolicySnapshotRequest,
     MemoryListRequest,
     ReferenceClaimsEvent,
+    ReferenceCatalogEvent,
+    ReferenceCatalogRequest,
     ReferenceClaimsRequest,
     ReferenceCurationRequest,
+    ReferenceLinksUpdateRequest,
+    ReferenceLinksUpdateResultEvent,
     ReferenceCurationResultEvent,
     MemoryListEvent,
     MemoryGetRequest,
@@ -2283,6 +2287,50 @@ class IPCClient:
             method,
             ReferenceCurationRequest(action=action, claim_id=claim_id, bundle=bundle),
             timeout, "refc")
+
+    async def list_reference_catalog(
+        self, *, timeout: float = 10.0,
+    ) -> ReferenceCatalogEvent:
+        """List this workspace's reference catalog with its typed links (1.33).
+
+        Every reference in ``.jaato/references/`` and its sub-bundles, read
+        by the daemon: each row carries its declared ``links`` (a target
+        this catalog does not hold is marked ``dangling``) and
+        ``linked_from``, the edges pointing at it.  ``may_curate`` says
+        whether this connection may edit them.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("list_reference_catalog")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "list_reference_catalog", ReferenceCatalogRequest(), timeout, "refk")
+
+    async def update_reference_links(
+        self, reference_id: str, links: List[Dict[str, Any]], *,
+        timeout: float = 10.0,
+    ) -> ReferenceLinksUpdateResultEvent:
+        """Replace one catalog reference's typed links (1.33).
+
+        ``links`` is the complete new list of ``{to, rel, note?}``; ``[]``
+        removes every declared edge.  The daemon validates them, writes only
+        the reference file's ``links`` key, and answers with the links as
+        written and any ``warnings`` (a target not in the catalog, a
+        ``supersedes`` another reference also declares).  Only the workspace
+        owner may, on an owned workspace.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("update_reference_links")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "update_reference_links",
+            ReferenceLinksUpdateRequest(reference_id=reference_id, links=list(links)),
+            timeout, "refk")
 
     def _require_reference_curation_protocol(self, method: str) -> None:
         """Refuse a daemon that would ignore the reference-claim verbs.

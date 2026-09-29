@@ -579,6 +579,7 @@ await client.create_session(profile="researcher")
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 - `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.33, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-133)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
+- `ReferenceCatalogRequest` → `ReferenceCatalogEvent` / `ReferenceLinksUpdateRequest` → `ReferenceLinksUpdateResultEvent` — list the workspace reference catalog with its typed links both ways, and replace one reference's links (protocol 1.33, see [Typed Links Between References](#typed-links-between-references-wikillm-seam-3))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
@@ -4323,8 +4324,34 @@ declared `depends-on` first, then references more of the previous depth
 points to (see [A Guard That Only Binds When Nothing Needs
 Bounding](#a-guard-that-only-binds-when-nothing-needs-bounding)).
 
-Guards: `shared/tests/test_typed_reference_links.py` (seven reversions)
-and `server/tests/test_a_proposal_carries_typed_links.py` (five).
+**Changing an edge after it is in the catalog** takes the daemon, for the
+reason promotion does: a confined runner cannot write `.jaato/references/`.
+`ReferenceCatalogRequest` → `ReferenceCatalogEvent` lists every reference
+the loader reads (the root and each sub-bundle carrying `bundle.json`, no
+link followed) with its `links` (a dangling one marked), `linked_from` and
+`may_curate`; `ReferenceLinksUpdateRequest{reference_id, links}` →
+`ReferenceLinksUpdateResultEvent` replaces one reference's list
+(`server/reference_catalog.py`, protocol 1.33):
+
+| Rule | Why |
+|---|---|
+| the owner gate (`may_curate`, identity from the transport) | a `supersedes` reroutes every request for its target |
+| `link_errors` before anything is written (`invalid_links`) | the loader drops a malformed edge silently, so a bad one would be saved and not there |
+| a dangling target, and a second `supersedes` of one target, are `warnings` | neither is wrong to write; the person should know |
+| only the `links` key changes (`write_contained`), `[]` removes it | name, tags and origin are not this verb's |
+| an id declared in two files is `ambiguous` and not edited | which file the loader keeps is not this verb's to guess |
+| no reconcile | an embedding is made from the name, description, tags and fetch hint, never the links |
+
+`IPCClient.list_reference_catalog` / `update_reference_links` and
+`listReferenceCatalog` / `updateReferenceLinks` share the 1.33 floor. The
+web coder's **References** rail section lists the catalog (the badge is
+`!` while any reference holds a dangling edge) and gives the owner an
+editor per reference; a promotion from Proposals re-lists it. A running
+session sees an edit at its next catalog reload.
+
+Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
+`server/tests/test_a_proposal_carries_typed_links.py` (five) and
+`server/tests/test_a_person_edits_a_references_links.py` (six).
 
 ### Plugin-Level Traits
 

@@ -896,6 +896,18 @@ class IPCRecoveryClient:
         return await self._memory_client("dismiss_reference_claim").dismiss_reference_claim(
             claim_id, timeout=timeout)
 
+    async def list_reference_catalog(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_reference_catalog`."""
+        return await self._memory_client("list_reference_catalog").list_reference_catalog(
+            timeout=timeout)
+
+    async def update_reference_links(
+        self, reference_id: str, links, *, timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.update_reference_links`."""
+        return await self._memory_client("update_reference_links").update_reference_links(
+            reference_id, links, timeout=timeout)
+
     async def send_external_event(
         self,
         name: str,

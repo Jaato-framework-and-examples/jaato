@@ -3,7 +3,7 @@
  * header (brand, one tab per agent, workspace / model / context on the
  * right), the selected agent's output with pending prompts and the
  * composer under it, one persistent rail on the right whose Plan /
- * Budget / Files / Sessions / Memories / Proposals / Diagnostics sections open and
+ * Budget / Files / Sessions / Memories / Proposals / References / Diagnostics sections open and
  * close, and the status bar.  On mount
  * it asks the daemon for its command list and profiles, then creates (or
  * reattaches) a session.
@@ -31,10 +31,12 @@ import { applySessionKey, resolveKeyChoice } from "@/app/sessionKey";
 import type { ModelChoice } from "@/app/newSession";
 import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
 import { ProposalsPanel } from "@/components/panels/ProposalsPanel";
+import { ReferencesPanel } from "@/components/panels/ReferencesPanel";
 import { EnvironmentPanel } from "@/components/workspace/EnvironmentPanel";
 import { currentWorkspacePath } from "@/app/toolchainOffer";
 import { memoriesSummary } from "@/app/memories";
 import { proposalsSummary } from "@/app/referenceClaims";
+import { referencesSummary } from "@/app/referenceCatalog";
 import { DiagnosticsPanel } from "@/components/panels/DiagnosticsPanel";
 import { diagnosticsSummary } from "@/app/diagnostics";
 import { AgentTabs } from "@/components/panels/AgentTabs";
@@ -167,6 +169,17 @@ function ProposalsBadgeIcon() {
   );
 }
 
+/** References: two linked documents -- the catalog and its links. */
+function ReferencesBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <path d="M2.75 3.25h5v6h-5Z" />
+      <path d="M10.25 8.75h5v6h-5Z" />
+      <path d="M7.75 6.25h2.5v2.5" />
+    </svg>
+  );
+}
+
 /** Toolchains: a wrench. */
 function ToolchainsBadgeIcon() {
   return (
@@ -227,6 +240,7 @@ const RAIL_BADGES: { id: RailPanelId; title: string; Icon: () => React.ReactElem
   { id: "sessions", title: "Sessions", Icon: SessionsBadgeIcon },
   { id: "memories", title: "Memories", Icon: MemoriesBadgeIcon },
   { id: "proposals", title: "Proposals", Icon: ProposalsBadgeIcon },
+  { id: "references", title: "References", Icon: ReferencesBadgeIcon },
   { id: "diagnostics", title: "Diagnostics", Icon: DiagnosticsBadgeIcon },
   { id: "environment", title: "Toolchains", Icon: ToolchainsBadgeIcon },
 ];
@@ -273,6 +287,7 @@ function Rail({ agentId }: { agentId: string }) {
   const notes = useJaato((s) => s.notes);
   const memories = useJaato((s) => s.memories);
   const referenceClaims = useJaato((s) => s.referenceClaims);
+  const referenceCatalog = useJaato((s) => s.referenceCatalog);
   const diagnostics = useJaato((s) => s.diagnostics);
   const environmentUrl = useJaato((s) => s.environmentUrl);
   const environmentHint = useJaato((s) => s.environmentHint);
@@ -286,6 +301,7 @@ function Rail({ agentId }: { agentId: string }) {
     sessions: notedSummary(sessions, notes),
     memories: memoriesSummary(memories),
     proposals: proposalsSummary(referenceClaims),
+    references: referencesSummary(referenceCatalog),
     diagnostics: diagnosticsSummary(diagnostics),
     // A missing command the last run hit outranks a count of repository proposals.
     environment: environmentHint ? "!" : environmentWaiting > 0 ? String(environmentWaiting) : null,
@@ -297,6 +313,7 @@ function Rail({ agentId }: { agentId: string }) {
     sessions: <SessionsPanel />,
     memories: <MemoriesPanel />,
     proposals: <ProposalsPanel />,
+    references: <ReferencesPanel />,
     diagnostics: <DiagnosticsPanel />,
     environment: <ToolchainsRailPanel />,
   };
@@ -328,7 +345,7 @@ function Rail({ agentId }: { agentId: string }) {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-[13px] text-text-muted italic px-4 text-center">
-            Pick a panel from the rail — Plan, Files, Budget, Sessions, Memories, Proposals or Diagnostics.
+            Pick a panel from the rail — Plan, Files, Budget, Sessions, Memories, Proposals, References or Diagnostics.
           </div>
         )}
       </div>

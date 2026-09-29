@@ -592,6 +592,55 @@ export interface ReferenceClaimsState {
   bundles: ReferenceBundleOption[];
 }
 
+/** One declared edge on a catalog reference; ``dangling`` when its target is not in the catalog. */
+export interface ReferenceCatalogLink {
+  to: string;
+  rel: string;
+  note?: string;
+  dangling?: boolean;
+}
+
+/**
+ * One reference in the workspace catalog, in the daemon's row shape
+ * (``reference_catalog._row``).  ``name`` / ``description`` / a link's
+ * ``note`` are catalog text, rendered as text.  ``duplicate_id``: another
+ * file declares the same id, so the daemon will not edit it.
+ */
+export interface ReferenceCatalogRow {
+  id: string;
+  name: string;
+  description: string;
+  bundle: string;
+  file: string;
+  links: ReferenceCatalogLink[];
+  linked_from: { from: string; rel: string }[];
+  duplicate_id?: boolean;
+}
+
+/**
+ * The rail's References section (``app/referenceCatalog.ts``): the
+ * workspace catalog with its typed links both ways, and -- for the owner --
+ * editing one reference's links.  ``status`` follows
+ * {@link ReferenceClaimsState}.
+ */
+export interface ReferenceCatalogState {
+  rows: ReferenceCatalogRow[];
+  status: "idle" | "loading" | "loaded" | "error" | "unsupported";
+  error: string | null;
+  /** Catalog files the daemon could not show. */
+  unreadable: string[];
+  /** Whether THIS connection may edit links -- the daemon's owner gate. */
+  mayCurate: boolean | null;
+  /** The reference whose details are showing. */
+  expanded: string | null;
+  /** The reference whose links are being edited, and the draft. */
+  editing: { id: string; links: ReferenceClaimLink[] } | null;
+  /** Reference id -> a save in flight. */
+  busy: Record<string, boolean>;
+  /** One-line outcome of the last save (``warning``: saved with warnings). */
+  notice: { text: string; error?: boolean; warning?: boolean } | null;
+}
+
 /**
  * One thread the runner's live re-probe scanned (#1294): ``label`` is the
  * AppArmor profile that thread's kernel task reported, or ``(unreadable)``

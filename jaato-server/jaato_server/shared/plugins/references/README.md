@@ -300,6 +300,11 @@ reference's `links` and the edges pointing at it (`linked_from`).
 `proposeReference` accepts `links` too; they take effect when the claim is
 promoted.
 
+Once a reference is in the catalog, the workspace owner changes its links
+through the daemon (`ReferenceLinksUpdateRequest`, protocol 1.33), which
+validates them and rewrites only the file's `links` key; the web coder's
+References rail section is the editor.
+
 ## Tags and Proactive Reference Access
 
 Each reference source can have tags describing its topic. The model is instructed to:

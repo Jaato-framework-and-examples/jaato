@@ -26,6 +26,7 @@ import { EventTypeValue, MIN_REFERENCE_CURATION_PROTOCOL, isProtocolCompatible, 
 import { useJaato } from "@/store/store";
 import { getClient, isConnected } from "@/sdk/connection";
 import type { ReferenceBundleOption, ReferenceClaimRow, ReferenceClaimsState } from "@/store/types";
+import { scheduleReferenceCatalogRefresh } from "@/app/referenceCatalog";
 
 /** The tool whose success means a claim was written. */
 export const PROPOSE_TOOL = "proposeReference";
@@ -211,6 +212,8 @@ async function curate(
     patch((r) => ({ busy: withoutKey(r.busy, claimId) }));
   }
   await refreshReferenceClaims();
+  // A promotion adds a catalog entry: the References section re-lists.
+  if (ok && action === "promote") scheduleReferenceCatalogRefresh();
   return ok;
 }
 

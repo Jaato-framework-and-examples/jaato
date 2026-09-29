@@ -72,6 +72,8 @@ import {
   type MemoryListEvent,
   type ReferenceClaimsEvent,
   type ReferenceCurationResultEvent,
+  type ReferenceCatalogEvent,
+  type ReferenceLinksUpdateResultEvent,
   type MemoryGetResultEvent,
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
@@ -172,7 +174,9 @@ export const MIN_FILE_SEARCH_PROTOCOL = "1.32";
 /**
  * Protocol floor for {@link JaatoClient.listReferenceClaims},
  * {@link JaatoClient.promoteReferenceClaim} and
- * {@link JaatoClient.dismissReferenceClaim}.  Same rule as
+ * {@link JaatoClient.dismissReferenceClaim}, and for the catalog's
+ * {@link JaatoClient.listReferenceCatalog} /
+ * {@link JaatoClient.updateReferenceLinks}.  Same rule as
  * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verbs,
  * and "promoted" would describe a catalog nobody changed.
  */
@@ -1278,6 +1282,58 @@ export class JaatoClient {
     options: { timeoutMs?: number } = {},
   ): Promise<ReferenceCurationResultEvent> {
     return this._sendReferenceCuration("dismiss", claimId, options.timeoutMs);
+  }
+
+  /**
+   * List this workspace's reference catalog with its typed links (protocol
+   * 1.33).  Every reference in ``.jaato/references/`` and its sub-bundles,
+   * read by the daemon: each row carries its declared ``links`` (a target
+   * this catalog does not hold is ``dangling``) and ``linked_from``, the
+   * edges pointing at it.  ``may_curate`` says whether this connection may
+   * edit them.  Mirror of Python ``IPCClient.list_reference_catalog``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async listReferenceCatalog(options: { timeoutMs?: number } = {}): Promise<ReferenceCatalogEvent> {
+    return this._quietRequest<ReferenceCatalogEvent>(
+      "listReferenceCatalog",
+      { type: EventTypeValue.REFERENCE_CATALOG_REQUEST },
+      EventTypeValue.REFERENCE_CATALOG,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference catalog verbs (upgrade the daemon)",
+      "refk",
+    );
+  }
+
+  /**
+   * Replace one catalog reference's typed links (protocol 1.33).  ``links``
+   * is the complete new list of ``{to, rel, note?}``; ``[]`` removes every
+   * declared edge.  The daemon validates them, writes only the reference
+   * file's ``links`` key, and answers with the links as written and any
+   * ``warnings``.  Only the workspace owner may, on an owned workspace.
+   * Mirror of Python ``IPCClient.update_reference_links``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async updateReferenceLinks(
+    referenceId: string,
+    links: Array<{ to: string; rel: string; note?: string }>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceLinksUpdateResultEvent> {
+    return this._quietRequest<ReferenceLinksUpdateResultEvent>(
+      "updateReferenceLinks",
+      {
+        type: EventTypeValue.REFERENCE_LINKS_UPDATE_REQUEST,
+        reference_id: referenceId,
+        links,
+      },
+      EventTypeValue.REFERENCE_LINKS_UPDATE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference catalog verbs (upgrade the daemon)",
+      "refk",
+    );
   }
 
   private async _sendReferenceCuration(

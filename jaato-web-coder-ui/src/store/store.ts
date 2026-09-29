@@ -53,6 +53,7 @@ import type {
   ContextState,
   MemoriesState,
   ReferenceClaimsState,
+  ReferenceCatalogState,
   DiagnosticsState,
   InitProgress,
   OutputBlock,
@@ -310,6 +311,8 @@ export interface JaatoState {
   memories: MemoriesState;
   /** The rail's Proposals section (reference claims, ``app/referenceClaims.ts``). */
   referenceClaims: ReferenceClaimsState;
+  /** The rail's References section (the catalog and its links, ``app/referenceCatalog.ts``). */
+  referenceCatalog: ReferenceCatalogState;
   /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
   diagnostics: DiagnosticsState;
   /**
@@ -430,6 +433,8 @@ export interface JaatoState {
   patchMemories: (patch: Partial<MemoriesState> | ((m: MemoriesState) => Partial<MemoriesState>)) => void;
   /** Merge into the Proposals section's state (``app/referenceClaims.ts`` is its one writer). */
   patchReferenceClaims: (patch: Partial<ReferenceClaimsState> | ((r: ReferenceClaimsState) => Partial<ReferenceClaimsState>)) => void;
+  /** Merge into the References section's state (``app/referenceCatalog.ts`` is its one writer). */
+  patchReferenceCatalog: (patch: Partial<ReferenceCatalogState> | ((r: ReferenceCatalogState) => Partial<ReferenceCatalogState>)) => void;
   /** Merge into the Diagnostics section's state (``app/diagnostics.ts`` is its one writer). */
   patchDiagnostics: (patch: Partial<DiagnosticsState> | ((d: DiagnosticsState) => Partial<DiagnosticsState>)) => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
@@ -514,6 +519,7 @@ const emptySessionState = () => ({
   environmentWaiting: 0,
   memories: emptyMemories(),
   referenceClaims: emptyReferenceClaims(),
+  referenceCatalog: emptyReferenceCatalog(),
   diagnostics: emptyDiagnostics(),
   lastEventAt: {} as Record<string, number>,
 });
@@ -574,6 +580,11 @@ export function emptyMemories(): MemoriesState {
 /** The Proposals section before anything was asked. */
 export function emptyReferenceClaims(): ReferenceClaimsState {
   return { rows: [], status: "idle", error: null, unreadable: [], mayCurate: null, expanded: null, busy: {}, notice: null, bundles: [] };
+}
+
+/** The References section before anything was asked. */
+export function emptyReferenceCatalog(): ReferenceCatalogState {
+  return { rows: [], status: "idle", error: null, unreadable: [], mayCurate: null, expanded: null, editing: null, busy: {}, notice: null };
 }
 
 /** The Diagnostics section before anything was asked (and after a session change). */
@@ -1548,6 +1559,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   })),
   patchReferenceClaims: (patch) => set((st) => ({
     referenceClaims: { ...st.referenceClaims, ...(typeof patch === "function" ? patch(st.referenceClaims) : patch) },
+  })),
+  patchReferenceCatalog: (patch) => set((st) => ({
+    referenceCatalog: { ...st.referenceCatalog, ...(typeof patch === "function" ? patch(st.referenceCatalog) : patch) },
   })),
   patchDiagnostics: (patch) => set((st) => ({
     diagnostics: { ...st.diagnostics, ...(typeof patch === "function" ? patch(st.diagnostics) : patch) },

@@ -48,6 +48,9 @@ _ROUTED_REQUEST_HANDLERS = {
     # promote / dismiss.  Daemon-level, like the typable commands.
     "ReferenceClaimsRequest": "_handle_reference_claims_request",
     "ReferenceCurationRequest": "_handle_reference_curation_request",
+    # The curator's view of the catalog and its typed links (1.33).
+    "ReferenceCatalogRequest": "_handle_reference_catalog_request",
+    "ReferenceLinksUpdateRequest": "_handle_reference_links_request",
 }
 
 
@@ -601,11 +604,14 @@ class CommandRouter:
         from jaato_sdk.events import (
             HistoryPageRequest,
             HistoryRequest,
+            ReferenceCatalogRequest,
             ReferenceClaimsRequest,
             ReferenceCurationRequest,
+            ReferenceLinksUpdateRequest,
         )
         if isinstance(event, (HistoryRequest, HistoryPageRequest,
-                              ReferenceClaimsRequest, ReferenceCurationRequest)):
+                              ReferenceClaimsRequest, ReferenceCurationRequest,
+                              ReferenceCatalogRequest, ReferenceLinksUpdateRequest)):
             getattr(self, _ROUTED_REQUEST_HANDLERS[type(event).__name__])(
                 client_id, event, session_id)
             return
@@ -956,6 +962,75 @@ class CommandRouter:
             claims=listing.claims, unreadable=listing.unreadable,
             may_curate=may_curate(self._workspace_owner(workspace), user_id),
             bundles=listing.bundles))
+
+    def _handle_reference_catalog_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Answer ``ReferenceCatalogRequest`` with one ``ReferenceCatalogEvent`` (1.33).
+
+        Lists :meth:`resolve_caller_workspace`'s catalog with its typed
+        links both ways (:func:`~.reference_catalog.list_catalog`), and says
+        whether this connection may edit them.  Looking is not gated.
+        """
+        from jaato_sdk.events import ReferenceCatalogEvent
+
+        from .memory_verbs import may_curate
+        from .reference_catalog import list_catalog
+
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, self._event_sink.get_client_workspace(client_id),
+            session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, ReferenceCatalogEvent(
+                request_id=event.request_id, ok=False, category="no_workspace",
+                error="reference.catalog: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        listing = list_catalog(workspace)
+        user_id = self._event_sink.get_client_user(client_id)
+        self._event_sink.send_event(client_id, ReferenceCatalogEvent(
+            request_id=event.request_id, ok=listing.ok,
+            category=listing.category, error=listing.error,
+            references=listing.references, unreadable=listing.unreadable,
+            may_curate=may_curate(self._workspace_owner(workspace), user_id)))
+
+    def _handle_reference_links_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Answer ``ReferenceLinksUpdateRequest`` with one result event (1.33).
+
+        Daemon-level for the reason promotion is: the catalog is
+        write-denied to a confined runner.  The owner gate reads the
+        transport's identity for this connection; the work and every
+        refusal are :func:`~.reference_catalog.update_links`'s.
+        """
+        from jaato_sdk.events import ReferenceLinksUpdateResultEvent
+
+        from .reference_catalog import update_links
+
+        answer = functools.partial(
+            ReferenceLinksUpdateResultEvent, request_id=event.request_id,
+            reference_id=event.reference_id)
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, self._event_sink.get_client_workspace(client_id),
+            session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, answer(
+                ok=False, category="no_workspace",
+                error="reference.links: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        user_id = self._event_sink.get_client_user(client_id)
+        outcome = update_links(
+            workspace, event.reference_id, event.links,
+            owner=self._workspace_owner(workspace), user_id=user_id)
+        logger.info("reference.links: client=%s user=%s ref=%s ok=%s category=%s "
+                    "links=%d", client_id, user_id or "-", event.reference_id,
+                    outcome.ok, outcome.category or "-", len(outcome.links))
+        self._event_sink.send_event(client_id, answer(
+            ok=outcome.ok, category=outcome.category, error=outcome.error,
+            reference_file=outcome.reference_file, links=list(outcome.links),
+            warnings=list(outcome.warnings)))
 
     def _workspace_owner(self, workspace: str) -> Optional[str]:
         """The workspace's qualified owner, ``None`` when unowned or unknown."""

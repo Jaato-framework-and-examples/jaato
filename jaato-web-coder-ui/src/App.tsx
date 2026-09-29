@@ -11,6 +11,7 @@ import { SessionScreen } from "@/screens/SessionScreen";
 import "@/app/bootstrapSkill";
 import "@/app/memories";
 import "@/app/referenceClaims";
+import "@/app/referenceCatalog";
 import "@/app/toolchainOffer";
 
 export default function App() {

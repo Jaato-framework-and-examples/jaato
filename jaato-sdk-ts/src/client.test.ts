@@ -710,10 +710,46 @@ describe("JaatoClient session management", () => {
     }
   });
 
+  test("reference catalog verbs correlate their answers", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const last = (): Record<string, unknown> =>
+      JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+
+    const listing = client.listReferenceCatalog();
+    await tick();
+    const listReq = last();
+    assert.equal(listReq.type, EventTypeValue.REFERENCE_CATALOG_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.REFERENCE_CATALOG, request_id: "other", references: [] });
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_CATALOG, request_id: listReq.request_id,
+      references: [{ id: "adr-2" }], ok: true, may_curate: true,
+    });
+    assert.deepEqual((await listing).references, [{ id: "adr-2" }]);
+
+    const update = client.updateReferenceLinks("adr-2", [{ to: "adr-1", rel: "supersedes" }]);
+    await tick();
+    const req = last();
+    assert.equal(req.type, EventTypeValue.REFERENCE_LINKS_UPDATE_REQUEST);
+    assert.equal(req.reference_id, "adr-2");
+    assert.deepEqual(req.links, [{ to: "adr-1", rel: "supersedes" }]);
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_LINKS_UPDATE_RESULT, request_id: req.request_id,
+      reference_id: "adr-2", ok: true, links: [{ to: "adr-1", rel: "supersedes" }],
+    });
+    assert.equal((await update).ok, true);
+  });
+
   test("reference claim verbs are refused below protocol 1.33", async () => {
     await assert.rejects(() => client.listReferenceClaims(), /listReferenceClaims/);
     await assert.rejects(() => client.promoteReferenceClaim("x"), /promoteReferenceClaim/);
     await assert.rejects(() => client.dismissReferenceClaim("x"), /dismissReferenceClaim/);
+    await assert.rejects(() => client.listReferenceCatalog(), /listReferenceCatalog/);
+    await assert.rejects(() => client.updateReferenceLinks("x", []), /updateReferenceLinks/);
     assert.equal(getSent().length, 0);
   });
 

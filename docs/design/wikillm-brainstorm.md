@@ -585,8 +585,10 @@ auto-approved otherwise); the executor binds the verdict for the tool body
 (`shared/call_witness.py`). And the curator's listing a person needs to act
 at all: `ReferenceClaimsRequest` → `ReferenceClaimsEvent` (each claim's
 recorded origin and the `problems` a promotion would raise) with correlated
-promote / dismiss, and the web coder's Proposals rail on top. `links` waits
-on Seam 3. Three departures from the table below: the promoted entry goes to
+promote / dismiss, and the web coder's Proposals rail on top. `links`
+(Seam 3) ride the claim into the catalog, and once there the owner edits
+them through the daemon (`ReferenceLinksUpdateRequest`, the web coder's
+References rail), which rewrites only the `links` key. Three departures from the table below: the promoted entry goes to
 the workspace catalog root unless the curator names a sub-bundle (the daemon
 then reconciles that bundle's vector index with vectors from the caller's
 runner, a stopgap until #1422 lets the runner write its own catalog);

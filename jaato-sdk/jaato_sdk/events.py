@@ -577,7 +577,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # is write-denied on the catalog.  Gated by the memory rail's owner rule.
 # NEW verbs: an older daemon ignores them silently, and "promoted" would
 # describe a catalog nobody changed, so the SDKs refuse below
-# ``MIN_REFERENCE_CURATION_PROTOCOL``.
+# ``MIN_REFERENCE_CURATION_PROTOCOL``.  The same version carries the
+# curator's view of the CATALOG: ``ReferenceCatalogRequest`` ->
+# ``ReferenceCatalogEvent`` lists every reference with its typed links both
+# ways, and ``ReferenceLinksUpdateRequest`` ->
+# ``ReferenceLinksUpdateResultEvent`` replaces one reference's links, again
+# written by the daemon under the owner rule.
 PROTOCOL_VERSION = "1.33"
 
 
@@ -804,6 +809,10 @@ class EventType(str, Enum):
     REFERENCE_CLAIMS = "reference.claims"  # Answer to ReferenceClaimsRequest (1.33)
     REFERENCE_CLAIMS_REQUEST = "reference.claims.request"  # Client -> Server (1.33)
     REFERENCE_CURATION_REQUEST = "reference.curation.request"  # Client -> Server (1.33)
+    REFERENCE_CATALOG = "reference.catalog"  # Answer to ReferenceCatalogRequest (1.33)
+    REFERENCE_CATALOG_REQUEST = "reference.catalog.request"  # Client -> Server (1.33)
+    REFERENCE_LINKS_UPDATE_REQUEST = "reference.links.request"  # Client -> Server (1.33)
+    REFERENCE_LINKS_UPDATE_RESULT = "reference.links.result"  # Answer to ReferenceLinksUpdateRequest (1.33)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
@@ -2921,6 +2930,90 @@ class ReferenceCurationRequest(Event):
     action: str = ""
     claim_id: str = ""
     bundle: str = ""
+
+
+class ReferenceCatalogEvent(Event):
+    """The workspace reference catalog, as a curator sees it (1.33).
+
+    Answer to :class:`ReferenceCatalogRequest`, carrying its ``request_id``.
+    Read by the DAEMON from ``<workspace>/.jaato/references/`` and its
+    sub-bundles, without following a link.  Each row: ``id``, ``name``,
+    ``description``, ``bundle`` (``""`` for the catalog root), ``file``
+    (workspace-relative), ``links`` (its declared ``{to, rel, note?,
+    dangling?}`` edges; ``dangling`` when the target is not in this
+    catalog), ``linked_from`` (``{from, rel}`` edges pointing at it) and
+    ``duplicate_id`` when another file declares the same id (such a
+    reference cannot be edited).  ``name``, ``description`` and ``note`` are
+    catalog text: a client shows them as text.
+
+    ``ok`` is ``False`` (``no_workspace`` / ``unsafe_path``) when the catalog
+    could not be read; ``references`` is then meaningless.  ``unreadable``
+    names files under the catalog that are not a reference this view can
+    show.  ``may_curate`` says whether THIS connection may edit links.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CATALOG)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    references: List[Dict[str, Any]] = Field(default_factory=list)
+    unreadable: List[str] = Field(default_factory=list)
+    may_curate: bool = False
+
+
+class ReferenceCatalogRequest(Event):
+    """List the caller's workspace reference catalog (1.33).
+
+    Answered by :class:`ReferenceCatalogEvent` carrying this ``request_id``.
+    Writes nothing.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CATALOG_REQUEST)
+    request_id: str = ""
+
+
+class ReferenceLinksUpdateRequest(Event):
+    """Replace one catalog reference's typed links (1.33).
+
+    ``links`` is the complete new list, ``[{to, rel, note?}]``; ``[]``
+    removes every declared edge.  Answered by
+    :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_LINKS_UPDATE_REQUEST)
+    request_id: str = ""
+    reference_id: str = ""
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReferenceLinksUpdateResultEvent(Event):
+    """What one links update did (1.33).
+
+    The daemon writes the reference's JSON, changing only its ``links`` key,
+    because a confined runner cannot write the catalog.  Gated by the
+    workspace-owner rule the memory rail and promotion use.
+
+    Fields:
+        request_id: Echoed from the request.
+        reference_id: The reference, as the caller named it.
+        ok: Whether the links were written.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``invalid_links``,
+            ``not_found``, ``ambiguous`` (the id is declared in two files),
+            ``unsafe_path`` or ``io_error``.
+        error: The reason, for a person.
+        reference_file: The workspace-relative file written.
+        links: The links as written, normalised.
+        warnings: What did not block the write: a target this catalog does
+            not hold, or a ``supersedes`` another reference also declares.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_LINKS_UPDATE_RESULT)
+    request_id: str = ""
+    reference_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    reference_file: str = ""
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SessionMessageResultEvent(Event):
@@ -5300,6 +5393,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REFERENCE_CLAIMS.value: ReferenceClaimsEvent,
     EventType.REFERENCE_CLAIMS_REQUEST.value: ReferenceClaimsRequest,
     EventType.REFERENCE_CURATION_REQUEST.value: ReferenceCurationRequest,
+    EventType.REFERENCE_CATALOG.value: ReferenceCatalogEvent,
+    EventType.REFERENCE_CATALOG_REQUEST.value: ReferenceCatalogRequest,
+    EventType.REFERENCE_LINKS_UPDATE_REQUEST.value: ReferenceLinksUpdateRequest,
+    EventType.REFERENCE_LINKS_UPDATE_RESULT.value: ReferenceLinksUpdateResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,

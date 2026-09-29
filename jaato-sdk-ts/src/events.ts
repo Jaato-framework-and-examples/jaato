@@ -123,6 +123,10 @@ export type JaatoEvents =
   | ReferenceClaimsEvent
   | ReferenceClaimsRequest
   | ReferenceCurationRequest
+  | ReferenceCatalogEvent
+  | ReferenceCatalogRequest
+  | ReferenceLinksUpdateRequest
+  | ReferenceLinksUpdateResultEvent
   | ScaffoldExplainEvent
   | SessionMessageResultEvent
   | ScaffoldIntegrationEvent
@@ -287,6 +291,10 @@ export type EventType =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -450,6 +458,10 @@ export type EventType1 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -618,6 +630,10 @@ export type EventType2 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -784,6 +800,10 @@ export type EventType3 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -949,6 +969,10 @@ export type EventType4 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1122,6 +1146,10 @@ export type EventType5 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1292,6 +1320,10 @@ export type EventType6 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1461,6 +1493,10 @@ export type EventType7 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1624,6 +1660,10 @@ export type EventType8 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1791,6 +1831,10 @@ export type EventType9 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1957,6 +2001,10 @@ export type EventType10 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2134,6 +2182,10 @@ export type EventType11 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2301,6 +2353,10 @@ export type EventType12 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2474,6 +2530,10 @@ export type EventType13 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2647,6 +2707,10 @@ export type EventType14 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2822,6 +2886,10 @@ export type EventType15 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2992,6 +3060,10 @@ export type EventType16 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3157,6 +3229,10 @@ export type EventType17 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3324,6 +3400,10 @@ export type EventType18 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3491,6 +3571,10 @@ export type EventType19 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3664,6 +3748,10 @@ export type EventType20 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3830,6 +3918,10 @@ export type EventType21 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4000,6 +4092,10 @@ export type EventType22 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4165,6 +4261,10 @@ export type EventType23 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4331,6 +4431,10 @@ export type EventType24 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4497,6 +4601,10 @@ export type EventType25 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4661,6 +4769,10 @@ export type EventType26 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4830,6 +4942,10 @@ export type EventType27 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4995,6 +5111,10 @@ export type EventType28 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5159,6 +5279,10 @@ export type EventType29 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5331,6 +5455,10 @@ export type EventType30 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5497,6 +5625,10 @@ export type EventType31 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5664,6 +5796,10 @@ export type EventType32 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5846,6 +5982,10 @@ export type EventType33 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6009,6 +6149,10 @@ export type EventType34 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6189,6 +6333,10 @@ export type EventType35 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6356,6 +6504,10 @@ export type EventType36 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6519,6 +6671,10 @@ export type EventType37 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6690,6 +6846,10 @@ export type EventType38 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6857,6 +7017,10 @@ export type EventType39 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7021,6 +7185,10 @@ export type EventType40 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7184,6 +7352,10 @@ export type EventType41 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7351,6 +7523,10 @@ export type EventType42 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7520,6 +7696,10 @@ export type EventType43 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7687,6 +7867,10 @@ export type EventType44 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7852,6 +8036,10 @@ export type EventType45 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8027,6 +8215,10 @@ export type EventType46 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8212,6 +8404,10 @@ export type EventType47 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8383,6 +8579,10 @@ export type EventType48 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8554,6 +8754,10 @@ export type EventType49 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8725,6 +8929,10 @@ export type EventType50 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8893,6 +9101,10 @@ export type EventType51 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9076,6 +9288,10 @@ export type EventType52 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9241,6 +9457,10 @@ export type EventType53 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9406,6 +9626,10 @@ export type EventType54 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9569,6 +9793,10 @@ export type EventType55 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9757,6 +9985,10 @@ export type EventType56 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9924,6 +10156,10 @@ export type EventType57 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10091,6 +10327,10 @@ export type EventType58 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10256,6 +10496,10 @@ export type EventType59 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10419,6 +10663,10 @@ export type EventType60 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10582,6 +10830,10 @@ export type EventType61 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10746,6 +10998,10 @@ export type EventType62 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10913,6 +11169,10 @@ export type EventType63 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11076,6 +11336,10 @@ export type EventType64 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11239,6 +11503,10 @@ export type EventType65 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11403,6 +11671,10 @@ export type EventType66 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11571,6 +11843,10 @@ export type EventType67 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11735,6 +12011,10 @@ export type EventType68 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11898,6 +12178,10 @@ export type EventType69 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12060,6 +12344,10 @@ export type EventType70 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12225,6 +12513,10 @@ export type EventType71 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12387,6 +12679,10 @@ export type EventType72 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12553,6 +12849,10 @@ export type EventType73 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12715,6 +13015,10 @@ export type EventType74 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12878,6 +13182,10 @@ export type EventType75 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13043,6 +13351,10 @@ export type EventType76 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13208,6 +13520,10 @@ export type EventType77 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13373,6 +13689,10 @@ export type EventType78 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13536,6 +13856,10 @@ export type EventType79 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13705,6 +14029,10 @@ export type EventType80 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13871,6 +14199,10 @@ export type EventType81 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14044,6 +14376,10 @@ export type EventType82 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14216,6 +14552,10 @@ export type EventType83 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14380,6 +14720,10 @@ export type EventType84 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14543,6 +14887,10 @@ export type EventType85 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14713,6 +15061,10 @@ export type EventType86 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14882,6 +15234,10 @@ export type EventType87 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15046,6 +15402,10 @@ export type EventType88 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15211,6 +15571,10 @@ export type EventType89 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15373,6 +15737,10 @@ export type EventType90 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15539,6 +15907,10 @@ export type EventType91 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15702,6 +16074,10 @@ export type EventType92 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15866,6 +16242,10 @@ export type EventType93 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16030,6 +16410,10 @@ export type EventType94 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16195,6 +16579,10 @@ export type EventType95 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16359,6 +16747,10 @@ export type EventType96 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16530,6 +16922,10 @@ export type EventType97 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16697,6 +17093,10 @@ export type EventType98 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16868,6 +17268,10 @@ export type EventType99 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17031,6 +17435,10 @@ export type EventType100 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17199,6 +17607,10 @@ export type EventType101 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17365,6 +17777,10 @@ export type EventType102 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17532,6 +17948,10 @@ export type EventType103 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17699,6 +18119,10 @@ export type EventType104 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17867,6 +18291,10 @@ export type EventType105 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18034,6 +18462,10 @@ export type EventType106 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18208,6 +18640,10 @@ export type EventType107 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18382,6 +18818,10 @@ export type EventType108 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18545,6 +18985,10 @@ export type EventType109 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18711,6 +19155,10 @@ export type EventType110 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18754,14 +19202,15 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type Topic = string;
+export type RequestId42 = string;
 export type Ok11 = boolean;
-export type Text4 = string;
-export type Topics = {
+export type Category7 = string;
+export type Error20 = string;
+export type References = {
   [k: string]: unknown;
 }[];
-export type Error20 = string;
-export type ServerVersion1 = string;
+export type Unreadable1 = string[];
+export type MayCurate2 = boolean;
 /**
  * All event types in the protocol.
  */
@@ -18881,6 +19330,10 @@ export type EventType111 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18924,22 +19377,7 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type RequestId42 = string | null;
-export type Target = string;
-export type Status3 = string;
-export type Ok12 = boolean;
-export type MessageId = string;
-export type TargetSessionId = string;
-export type SiblingName = string;
-export type GroupKey = string;
-export type Woken = boolean;
-export type Headless = boolean;
-export type Spooled = boolean;
-export type Candidates = string[];
-export type Files1 = {
-  [k: string]: unknown;
-}[];
-export type Error21 = string;
+export type RequestId43 = string;
 /**
  * All event types in the protocol.
  */
@@ -19059,6 +19497,10 @@ export type EventType112 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19102,17 +19544,11 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type Integration = string;
-export type Ok13 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target1 = string;
-export type Text5 = string;
-export type Error22 = string;
-export type Available = string[];
-export type ServerVersion2 = string;
+export type RequestId44 = string;
+export type ReferenceId1 = string;
+export type Links = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -19232,6 +19668,10 @@ export type EventType113 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19275,12 +19715,16 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type WorkspaceId = string;
-export type Name12 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files2 = StagedFileSpec[];
+export type RequestId45 = string;
+export type ReferenceId2 = string;
+export type Ok12 = boolean;
+export type Category8 = string;
+export type Error21 = string;
+export type ReferenceFile1 = string;
+export type Links1 = {
+  [k: string]: unknown;
+}[];
+export type Warnings2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -19400,6 +19844,10 @@ export type EventType114 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19443,11 +19891,14 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
+export type Topic = string;
+export type Ok13 = boolean;
+export type Text4 = string;
+export type Topics = {
+  [k: string]: unknown;
 }[];
+export type Error22 = string;
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -19567,6 +20018,10 @@ export type EventType115 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19610,9 +20065,22 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type RequestId43 = string;
-export type Path4 = string;
-export type MetadataOnly = boolean;
+export type RequestId46 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok14 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
+}[];
+export type Error23 = string;
 /**
  * All event types in the protocol.
  */
@@ -19732,6 +20200,10 @@ export type EventType116 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19775,15 +20247,17 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type RequestId44 = string;
-export type Ok14 = boolean;
-export type Path5 = string;
-export type Name13 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category7 = string;
-export type Error23 = string;
+export type Integration = string;
+export type Ok15 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error24 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
 /**
  * All event types in the protocol.
  */
@@ -19903,6 +20377,10 @@ export type EventType117 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19946,9 +20424,12 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type RequestId45 = string;
-export type Query = string;
-export type MaxResults = number;
+export type WorkspaceId = string;
+export type Name12 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -20068,6 +20549,10 @@ export type EventType118 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20111,16 +20596,11 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type RequestId46 = string;
-export type Ok15 = boolean;
-export type Query1 = string;
-export type Matches = {
-  [k: string]: unknown;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
 }[];
-export type Total2 = number;
-export type Truncated = boolean;
-export type Category8 = string;
-export type Error24 = string;
 /**
  * All event types in the protocol.
  */
@@ -20240,6 +20720,10 @@ export type EventType119 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20283,20 +20767,9 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion3 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags1 = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId47 = string;
+export type Path4 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -20416,6 +20889,10 @@ export type EventType120 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20459,17 +20936,15 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type RequestId47 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type RequestId48 = string;
+export type Ok16 = boolean;
+export type Path5 = string;
+export type Name13 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category9 = string;
+export type Error25 = string;
 /**
  * All event types in the protocol.
  */
@@ -20589,6 +21064,10 @@ export type EventType121 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20632,8 +21111,9 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type RequestId48 = string;
-export type RemoteAgentId = string;
+export type RequestId49 = string;
+export type Query = string;
+export type MaxResults = number;
 /**
  * All event types in the protocol.
  */
@@ -20753,6 +21233,10 @@ export type EventType122 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20796,8 +21280,16 @@ export type EventType122 =
   | "gates.snapshot";
 export type Timestamp122 = string;
 export type SessionId122 = string;
-export type RequestId49 = string;
-export type Reason1 = string;
+export type RequestId50 = string;
+export type Ok17 = boolean;
+export type Query1 = string;
+export type Matches = {
+  [k: string]: unknown;
+}[];
+export type Total2 = number;
+export type Truncated = boolean;
+export type Category10 = string;
+export type Error26 = string;
 /**
  * All event types in the protocol.
  */
@@ -20917,6 +21409,10 @@ export type EventType123 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20960,10 +21456,20 @@ export type EventType123 =
   | "gates.snapshot";
 export type Timestamp123 = string;
 export type SessionId123 = string;
-export type RequestId50 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source5 = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion3 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -21083,6 +21589,10 @@ export type EventType124 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21127,11 +21637,16 @@ export type EventType124 =
 export type Timestamp124 = string;
 export type SessionId124 = string;
 export type RequestId51 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error25 = string;
-export type WorkspaceModified = boolean;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -21251,6 +21766,10 @@ export type EventType125 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21295,7 +21814,7 @@ export type EventType125 =
 export type Timestamp125 = string;
 export type SessionId125 = string;
 export type RequestId52 = string;
-export type RemoteAgentId3 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -21415,6 +21934,10 @@ export type EventType126 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21459,7 +21982,7 @@ export type EventType126 =
 export type Timestamp126 = string;
 export type SessionId126 = string;
 export type RequestId53 = string;
-export type RemoteAgentId4 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -21579,6 +22102,10 @@ export type EventType127 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21622,10 +22149,10 @@ export type EventType127 =
   | "gates.snapshot";
 export type Timestamp127 = string;
 export type SessionId127 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId54 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source5 = string;
 /**
  * All event types in the protocol.
  */
@@ -21745,6 +22272,10 @@ export type EventType128 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21788,14 +22319,12 @@ export type EventType128 =
   | "gates.snapshot";
 export type Timestamp128 = string;
 export type SessionId128 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId55 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error27 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -21915,6 +22444,10 @@ export type EventType129 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21958,17 +22491,8 @@ export type EventType129 =
   | "gates.snapshot";
 export type Timestamp129 = string;
 export type SessionId129 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State1 = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type RequestId56 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -22088,6 +22612,10 @@ export type EventType130 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22131,13 +22659,8 @@ export type EventType130 =
   | "gates.snapshot";
 export type Timestamp130 = string;
 export type SessionId130 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId54 = string | null;
+export type RequestId57 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -22257,6 +22780,10 @@ export type EventType131 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22300,9 +22827,10 @@ export type EventType131 =
   | "gates.snapshot";
 export type Timestamp131 = string;
 export type SessionId131 = string;
-export type RequestId55 = string;
-export type Status4 = string;
-export type Detail = string | null;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -22422,6 +22950,10 @@ export type EventType132 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22465,13 +22997,14 @@ export type EventType132 =
   | "gates.snapshot";
 export type Timestamp132 = string;
 export type SessionId132 = string;
-export type RequestId56 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -22591,6 +23124,10 @@ export type EventType133 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22634,9 +23171,17 @@ export type EventType133 =
   | "gates.snapshot";
 export type Timestamp133 = string;
 export type SessionId133 = string;
-export type RequestId57 = string;
-export type ResponseText = string;
-export type Error26 = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -22756,6 +23301,10 @@ export type EventType134 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22799,10 +23348,13 @@ export type EventType134 =
   | "gates.snapshot";
 export type Timestamp134 = string;
 export type SessionId134 = string;
-export type RequestId58 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId58 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -22922,6 +23474,10 @@ export type EventType135 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22966,8 +23522,8 @@ export type EventType135 =
 export type Timestamp135 = string;
 export type SessionId135 = string;
 export type RequestId59 = string;
-export type ForkIndex = number;
-export type Error27 = string;
+export type Status4 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -23087,6 +23643,10 @@ export type EventType136 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23130,11 +23690,13 @@ export type EventType136 =
   | "gates.snapshot";
 export type Timestamp136 = string;
 export type SessionId136 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId60 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -23254,6 +23816,10 @@ export type EventType137 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23297,8 +23863,9 @@ export type EventType137 =
   | "gates.snapshot";
 export type Timestamp137 = string;
 export type SessionId137 = string;
-export type WakeRef1 = string;
-export type Source6 = string;
+export type RequestId61 = string;
+export type ResponseText = string;
+export type Error28 = string;
 /**
  * All event types in the protocol.
  */
@@ -23418,6 +23985,10 @@ export type EventType138 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23461,8 +24032,10 @@ export type EventType138 =
   | "gates.snapshot";
 export type Timestamp138 = string;
 export type SessionId138 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId62 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -23582,6 +24155,10 @@ export type EventType139 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23625,8 +24202,9 @@ export type EventType139 =
   | "gates.snapshot";
 export type Timestamp139 = string;
 export type SessionId139 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId63 = string;
+export type ForkIndex = number;
+export type Error29 = string;
 /**
  * All event types in the protocol.
  */
@@ -23746,6 +24324,10 @@ export type EventType140 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23789,9 +24371,11 @@ export type EventType140 =
   | "gates.snapshot";
 export type Timestamp140 = string;
 export type SessionId140 = string;
-export type Target2 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -23911,6 +24495,10 @@ export type EventType141 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23954,7 +24542,8 @@ export type EventType141 =
   | "gates.snapshot";
 export type Timestamp141 = string;
 export type SessionId141 = string;
-export type Target3 = string;
+export type WakeRef1 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -24074,6 +24663,10 @@ export type EventType142 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24117,7 +24710,8 @@ export type EventType142 =
   | "gates.snapshot";
 export type Timestamp142 = string;
 export type SessionId142 = string;
-export type Policy = string;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -24237,6 +24831,10 @@ export type EventType143 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24280,7 +24878,8 @@ export type EventType143 =
   | "gates.snapshot";
 export type Timestamp143 = string;
 export type SessionId143 = string;
-export type RequestId60 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -24400,6 +24999,10 @@ export type EventType144 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24443,15 +25046,9 @@ export type EventType144 =
   | "gates.snapshot";
 export type Timestamp144 = string;
 export type SessionId144 = string;
-export type RequestId61 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -24571,6 +25168,10 @@ export type EventType145 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24614,10 +25215,7 @@ export type EventType145 =
   | "gates.snapshot";
 export type Timestamp145 = string;
 export type SessionId145 = string;
-export type RequestId62 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -24737,6 +25335,10 @@ export type EventType146 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24780,13 +25382,7 @@ export type EventType146 =
   | "gates.snapshot";
 export type Timestamp146 = string;
 export type SessionId146 = string;
-export type RequestId63 = string;
-export type Status5 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -24906,6 +25502,10 @@ export type EventType147 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24950,8 +25550,6 @@ export type EventType147 =
 export type Timestamp147 = string;
 export type SessionId147 = string;
 export type RequestId64 = string;
-export type Ticket1 = string;
-export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -25071,6 +25669,10 @@ export type EventType148 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25115,9 +25717,14 @@ export type EventType148 =
 export type Timestamp148 = string;
 export type SessionId148 = string;
 export type RequestId65 = string;
-export type Status6 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -25237,6 +25844,10 @@ export type EventType149 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25281,9 +25892,9 @@ export type EventType149 =
 export type Timestamp149 = string;
 export type SessionId149 = string;
 export type RequestId66 = string;
-export type User2 = string;
-export type Workspace3 = string;
-export type Name14 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -25403,6 +26014,10 @@ export type EventType150 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25447,10 +26062,12 @@ export type EventType150 =
 export type Timestamp150 = string;
 export type SessionId150 = string;
 export type RequestId67 = string;
-export type Status7 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -25570,6 +26187,10 @@ export type EventType151 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25614,7 +26235,8 @@ export type EventType151 =
 export type Timestamp151 = string;
 export type SessionId151 = string;
 export type RequestId68 = string;
-export type User3 = string;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -25734,6 +26356,10 @@ export type EventType152 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25778,9 +26404,9 @@ export type EventType152 =
 export type Timestamp152 = string;
 export type SessionId152 = string;
 export type RequestId69 = string;
-export type Status8 = string;
-export type Reloaded = number;
-export type Detail5 = string | null;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -25900,6 +26526,10 @@ export type EventType153 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25944,11 +26574,9 @@ export type EventType153 =
 export type Timestamp153 = string;
 export type SessionId153 = string;
 export type RequestId70 = string;
-export type User4 = string;
-export type Workspace4 = string;
-export type Files3 = {
-  [k: string]: unknown;
-}[];
+export type User2 = string;
+export type Workspace3 = string;
+export type Name14 = string;
 /**
  * All event types in the protocol.
  */
@@ -26068,6 +26696,10 @@ export type EventType154 =
   | "reference.claims"
   | "reference.claims.request"
   | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26112,6 +26744,687 @@ export type EventType154 =
 export type Timestamp154 = string;
 export type SessionId154 = string;
 export type RequestId71 = string;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType155 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp155 = string;
+export type SessionId155 = string;
+export type RequestId72 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType156 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp156 = string;
+export type SessionId156 = string;
+export type RequestId73 = string;
+export type Status8 = string;
+export type Reloaded = number;
+export type Detail5 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType157 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp157 = string;
+export type SessionId157 = string;
+export type RequestId74 = string;
+export type User4 = string;
+export type Workspace4 = string;
+export type Files3 = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType158 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp158 = string;
+export type SessionId158 = string;
+export type RequestId75 = string;
 export type Status9 = string;
 export type Files4 = {
   [k: string]: unknown;
@@ -28542,6 +29855,98 @@ export interface ReferenceCurationRequest {
   bundle?: Bundle1;
 }
 /**
+ * The workspace reference catalog, as a curator sees it (1.33).
+ *
+ * Answer to :class:`ReferenceCatalogRequest`, carrying its ``request_id``.
+ * Read by the DAEMON from ``<workspace>/.jaato/references/`` and its
+ * sub-bundles, without following a link.  Each row: ``id``, ``name``,
+ * ``description``, ``bundle`` (``""`` for the catalog root), ``file``
+ * (workspace-relative), ``links`` (its declared ``{to, rel, note?,
+ * dangling?}`` edges; ``dangling`` when the target is not in this
+ * catalog), ``linked_from`` (``{from, rel}`` edges pointing at it) and
+ * ``duplicate_id`` when another file declares the same id (such a
+ * reference cannot be edited).  ``name``, ``description`` and ``note`` are
+ * catalog text: a client shows them as text.
+ *
+ * ``ok`` is ``False`` (``no_workspace`` / ``unsafe_path``) when the catalog
+ * could not be read; ``references`` is then meaningless.  ``unreadable``
+ * names files under the catalog that are not a reference this view can
+ * show.  ``may_curate`` says whether THIS connection may edit links.
+ */
+export interface ReferenceCatalogEvent {
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId42;
+  ok?: Ok11;
+  category?: Category7;
+  error?: Error20;
+  references?: References;
+  unreadable?: Unreadable1;
+  may_curate?: MayCurate2;
+}
+/**
+ * List the caller's workspace reference catalog (1.33).
+ *
+ * Answered by :class:`ReferenceCatalogEvent` carrying this ``request_id``.
+ * Writes nothing.
+ */
+export interface ReferenceCatalogRequest {
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId43;
+}
+/**
+ * Replace one catalog reference's typed links (1.33).
+ *
+ * ``links`` is the complete new list, ``[{to, rel, note?}]``; ``[]``
+ * removes every declared edge.  Answered by
+ * :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
+ */
+export interface ReferenceLinksUpdateRequest {
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId44;
+  reference_id?: ReferenceId1;
+  links?: Links;
+}
+/**
+ * What one links update did (1.33).
+ *
+ * The daemon writes the reference's JSON, changing only its ``links`` key,
+ * because a confined runner cannot write the catalog.  Gated by the
+ * workspace-owner rule the memory rail and promotion use.
+ *
+ * Fields:
+ *     request_id: Echoed from the request.
+ *     reference_id: The reference, as the caller named it.
+ *     ok: Whether the links were written.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``invalid_links``,
+ *         ``not_found``, ``ambiguous`` (the id is declared in two files),
+ *         ``unsafe_path`` or ``io_error``.
+ *     error: The reason, for a person.
+ *     reference_file: The workspace-relative file written.
+ *     links: The links as written, normalised.
+ *     warnings: What did not block the write: a target this catalog does
+ *         not hold, or a ``supersedes`` another reference also declares.
+ */
+export interface ReferenceLinksUpdateResultEvent {
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
+  request_id?: RequestId45;
+  reference_id?: ReferenceId2;
+  ok?: Ok12;
+  category?: Category8;
+  error?: Error21;
+  reference_file?: ReferenceFile1;
+  links?: Links1;
+  warnings?: Warnings2;
+}
+/**
  * One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
  *
  * ``explain`` introspects the framework installed in the CALLING process,
@@ -28584,15 +29989,15 @@ export interface ReferenceCurationRequest {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   topic?: Topic;
-  ok?: Ok11;
+  ok?: Ok13;
   text?: Text4;
   data?: Data2;
   topics?: Topics;
-  error?: Error20;
+  error?: Error22;
   server_version?: ServerVersion1;
 }
 export interface Data2 {
@@ -28660,13 +30065,13 @@ export interface Data2 {
  *     error: Why not, when ``ok`` is ``False``.
  */
 export interface SessionMessageResultEvent {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId42;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId46;
   target?: Target;
   status?: Status3;
-  ok?: Ok12;
+  ok?: Ok14;
   message_id?: MessageId;
   target_session_id?: TargetSessionId;
   sibling_name?: SiblingName;
@@ -28676,7 +30081,7 @@ export interface SessionMessageResultEvent {
   spooled?: Spooled;
   candidates?: Candidates;
   files?: Files1;
-  error?: Error21;
+  error?: Error23;
 }
 /**
  * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
@@ -28725,18 +30130,18 @@ export interface SessionMessageResultEvent {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   integration?: Integration;
-  ok?: Ok13;
+  ok?: Ok15;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
   target?: Target1;
   text?: Text5;
-  error?: Error22;
+  error?: Error24;
   available?: Available;
   server_version?: ServerVersion2;
 }
@@ -28780,9 +30185,9 @@ export interface ScaffoldIntegrationEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
   workspace_id?: WorkspaceId;
   files?: Files2;
 }
@@ -28830,9 +30235,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -28858,10 +30263,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
-  request_id?: RequestId43;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  request_id?: RequestId47;
   path?: Path4;
   metadata_only?: MetadataOnly;
 }
@@ -28887,18 +30292,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
-  request_id?: RequestId44;
-  ok?: Ok14;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
+  request_id?: RequestId48;
+  ok?: Ok16;
   path?: Path5;
   name?: Name13;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
-  category?: Category7;
-  error?: Error23;
+  category?: Category9;
+  error?: Error25;
 }
 /**
  * Find files in the caller's workspace by name (WS only, protocol 1.32).
@@ -28911,10 +30316,10 @@ export interface WorkspaceFileContentEvent {
  * :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
  */
 export interface WorkspaceFilesSearchRequest {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  request_id?: RequestId45;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
+  request_id?: RequestId49;
   query?: Query;
   max_results?: MaxResults;
 }
@@ -28934,17 +30339,17 @@ export interface WorkspaceFilesSearchRequest {
  * (this connection is in no workspace).
  */
 export interface WorkspaceFilesSearchResultEvent {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
-  request_id?: RequestId46;
-  ok?: Ok15;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId50;
+  ok?: Ok17;
   query?: Query1;
   matches?: Matches;
   total?: Total2;
   truncated?: Truncated;
-  category?: Category8;
-  error?: Error24;
+  category?: Category10;
+  error?: Error26;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -28954,9 +30359,9 @@ export interface WorkspaceFilesSearchResultEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion3;
@@ -28981,10 +30386,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId47;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId51;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -29003,10 +30408,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId48;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId52;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -29016,10 +30421,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId49;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
+  request_id?: RequestId53;
   reason?: Reason1;
 }
 /**
@@ -29030,10 +30435,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
-  request_id?: RequestId50;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId54;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source5;
@@ -29046,14 +30451,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
-  request_id?: RequestId51;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId55;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error25;
+  error?: Error27;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -29063,20 +30468,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
-  request_id?: RequestId52;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId56;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
-  request_id?: RequestId53;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId57;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -29088,9 +30493,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -29110,9 +30515,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -29128,9 +30533,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -29181,14 +30586,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType130;
-  timestamp?: Timestamp130;
-  session_id?: SessionId130;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId54;
+  request_id?: RequestId58;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -29240,10 +30645,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType131;
-  timestamp?: Timestamp131;
-  session_id?: SessionId131;
-  request_id?: RequestId55;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
+  request_id?: RequestId59;
   status?: Status4;
   detail?: Detail;
 }
@@ -29262,10 +30667,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType132;
-  timestamp?: Timestamp132;
-  session_id?: SessionId132;
-  request_id?: RequestId56;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
+  request_id?: RequestId60;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -29273,12 +30678,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType133;
-  timestamp?: Timestamp133;
-  session_id?: SessionId133;
-  request_id?: RequestId57;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
+  request_id?: RequestId61;
   response_text?: ResponseText;
-  error?: Error26;
+  error?: Error28;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -29296,10 +30701,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType134;
-  timestamp?: Timestamp134;
-  session_id?: SessionId134;
-  request_id?: RequestId58;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
+  request_id?: RequestId62;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -29308,12 +30713,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType135;
-  timestamp?: Timestamp135;
-  session_id?: SessionId135;
-  request_id?: RequestId59;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
+  request_id?: RequestId63;
   fork_index?: ForkIndex;
-  error?: Error27;
+  error?: Error29;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -29325,9 +30730,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType136;
-  timestamp?: Timestamp136;
-  session_id?: SessionId136;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -29354,9 +30759,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType137;
-  timestamp?: Timestamp137;
-  session_id?: SessionId137;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
   wake_ref?: WakeRef1;
   source?: Source6;
 }
@@ -29369,9 +30774,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType138;
-  timestamp?: Timestamp138;
-  session_id?: SessionId138;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -29383,9 +30788,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType139;
-  timestamp?: Timestamp139;
-  session_id?: SessionId139;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -29396,9 +30801,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType140;
-  timestamp?: Timestamp140;
-  session_id?: SessionId140;
+  type?: EventType144;
+  timestamp?: Timestamp144;
+  session_id?: SessionId144;
   target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -29412,9 +30817,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType141;
-  timestamp?: Timestamp141;
-  session_id?: SessionId141;
+  type?: EventType145;
+  timestamp?: Timestamp145;
+  session_id?: SessionId145;
   target?: Target3;
 }
 /**
@@ -29425,19 +30830,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType142;
-  timestamp?: Timestamp142;
-  session_id?: SessionId142;
+  type?: EventType146;
+  timestamp?: Timestamp146;
+  session_id?: SessionId146;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType143;
-  timestamp?: Timestamp143;
-  session_id?: SessionId143;
-  request_id?: RequestId60;
+  type?: EventType147;
+  timestamp?: Timestamp147;
+  session_id?: SessionId147;
+  request_id?: RequestId64;
 }
 /**
  * Structured permission policy snapshot.
@@ -29448,10 +30853,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType144;
-  timestamp?: Timestamp144;
-  session_id?: SessionId144;
-  request_id?: RequestId61;
+  type?: EventType148;
+  timestamp?: Timestamp148;
+  session_id?: SessionId148;
+  request_id?: RequestId65;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -29500,10 +30905,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType145;
-  timestamp?: Timestamp145;
-  session_id?: SessionId145;
-  request_id?: RequestId62;
+  type?: EventType149;
+  timestamp?: Timestamp149;
+  session_id?: SessionId149;
+  request_id?: RequestId66;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -29551,10 +30956,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType146;
-  timestamp?: Timestamp146;
-  session_id?: SessionId146;
-  request_id?: RequestId63;
+  type?: EventType150;
+  timestamp?: Timestamp150;
+  session_id?: SessionId150;
+  request_id?: RequestId67;
   status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -29591,10 +30996,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType147;
-  timestamp?: Timestamp147;
-  session_id?: SessionId147;
-  request_id?: RequestId64;
+  type?: EventType151;
+  timestamp?: Timestamp151;
+  session_id?: SessionId151;
+  request_id?: RequestId68;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -29620,10 +31025,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType148;
-  timestamp?: Timestamp148;
-  session_id?: SessionId148;
-  request_id?: RequestId65;
+  type?: EventType152;
+  timestamp?: Timestamp152;
+  session_id?: SessionId152;
+  request_id?: RequestId69;
   status?: Status6;
   revoked?: Revoked;
   detail?: Detail3;
@@ -29665,10 +31070,10 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType149;
-  timestamp?: Timestamp149;
-  session_id?: SessionId149;
-  request_id?: RequestId66;
+  type?: EventType153;
+  timestamp?: Timestamp153;
+  session_id?: SessionId153;
+  request_id?: RequestId70;
   user?: User2;
   workspace?: Workspace3;
   name?: Name14;
@@ -29707,10 +31112,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType150;
-  timestamp?: Timestamp150;
-  session_id?: SessionId150;
-  request_id?: RequestId67;
+  type?: EventType154;
+  timestamp?: Timestamp154;
+  session_id?: SessionId154;
+  request_id?: RequestId71;
   status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -29735,10 +31140,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType151;
-  timestamp?: Timestamp151;
-  session_id?: SessionId151;
-  request_id?: RequestId68;
+  type?: EventType155;
+  timestamp?: Timestamp155;
+  session_id?: SessionId155;
+  request_id?: RequestId72;
   user?: User3;
 }
 /**
@@ -29759,10 +31164,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType152;
-  timestamp?: Timestamp152;
-  session_id?: SessionId152;
-  request_id?: RequestId69;
+  type?: EventType156;
+  timestamp?: Timestamp156;
+  session_id?: SessionId156;
+  request_id?: RequestId73;
   status?: Status8;
   reloaded?: Reloaded;
   detail?: Detail5;
@@ -29808,10 +31213,10 @@ export interface SecretReloadResultEvent {
  *         copy the user made their own survives.  A removal requires it.
  */
 export interface WorkspaceAppWriteRequest {
-  type?: EventType153;
-  timestamp?: Timestamp153;
-  session_id?: SessionId153;
-  request_id?: RequestId70;
+  type?: EventType157;
+  timestamp?: Timestamp157;
+  session_id?: SessionId157;
+  request_id?: RequestId74;
   user?: User4;
   workspace?: Workspace4;
   env?: Env;
@@ -29839,10 +31244,10 @@ export interface Env {
  *     detail: Human-readable elaboration.
  */
 export interface WorkspaceAppWriteResultEvent {
-  type?: EventType154;
-  timestamp?: Timestamp154;
-  session_id?: SessionId154;
-  request_id?: RequestId71;
+  type?: EventType158;
+  timestamp?: Timestamp158;
+  session_id?: SessionId158;
+  request_id?: RequestId75;
   status?: Status9;
   env?: Env1;
   files?: Files4;
@@ -29987,6 +31392,10 @@ export const EventTypeValue = {
   REFERENCE_CLAIMS: "reference.claims",
   REFERENCE_CLAIMS_REQUEST: "reference.claims.request",
   REFERENCE_CURATION_REQUEST: "reference.curation.request",
+  REFERENCE_CATALOG: "reference.catalog",
+  REFERENCE_CATALOG_REQUEST: "reference.catalog.request",
+  REFERENCE_LINKS_UPDATE_REQUEST: "reference.links.request",
+  REFERENCE_LINKS_UPDATE_RESULT: "reference.links.result",
   SCAFFOLD_EXPLAIN_RESULT: "scaffold.explain.result",
   SESSION_MESSAGE_RESULT: "session.message.result",
   SCAFFOLD_INTEGRATION_RESULT: "scaffold.integration.result",

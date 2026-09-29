@@ -1639,6 +1639,51 @@ test("proposals rail lists reference claims, explains a blocked one, promotes an
   await expect(panel.getByText("Nothing proposed.")).toBeVisible();
 });
 
+test("references rail lists the catalog, promoted proposals appear, and the owner edits a reference's links", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Open References" }).click();
+  const panel = page.getByRole("region", { name: "References" });
+
+  // The seeded catalog: two ADRs (adr-2 supersedes adr-1) and a runbook in
+  // the "ops" bundle whose edge names nothing the catalog holds.
+  await expect(panel.getByTestId("reference-row")).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "Close References" })).toContainText("!");
+  const adr2 = panel.locator('[data-reference-id="adr-2"]');
+  const runbook = panel.locator('[data-reference-id="ops-runbook"]');
+  await expect(adr2.getByTestId("reference-links")).toContainText("supersedes adr-1 (requests for it get this one)");
+  await expect(runbook).toContainText("bundle ops");
+  await expect(runbook.getByTestId("reference-links")).toContainText("elaborates old-pager (not in this catalog)");
+  const adr1 = panel.locator('[data-reference-id="adr-1"]');
+  await adr1.getByRole("button", { name: /^Show reference/ }).click();
+  await expect(adr1).toContainText("linked from adr-2 (supersedes)");
+
+  // Fix the dangling edge: point it at adr-2 and relabel it depends-on.
+  await runbook.getByRole("button", { name: /^Edit links of/ }).click();
+  await runbook.getByLabel("Target of link 1").fill("adr-2");
+  await runbook.getByLabel("Relation of link 1").selectOption("depends-on");
+  await runbook.getByRole("button", { name: /^Save links of/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Saved.");
+  await expect(runbook.getByTestId("reference-links")).toHaveText("depends on adr-2");
+  await expect(page.getByRole("button", { name: "Close References" })).toContainText("3");
+
+  // A refused save keeps the draft and says why.
+  await adr2.getByRole("button", { name: /^Edit links of/ }).click();
+  await adr2.getByLabel("Target of link 1").fill("adr-2");
+  await adr2.getByRole("button", { name: /^Save links of/ }).click();
+  await expect(panel.getByRole("status")).toContainText("A reference cannot link to itself.");
+  await adr2.getByRole("button", { name: /^Cancel editing/ }).click();
+  await expect(adr2.getByTestId("reference-links")).toContainText("supersedes adr-1");
+
+  // A promotion lands in the catalog without a manual refresh.
+  await page.getByRole("button", { name: "Open Proposals" }).click();
+  const proposals = page.getByRole("region", { name: "Proposals" });
+  await proposals.locator('[data-claim-id="20260929T100000Z-aaaa1111"]').getByRole("button", { name: /^Promote proposal/ }).click();
+  await expect(proposals.getByRole("status")).toContainText("Promoted into the catalog as deploy-runbook.");
+  await page.getByRole("button", { name: "Open References" }).click();
+  await expect(panel.locator('[data-reference-id="deploy-runbook"]')).toContainText("supersedes old-deploy");
+  await expect(page.getByText("mock: executed reference")).toHaveCount(0);
+});
+
 test("memories rail lists the store, re-lists on a store_memory, and approves and removes (#1232)", async ({ page }) => {
   await openSession(page);
   await page.getByRole("button", { name: "Open Memories" }).click();

@@ -16,10 +16,14 @@ from jaato_sdk.client.ipc import IPCClient
 from jaato_sdk.events import (
     PROTOCOL_VERSION,
     ClientType,
+    ReferenceCatalogEvent,
+    ReferenceCatalogRequest,
     ReferenceClaimsEvent,
     ReferenceClaimsRequest,
     ReferenceCurationRequest,
     ReferenceCurationResultEvent,
+    ReferenceLinksUpdateRequest,
+    ReferenceLinksUpdateResultEvent,
 )
 
 
@@ -52,6 +56,8 @@ def test_the_floor_is_the_version_that_introduced_the_verbs():
     lambda c: c.list_reference_claims(),
     lambda c: c.promote_reference_claim("c1"),
     lambda c: c.dismiss_reference_claim("c1"),
+    lambda c: c.list_reference_catalog(),
+    lambda c: c.update_reference_links("r", []),
 ])
 def test_an_older_daemon_is_refused_with_nothing_sent(call):
     client = _client("1.31")
@@ -83,3 +89,23 @@ def test_curation_sends_the_typed_request_and_returns_its_answer(method, action)
     assert isinstance(sent[0], ReferenceCurationRequest)
     assert (sent[0].action, sent[0].claim_id) == (action, "c7")
     assert answer.request_id == sent[0].request_id and answer.action == action
+
+
+def test_the_catalog_listing_is_correlated():
+    client = _client()
+    sent = _answering(client, lambda e, rid: ReferenceCatalogEvent(
+        request_id=rid, references=[{"id": rid}]))
+    answer = asyncio.run(client.list_reference_catalog())
+    assert isinstance(sent[0], ReferenceCatalogRequest)
+    assert answer.references == [{"id": sent[0].request_id}]
+
+
+def test_a_links_update_sends_the_whole_list():
+    client = _client()
+    sent = _answering(client, lambda e, rid: ReferenceLinksUpdateResultEvent(
+        request_id=rid, reference_id=e.reference_id, links=e.links))
+    links = [{"to": "adr-1", "rel": "supersedes"}]
+    answer = asyncio.run(client.update_reference_links("adr-2", links))
+    assert isinstance(sent[0], ReferenceLinksUpdateRequest)
+    assert (sent[0].reference_id, sent[0].links) == ("adr-2", links)
+    assert answer.request_id == sent[0].request_id and answer.links == links
