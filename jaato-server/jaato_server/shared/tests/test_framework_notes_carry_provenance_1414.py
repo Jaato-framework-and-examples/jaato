@@ -191,45 +191,54 @@ def _call_name(node: ast.AST) -> str:
     return ""
 
 
+def _unmarked_note_head(node: ast.AST, parent: Optional[ast.AST]) -> Optional[str]:
+    """The note text ``node`` starts, when it is an UNMARKED note."""
+    if isinstance(parent, ast.JoinedStr):
+        return None  # a piece of an f-string, judged as a whole
+    text = _leading_text(node)
+    if text is None:
+        return None
+    head = text.lstrip()
+    if not head.startswith(("<hidden>", "[System:")):
+        return None
+    if isinstance(node, ast.Constant) and head in ("<hidden>", "[System:"):
+        return None  # a membership probe, not a note
+    if _call_name(parent) in ("framework_note", "hidden_framework_note"):
+        return None
+    if _call_name(parent) in _REGEX_CALLS:
+        return None  # a pattern that strips hidden text
+    if _marked_fstring(node):
+        return None
+    return head
+
+
+def _unmarked_in_file(path) -> List[str]:
+    rel = str(path.relative_to(_REPO))
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    owner: Dict[int, str] = {}
+    for qualname, func in _functions(tree):
+        for node in _own_nodes(func):
+            owner[id(node)] = qualname
+    parents = {id(c): p for p in ast.walk(tree)
+               for c in ast.iter_child_nodes(p)}
+    found: List[str] = []
+    for node in ast.walk(tree):
+        head = _unmarked_note_head(node, parents.get(id(node)))
+        if head is None:
+            continue
+        key = (rel, owner.get(id(node), "<module>"))
+        if key not in ALLOWED:
+            found.append(f"{rel}:{node.lineno} in {key[1]}: {head[:60]!r}")
+    return found
+
+
 def _unmarked_note_literals() -> List[str]:
     """``<hidden>`` / ``[System:`` literals built without the marker."""
     found: List[str] = []
     for root in _SCANNED_ROOTS:
         for path in sorted((_SERVER / root).rglob("*.py")):
-            if "tests" in path.parts:
-                continue
-            rel = str(path.relative_to(_REPO))
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            owner: Dict[int, str] = {}
-            for qualname, func in _functions(tree):
-                for node in _own_nodes(func):
-                    owner[id(node)] = qualname
-            parents = {id(c): p for p in ast.walk(tree)
-                       for c in ast.iter_child_nodes(p)}
-            for node in ast.walk(tree):
-                if isinstance(parents.get(id(node)), ast.JoinedStr):
-                    continue  # a piece of an f-string, judged as a whole
-                text = _leading_text(node)
-                if text is None:
-                    continue
-                head = text.lstrip()
-                if not head.startswith(("<hidden>", "[System:")):
-                    continue
-                if isinstance(node, ast.Constant) and head in (
-                        "<hidden>", "[System:"):
-                    continue  # a membership probe, not a note
-                parent = parents.get(id(node))
-                if _call_name(parent) in ("framework_note",
-                                          "hidden_framework_note"):
-                    continue
-                if _call_name(parent) in _REGEX_CALLS:
-                    continue  # a pattern that strips hidden text
-                if _marked_fstring(node):
-                    continue
-                key = (rel, owner.get(id(node), "<module>"))
-                if key in ALLOWED:
-                    continue
-                found.append(f"{rel}:{node.lineno} in {key[1]}: {head[:60]!r}")
+            if "tests" not in path.parts:
+                found.extend(_unmarked_in_file(path))
     return found
 
 
