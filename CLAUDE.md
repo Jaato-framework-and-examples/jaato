@@ -2093,15 +2093,16 @@ cancelled it.
   own line and `JaatoServer.shutdown`'s say which happened.
 
 **One slot, one entry.** `return_slot_after_session` refuses (by identity) a
-slot already in `_idle_slots`, at ERROR, counted. `JaatoServer.shutdown`
-captures and nulls `_runner_rpc` / `_spawned_runner` / `_pool_manager_ref`
-**without a lock** and is called from session unload, `session.stop`, the #812
-orphan sweep and daemon shutdown — so two concurrent callers can both see the
-live triple and both return the same slot. The two entries share one `rpc`:
-tear either down and the other is a corpse in the pool that no teardown line
-names. Guarded at the pool rather than at the four teardown paths, the #674
-argument — the pool owns the list, so one boundary check covers callers that do
-not exist yet. It does not *fix* the double shutdown; it makes it audible.
+slot already in `_idle_slots`, at ERROR, counted. The capture-and-null in
+`JaatoServer.shutdown` (#1061) was made atomic under `_runner_lock` —
+called from session unload, `session.stop`, the #812 orphan sweep and daemon
+shutdown — so two concurrent callers cannot both read the triple before
+either nulls it, and the "two entries share one `rpc`" path that left a
+corpse in the pool is now structurally impossible. Guarded at the pool too
+(`return_slot_after_session` refuses a slot already held), the #674 argument
+that the pool owns the list is moot for the double-shutdown case; both
+layers protect the same invariant.  The pool guard remains as defence in
+depth for any future caller that does not route through `shutdown`.
 
 **What killed the reported client is still unknown, and is now answerable.**
 Both read-loop exit lines named no channel (`RunnerRPCClient: runner closed

@@ -511,3 +511,67 @@ def test_shutdown_is_idempotent_without_runner_lock_present() -> None:
         assert len(rpc.close_calls) == 1
     finally:
         rpc.stop_loop()
+
+# ----------------------------------------------------------------------------
+# Reviewer #1 (v3): A cascade stage that never had a runner must still emit
+# SlotSettledEvent so the stage-advance reactor (which gates on it with no
+# timeout) does not stall waiting for a slot that will never be returned.
+# ----------------------------------------------------------------------------
+
+
+def test_a_cascade_stage_with_no_runner_still_emits_slot_settled() -> None:
+    """A cascade stage that NEVER attached a runner still emits SlotSettledEvent.
+
+    The reviewer (v2 follow-up) called this out as the missing regression
+    test for the original fix.  The shape is: a JaatoServer built via
+    ``__new__`` (bypassing ``__init__``), with ``_cascade_driver_id`` set
+    (so the cascade reactor is waiting on this stage) and no runner ever
+    attached (so ``_runner_rpc`` is None and ``_runner_released`` stays
+    False).  When ``shutdown()`` runs, the v1 implementation's early-return
+    guard (``if rpc is None: return``) suppresses the ``SlotSettledEvent``
+    entirely — the stage-advance reactor stalls.
+
+    After the v3 fix, ``shutdown`` bails only when ``_runner_released`` is
+    True (a race lost).  A stage that never had a runner has
+    ``_runner_released`` False from the start, so the SlotSettledEvent
+    still fires.
+    """
+    emitted: List[Any] = []
+
+    rpc = _FakeRPC()
+    try:
+        srv = JaatoServer.__new__(JaatoServer)
+        srv.registry = None
+        srv.permission_plugin = None
+        # No runner ever wired up: every field stays at its __new__ default.
+        srv._runner_rpc = None
+        srv._spawned_runner = None
+        srv._pool_manager_ref = None
+        srv._runner_ready = threading.Event()
+        srv._runner_released = False
+        # Cascade driver set: the cascade reactor is waiting on this stage.
+        srv._cascade_driver_id = "cascade-driver-test"
+        srv._session_id = "session-test"
+        srv._main_agent_id = "main-agent"
+        # Catch every event emit.
+        srv.emit = lambda event: emitted.append(event)
+
+        srv.shutdown()
+
+        # The cascade reactor must have seen exactly one SlotSettledEvent.
+        slot_events = [
+            e for e in emitted
+            if type(e).__name__ == "SlotSettledEvent"
+        ]
+        assert len(slot_events) == 1, (
+            f"expected exactly 1 SlotSettledEvent for a never-had-runner "
+            f"stage; got {len(slot_events)}: {[type(e).__name__ for e in emitted]}"
+        )
+        # The pool_slot_pid is 0 (no slot), was_warm is False.
+        assert slot_events[0].pool_slot_pid == 0
+        assert slot_events[0].was_warm is False
+    finally:
+        rpc.stop_loop()
+
+
+# ----------------------------------------------------------------------------
