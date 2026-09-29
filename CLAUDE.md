@@ -4074,8 +4074,10 @@ earlier. Each depth is now read WHOLE (`_reached_at_depth`) and ordered by
 
 1. how many parents at the previous depth DECLARE `depends-on` to it,
    counted by its current version (the routing `supersedes` applies);
-2. how many parents reach it at all;
-3. the id, which keeps the order total, so determinism now comes from the
+2. where the workspace has an embedding index, how close its vector is to
+   the selection's;
+3. how many parents reach it at all;
+4. the id, which keeps the order total, so determinism now comes from the
    ranking rather than from sorting `pending`.
 
 Unbounded, the SET is unchanged and only the order within a depth moves.
@@ -4083,12 +4085,23 @@ The truncation record carries `ranked_by`. Guard:
 `shared/tests/test_the_cap_keeps_what_the_links_rank_first.py`, five
 reversions.
 
-**Still not done:** ranking by *similarity*, keeping the nearest 25 rather
-than the best-linked 25. `score_sources` takes a vector and does not care
-where it came from, but it is reachable only where a vector index has been
-generated, and `initialize()` skips the embedding provider otherwise. A
-bound has to work for everyone; the link ranking does, similarity is a
-refinement for workspaces that have embeddings.
+**The nearest, where there are vectors.** Tier 2 keeps the nearest 25
+rather than the best-linked 25. The selection is embedded once, from the
+fields every reference's vector is made from (`bundle.embedding_text`:
+name, description, tags, fetch hint, now the one definition `reconcile`
+and `metadata_hash` also read), and each candidate is scored against its
+own bundle's sidecar (`_semantic_score_sources`). Four rules:
+
+| Rule | Why |
+|---|---|
+| **asked only for a depth that is cut** | unbounded, or with room for every candidate, the order changes nothing about what is selected, so no embedding is paid for. A walk cuts at most one depth |
+| **a declared `depends-on` still comes first** | an author's statement outranks a vector's opinion |
+| **one unindexed candidate means links for the whole depth** | it cannot be compared, and ranking it below the indexed ones would prefer a reference for being in an indexed bundle rather than for being near |
+| **best effort, and said** | no matcher, a failed embedding or a matcher that raises ranks by links; `ranked_by` names which ranking cut the depth |
+
+No knob: it applies only under `max_transitive_references`, which is
+already opt-in, and only where an index exists. Guard:
+`shared/tests/test_the_cap_prefers_what_is_nearest.py`, six reversions.
 
 ### A Reference Records Where It Arrived, Not Who Wrote It
 

@@ -33,7 +33,14 @@ logger = logging.getLogger(__name__)
 from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
-from .links import FRONTIER_RANKING, LINK_RELS, LinkIndex, expansion_neighbours, rank_frontier
+from .links import (
+    FRONTIER_RANKING,
+    FRONTIER_RANKING_SIMILARITY,
+    LINK_RELS,
+    LinkIndex,
+    expansion_neighbours,
+    rank_frontier,
+)
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import (
     load_config,
@@ -49,6 +56,7 @@ from .bundle import (
     BundleRef,
     EMBEDDING_CONFIG_FILENAME,
     REFERENCE_NON_SOURCE_FILENAMES,
+    embedding_text,
     is_bundle_directory,
     ROOT_BUNDLE_NAME,
     VALID_BUNDLE_TIERS,
@@ -985,6 +993,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         )
         initial_set = set(initial_ids)
         depth = 0
+        ranked_by = FRONTIER_RANKING
 
         for depth in range(max_depth):
             if not pending:
@@ -1001,13 +1010,17 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     links))
 
             # RANKED, then cut: when the limit binds, the order decides
-            # WHICH references survive, so it is the declared edges and
-            # the link structure that decide it (``rank_frontier``), and
-            # never set order -- ``pending`` is a set, and its iteration
-            # order varies across processes (measured at six of
-            # twenty-five differing between two PYTHONHASHSEED values).
+            # WHICH references survive, so it is the declared edges, the
+            # selection's embedding where there is one, and the link
+            # structure that decide it (``rank_frontier``), and never set
+            # order -- ``pending`` is a set, and its iteration order varies
+            # across processes (measured at six of twenty-five differing
+            # between two PYTHONHASHSEED values).
+            order, ranked_by = self._rank_depth(
+                candidates, links, initial_ids, catalog_by_id,
+                None if limit is None else limit - len(resolved_ids))
             newly_found: Set[str] = set()
-            for mentioned_id in rank_frontier(candidates, links):
+            for mentioned_id in order:
                 if self._expansion_at_limit(len(resolved_ids), limit):
                     break
                 newly_found.add(mentioned_id)
@@ -1019,8 +1032,85 @@ class ReferencesPlugin(RunnerForwardingMixin):
             pending = newly_found
 
         self._conclude_expansion(
-            initial_ids, resolved_ids, pending, limit, depth, max_depth)
+            initial_ids, resolved_ids, pending, limit, depth, max_depth,
+            ranked_by)
         return resolved_ids, parent_map
+
+    def _rank_depth(
+        self,
+        candidates: Dict[str, Set[str]],
+        links: LinkIndex,
+        initial_ids: List[str],
+        catalog_by_id: Dict[str, ReferenceSource],
+        room: Optional[int],
+    ) -> Tuple[List[str], str]:
+        """Order one depth for admission, and name the ranking used.
+
+        Similarity is consulted only when this depth is CUT (more
+        candidates than ``room``): unbounded, or with room for all, the
+        order changes nothing about which references are selected, and an
+        embedding call would be paid for nothing.  A walk cuts at most one
+        depth -- it fills the room and stops -- so the selection is
+        embedded at most once per expansion.
+        """
+        scores = None
+        if room is not None and len(candidates) > room:
+            scores = self._similarity_to_selection(
+                initial_ids, set(candidates), catalog_by_id)
+        ranked_by = FRONTIER_RANKING_SIMILARITY if scores is not None else FRONTIER_RANKING
+        return rank_frontier(candidates, links, scores), ranked_by
+
+    def _similarity_to_selection(
+        self,
+        initial_ids: List[str],
+        candidate_ids: Set[str],
+        catalog_by_id: Dict[str, ReferenceSource],
+    ) -> Optional[Dict[str, float]]:
+        """Each candidate's cosine similarity to the selection, or ``None``.
+
+        The selection is embedded from the same fields its references'
+        vectors were made from (:func:`embedding_text`), and each
+        candidate is scored against the sidecar of the bundle that owns
+        it.  ``None`` -- rank by links alone -- when no bundle has a
+        matcher, when the embedding fails, or when ANY candidate has no
+        vector: a candidate that cannot be scored cannot be compared, and
+        ranking it below the scored ones would prefer a reference for
+        being in an indexed bundle rather than for being near.  Best
+        effort: a failure here never fails the selection.
+        """
+        if not self._semantic_available():
+            return None
+        vector = self._embed_selection(initial_ids, catalog_by_id)
+        if vector is None:
+            return None
+        try:
+            scores = self._semantic_score_sources(vector, candidate_ids)
+        except Exception as exc:  # a matcher is out-of-tree code
+            self._trace(f"transitive: similarity scoring failed ({exc}); ranking by links")
+            return None
+        unscored = candidate_ids - scores.keys()
+        if unscored:
+            self._trace(
+                f"transitive: {len(unscored)} candidate(s) have no vector "
+                f"({sorted(unscored)[:5]}); ranking by links")
+            return None
+        return {cid: float(scores[cid]) for cid in candidate_ids}
+
+    def _embed_selection(
+        self, initial_ids: List[str], catalog_by_id: Dict[str, ReferenceSource],
+    ) -> Optional[Any]:
+        """One query vector for the whole selection, or ``None``."""
+        provider = self._embedding_provider
+        if provider is None or not provider.available:
+            return None
+        texts = [embedding_text(catalog_by_id[i]) for i in initial_ids if i in catalog_by_id]
+        if not texts:
+            return None
+        try:
+            return provider.embed_text_as_array("\n\n".join(texts))
+        except Exception as exc:  # a provider is out-of-tree code
+            self._trace(f"transitive: embedding the selection failed ({exc})")
+            return None
 
     def _reached_at_depth(
         self,
@@ -1108,6 +1198,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         limit: Optional[int],
         depth: int,
         max_depth: int,
+        ranked_by: str,
     ) -> None:
         """Publish the traversal's outcome: traces, truncation, warning.
 
@@ -1133,7 +1224,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         truncated = None
         if self._expansion_at_limit(len(resolved_ids), limit) and pending:
             truncated = self._transitive_truncation(
-                limit, len(resolved_ids), depth)
+                limit, len(resolved_ids), depth, ranked_by)
             self._trace(
                 f"transitive: TRUNCATED at {limit} "
                 f"(resolved={len(resolved_ids)}, depth={depth})"
@@ -1210,7 +1301,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
     @staticmethod
     def _transitive_truncation(
-        limit: Optional[int], resolved: int, depth: int
+        limit: Optional[int], resolved: int, depth: int, ranked_by: str,
     ) -> Dict[str, Any]:
         """The record published when expansion stopped at its ceiling.
 
@@ -1226,7 +1317,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "limit": limit,
             "resolved": resolved,
             "stopped_at_depth": depth,
-            "ranked_by": FRONTIER_RANKING,
+            "ranked_by": ranked_by,
             "note": (
                 "Transitive expansion stopped at the configured limit. "
                 "Absence from this list does not mean a reference does not "

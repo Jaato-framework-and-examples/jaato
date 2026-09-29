@@ -246,9 +246,16 @@ FRONTIER_RANKING = (
     "depth points to, then id"
 )
 
+FRONTIER_RANKING_SIMILARITY = (
+    "declared depends-on edges first, then similarity to the selection, then "
+    "references more of the previous depth points to, then id"
+)
+
 
 def rank_frontier(
-    candidates: Mapping[str, Set[str]], index: LinkIndex,
+    candidates: Mapping[str, Set[str]],
+    index: LinkIndex,
+    similarity: Optional[Mapping[str, float]] = None,
 ) -> List[str]:
     """One depth's newly reached references, most wanted first.
 
@@ -258,12 +265,18 @@ def rank_frontier(
     references survive -- and it is:
 
     1. how many of those parents DECLARE ``depends-on`` to it: an author
-       said the parent is not comprehensible without it, which no mention
-       says;
-    2. how many parents reached it at all: a reference several selected
+       said the parent is not comprehensible without it, which neither a
+       mention nor a vector says;
+    2. with ``similarity``, how close its vector is to the selection's: the
+       nearest references rather than the best-linked ones.  The caller
+       passes scores only when EVERY candidate has one (see
+       ``ReferencesPlugin._similarity_to_selection``): a candidate with no
+       vector cannot be compared, and ranking it below every indexed one
+       would prefer a reference for being in an indexed bundle;
+    3. how many parents reached it at all: a reference several selected
        documents point to is more central to the selection than one only
        one of them names;
-    3. the id, so the order is total and reproducible (it reaches the
+    4. the id, so the order is total and reproducible (it reaches the
        prompt-cache prefix, and a set's order varies across processes).
 
     A declared target is counted by its current version, the same routing
@@ -276,4 +289,7 @@ def rank_frontier(
             if cid in {index.current_version(t) for t in index.expanding_targets(parent)}
         )
 
-    return sorted(candidates, key=lambda cid: (-declared_votes(cid), -len(candidates[cid]), cid))
+    def nearness(cid: str) -> float:
+        return -similarity[cid] if similarity is not None else 0.0
+
+    return sorted(candidates, key=lambda cid: (-declared_votes(cid), nearness(cid), -len(candidates[cid]), cid))

@@ -428,6 +428,14 @@ To disable transitive injection:
 }
 ```
 
+To bound it, set `max_transitive_references` (unset or `0` = unbounded).
+When a depth has more candidates than the room left, they are ranked
+before the cut: declared `depends-on` edges first, then (when every
+candidate has a vector in the workspace's embedding index) similarity to
+the selection, then how many references at the previous depth reach the
+candidate, then id. `selectReferences` reports a cut as `truncated`, with
+`ranked_by` naming the ranking that decided it.
+
 ## Environment Variables
 
 | Variable | Description |

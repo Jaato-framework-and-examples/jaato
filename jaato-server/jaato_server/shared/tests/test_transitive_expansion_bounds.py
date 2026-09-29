@@ -62,7 +62,7 @@ _LINKS = "jaato-server/jaato_server/shared/plugins/references/links.py"
 REVERSIONS = [
     Reversion(
         target=_LINKS,
-        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), -len(candidates[cid]), cid))\n",
+        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), nearness(cid), -len(candidates[cid]), cid))\n",
         replace="    return list(candidates)\n",
         because=(
             "admitting a depth in set order makes the resolved list "
@@ -96,12 +96,12 @@ REVERSIONS = [
     Reversion(
         target=_TARGET,
         find=(
-            "            for mentioned_id in rank_frontier(candidates, links):\n"
+            "            for mentioned_id in order:\n"
             "                if self._expansion_at_limit("
             "len(resolved_ids), limit):"
         ),
         replace=(
-            "            for mentioned_id in rank_frontier(candidates, links):\n"
+            "            for mentioned_id in order:\n"
             "                if False:"
         ),
         because="without the inner check one frontier can overshoot the cap",

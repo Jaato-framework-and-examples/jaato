@@ -38,8 +38,8 @@ _PLUGIN = "jaato-server/jaato_server/shared/plugins/references/plugin.py"
 REVERSIONS = [
     Reversion(
         target=_LINKS,
-        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), -len(candidates[cid]), cid))\n",
-        replace="    return sorted(candidates, key=lambda cid: (-len(candidates[cid]), cid))\n",
+        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), nearness(cid), -len(candidates[cid]), cid))\n",
+        replace="    return sorted(candidates, key=lambda cid: (nearness(cid), -len(candidates[cid]), cid))\n",
         because=(
             "a parent's declared depends-on would lose the cut to a "
             "sibling's passing mention whose id sorts earlier"
@@ -48,8 +48,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_LINKS,
-        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), -len(candidates[cid]), cid))\n",
-        replace="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), cid))\n",
+        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), nearness(cid), -len(candidates[cid]), cid))\n",
+        replace="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), nearness(cid), cid))\n",
         because=(
             "a reference several selected documents point to would lose the "
             "cut to one a single document names"
@@ -76,7 +76,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_PLUGIN,
-        find='            "ranked_by": FRONTIER_RANKING,\n',
+        find='            "ranked_by": ranked_by,\n',
         replace="",
         because="a cut neighbourhood would not say what the cut preferred",
         test="TestNothingElseChanged::test_the_truncation_record_names_the_ranking",
