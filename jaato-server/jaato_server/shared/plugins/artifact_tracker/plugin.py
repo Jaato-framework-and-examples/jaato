@@ -17,6 +17,7 @@ from a previous session from leaking into the new one.
 """
 
 import json
+from jaato_sdk.framework_note import framework_note
 import os
 from jaato_server.shared.session_context import get_workspace_root, get_config_root
 import tempfile
@@ -1476,7 +1477,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         else:
             files_str = ", ".join(names[:5]) + f" +{len(names) - 5} more"
 
-        summary = f"\n\n[Artifact Tracker: Flagged {len(dependents)} dependent file(s) for review: {files_str}]"
+        summary = "\n\n" + framework_note(f"[Artifact Tracker: Flagged {len(dependents)} dependent file(s) for review: {files_str}]")
 
         return result + summary
 

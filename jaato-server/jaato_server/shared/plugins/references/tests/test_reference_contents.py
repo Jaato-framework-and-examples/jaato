@@ -309,7 +309,7 @@ class TestBuildContentsAnnotation:
             "mod-001", {"path": str(mod_dir / "MODULE.md")}
         )
         assert result is not None
-        assert "Mandatory Templates" in result
+        assert "**Templates**" in result
         assert "renderTemplateToFile" in result
         assert "Application.java.tpl" in result
         assert "Entity.java.tpl" in result
@@ -338,7 +338,7 @@ class TestBuildContentsAnnotation:
         )
         assert result is not None
         assert "Post-Implementation Validation" in result
-        assert "MUST run" in result
+        assert "checks to run after implementing" in result
         assert "check.sh" in result
 
     def test_annotation_with_policies(self, tmp_path):
@@ -426,7 +426,7 @@ class TestBuildContentsAnnotation:
             "mod-001", {"path": str(mod_dir / "MODULE.md")}
         )
         assert result is not None
-        assert "Mandatory Templates" in result
+        assert "**Templates**" in result
         assert "Post-Implementation Validation" in result
         assert "Implementation Policies" in result
         assert "Helper Scripts" in result

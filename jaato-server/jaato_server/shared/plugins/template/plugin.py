@@ -101,6 +101,7 @@ from jaato_sdk.plugins.base import (
     UserCommand,
 )
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, DISCOVERABILITY_DEFERRED
+from jaato_sdk.framework_note import framework_note
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.tool_id_map import name_to_id, id_to_name
 from jaato_server.shared.trace import trace as _trace_write
@@ -133,6 +134,15 @@ def _template_name_from_id(template_id: str) -> str:
 
 # File extensions recognized as standalone template files
 TEMPLATE_FILE_EXTENSIONS = {'.tpl', '.tmpl'}
+
+# A tool result is treated as a template AS A WHOLE only when the file it
+# read carries one of these extensions (#1414).  Before, any result whose
+# raw text contained ``{{word`` was, so reading a Python module whose
+# docstring mentions ``{{param}}`` extracted "a template" from it and
+# annotated the result.
+RAW_TEMPLATE_READ_EXTENSIONS = TEMPLATE_FILE_EXTENSIONS | {
+    '.j2', '.jinja', '.jinja2', '.mustache', '.hbs', '.handlebars',
+}
 
 # Auto-discovered path-routing config (server 0.6.40+).  When present
 # at ``<config_root>/template_routing.yaml`` (or workspace-tier
@@ -282,7 +292,11 @@ class TemplateIndexEntry:
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
 # Matches {{ variable }}, {% control %}, or {# comment #}
-JINJA2_VARIABLE_PATTERN = re.compile(r'\{\{\s*\w+')
+# The lookbehind refuses the ``{{`` inside a Python f-string's escaped
+# brace (``f"{{{name}}}"`` reads ``{{name`` at its second position), which
+# made every Python file that builds a braced string look like a template
+# (#1414).
+JINJA2_VARIABLE_PATTERN = re.compile(r'(?<!\{)\{\{\s*\w+')
 JINJA2_CONTROL_PATTERN = re.compile(r'\{%\s*\w+')
 JINJA2_COMMENT_PATTERN = re.compile(r'\{#.*#\}')
 
@@ -1335,9 +1349,10 @@ showing the template's id AND the **exact variable names** required.  Look
 for annotations like:
 
 ```
-[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: tpl_a8f0e2b1
-  Syntax: mustache
-  Required variables: [Entity, basePackage, entityFields]
+⟦JAATO⟧ Template(s) found in this result. ...
+- tpl_a8f0e2b1 (audit name: ...)
+  Why: a fenced `java` block in this result contains mustache template syntax ...
+  Variables: [Entity, basePackage, entityFields]
   ...
 ```
 
@@ -1774,7 +1789,8 @@ Template rendering writes files to the workspace."""
         # rather than reconstruct argument shape.  Human filename is
         # shown as "audit" so the kb author / human reader can correlate
         # — the LLM passes id only.
-        hint_lines = ["", "📦 **Available Templates** — call by `template_id`:"]
+        hint_lines = ["", framework_note(
+            "📦 **Available Templates** — call by `template_id`:")]
         for entry in matches:
             desc = entry.description.strip() if entry.description else ""
             tail = f" — {desc}" if desc else ""
@@ -1866,7 +1882,7 @@ Template rendering writes files to the workspace."""
         # If no code blocks found, check if the raw content itself is a template
         # This handles cases like readFile on a .tpl file
         if not code_blocks:
-            if self._is_template(result):
+            if self._raw_read_is_template(result, tool_args):
                 self._trace("  no code blocks, but raw content is a template")
                 # Treat the entire result as a single template block
                 # Use empty lang, full content, position 0
@@ -1926,32 +1942,10 @@ Template rendering writes files to the workspace."""
                 # Build annotation with COMPLETE variable list
                 rel_path = template_path.relative_to(self._base_path) if self._base_path and template_path.is_relative_to(self._base_path) else template_path
 
-                # Show ALL variables so the model knows exactly what to provide
-                if variables:
-                    var_list = ", ".join(variables)
-                    var_dict_example = ", ".join(f'"{v}": <value>' for v in variables[:3])
-                    if len(variables) > 3:
-                        var_dict_example += ", ..."
-                else:
-                    var_list = "(none detected)"
-                    var_dict_example = ""
-
-                # Compute the LLM-facing opaque id for this template
-                # (server 0.6.119+, the cutover surface).  The annotation
-                # shows it as the call argument; the human filename
-                # remains on the first line for kb-author audit.
-                _id = _template_id(template_path.name)
-                annotations.append(
-                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {_id} (audit name: {rel_path})\n"
-                    f"  Syntax: {syntax}\n"
-                    f"  Required variables: [{var_list}]\n"
-                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: renderTemplateToFile(\n"
-                    f"      template_id=\"{_id}\",\n"
-                    f"      variables={{{var_dict_example}}},\n"
-                    f"      output_path=\"<your-output-file>\"\n"
-                    f"  )"
-                )
+                annotations.append(self._extraction_annotation(
+                    _template_id(template_path.name), rel_path, syntax,
+                    variables, lang, content,
+                ))
 
         # Register extracted templates in the unified index
         for content_hash, template_path, variables in extracted:
@@ -1997,7 +1991,14 @@ Template rendering writes files to the workspace."""
         if not annotations:
             return self._finalize_tool_result(result)
 
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = (
+            "\n\n---\n"
+            + framework_note(
+                "Template(s) found in this result. If you are about to "
+                "write this code by hand, `renderTemplateToFile` with the "
+                "id below may do it for you:\n")
+            + "\n\n".join(annotations) + "\n---"
+        )
         enriched_result = result + annotation_block
 
         # Embedded extraction added new entries to the catalog — refresh
@@ -2303,6 +2304,66 @@ Template rendering writes files to the workspace."""
             content = match.group(2)
             blocks.append((lang, content, match.start(), match.end()))
         return blocks
+
+    def _raw_read_is_template(
+        self, content: str, tool_args: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Whether a whole tool result (no fenced blocks) is a template.
+
+        Only when the tool read a file whose extension names a template
+        (:data:`RAW_TEMPLATE_READ_EXTENSIONS`) AND the text has template
+        syntax.  A result with no known path (a shell ``cat``, a search)
+        is never taken whole: ``{{word`` in arbitrary output is far more
+        often a docstring, a format string or a Go/Rust brace escape than
+        a template the model should render (#1414).
+        """
+        path = (tool_args or {}).get("path") or (tool_args or {}).get("file_path")
+        if not isinstance(path, str):
+            return False
+        if Path(path).suffix.lower() not in RAW_TEMPLATE_READ_EXTENSIONS:
+            return False
+        return self._is_template(content)
+
+    @staticmethod
+    def _extraction_annotation(
+        template_id: str, rel_path: Any, syntax: str,
+        variables: List[str], lang: str, content: str,
+    ) -> str:
+        """One template's entry in the extraction note, with its evidence.
+
+        A suggestion, not an order (#1414): it says what was found, where,
+        and how to use it.  The old wording ("MANDATORY USAGE", "YOU MUST
+        USE THIS TEMPLATE") is the shape of a prompt injection, so a model
+        that respects the untrusted-content boundary discarded it.
+        """
+        if variables:
+            var_list = ", ".join(variables)
+            example = ", ".join(f'"{v}": <value>' for v in variables[:3])
+            if len(variables) > 3:
+                example += ", ..."
+        else:
+            var_list, example = "(none detected)", ""
+        where = (f"a fenced `{lang}` block in this result" if lang
+                 else "the template file this result read")
+        first = next(
+            (m.group(0) for m in (
+                p.search(content) for p in (
+                    MUSTACHE_SECTION_PATTERN, JINJA2_CONTROL_PATTERN,
+                    JINJA2_VARIABLE_PATTERN)) if m),
+            "",
+        )
+        evidence = f" (first tag: `{first}`)" if first else ""
+        return (
+            f"- {template_id} (audit name: {rel_path})\n"
+            f"  Why: {where} contains {syntax} template "
+            f"syntax{evidence}.\n"
+            f"  Variables: [{var_list}]\n"
+            f"  Call: renderTemplateToFile(\n"
+            f"      template_id=\"{template_id}\",\n"
+            f"      variables={{{example}}},\n"
+            f"      output_path=\"<your-output-file>\"\n"
+            f"  )"
+        )
 
     def _is_template(self, content: str) -> bool:
         """Check if content contains template syntax (Jinja2 or Mustache)."""

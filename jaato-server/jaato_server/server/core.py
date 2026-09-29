@@ -67,6 +67,7 @@ from jaato_server.shared.plugins.clarification.attachments import (
 )
 from jaato_server.shared.plugins.clarification.channels import question_payload
 from jaato_server.shared.plugins.session import create_plugin as create_session_plugin, load_session_config
+from jaato_sdk.framework_note import hidden_framework_note
 from jaato_sdk.plugins.base import parse_command_args, HelpLines
 from jaato_server.shared.plugins.gc import load_gc_from_file
 from jaato_server.shared.bootstrap_timing import BootstrapTimer
@@ -309,7 +310,10 @@ from jaato_server.server.awaiting import (
     pending_prompt,
     resolve_awaiting,
 )
-from jaato_server.shared.completion_nudge import resolve_max_completion_nudges
+from jaato_server.shared.completion_nudge import (
+    COMPLETION_NUDGE_TEXT,
+    resolve_max_completion_nudges,
+)
 from jaato_server.shared.model_tiers import (bound_model_for_profile,
                                 bound_provider_for_profile)
 
@@ -6999,15 +7003,7 @@ class JaatoServer:
                         f"{nudges_fired}/{MAX_COMPLETION_NUDGES}) "
                         f"— re-prompting"
                     )
-                    nudge = (
-                        "Your session is about to end without calling "
-                        "`signal_completion`. The loop cannot close cleanly "
-                        "until you either continue the work with another "
-                        "tool call, or call `signal_completion` per your "
-                        "profile's payload schema with the appropriate "
-                        "decision and evidence. Please proceed with one of "
-                        "those two paths."
-                    )
+                    nudge = COMPLETION_NUDGE_TEXT
                     server.emit_agent_status(server._main_agent_id, "active")
                     server._start_model_thread(nudge)
                     clear_logging_context()
@@ -7124,8 +7120,8 @@ class JaatoServer:
                         feedback = main_agent.pending_formatter_feedback
                         main_agent.pending_formatter_feedback = None
                         server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
-                        feedback_prompt = (
-                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
+                        feedback_prompt = hidden_framework_note(
+                            f"[Formatter Feedback]\n{feedback}"
                         )
                         server._runner_rpc.session_send_message_threadsafe(
                             feedback_prompt,

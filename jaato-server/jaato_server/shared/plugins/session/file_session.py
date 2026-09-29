@@ -17,6 +17,7 @@ from jaato_server.shared.session_id import validate_session_id
 from . import listing_cache
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .listing_cache import SessionListingCache
+from jaato_sdk.framework_note import framework_note
 from .serializer import (
     serialize_session_state,
     deserialize_session_state,
@@ -982,7 +983,7 @@ class FileSessionPlugin:
         ):
             self._description_requested = True
 
-            hint = (
+            hint = framework_note(
                 "\n\n[System: This conversation has been ongoing for a while. "
                 "Please provide a brief 3-5 word description summarizing its main topic "
                 "by calling the session_describe tool. This is for session management only "
