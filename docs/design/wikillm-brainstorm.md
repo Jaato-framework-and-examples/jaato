@@ -3,6 +3,12 @@
 Status: **brainstorm, not a spec.** Nothing here is scheduled, and §5 is
 deliberately the only section that says what the framework would owe.
 
+**What it is for:** giving an agent the capability to put knowledge *into*
+a shared store — as a memory (an event it observed) or as a reference (a
+document it wrote) — and giving the next agent a way to trust what it
+finds there. The read side already exists three times over (§6); the
+write side is the subject, and §6 is where it is designed.
+
 Tree claims verified at `afd067a` (2026-09-17), **re-verified at
 `781f0ef` (2026-09-29)**. Re-verify file:line citations before relying on
 them — two of the three documents this one builds on record being
@@ -17,7 +23,7 @@ true at one commit, read at another.
 | the transitive expansion gained a **cost** bound, and the diagnosis was measured | §5, Seam 3 |
 | memory gained **model and curator provenance** (EU AI Act Art. 15(4), #1123) | §5, Seam 4 |
 | the binding became **durably stamped** | §8 |
-| `ReferenceSource` is **unchanged** — no provenance, no links | §5, Seams 3 and 4 |
+| `ReferenceSource` gained **arrival** provenance (`origin`, stamped on bundle merge) — still no authorship, no links, and no agent write path | §5, Seams 3 and 4; §6 |
 
 Prior art in this repo, and the relationship to each:
 
@@ -436,10 +442,14 @@ both land on the same dataclass:
    account of its own provenance is an assertion by the party being
    judged), and absence meaning *unobserved* rather than *authored here*.
 
-   The remainder of the ask is not withdrawn — it is **blocked on §6**. The
-   six fields become stampable the moment something writes an article, and
-   not before. That is the honest ordering: provenance about a write path
-   cannot precede the write path.
+   The remainder of the ask is not withdrawn, and it is not a separate
+   piece of work: it is **the write path's stamp**. An agent writing a
+   reference is exactly the event the six fields describe, and §6 designs
+   that write path with the stamper in it — the plugin records what it
+   observed about the writing session, and the daemon records who
+   approved the promotion. Shipping `origin` first was not a detour: it
+   fixed the field's shape (observed, never claimed; absent means
+   unobserved) that an agent-written `kind` now has to satisfy too.
 
 ### Fidelity — a pattern IS written and breaks, because a primitive misreports
 
@@ -512,6 +522,83 @@ For a long cascade that is a genuine loss. The mitigation is not to
 weaken the invariant but to note that within one session the claim is
 already in history, and across a cascade the parent can pass it down —
 both of which exist.
+
+### What an agent actually calls
+
+Two kinds of knowledge, and they are not the same act, so they are not
+the same tool:
+
+| An agent wants to record | It is a | Tool | Exists? |
+|---|---|---|---|
+| something it **observed** — a fact, a gotcha, a decision and its reason | memory (an event) | `store_memory` → `.jaato/memories/raw/` | **yes**, with `source_agent`, `source_session`, `generated_by`; `curated_by` on promotion |
+| a **document** it produced — a design note, a runbook, an API map — that others should be able to select | reference (a document) | `proposeReference` | **no** |
+
+`proposeReference` takes what a catalog entry carries — `id`, `name`,
+`description`, `tags`, `links` (Seam 3) — plus the document itself, as a
+path to a workspace file the agent already wrote or as inline content.
+Its result is a **claim**, never a catalog entry, and the tree already
+forces that answer rather than merely suggesting it:
+
+> The confined runner is **denied writes** to `.jaato/references/**`
+> (`audit deny ... wlk` in every AppArmor body, and `references/` is an
+> `AUTHORED` entry in `scaffold/gitignore.py`). An agent *cannot* edit the
+> catalog, and should not be given a way around that. "Append at the
+> edge, merge at the centre" is not a policy to be enforced here — it is
+> the existing boundary, and the design only has to use it.
+
+So the path has three steps, each owned by the process that can do it
+honestly:
+
+| Step | Who | Writes | Stamps |
+|---|---|---|---|
+| 1. propose | the **plugin**, in the runner | `.jaato/references-claims/<claim_id>.json` (runtime state, writable, never read as catalog) | `source_agent`, `source_session`, `generated_by` from `JaatoSession._model_provenance` — **never from the tool's arguments**, the rule `store_memory` already follows |
+| 2. witness | the **permission gate** | nothing new | `witnessed_by` = #859's `approver`/`user_id`, only when #951's `asked=True`; absent otherwise |
+| 3. promote | the **daemon**, on a curator's verb | the catalog entry, through `contained_write` (#1386), into the bundle it names | `created_by` from `Session.created_by` (the `get_client_user` chain — no env fallback), `curated_by` from the transport's identity, `at` |
+
+Step 3 is the #1232 memory-rail shape reused rather than a new one:
+`may_curate` (workspace owner, or unowned) decides who may promote, a
+refused promotion answers `not_owner` without touching disk, and the
+daemon — the one process holding both the authenticated identity and
+write access to authored assets — is the only writer. A curator agent
+promoting on a human's behalf is the same verb with `curated_by` naming
+the agent's session *and* the human it ran for, because those are two
+facts.
+
+The promoted entry's `origin` gains a second kind beside `imported`:
+
+```json
+"origin": {"kind": "agent",
+           "generated_by": {"kind": "ai", "provider": "...", "model": "...",
+                            "session_id": "...", "agent_id": "..."},
+           "source_agent": "documentalista",
+           "created_by": "acme:alice",
+           "witnessed_by": "acme:alice",
+           "curated_by": {"kind": "human", "user": "acme:bob"},
+           "claim_id": "...", "at": "..."}
+```
+
+Every field is one the framework **observed**, and every one may be
+absent — absence stays *unobserved*, never *nobody*. That is what makes
+`kind` a string rather than a bool: `imported` and `agent` are two
+arrivals the framework was present for, and a hand-authored reference
+still carries no `origin` at all.
+
+**Memory → reference is the same verb with a different source.** A
+curated memory about a topic that keeps being re-derived (§10) is a
+candidate article; promoting it builds the catalog entry from the memory
+and carries the memory's own provenance across unchanged. That is The
+School's escalation, expressed as one daemon verb with two inputs rather
+than as a second mechanism.
+
+**What a claim is before promotion.** Visible to the session that wrote
+it (it is in that session's history anyway), listed by `listReferences`
+as `status: proposed` for others, and — per §8 — fenced as untrusted
+content when read, because until a curator has looked at it, it is a
+model's assertion. A `plugin_configs.references.require_curation` knob
+mirroring memory's withholds proposed claims from the listing entirely.
+Neither choice is free: listed claims are how a sibling benefits *now*
+(the cost above), withheld claims are how a deployment keeps unreviewed
+text out of every prompt.
 
 ---
 
@@ -856,7 +943,7 @@ by running the same task corpus with the wiki injected and withheld.
    *actively suppresses* the article that should have been read. The
    asymmetry says declared edges want a narrower writer than declared
    articles do, which may mean the curator and nobody else.
-6. **Does the wiki version with the code?** A git-tracked wiki answers
+8. **Does the wiki version with the code?** A git-tracked wiki answers
    *"what did we believe at commit X"* for free, and makes every branch a
    fork of the knowledge base — which may be an excellent property or a
    merge nightmare, and the difference is not obvious from here.
@@ -868,6 +955,9 @@ by running the same task corpus with the wiki injected and withheld.
 - **A new plugin.** §5 argues the ask is a write path on an existing
   store, and a wiki plugin would be a third copy of the matcher, the
   reconcile pass and the enrichment wiring.
+  `proposeReference` (§6) is a tool on the references plugin, and the
+  promotion is a daemon verb beside the memory rail's — the write
+  capability lands in the two stores that already own the read.
 - **Replacing memory or references.** The wiki is the *join* between
   them: references' read path and bundles, memory's write path and
   provenance, and a merge policy that makes the unit a topic.
