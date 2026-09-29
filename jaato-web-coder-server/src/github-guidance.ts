@@ -19,7 +19,7 @@
 import type { ManagedFile } from "./managed-files.js";
 
 /** Bumped whenever {@link GITHUB_GUIDANCE_BODY} changes, so a bind refreshes the on-disk copy. */
-export const GITHUB_GUIDANCE_VERSION = 1;
+export const GITHUB_GUIDANCE_VERSION = 2;
 
 /** The ``jaato-managed:`` marker id that identifies this file as the GitHub guidance the BFF owns. */
 export const GITHUB_GUIDANCE_MARKER_ID = "github-guidance";
@@ -28,7 +28,7 @@ export const GITHUB_GUIDANCE_MARKER_ID = "github-guidance";
 export const GITHUB_GUIDANCE_PATH = ".jaato/instructions/40-github.md";
 
 /**
- * The rule-set, verbatim from the design's §3 (13 rules, grouped, each with a
+ * The rule-set, verbatim from the design's §3 (14 rules, grouped, each with a
  * one-line rationale).  The model reads this as an instruction layer, so it
  * carries no internal issue numbers — only what a session acting on the rules
  * needs.
@@ -93,6 +93,11 @@ from colliding with theirs and keep actions taken on the user's behalf safe.
   issue or PR.
 - **Only touch repositories the user named.** The token may reach more
   repositories than the task needs.
+- **Before pushing, run the checks CI will run.** Rebase onto the base branch
+  first, then run the repository's own local check if it has one (e.g.
+  \`python scripts/check.py\` in jaato; otherwise what its \`AGENTS.md\` or
+  \`CONTRIBUTING.md\` names). Running only the tests near your change is not
+  that: a push that turns CI red costs everyone a review round.
 `;
 
 /** The one GitHub {@link ManagedFile} — the guidance file, its marker id, its version and its body. */
