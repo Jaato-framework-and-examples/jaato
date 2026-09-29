@@ -498,7 +498,9 @@ def _client(name: str, *, detail: Tuple[str, ...],
                   "own load_processors and DRIVEN through invoke_processors: "
                   "a generated set that would accept a completion while "
                   "acceptance.sh has no checks configured fails here, at "
-                  "scaffold time, rather than silently in a graded run")
+                  "scaffold time, rather than silently in a graded run.  "
+                  "Without jaato-server that probe is skipped with one "
+                  "notice: it IS the framework's loader")
         next_steps = (("put your acceptance criteria in acceptance.sh — every "
                        "job is refused until you do",
                        "jaato-scaffold validate <ws>") + _CLIENT_NEXT)
@@ -660,7 +662,10 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
         check="the emitted set is run straight back through the SAME validator "
               "the `validate` verb uses — valid by construction.  Findings from "
               "your USER tier (~/.jaato/profiles) are shown for context but "
-              "never blamed on the generator",
+              "never blamed on the generator.  Without jaato-server's "
+              "`validate` verb installed, the emitted keys are checked against "
+              "the profile facts shipped with jaato-sdk and one line says the "
+              "set was NOT validated and how to validate it",
         next_steps=(
             "edit plugins: [] in .jaato/profiles/_base_<agent>.yaml",
             "fill the credential blank in .env",
@@ -823,7 +828,9 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
         check="py_compile, then the module is loaded through the framework's "
               "own `load_processors` and driven through `invoke_processors` — "
               "so a generated processor that would not load, or that would "
-              "wave a completion through, fails at scaffold time",
+              "wave a completion through, fails at scaffold time.  Without "
+              "jaato-server the load is skipped with one notice (the file is "
+              "still written): the check IS the framework's loader",
         next_steps=(
             "paste the printed completion_processors: block into the profile "
             "whose completions it should gate",

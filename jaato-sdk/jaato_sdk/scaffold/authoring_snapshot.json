@@ -630,6 +630,180 @@
   }
  },
  "jaato_server_version": "1.2.0",
+ "profiles": {
+  "derived_keys": {
+   "apparmor_fragments_source": "derived from which profile in the inherits: chain declared `apparmor_fragments`",
+   "preloaded_plugins": "derived from plugins: — write `todo(preload)`",
+   "tool_scopes": "derived from plugins: — write `memory(tools:[a,b])`"
+  },
+  "enums": {
+   "budget_control.degrade[].action": [
+    "abort",
+    "escalate",
+    "finalize",
+    "notify"
+   ],
+   "budget_control.on_unmetered": [
+    "estimate",
+    "halt",
+    "ignore"
+   ],
+   "cache.ttl": [
+    "1h",
+    "5m"
+   ],
+   "completion_processors[].on_error": [
+    "fail_completion",
+    "warn"
+   ],
+   "completion_processors[].on_exhausted": [
+    "allow",
+    "fail"
+   ],
+   "completion_processors[].phase": [
+    "completeness",
+    "finalization"
+   ],
+   "record_keeping.integrity": [
+    "none",
+    "sha256-chain"
+   ],
+   "regulatory.risk_class": [
+    "high",
+    "limited",
+    "minimal"
+   ]
+  },
+  "field_types": {
+   "apparmor": "bool",
+   "apparmor_fragments": "Optional[List[str]]",
+   "budget_control": "Optional[BudgetControlConfig]",
+   "cache": "Optional[CacheProfileConfig]",
+   "completion_payload_schema": "Union[str, Dict[str, Any], None]",
+   "completion_processors": "List[CompletionProcessor]",
+   "default_agent": "Optional[str]",
+   "description": "str",
+   "env": "Dict[str, str]",
+   "gc": "Optional[GCProfileConfig]",
+   "inherits": "Optional[List[str]]",
+   "max_completion_nudges": "Optional[int]",
+   "model": "Optional[str]",
+   "model_tiers": "Dict[str, Any]",
+   "name": "str",
+   "plugin_configs": "Dict[str, Dict[str, Any]]",
+   "plugins": "List[str]",
+   "provider": "Optional[str]",
+   "quirks": "Dict[str, Any]",
+   "record_keeping": "Optional[RecordKeepingConfig]",
+   "regulatory": "Optional[RegulatoryProfileConfig]",
+   "runtime_limits": "Optional[RuntimeLimits]",
+   "scrub_secret_env": "Optional[Any]",
+   "spawn_payload_schema": "Union[str, Dict[str, Any], None]",
+   "suppress_base_instructions": "Any",
+   "suppress_inherited_processors": "List[str]",
+   "system_instructions": "Optional[str]",
+   "trace": "Optional[TraceProfileConfig]"
+  },
+  "file_keys": [
+   "apparmor",
+   "apparmor_fragments",
+   "budget_control",
+   "cache",
+   "completion_payload_schema",
+   "completion_processors",
+   "default_agent",
+   "description",
+   "env",
+   "gc",
+   "inherits",
+   "max_completion_nudges",
+   "model",
+   "model_tiers",
+   "name",
+   "plugin_configs",
+   "plugins",
+   "provider",
+   "quirks",
+   "record_keeping",
+   "regulatory",
+   "runtime_limits",
+   "scrub_secret_env",
+   "spawn_payload_schema",
+   "suppress_base_instructions",
+   "suppress_inherited_processors",
+   "system_instructions",
+   "trace"
+  ],
+  "key_vocabularies": {
+   "budget_control.limits": [
+    "seconds",
+    "tokens",
+    "tool_calls",
+    "turns",
+    "usd"
+   ],
+   "record_keeping": [
+    "conversation_retention_days",
+    "integrity",
+    "retention_days"
+   ],
+   "regulatory": [
+    "annex_iii",
+    "disclosure_text",
+    "intended_purpose",
+    "interacts_with_persons",
+    "provider",
+    "risk_class"
+   ],
+   "suppress_base_instructions": [
+    "constants",
+    "disclosure",
+    "disk",
+    "security"
+   ]
+  },
+  "layout": {
+   "extensions": [
+    ".json",
+    ".yaml",
+    ".yml"
+   ],
+   "profile_set_env_var": "JAATO_PROFILE_SET",
+   "profiles_subdir": "profiles",
+   "tiers": [
+    {
+     "location": "<config_root>/profiles/<JAATO_PROFILE_SET>/",
+     "rule": "scanned first, only when JAATO_PROFILE_SET names a set; a set is a subdirectory of profiles/, and its profiles usually inherit the regular tier's (inherits: [_base_<agent>])",
+     "tier": "profile_set"
+    },
+    {
+     "location": "<config_root>/profiles/",
+     "rule": "<config_root> defaults to <workspace>/.jaato; the scan is non-recursive, so set subdirectories are not pulled in",
+     "tier": "workspace"
+    },
+    {
+     "location": "~/.jaato/profiles/",
+     "rule": "skipped when unreadable (a confined session is denied it)",
+     "tier": "user"
+    },
+    {
+     "location": "the jaato.premium entry point's profiles directory",
+     "rule": "only when a premium package is installed",
+     "tier": "premium"
+    }
+   ],
+   "yaml_extensions": [
+    ".yaml",
+    ".yml"
+   ]
+  },
+  "removed_keys": {
+   "max_turns": "removed in #1068 — it was declared, validated, inherited and advertised to the model, and compared against a turn counter in no path of the tree.  Bound a session with `budget_control` instead: `limits.turns` plus a `degrade` rung whose `action` is `abort` (limits alone are observed, never enforced)"
+  },
+  "reserved_names": [
+   "inherit"
+  ]
+ },
  "providers": {
   "anthropic": {
    "auth": [
@@ -1649,5 +1823,5 @@
    }
   }
  },
- "snapshot_version": 1
+ "snapshot_version": 2
 }

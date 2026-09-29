@@ -4616,6 +4616,44 @@ INHERIT_PROFILE_NAME = "inherit"
 #: a new branch.
 RESERVED_PROFILE_NAMES = frozenset({INHERIT_PROFILE_NAME})
 
+#: The suffixes a profile file may carry.  Every scan (workspace, set, user,
+#: premium) reads these and nothing else; a ``.yaml`` / ``.yml`` file is
+#: parsed as YAML and anything else here as JSON.  Named rather than written
+#: at each scan so ``jaato-scaffold``'s authoring snapshot (#1267, tier 2)
+#: records the set the scans actually use, not a copy of it.
+PROFILE_FILE_EXTENSIONS: Tuple[str, ...] = ('.json', '.yaml', '.yml')
+
+#: The suffixes of :data:`PROFILE_FILE_EXTENSIONS` parsed as YAML.
+PROFILE_YAML_EXTENSIONS: Tuple[str, ...] = ('.yaml', '.yml')
+
+#: The directory under a config root (``<workspace>/.jaato`` by default, and
+#: ``~/.jaato`` for the user tier) that holds profiles.
+PROFILES_SUBDIR = "profiles"
+
+#: The variable that selects a profile set: a subdirectory of
+#: ``<config_root>/profiles/`` scanned ahead of the regular tier.
+PROFILE_SET_ENV_VAR = "JAATO_PROFILE_SET"
+
+#: The discovery tiers :func:`discover_profiles` scans, highest precedence
+#: first, as ``(tier, location, rule)``.  Descriptive: the scan below is the
+#: behaviour, and these lines say what it does for anyone who cannot read it
+#: (the authoring snapshot, ``jaato-scaffold explain``).  Keep them in step
+#: with the code; ``test_scaffold_profile_snapshot_1267.py`` checks the
+#: locations against the constants the scan uses.
+PROFILE_DISCOVERY_TIERS: Tuple[Tuple[str, str, str], ...] = (
+    ("profile_set", f"<config_root>/{PROFILES_SUBDIR}/<{PROFILE_SET_ENV_VAR}>/",
+     f"scanned first, only when {PROFILE_SET_ENV_VAR} names a set; a set is a "
+     f"subdirectory of {PROFILES_SUBDIR}/, and its profiles usually inherit "
+     f"the regular tier's (inherits: [_base_<agent>])"),
+    ("workspace", f"<config_root>/{PROFILES_SUBDIR}/",
+     "<config_root> defaults to <workspace>/.jaato; the scan is "
+     "non-recursive, so set subdirectories are not pulled in"),
+    ("user", f"~/.jaato/{PROFILES_SUBDIR}/",
+     "skipped when unreadable (a confined session is denied it)"),
+    ("premium", "the jaato.premium entry point's profiles directory",
+     "only when a premium package is installed"),
+)
+
 
 def _parse_profile_file(
     file_path: Path,
@@ -4632,7 +4670,7 @@ def _parse_profile_file(
     try:
         content = file_path.read_text(encoding='utf-8')
 
-        if file_path.suffix in ('.yaml', '.yml'):
+        if file_path.suffix in PROFILE_YAML_EXTENSIONS:
             try:
                 import yaml
                 data = yaml.safe_load(content)
@@ -4813,7 +4851,7 @@ def _scan_profiles_dir(
     for file_path in entries:
         if not file_path.is_file():
             continue
-        if file_path.suffix not in ('.json', '.yaml', '.yml'):
+        if file_path.suffix not in PROFILE_FILE_EXTENSIONS:
             continue
 
         name, data, error = _parse_profile_file(file_path)
@@ -5265,11 +5303,11 @@ def discover_profiles(
     # ``force_profile_set`` (explicit kwarg) wins over the env-var read
     # so callers resolving a qualified ``set/name`` path can pin the
     # set without mutating the per-session env contextvar.
-    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')
+    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')  # == PROFILE_SET_ENV_VAR; literal for the env-scope scan
     if profile_set and effective_config_root:
         set_path = (
             Path(effective_config_root).expanduser().resolve()
-            / "profiles" / profile_set
+            / PROFILES_SUBDIR / profile_set
         )
         _scan_profiles_dir(set_path, profiles, errors)
     elif profile_set and not effective_config_root:
@@ -5285,7 +5323,7 @@ def discover_profiles(
     # 1.b Workspace tier — config_root override takes precedence; fall
     #    back to <base_path>/<profiles_dir> when no override is in effect.
     if effective_config_root:
-        profiles_path = Path(effective_config_root).expanduser().resolve() / "profiles"
+        profiles_path = Path(effective_config_root).expanduser().resolve() / PROFILES_SUBDIR
     else:
         profiles_path = Path(profiles_dir)
         if not profiles_path.is_absolute():
@@ -5294,7 +5332,7 @@ def discover_profiles(
 
     # 2. User-level profiles from ~/.jaato/profiles/
     #    Workspace profiles take precedence.
-    user_profiles_path = Path.home() / ".jaato" / "profiles"
+    user_profiles_path = Path.home() / ".jaato" / PROFILES_SUBDIR
     _scan_profiles_dir(user_profiles_path, profiles, errors)
 
     # 3. Premium entry-point profiles (if installed).
@@ -5331,7 +5369,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
     for file_path in Path(premium_dir).iterdir():
         if not file_path.is_file():
             continue
-        if file_path.suffix not in ('.json', '.yaml', '.yml'):
+        if file_path.suffix not in PROFILE_FILE_EXTENSIONS:
             continue
 
         name, data, _error = _parse_profile_file(file_path)

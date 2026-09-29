@@ -4583,13 +4583,11 @@ jaato-server), or ..."*, never an `ImportError`. `explain` first asks a
 running daemon (the protocol 1.18 path, unchanged: `--connect`, or a daemon
 listening on the default socket); `releases` points at `jaato-doctor`, whose
 release check needs only the SDK; `validate` and `dependencies` have no
-daemon verb yet. The authoring invocations that still need jaato-server
-refuse by name before writing anything (`build._server_need`): `new
-profile-set` (re-validates with the framework validator), `new client
---profile` (resolves the name with `discover_profiles`, whose ImportError
-would otherwise be read as "cannot enumerate" and accept any name), `new
-processor` and gated `new sweep` (the self-probe; `--no-gate` needs no
-server), and `new dossier`.
+daemon verb yet. Tier 1 also refused, before writing anything, the four
+authoring invocations that reached into jaato-server (`new profile-set`,
+`new client --profile`, `new processor` / gated `new sweep`, `new
+dossier`). Tier 2 (next section) lifts three of those; `new dossier` is
+still refused by name (`build._server_need`).
 
 **The floor (#1055).** jaato-server now imports `jaato_sdk.scaffold`, so it
 needs the SDK cut that contains it. That is 0.29.0: not yet on PyPI, so by the
@@ -4620,9 +4618,10 @@ once; `integration <name> --refresh` re-applies it (nothing local is lost).
 
 Not done, and why:
 
-- **Tier 2**: moving `subagent.config`, `model_tiers`, `budget_control` and
-  the rest into the SDK, and adding pyyaml to it. An open decision; the four
-  refusals above are what it would lift.
+- **Moving `subagent.config`, `model_tiers`, `budget_control`** and the
+  rest into the SDK, and adding pyyaml to it. Decided against in tier 2
+  (next section): profiles stay server-side and their facts go in the
+  snapshot.
 - **A daemon `scaffold.validate`**: it must read the caller's workspace,
   which the daemon may not be able to (another user, another host), so it
   needs the peer-entitlement check or the client sending `.jaato/` content.
@@ -4634,6 +4633,83 @@ seven reversions. The SDK-only cases run the shell in a subprocess whose
 meta path refuses `jaato_server` and whose entry points omit jaato-server's
 verbs; an AST scan fails any module-level `jaato_server` import under
 `jaato_sdk/scaffold/` or in `gitignore_parser.py`.
+
+### Profiles Stay Server-Side; Their Facts Go in the Snapshot (#1267, tier 2)
+
+Tier 1 left four SDK-only refusals. Tier 2 lifts three of them and moves
+**no** `jaato_server` module into the SDK and adds **no** SDK dependency
+(pyyaml stays out). What each command needs, and where it now comes from:
+
+| Command | SDK only | jaato-server installed |
+|---|---|---|
+| `new profile-set` | emits; the emitted top-level keys are checked against the snapshot's profile facts; ONE line says the set was not validated and names `jaato-scaffold validate <ws> --set <set>` | re-validated by the framework validator, byte-identical to before |
+| `new client --profile X` | writes `X` as given; `--set Y` writes `JAATO_PROFILE_SET=Y` from the flag, no lookup | same, plus ONE note when `X` does not resolve (or resolves only in another set) |
+| `new processor`, gated `new sweep` | files written; ONE notice says the probe was skipped | the probe runs, as before |
+| `new dossier` | refused, before writing | unchanged |
+
+**The profile section.** `authoring_snapshot.json` (now
+`snapshot_version: 2`) gains `profiles`, projected by
+`authoring_contracts.project_profiles` from `subagent.config` and the two
+modules owning a vocabulary (`budget_control`, `instruction_suppression`):
+
+| Fact | Source |
+|---|---|
+| `file_keys`, `derived_keys`, `removed_keys`, `reserved_names` | `PROFILE_FILE_KEYS`, `PROFILE_DERIVED_FIELDS`, `PROFILE_REMOVED_FIELDS`, `RESERVED_PROFILE_NAMES` |
+| `field_types` | `dataclasses.fields(SubagentProfile)` for each file key, rendered as `explain profile` renders them |
+| `enums` (values) / `key_vocabularies` (keys) | the closed vocabularies: `risk_class`, `integrity`, `cache.ttl`, the processor `on_error` / `phase` / `on_exhausted`, the degrade `action`, `on_unmetered`; the `regulatory`, `record_keeping`, `budget_control.limits` and `suppress_base_instructions` key sets |
+| `layout` | `PROFILE_FILE_EXTENSIONS`, `PROFILES_SUBDIR`, `PROFILE_SET_ENV_VAR`, `PROFILE_DISCOVERY_TIERS` |
+
+The layout constants are new in `subagent/config.py`, and the scans READ
+them (`_scan_profiles_dir`, the premium scan, `discover_profiles`) rather
+than a literal beside them, so the recorded extensions are the ones
+discovery uses. One exception: the `JAATO_PROFILE_SET` read stays a literal,
+because the env-scope catalog is derived by an AST scan for literal reads.
+`authoring_contracts.profile_facts()` answers live when jaato-server
+imports and from the snapshot otherwise; a reachable daemon is not asked
+(no daemon verb serves these facts yet, a noted follow-up). The existing
+guard diffs the whole snapshot, profile section included, against the live
+projection.
+
+**Validation runs where the validator is.** `_server_validator_installed()`
+asks the `jaato.scaffold_verbs` metadata for a `validate` entry point from
+code under `jaato_server` (the shell's own rule for who may answer it), and
+jaato-server must be importable. Nothing is imported to decide. Without it,
+`_report_unvalidated` checks the emitted keys against `file_keys` (a key
+outside it is a generator bug, exit 1) and prints the one line. It does not
+claim the set is valid: merging `inherits`, block construction and plugin
+schemas are behaviour, and stay the validator's.
+
+**`--profile` never refuses a name.** The profile does not have to exist
+when the client is scaffolded; the daemon reads it at `create_session`, and
+writing it afterwards is a normal order of work. A typo therefore surfaces
+on the client's first run, as the daemon's named "profile not found":
+immediate and explicit. `validate` would not catch it either, because it
+does not read client code. What still refuses: `--profile` with
+`--provider`/`--model`, with `--transport in_process`, and on an archetype
+that opens no session it can bind. `new dossier --profile` keeps its
+refusal (`_check_named_profile`): a dossier documents a profile, and one
+that does not resolve has nothing to document.
+
+**The probe is not re-implemented.** The processor and gate probes run the
+generated module through the framework's own `load_processors` /
+`invoke_processors`; a loader copied into the SDK would test itself, not
+the framework, so without jaato-server the probe is skipped and says so
+(`build.PROBE_SKIPPED`).
+
+Stated cost, the same as tier 1's: the facts are as current as the
+jaato-server release the snapshot was generated from. A new profile key
+needs a regenerated snapshot and an SDK release, but no SDK code change,
+and a snapshot read beside a different installed jaato-server warns once.
+
+Verified byte-identical to main, with both packages installed, for
+`profile-set` (two provider / secrets modes and `--dry-run`), `client
+--profile` (existing), an inline `client`, `processor` and gated `sweep`.
+
+Guard: `jaato_server/shared/tests/test_scaffold_tier2_snapshot_1267.py`,
+seven reversions: the SDK-only profile-set, client, processor and sweep
+runs (subprocess, `jaato_server` blocked), the note and the no-refusal with
+the server, the profile section against the live projection, and the scan
+reading the recorded extensions.
 
 ### An Integration Declares Its Own Paths, and Its Own Harness
 
@@ -6132,15 +6208,19 @@ accepted it, and emitted the `"<profile-name>"` placeholder, byte-identical
 to passing nothing. A cascade's stages each name their own profile, which is
 the point of them.
 
-The name is resolved through the framework's own resolver under the set the
-workspace actually selects — `JAATO_PROFILE_SET` from its `.env`, or
-`--set` — so a profile that resolves only through `inherits` counts, and one
-that exists only inside an unselected set is reported as that rather than as
-missing. Four properties:
+The name is written as given and never refused (#1267, tier 2): the
+profile may be written after the client, and a typo surfaces on the
+client's first run as the daemon's named "profile not found" (`validate`
+does not read client code). With jaato-server installed, the name is
+resolved through the framework's own resolver under the set the workspace
+actually selects — `JAATO_PROFILE_SET` from its `.env`, or `--set` — so a
+profile that resolves only through `inherits` counts, and one that does not
+resolve gets ONE note, which names the set when it exists only inside an
+unselected one. Four properties:
 
 - **`[]` and `None` are different answers.** `[]` is "this workspace declares
-  no profiles", which `--profile` can be refused against; `None` is "I could
-  not look", which must not become "your profile does not exist".
+  no profiles", which earns the note; `None` is "I could not look", which
+  must not become "your profile does not exist", so it earns nothing.
 - **The workspace `.env` is never rewritten for a `--profile` client**, even
   under `--force`: that file is where `JAATO_PROFILE_SET` lives, and this
   archetype's template carries a provider/model pair the profile supersedes.
@@ -6148,11 +6228,11 @@ missing. Four properties:
   message and the same inline-spec client it always did; the `--profile`
   suggestion appears only when the workspace demonstrably has profiles to
   name.
-- **The set that made resolution succeed is persisted, and the banner
-  carries the flag.** `--profile X --set Y` resolved X only because Y was
-  forced, and the generated client resolves its profile from the workspace
-  `.env` — so `JAATO_PROFILE_SET` is written there (never retargeting one
-  already present). `_provenance` names `--profile` too: its whole claim is
+- **`--set` is persisted, and the banner carries the flag.** `--profile X
+  --set Y` names a profile in set Y, and the generated client resolves its
+  profile from the workspace `.env` — so `JAATO_PROFILE_SET=Y` is written
+  there from the flag, with no lookup (never retargeting one already
+  present). `_provenance` names `--profile` too: its whole claim is
   to be copy-paste reproducible, and without the flag the printed command
   re-ran to `missing required --provider / --model`.
 

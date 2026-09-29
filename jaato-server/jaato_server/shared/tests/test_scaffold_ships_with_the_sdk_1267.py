@@ -10,8 +10,9 @@ keep true, each attached to how it goes wrong:
 
 * **SDK-only runs.**  ``new client``, ``new gitignore`` and ``integration
   claude-code`` succeed with ``jaato_server`` unimportable, and the four
-  introspection verbs and the server-only archetypes answer with a refusal
-  naming the fix, never an ``ImportError``.  Driven in a subprocess whose
+  introspection verbs and ``new dossier`` (the one server-only archetype
+  since tier 2) answer with a refusal naming the fix, never an
+  ``ImportError``.  Driven in a subprocess whose
   meta path refuses ``jaato_server``, because this process already has it.
 * **No module-level server import** anywhere under the SDK location, by AST
   scan: a behavioural run only covers the paths it drives.
@@ -82,9 +83,9 @@ REVERSIONS = [
         target=_BUILD,
         find="    refusal = _refuse_without_server(_server_need(args, archetype))\n",
         replace="    refusal = None\n",
-        because="`new client --profile` without jaato-server swallows the "
-                "resolver's ImportError as 'cannot enumerate' and accepts any "
-                "name, writing a client bound to a profile nobody checked",
+        because="`new dossier` without jaato-server would import the "
+                "introspection pages it renders and die with an ImportError, "
+                "naming no fix",
         test="test_sdk_only_server_archetypes_refuse_before_writing",
     ),
     Reversion(
@@ -205,14 +206,12 @@ def test_sdk_only_introspection_verbs_refuse_with_the_fix(tmp_path, verb):
 
 
 @pytest.mark.parametrize("argv", [
-    ("new", "client", "--profile", "worker"),
-    ("new", "profile-set", "--set", "s", "--provider", "anthropic",
-     "--model", "m", "--agents", "a"),
-    ("new", "sweep", "--provider", "anthropic", "--model", "m"),
-    ("new", "processor", "--name", "p"),
     ("new", "dossier", "--component"),
+    ("new", "dossier", "--profile", "worker"),
 ])
 def test_sdk_only_server_archetypes_refuse_before_writing(tmp_path, argv):
+    """Only ``new dossier`` is refused since tier 2; the rest emit (see
+    ``test_scaffold_tier2_snapshot_1267.py``)."""
     ws = tmp_path / "ws"
     rc, out, err, leaked = _sdk_only(*argv, "--workspace", str(ws), cwd=tmp_path)
     assert rc == 2, out + err
