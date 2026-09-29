@@ -264,6 +264,25 @@ When you do hit a hang, the discriminating probe is cheap: subscribe to every
 trap 1's signature before #881 and should no longer occur on a current daemon —
 seeing it means you are running an older one, which `jaato-doctor` will say.
 
+## Changing jaato itself — before you push
+
+Everything above is about building ON the SDK. If the change is to the jaato
+repository itself (a fix, a guard, a plugin), run what CI will run before
+pushing, from the repo root with the venv you develop in:
+
+```
+.venv/bin/python scripts/check.py                # contract-guards + the suite legs your diff touches
+.venv/bin/python scripts/check.py --reversions   # + the reversion meta-guard for guards you changed
+.venv/bin/python scripts/check.py --all          # every pytest leg, as CI runs it
+```
+
+Its commands are read from `.github/workflows/`, so it cannot fall behind
+them. It also warns when your branch is behind `origin/main` or would
+conflict, and `--show-commit` prints each commit message beside its `--stat`.
+Running only the tests next to your change is not a substitute: the required
+`contract-guards` job holds repo-wide ratchets (complexity, CI coverage, docs)
+that no nearby test exercises.
+
 ## Keeping this file honest
 
 This skill is shared by jaato's agent-harness integrations and ships as package

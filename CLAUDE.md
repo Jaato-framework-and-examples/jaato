@@ -11569,6 +11569,58 @@ ratchet for a resolving `typed_key`.
 
 ## Coding Policies
 
+### Run What CI Runs Before Pushing (#1415)
+
+```bash
+.venv/bin/python scripts/check.py                # contract-guards + suite legs the diff touches
+.venv/bin/python scripts/check.py --reversions   # + meta-guard cases of changed guard modules
+.venv/bin/python scripts/check.py --all          # every pytest leg, as CI runs it
+.venv/bin/python scripts/check.py --list         # pre-flight + plan, run nothing
+```
+
+A session ran all 2,048 `server/tests`, reported green, and pushed past the
+complexity ratchet, which lives in the required `contract-guards` job it never
+ran; it also never ran the reversion meta-guard, and opened against a stale
+base. Each cost a review round. The list of "which checks to run" lived only in
+`.github/workflows/`, so every delegated session had to be told it file by
+file, and that list drifted.
+
+**The commands are read from the workflows, never restated.**
+`scripts/ci_workflows.py` is the ONE parser: `test_ci_runs_every_test_file.py`
+uses it to prove every test file is run by CI, and `scripts/check.py` uses it
+to decide what to run. Each command is a step's `run:` text with
+`${{ matrix.* }}` substituted, run under `bash --noprofile --norc -eo
+pipefail` with the invoking interpreter's `bin/` first on `PATH`. The only
+names in `check.py` are the two job ids that have a role (`contract-guards`
+always runs, `reversion-guard` is scoped), and it refuses to run if either
+leaves the workflows. `test_check_runs_what_ci_runs.py` (in `contract-guards`)
+asserts that the pytest invocations `--all` would run equal, as a multiset,
+the ones the coverage scan finds.
+
+| Mode | Runs |
+|---|---|
+| default | `contract-guards` in full, plus each suite leg whose SCOPE a changed file lies under |
+| `--reversions` | also the meta-guard, limited to the parametrized cases of changed guard modules that declare `REVERSIONS`, plus its two up-front checks (nodeid resolution, import failures). No hook in the meta-guard: its ids are `<module>::<test>`, so the nodeids are picked from a collection pass |
+| `--all` | every pytest leg of every commit-triggered workflow, `reversion-guard` included |
+
+"Changed" is everything that differs from the merge base with `origin/main`:
+commits, uncommitted edits and untracked files. A leg's scope is each path it
+hands pytest, with `<pkg>/tests/` widened to `<pkg>/` so a source change
+selects the leg that tests it (not widened to a distribution root holding
+another leg's scope, e.g. `jaato-server/`). That selection is a heuristic;
+`--all` is the claim the guard backs, and CI is the authority over both
+(CI installs `[all]`, has AppArmor, runs Linux on 3.12).
+
+The pre-flight fetches the base (`--no-fetch` to skip) and WARNS when HEAD is
+behind it or when `git merge-tree --write-tree` finds a conflict.
+`--show-commit` prints each commit on the branch with its message beside its
+`--stat`, and the uncommitted files separately, so a message describing
+changes that are not in the commit is visible before pushing. It exits with
+the first failing leg's status after printing that leg's name as the checks
+list shows it (`suite (shared/tests)`). The Node jobs (`web-client`,
+`web-coder-server`) have no pytest step and are not run; they are named, with
+a note when the diff touches their directories.
+
 ### Cyclomatic Complexity
 
 New functions must score **15 or below** under radon. The gate is

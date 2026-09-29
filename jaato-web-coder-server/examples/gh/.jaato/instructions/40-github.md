@@ -1,4 +1,4 @@
-<!-- jaato-managed: github-guidance v1 — delete this line to keep your own edits -->
+<!-- jaato-managed: github-guidance v2 — delete this line to keep your own edits -->
 # Working with GitHub in this workspace
 
 This workspace is bound to a GitHub account. A per-user token reaches your
@@ -59,3 +59,8 @@ from colliding with theirs and keep actions taken on the user's behalf safe.
   issue or PR.
 - **Only touch repositories the user named.** The token may reach more
   repositories than the task needs.
+- **Before pushing, run the checks CI will run.** Rebase onto the base branch
+  first, then run the repository's own local check if it has one (e.g.
+  `python scripts/check.py` in jaato; otherwise what its `AGENTS.md` or
+  `CONTRIBUTING.md` names). Running only the tests near your change is not
+  that: a push that turns CI red costs everyone a review round.

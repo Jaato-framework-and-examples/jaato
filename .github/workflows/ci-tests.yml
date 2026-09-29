@@ -41,6 +41,12 @@ jobs:
   # source + YAML scan that imports none of the tree, so it costs ~5s and
   # adds no new failure mode here.
   #
+  # And the local-check guard (#1415): `scripts/check.py --all` must run
+  # exactly the pytest invocations these workflows declare.  check.py reads
+  # its commands from this file through scripts/ci_workflows.py, the same
+  # parser the CI-coverage ratchet uses, so editing a leg here changes what
+  # the local check runs with no second edit.
+  #
   # Kept deliberately light + reliable: the only optional backend any of
   # these guards imports is the interactive_shell plugin's `pexpect`
   # (.[interactive]). No system-dependency extras (notably `kerberos`,
@@ -95,6 +101,7 @@ jobs:
             jaato-server/jaato_server/shared/tests/test_env_scope_catalog.py \
             jaato-server/jaato_server/shared/tests/test_docs_do_not_contradict_the_tree.py \
             jaato-server/jaato_server/shared/tests/test_ci_runs_every_test_file.py \
+            jaato-server/jaato_server/shared/tests/test_check_runs_what_ci_runs.py \
             jaato-server/jaato_server/shared/tests/test_declared_python_floor_is_tested.py \
             jaato-server/jaato_server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py \
             jaato-server/jaato_server/shared/tests/test_a_predefined_plan_is_per_session_1195.py \

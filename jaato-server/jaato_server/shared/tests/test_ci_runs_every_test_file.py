@@ -70,7 +70,8 @@ and it is still the property whose absence produced eight directories
 and five rediscoveries.
 
 HOW IT WORKS.  Walk the tree for ``test_*.py`` / ``*_test.py``; parse
-the pytest invocations out of ``.github/workflows/*.y*ml``; a file is
+the pytest invocations out of ``.github/workflows/*.y*ml`` (the parser is
+``scripts/ci_workflows.py``, shared with ``scripts/check.py``); a file is
 covered when some commit-triggered pytest INVOCATION names it, or names
 a directory above it, and that same invocation does not ``--ignore`` it.
 Existential: one leg running a file is coverage, however many other legs
@@ -89,10 +90,10 @@ into decoration.
 from __future__ import annotations
 
 import fnmatch
-import glob as _glob
-import shlex
+import importlib.util
+import sys
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Sequence, Set
+from typing import Dict, List, Set
 
 import pytest
 import yaml
@@ -105,14 +106,6 @@ _SKIP_DIRS = frozenset({
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
     "build", "dist", ".tox", ".mypy_cache", ".ruff_cache", ".eggs",
 })
-
-#: Flags that consume the NEXT token, so that token is a value and not a
-#: path.  ``-m`` is the interesting one -- see ``_pytest_invocations``.
-_VALUE_FLAGS = frozenset({
-    "-m", "-k", "-p", "-n", "-o", "-c", "-r", "--deselect", "--rootdir",
-    "--override-ini", "--maxfail", "--tb", "--junitxml", "--cov",
-})
-
 
 # ---------------------------------------------------------------------------
 # UNCOVERED -- test files/directories deliberately run by NO
@@ -159,184 +152,32 @@ def _discover_test_files() -> Set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Workflow parsing
+# Workflow parsing -- shared with scripts/check.py (#1415)
+#
+# The parser lives in ``scripts/ci_workflows.py`` so the local check and
+# this guard read ONE answer to "what does CI run".  It is loaded by PATH,
+# relative to this file, so that inside the reversion meta-guard's
+# sandbox the sandbox's copy is the one read.
 # ---------------------------------------------------------------------------
 
-def _triggers(doc: dict) -> object:
-    """The workflow's ``on:`` value.
-
-    GOTCHA, and it is the one that makes this guard silently vacuous:
-    PyYAML parses the bare key ``on:`` as the BOOLEAN ``True`` (YAML 1.1
-    treats ``on``/``off``/``yes``/``no`` as booleans).  Read only
-    ``doc["on"]`` and every workflow in this repo looks untriggered, no
-    step is ever collected, every file reads as uncovered -- or, with the
-    comparison the other way round, every file reads as covered and the
-    guard passes forever.
-    """
-    if "on" in doc:
-        return doc["on"]
-    return doc.get(True)
+def _load_script(name: str):
+    """Import ``scripts/<name>.py`` from the tree this file lives in."""
+    mod_name = f"_jaato_scripts_{name}"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(
+        mod_name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _is_commit_triggered(doc: dict) -> bool:
-    """True iff this workflow fires on a PR or on a push to a BRANCH.
-
-    ``workflow_dispatch`` is manual, which #736 correctly calls
-    "indistinguishable from never" -- two directories were reachable only
-    that way and had never gated anything.  A push filtered to ``tags:``
-    alone is likewise not commit-triggered for branch work: it fires
-    after the merge it should have been able to block.
-    """
-    on = _triggers(doc)
-    if on is None:
-        return False
-    if isinstance(on, str):
-        return on == "pull_request" or on == "push"
-    if isinstance(on, list):
-        return "pull_request" in on or "push" in on
-    if not isinstance(on, dict):
-        return False
-    if "pull_request" in on or "pull_request_target" in on:
-        return True
-    if "push" not in on:
-        return False
-    push = on["push"]
-    if not isinstance(push, dict):
-        return True          # bare `push:` -- every branch
-    # `tags:` only, with no branch filter, fires on a release rather than
-    # on the commit that needs gating.
-    return "branches" in push or "branches-ignore" in push or not push
-
-
-def _scalars(node: object) -> List[str]:
-    """Every string scalar anywhere in a parsed YAML tree.
-
-    GOTCHA: the suite paths live in ``strategy.matrix.leg[].run`` and
-    reach the step as ``${{ matrix.leg.run }}``.  A scan that read only
-    step ``run:`` keys would find that literal expression and conclude
-    the entire ``suite`` job runs no tests at all.  Recursing over every
-    scalar models neither the matrix nor the expression language, and
-    needs to model neither.
-    """
-    out: List[str] = []
-    if isinstance(node, str):
-        out.append(node)
-    elif isinstance(node, dict):
-        for v in node.values():
-            out.extend(_scalars(v))
-    elif isinstance(node, list):
-        for v in node:
-            out.extend(_scalars(v))
-    return out
-
-
-def _resolve(token: str) -> List[str]:
-    """Repo-relative paths a pytest argument names, or ``[]``.
-
-    Existence on disk is the filter.  It keeps ``rc=1``, ``exit``, ``||``
-    and every other shell token out without a keyword blacklist that
-    would need extending for the next idiom.  A ``::nodeid`` suffix is
-    stripped, and a glob (``server/test_*.py``) is expanded -- a glob is
-    a legitimate and self-maintaining way to name a set of files.
-    """
-    token = token.split("::", 1)[0]
-    if not token or token.startswith("-"):
-        return []
-    matches = _glob.glob(str(ROOT / token), recursive=True)
-    out: List[str] = []
-    for m in matches:
-        p = Path(m)
-        try:
-            rel = p.relative_to(ROOT).as_posix()
-        except ValueError:       # pragma: no cover - absolute path outside
-            continue
-        out.append(rel + "/" if p.is_dir() else rel)
-    return out
-
-
-class _Invocation(NamedTuple):
-    """One ``pytest`` command line: what it runs, and what it excludes.
-
-    The pair is kept TOGETHER because ``--ignore`` binds to the
-    invocation that carries it and to nothing else.  Unioning the
-    ignores across invocations -- which this scan used to do -- makes one
-    leg's exclusion silently cancel another leg's coverage, so a file
-    named explicitly by ``contract-guards`` read as uncovered the moment
-    any other leg ignored it.  That is the opposite of what a coverage
-    guard is for: it fails a repository that improved its CI.
-    """
-
-    covered: Set[str]
-    ignored: Set[str]
-
-
-def _pytest_invocations(command: str) -> List[_Invocation]:
-    """One ``_Invocation`` per pytest command line in a shell snippet.
-
-    Per LINE rather than per step, because a step legitimately holds
-    several invocations -- the `server (daemon tier)` leg runs one pytest
-    per tree -- and an ``--ignore`` on the third must not reach the first.
-    """
-    out: List[_Invocation] = []
-    for line in command.replace("\\\n", " ").splitlines():
-        covered: Set[str] = set()
-        ignored: Set[str] = set()
-        if "pytest" not in line:
-            continue
-        try:
-            tokens = shlex.split(line, comments=True)
-        except ValueError:
-            continue
-        if "pytest" not in tokens:
-            continue
-        # GOTCHA: `-m` is both `-m conformance` (a marker, whose value must
-        # be skipped) and `python -m pytest` (the invocation itself).
-        # Anchoring on the pytest token and reading only what FOLLOWS it
-        # settles both: in `python -m pytest -m conformance x/`, the first
-        # `-m` is behind the anchor and the second correctly eats
-        # `conformance`.  A scan that started at token 0 would consume
-        # `pytest` as a marker value and the step would contribute nothing.
-        rest = tokens[tokens.index("pytest") + 1:]
-        pending_ignore = False
-        skip_next = False
-        for tok in rest:
-            if pending_ignore:
-                pending_ignore = False
-                ignored.update(_resolve(tok))
-                continue
-            if skip_next:
-                skip_next = False
-                continue
-            if tok.startswith(("--ignore=", "--ignore-glob=")):
-                ignored.update(_resolve(tok.split("=", 1)[1]))
-                continue
-            if tok in ("--ignore", "--ignore-glob"):
-                pending_ignore = True
-                continue
-            if tok in _VALUE_FLAGS:
-                skip_next = True
-                continue
-            if tok.startswith("-"):
-                continue
-            covered.update(_resolve(tok))
-        if covered or ignored:
-            out.append(_Invocation(covered, ignored))
-    return out
-
-
-def _covered_invocations() -> List[_Invocation]:
-    """Every pytest invocation across every commit-triggered workflow."""
-    out: List[_Invocation] = []
-    for wf in sorted(WORKFLOWS.glob("*.y*ml")):
-        try:
-            doc = yaml.safe_load(wf.read_text())
-        except yaml.YAMLError as exc:      # pragma: no cover
-            raise AssertionError(f"{wf.name} is not parseable YAML: {exc}")
-        if not isinstance(doc, dict) or not _is_commit_triggered(doc):
-            continue
-        for scalar in _scalars(doc):
-            out.extend(_pytest_invocations(scalar))
-    return out
+_cw = _load_script("ci_workflows")
+_triggers = _cw.triggers
+_is_commit_triggered = _cw.is_commit_triggered
+_Invocation = _cw.Invocation
+_covered_invocations = _cw.covered_invocations
 
 
 def _all_covered_roots(invocations: List[_Invocation]) -> Set[str]:
@@ -590,7 +431,7 @@ REVERSIONS = [
         test="test_no_uncovered_test_files_outside_the_allowlist",
     ),
     Reversion(
-        target="jaato-server/jaato_server/shared/tests/test_ci_runs_every_test_file.py",
+        target="scripts/ci_workflows.py",
         find='    if "on" in doc:\n        return doc["on"]\n    return doc.get(True)',
         replace='    return doc.get("on")',
         because=(
