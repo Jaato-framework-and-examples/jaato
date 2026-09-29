@@ -119,7 +119,7 @@ REVERSIONS = [
         target="jaato-server/jaato_server/shared/scaffold/build.py",
         find='''        "# Optional per-SESSION env vars.  This block:",
     ]
-    lines += [f"#   - {fact}" for fact in _explain.PROFILE_ENV_FACTS]
+    lines += [f"#   - {fact}" for fact in _facts.PROFILE_ENV_FACTS]
     lines += [
         "#     — the trace vars resolve theirs against the session workspace,",
         "#     so the RELATIVE form below writes one file per session, in its",
@@ -127,7 +127,7 @@ REVERSIONS = [
         "#     profile and shared by every session using it.",
         "#     See `jaato-scaffold explain env`.",
         "# env:",
-        f"#   {_explain.ENV_EXAMPLE_VAR}: {_explain.ENV_EXAMPLE_VALUE}",
+        f"#   {_facts.ENV_EXAMPLE_VAR}: {_facts.ENV_EXAMPLE_VALUE}",
     ]''',
         replace='''    ]''',
         test="test_new_emits_a_commented_env_block_with_a_pointer",

@@ -1,0 +1,1652 @@
+{
+ "env_vars": {
+  "AI_REQUEST_INTERVAL": {
+   "category": "rate_limit",
+   "default": "0"
+  },
+  "AI_RETRY_ATTEMPTS": {
+   "category": "rate_limit",
+   "default": "5"
+  },
+  "AI_RETRY_BASE_DELAY": {
+   "category": "rate_limit",
+   "default": "1.0"
+  },
+  "AI_RETRY_MAX_DELAY": {
+   "category": "rate_limit",
+   "default": "30.0"
+  },
+  "ANTHROPIC_API_KEY": {
+   "category": "provider:anthropic",
+   "default": null
+  },
+  "ANTHROPIC_AUTH_TOKEN": {
+   "category": "provider:anthropic",
+   "default": null
+  },
+  "APPDATA": {
+   "category": "provider:antigravity",
+   "default": null
+  },
+  "AWS_REGION": {
+   "category": "provider:bedrock",
+   "default": null
+  },
+  "AZURE_OPENAI_API_KEY": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "AZURE_OPENAI_API_VERSION": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "AZURE_OPENAI_DEPLOYMENT": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "AZURE_OPENAI_ENDPOINT": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "CLAUDE_CODE_OAUTH_TOKEN": {
+   "category": "provider:anthropic",
+   "default": null
+  },
+  "GITHUB_TOKEN": {
+   "category": "provider:github_models",
+   "default": null
+  },
+  "GOOGLE_APPLICATION_CREDENTIALS": {
+   "category": "provider:google_genai",
+   "default": null
+  },
+  "GOOGLE_GENAI_API_KEY": {
+   "category": "provider:google_genai",
+   "default": null
+  },
+  "JAATO_AMBIGUOUS_WIDTH": {
+   "category": "plugin:table_formatter",
+   "default": "1"
+  },
+  "JAATO_ANTHROPIC_ENABLE_CACHING": {
+   "category": "provider:anthropic",
+   "default": ""
+  },
+  "JAATO_ANTHROPIC_ENABLE_THINKING": {
+   "category": "provider:anthropic",
+   "default": ""
+  },
+  "JAATO_ANTHROPIC_THINKING_BUDGET": {
+   "category": "provider:anthropic",
+   "default": "10000"
+  },
+  "JAATO_ANTIGRAVITY_AUTO_ROTATE": {
+   "category": "provider:antigravity",
+   "default": "true"
+  },
+  "JAATO_ANTIGRAVITY_ENDPOINT": {
+   "category": "provider:antigravity",
+   "default": null
+  },
+  "JAATO_ANTIGRAVITY_PROJECT_ID": {
+   "category": "provider:antigravity",
+   "default": null
+  },
+  "JAATO_ANTIGRAVITY_QUOTA": {
+   "category": "provider:antigravity",
+   "default": ""
+  },
+  "JAATO_ANTIGRAVITY_RETRY_EMPTY": {
+   "category": "provider:antigravity",
+   "default": "true"
+  },
+  "JAATO_ANTIGRAVITY_SESSION_RECOVERY": {
+   "category": "provider:antigravity",
+   "default": "true"
+  },
+  "JAATO_ANTIGRAVITY_THINKING_BUDGET": {
+   "category": "provider:antigravity",
+   "default": "8192"
+  },
+  "JAATO_ANTIGRAVITY_THINKING_LEVEL": {
+   "category": "provider:antigravity",
+   "default": ""
+  },
+  "JAATO_AZURE_OPENAI_API_KEY": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "JAATO_AZURE_OPENAI_API_VERSION": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "JAATO_AZURE_OPENAI_AUTH": {
+   "category": "provider:azure_openai",
+   "default": ""
+  },
+  "JAATO_AZURE_OPENAI_CONTEXT_LENGTH": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "JAATO_AZURE_OPENAI_DEPLOYMENT": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "JAATO_AZURE_OPENAI_ENDPOINT": {
+   "category": "provider:azure_openai",
+   "default": null
+  },
+  "JAATO_BEDROCK_CONTEXT_LENGTH": {
+   "category": "provider:bedrock",
+   "default": null
+  },
+  "JAATO_BEDROCK_ENDPOINT_URL": {
+   "category": "provider:bedrock",
+   "default": null
+  },
+  "JAATO_BEDROCK_MODEL": {
+   "category": "provider:bedrock",
+   "default": null
+  },
+  "JAATO_BEDROCK_PROFILE": {
+   "category": "provider:bedrock",
+   "default": null
+  },
+  "JAATO_BEDROCK_REGION": {
+   "category": "provider:bedrock",
+   "default": null
+  },
+  "JAATO_CHROME_AI_BINARY": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CHROME_AI_CDP_URL": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CHROME_AI_CONTEXT_LENGTH": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CHROME_AI_HEADLESS": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CHROME_AI_MODEL": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CHROME_AI_PAGE_URL": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CHROME_AI_USER_DATA_DIR": {
+   "category": "provider:chrome_ai",
+   "default": null
+  },
+  "JAATO_CLAUDE_CLI_MAX_TURNS": {
+   "category": "provider:claude_cli",
+   "default": null
+  },
+  "JAATO_CLAUDE_CLI_MODE": {
+   "category": "provider:claude_cli",
+   "default": null
+  },
+  "JAATO_CLAUDE_CLI_PATH": {
+   "category": "provider:claude_cli",
+   "default": null
+  },
+  "JAATO_CLAUDE_CLI_PERMISSION_MODE": {
+   "category": "provider:claude_cli",
+   "default": null
+  },
+  "JAATO_DEFERRED_TOOLS": {
+   "category": "framework",
+   "default": "true"
+  },
+  "JAATO_DOUBLEWORD_API_KEY": {
+   "category": "provider:doubleword",
+   "default": null
+  },
+  "JAATO_DOUBLEWORD_BASE_URL": {
+   "category": "provider:doubleword",
+   "default": null
+  },
+  "JAATO_DOUBLEWORD_CONTEXT_LENGTH": {
+   "category": "provider:doubleword",
+   "default": null
+  },
+  "JAATO_DOUBLEWORD_MODEL": {
+   "category": "provider:doubleword",
+   "default": null
+  },
+  "JAATO_DOUBLEWORD_SERVICE_TIER": {
+   "category": "provider:doubleword",
+   "default": ""
+  },
+  "JAATO_DUMP_PROVIDER_REQUEST": {
+   "category": "provider:anthropic",
+   "default": ""
+  },
+  "JAATO_EPHEMERAL_TIMEOUT_S": {
+   "category": "daemon",
+   "default": "1800"
+  },
+  "JAATO_GC_PRESSURE": {
+   "category": "plugin:gc",
+   "default": "90.0"
+  },
+  "JAATO_GC_TARGET": {
+   "category": "plugin:gc",
+   "default": "60.0"
+  },
+  "JAATO_GC_THRESHOLD": {
+   "category": "plugin:gc",
+   "default": "80.0"
+  },
+  "JAATO_GITHUB_AUTH_METHOD": {
+   "category": "provider:github_models",
+   "default": ""
+  },
+  "JAATO_GITHUB_ENDPOINT": {
+   "category": "provider:github_models",
+   "default": null
+  },
+  "JAATO_GITHUB_ENTERPRISE": {
+   "category": "provider:github_models",
+   "default": null
+  },
+  "JAATO_GITHUB_ORGANIZATION": {
+   "category": "provider:github_models",
+   "default": null
+  },
+  "JAATO_GOOGLE_AUTH_METHOD": {
+   "category": "provider:google_genai",
+   "default": ""
+  },
+  "JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT": {
+   "category": "provider:google_genai",
+   "default": null
+  },
+  "JAATO_GOOGLE_USE_VERTEX": {
+   "category": "provider:google_genai",
+   "default": null
+  },
+  "JAATO_KIMI_API_KEY": {
+   "category": "provider:kimi",
+   "default": null
+  },
+  "JAATO_KIMI_BASE_URL": {
+   "category": "provider:kimi",
+   "default": null
+  },
+  "JAATO_KIMI_CONTEXT_LENGTH": {
+   "category": "provider:kimi",
+   "default": null
+  },
+  "JAATO_KIMI_MODEL": {
+   "category": "provider:kimi",
+   "default": null
+  },
+  "JAATO_KROKI_URL": {
+   "category": "plugin:mermaid_formatter",
+   "default": "https://kroki.io"
+  },
+  "JAATO_MIMO_API_KEY": {
+   "category": "provider:mimo",
+   "default": null
+  },
+  "JAATO_MIMO_BASE_URL": {
+   "category": "provider:mimo",
+   "default": null
+  },
+  "JAATO_MIMO_CONTEXT_LENGTH": {
+   "category": "provider:mimo",
+   "default": null
+  },
+  "JAATO_MIMO_MODEL": {
+   "category": "provider:mimo",
+   "default": null
+  },
+  "JAATO_MINIMAX_API_KEY": {
+   "category": "provider:minimax",
+   "default": null
+  },
+  "JAATO_MINIMAX_BASE_URL": {
+   "category": "provider:minimax",
+   "default": null
+  },
+  "JAATO_MINIMAX_CONTEXT_LENGTH": {
+   "category": "provider:minimax",
+   "default": null
+  },
+  "JAATO_MINIMAX_MODEL": {
+   "category": "provider:minimax",
+   "default": null
+  },
+  "JAATO_NEBIUS_API_KEY": {
+   "category": "provider:nebius",
+   "default": null
+  },
+  "JAATO_NEBIUS_BASE_URL": {
+   "category": "provider:nebius",
+   "default": null
+  },
+  "JAATO_NEBIUS_CONTEXT_LENGTH": {
+   "category": "provider:nebius",
+   "default": null
+  },
+  "JAATO_NEBIUS_MODEL": {
+   "category": "provider:nebius",
+   "default": null
+  },
+  "JAATO_NIM_API_KEY": {
+   "category": "provider:nim",
+   "default": null
+  },
+  "JAATO_NIM_BASE_URL": {
+   "category": "provider:nim",
+   "default": null
+  },
+  "JAATO_NIM_CONTEXT_LENGTH": {
+   "category": "provider:nim",
+   "default": null
+  },
+  "JAATO_NIM_MODEL": {
+   "category": "provider:nim",
+   "default": null
+  },
+  "JAATO_OPENAI_API": {
+   "category": "provider:openai",
+   "default": ""
+  },
+  "JAATO_OPENAI_API_KEY": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "JAATO_OPENAI_BASE_URL": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "JAATO_OPENAI_CONTEXT_LENGTH": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "JAATO_OPENAI_MODEL": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "JAATO_OPENAI_ORG_ID": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "JAATO_OPENAI_PROJECT_ID": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "JAATO_OPENROUTER_API_KEY": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OPENROUTER_APP_CATEGORIES": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OPENROUTER_APP_TITLE": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OPENROUTER_BASE_URL": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OPENROUTER_CONTEXT_LENGTH": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OPENROUTER_HTTP_REFERER": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OPENROUTER_MODEL": {
+   "category": "provider:openrouter",
+   "default": null
+  },
+  "JAATO_OVHCLOUD_ALLOW_ANONYMOUS": {
+   "category": "provider:ovhcloud",
+   "default": ""
+  },
+  "JAATO_OVHCLOUD_API_KEY": {
+   "category": "provider:ovhcloud",
+   "default": null
+  },
+  "JAATO_OVHCLOUD_BASE_URL": {
+   "category": "provider:ovhcloud",
+   "default": null
+  },
+  "JAATO_OVHCLOUD_CONTEXT_LENGTH": {
+   "category": "provider:ovhcloud",
+   "default": null
+  },
+  "JAATO_OVHCLOUD_MODEL": {
+   "category": "provider:ovhcloud",
+   "default": null
+  },
+  "JAATO_PARALLEL_TOOLS": {
+   "category": "framework",
+   "default": "true"
+  },
+  "JAATO_RUNNER_POOL_SIZE": {
+   "category": "daemon",
+   "default": "2"
+  },
+  "JAATO_TELEMETRY_EXPORTER": {
+   "category": "telemetry",
+   "default": "otlp"
+  },
+  "JAATO_TELEMETRY_FILE": {
+   "category": "telemetry",
+   "default": "/tmp/jaato-traces.jsonl"
+  },
+  "JAATO_TELEMETRY_REDACT_CONTENT": {
+   "category": "telemetry",
+   "default": "true"
+  },
+  "JAATO_TOOL_BINDINGS": {
+   "category": "plugin:notebook",
+   "default": "true"
+  },
+  "JAATO_ZHIPUAI_API_KEY": {
+   "category": "provider:zhipuai",
+   "default": null
+  },
+  "LMSTUDIO_API_TOKEN": {
+   "category": "provider:lmstudio",
+   "default": null
+  },
+  "LMSTUDIO_CONTEXT_LENGTH": {
+   "category": "provider:lmstudio",
+   "default": null
+  },
+  "LMSTUDIO_HOST": {
+   "category": "provider:lmstudio",
+   "default": null
+  },
+  "LMSTUDIO_MODEL": {
+   "category": "provider:lmstudio",
+   "default": null
+  },
+  "MIMO_API_KEY": {
+   "category": "provider:mimo",
+   "default": null
+  },
+  "MINIMAX_API_KEY": {
+   "category": "provider:minimax",
+   "default": null
+  },
+  "MODEL_NAME": {
+   "category": "daemon",
+   "default": "gemini-2.5-flash"
+  },
+  "MOONSHOT_API_KEY": {
+   "category": "provider:kimi",
+   "default": null
+  },
+  "NEBIUS_API_KEY": {
+   "category": "provider:nebius",
+   "default": null
+  },
+  "OLLAMA_CONTEXT_LENGTH": {
+   "category": "provider:ollama",
+   "default": null
+  },
+  "OLLAMA_HOST": {
+   "category": "provider:ollama",
+   "default": null
+  },
+  "OLLAMA_MODEL": {
+   "category": "provider:ollama",
+   "default": null
+  },
+  "OPENAI_API_KEY": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "OPENAI_BASE_URL": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "OPENAI_ORG_ID": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "OPENAI_PROJECT_ID": {
+   "category": "provider:openai",
+   "default": null
+  },
+  "OTEL_SERVICE_NAME": {
+   "category": "telemetry",
+   "default": "jaato"
+  },
+  "OVH_AI_ENDPOINTS_ACCESS_TOKEN": {
+   "category": "provider:ovhcloud",
+   "default": null
+  },
+  "SHELL": {
+   "category": "plugin:environment",
+   "default": "/bin/sh"
+  },
+  "TENSORRT_LLM_API_TOKEN": {
+   "category": "provider:tensorrt_llm",
+   "default": null
+  },
+  "TENSORRT_LLM_CONTEXT_LENGTH": {
+   "category": "provider:tensorrt_llm",
+   "default": null
+  },
+  "TENSORRT_LLM_HOST": {
+   "category": "provider:tensorrt_llm",
+   "default": null
+  },
+  "TENSORRT_LLM_MODEL": {
+   "category": "provider:tensorrt_llm",
+   "default": null
+  },
+  "TRITON_API_TOKEN": {
+   "category": "provider:triton",
+   "default": null
+  },
+  "TRITON_CONTEXT_LENGTH": {
+   "category": "provider:triton",
+   "default": null
+  },
+  "TRITON_CONTROL_URL": {
+   "category": "provider:triton",
+   "default": null
+  },
+  "TRITON_HOST": {
+   "category": "provider:triton",
+   "default": null
+  },
+  "TRITON_MODEL": {
+   "category": "provider:triton",
+   "default": null
+  },
+  "TRITON_OPENAI_URL": {
+   "category": "provider:triton",
+   "default": null
+  },
+  "VLLM_API_TOKEN": {
+   "category": "provider:vllm",
+   "default": null
+  },
+  "VLLM_CONTEXT_LENGTH": {
+   "category": "provider:vllm",
+   "default": null
+  },
+  "VLLM_HOST": {
+   "category": "provider:vllm",
+   "default": null
+  },
+  "VLLM_MODEL": {
+   "category": "provider:vllm",
+   "default": null
+  },
+  "ZHIPUAI_API_KEY": {
+   "category": "provider:zhipuai",
+   "default": null
+  },
+  "ZHIPUAI_BASE_URL": {
+   "category": "provider:zhipuai",
+   "default": null
+  },
+  "ZHIPUAI_CONTEXT_LENGTH": {
+   "category": "provider:zhipuai",
+   "default": null
+  },
+  "ZHIPUAI_ENABLE_THINKING": {
+   "category": "provider:zhipuai",
+   "default": ""
+  },
+  "ZHIPUAI_MODEL": {
+   "category": "provider:zhipuai",
+   "default": null
+  },
+  "ZHIPUAI_OPENAI_BASE_URL": {
+   "category": "provider:zhipuai_openai",
+   "default": null
+  },
+  "ZHIPUAI_OPENAI_CONTEXT_LENGTH": {
+   "category": "provider:zhipuai_openai",
+   "default": null
+  },
+  "ZHIPUAI_OPENAI_MODEL": {
+   "category": "provider:zhipuai_openai",
+   "default": null
+  },
+  "ZHIPUAI_THINKING_BUDGET": {
+   "category": "provider:zhipuai",
+   "default": null
+  }
+ },
+ "providers": {
+  "anthropic": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.anthropic.api_key"
+    ],
+    [
+     "oauth",
+     "anthropic_oauth.json",
+     "PKCE token (.jaato/ → ~/.jaato)"
+    ],
+    [
+     "env",
+     "ANTHROPIC_AUTH_TOKEN",
+     "OAuth token"
+    ],
+    [
+     "env",
+     "CLAUDE_CODE_OAUTH_TOKEN",
+     "OAuth token"
+    ],
+    [
+     "env",
+     "ANTHROPIC_API_KEY",
+     ""
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "enable_thinking",
+      "max_tokens",
+      "temperature",
+      "thinking_budget",
+      "top_k",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "framework_overrides": {
+     "keys": [
+      "context_length",
+      "modalities"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "cache_exclude_recent_turns",
+      "cache_history",
+      "cache_min_tokens",
+      "cache_ttl",
+      "enable_caching",
+      "oauth_token"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "antigravity": {
+   "auth": [
+    [
+     "oauth",
+     "antigravity_accounts.json",
+     "Google OAuth account store (.jaato/ → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "auto_rotate",
+      "context_length",
+      "endpoint",
+      "modalities",
+      "project_id",
+      "quota_type",
+      "retry_empty",
+      "session_recovery",
+      "thinking_budget",
+      "thinking_level"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "azure_openai": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.azure_openai.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_AZURE_OPENAI_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "AZURE_OPENAI_API_KEY",
+     "the vendor's own variable"
+    ],
+    [
+     "stored",
+     "azure_openai_auth.json",
+     "config_root → workspace/.jaato → ~/.jaato; the key and its endpoint are stored together, because a key from another resource authenticates against nothing here"
+    ],
+    [
+     "adc",
+     "DefaultAzureCredential",
+     "auth: aad — managed identity / workload identity / az login, via azure-identity; no stored secret"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "frequency_penalty",
+      "max_tokens",
+      "modalities",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "seed",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "api_version",
+      "auth",
+      "context_length",
+      "endpoint",
+      "extra_body",
+      "modalities",
+      "model_name",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "bedrock": {
+   "auth": [
+    [
+     "env",
+     "AWS_ACCESS_KEY_ID",
+     "with AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN); read by boto3, never by jaato — which is why it is absent from jaato's env catalog"
+    ],
+    [
+     "stored",
+     "~/.aws/credentials",
+     "and ~/.aws/config; the profile is selected by plugin_configs.bedrock.profile, JAATO_BEDROCK_PROFILE or boto3's own AWS_PROFILE"
+    ],
+    [
+     "cli",
+     "aws sso login",
+     "IAM Identity Center cached credentials; the interactive login is AWS's own and runs outside this process, which is why verify_auth() offers none"
+    ],
+    [
+     "adc",
+     "container and instance roles",
+     "ECS / EKS task role, then EC2 instance metadata — the deployment shape that needs no jaato credential config at all beyond the region"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "enable_thinking",
+      "max_tokens",
+      "stop_sequences",
+      "temperature",
+      "thinking_budget",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "additional_model_request_fields",
+      "cache_ttl",
+      "context_length",
+      "enable_caching",
+      "endpoint_url",
+      "guardrail_config",
+      "modalities",
+      "output_modalities",
+      "performance_latency",
+      "profile",
+      "region"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "chrome_ai": {
+   "auth": [
+    [
+     "none",
+     "",
+     "local browser over CDP — no credential"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "temperature",
+      "top_k"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "auto_download",
+      "binary",
+      "cdp_url",
+      "connect_timeout",
+      "context_length",
+      "download_timeout",
+      "extra_args",
+      "headless",
+      "page_url",
+      "turn_timeout",
+      "user_data_dir",
+      "warmup"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "claude_cli": {
+   "auth": [
+    [
+     "cli",
+     "claude",
+     "external claude CLI's own login session"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "cli_mode",
+      "cli_path",
+      "context_length",
+      "max_turns",
+      "permission_mode"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "doubleword": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.doubleword.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_DOUBLEWORD_API_KEY",
+     ""
+    ],
+    [
+     "stored",
+     "doubleword-auth",
+     "doubleword_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "frequency_penalty",
+      "max_tokens",
+      "modalities",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "seed",
+      "service_tier",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "github_models": {
+   "auth": [
+    [
+     "oauth",
+     "github_oauth.json",
+     "device-code token (.jaato/ → ~/.jaato)"
+    ],
+    [
+     "env",
+     "GITHUB_TOKEN",
+     ""
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "context_length",
+      "endpoint",
+      "enterprise",
+      "organization"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "google_genai": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.google_genai.api_key"
+    ],
+    [
+     "env",
+     "GOOGLE_GENAI_API_KEY",
+     "AI Studio api-key mode"
+    ],
+    [
+     "stored",
+     "GOOGLE_APPLICATION_CREDENTIALS",
+     "service-account file"
+    ],
+    [
+     "adc",
+     "",
+     "Application Default Credentials (gcloud / GCE metadata)"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "cache_ttl",
+      "context_length",
+      "enable_caching",
+      "modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "kimi": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.kimi.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_KIMI_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "MOONSHOT_API_KEY",
+     "vendor SDK var"
+    ],
+    [
+     "stored",
+     "kimi-auth",
+     "kimi_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "enable_thinking",
+      "max_tokens",
+      "modalities",
+      "prompt_cache_key",
+      "response_format",
+      "stop",
+      "strict_tools",
+      "thinking_keep",
+      "thinking_level",
+      "tool_choice"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "lmstudio": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_token",
+     "plugin_configs.lmstudio.api_token (optional)"
+    ],
+    [
+     "env",
+     "LMSTUDIO_API_TOKEN",
+     "optional — only if the server requires a token"
+    ]
+   ],
+   "knobs": {
+    "load": {
+     "keys": [],
+     "opaque": true
+    },
+    "top_level": {
+     "keys": [
+      "api_token",
+      "context_length",
+      "host"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "mimo": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.mimo.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_MIMO_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "MIMO_API_KEY",
+     "vendor SDK var"
+    ],
+    [
+     "stored",
+     "mimo-auth",
+     "mimo_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "enable_thinking",
+      "max_tokens",
+      "modalities",
+      "parallel_tool_calls",
+      "response_format",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "minimax": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.minimax.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_MINIMAX_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "MINIMAX_API_KEY",
+     "vendor SDK var"
+    ],
+    [
+     "stored",
+     "minimax-auth",
+     "minimax_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "enable_thinking",
+      "max_tokens",
+      "modalities",
+      "parallel_tool_calls",
+      "service_tier",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "nebius": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.nebius.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_NEBIUS_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "NEBIUS_API_KEY",
+     "vendor var"
+    ],
+    [
+     "stored",
+     "nebius-auth",
+     "nebius_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "frequency_penalty",
+      "max_tokens",
+      "modalities",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "seed",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "nim": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.nim.api_key"
+    ],
+    [
+     "env",
+     "JAATO_NIM_API_KEY",
+     ""
+    ],
+    [
+     "stored",
+     "nim-auth",
+     "nim_auth.json (config_root → workspace → ~/.jaato); self-hosted endpoints may need none"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "ollama": {
+   "auth": [
+    [
+     "none",
+     "",
+     "local server — no credential (dummy key)"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "context_length",
+      "host"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "openai": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.openai.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_OPENAI_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "OPENAI_API_KEY",
+     "the vendor's own variable"
+    ],
+    [
+     "stored",
+     "openai_auth.json",
+     "config_root → workspace/.jaato → ~/.jaato; {\"api_key\": ...}"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "frequency_penalty",
+      "include",
+      "max_output_tokens",
+      "max_tokens",
+      "metadata",
+      "modalities",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "prompt_cache_key",
+      "reasoning",
+      "safety_identifier",
+      "seed",
+      "service_tier",
+      "stop",
+      "store",
+      "temperature",
+      "text",
+      "tool_choice",
+      "top_p",
+      "truncation"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api",
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "organization",
+      "output_modalities",
+      "project"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "openrouter": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.openrouter.api_key"
+    ],
+    [
+     "env",
+     "JAATO_OPENROUTER_API_KEY",
+     ""
+    ],
+    [
+     "stored",
+     "openrouter-auth",
+     "openrouter_auth.json (workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "cache_prompt",
+      "cache_ttl",
+      "enable_thinking",
+      "max_tokens",
+      "modalities",
+      "models",
+      "parallel_tool_calls",
+      "service_tier",
+      "strict_tools",
+      "temperature",
+      "thinking_budget",
+      "thinking_level",
+      "tool_choice",
+      "top_k",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "framework_overrides": {
+     "keys": [
+      "base_url",
+      "connect_timeout",
+      "context_length",
+      "modalities",
+      "output_modalities",
+      "request_timeout",
+      "stream_idle_timeout"
+     ],
+     "opaque": false
+    },
+    "routing": {
+     "keys": [],
+     "opaque": true
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "app_categories",
+      "app_title",
+      "extra_headers",
+      "http_referer"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "ovhcloud": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.ovhcloud.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_OVHCLOUD_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "OVH_AI_ENDPOINTS_ACCESS_TOKEN",
+     "vendor var"
+    ],
+    [
+     "stored",
+     "ovhcloud-auth",
+     "ovhcloud_auth.json (config_root → workspace → ~/.jaato)"
+    ],
+    [
+     "none",
+     "",
+     "anonymous free tier — explicit opt-in via JAATO_OVHCLOUD_ALLOW_ANONYMOUS / allow_anonymous knob"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "audio",
+      "frequency_penalty",
+      "max_tokens",
+      "modalities",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "seed",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "allow_anonymous",
+      "api_key",
+      "base_url",
+      "context_length",
+      "extra_body",
+      "modalities",
+      "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "tensorrt_llm": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_token",
+     "plugin_configs.tensorrt_llm.api_token (optional)"
+    ],
+    [
+     "env",
+     "TENSORRT_LLM_API_TOKEN",
+     "optional — only behind an auth proxy"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "api_token",
+      "context_length",
+      "host",
+      "max_tokens"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "triton": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_token",
+     "plugin_configs.triton.api_token (optional)"
+    ],
+    [
+     "env",
+     "TRITON_API_TOKEN",
+     "optional — only behind an auth proxy"
+    ]
+   ],
+   "knobs": {
+    "load": {
+     "keys": [],
+     "opaque": true
+    },
+    "top_level": {
+     "keys": [
+      "api_token",
+      "context_length",
+      "control_url",
+      "host",
+      "openai_url"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "vllm": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_token",
+     "plugin_configs.vllm.api_token (optional)"
+    ],
+    [
+     "env",
+     "VLLM_API_TOKEN",
+     "optional — only if launched with --api-key"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "frequency_penalty",
+      "max_tokens",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "seed",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_token",
+      "context_length",
+      "host",
+      "max_tokens",
+      "parallel_tool_calls",
+      "quirks"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "zhipuai": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.zhipuai.api_key"
+    ],
+    [
+     "env",
+     "JAATO_ZHIPUAI_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "ZHIPUAI_API_KEY",
+     "vendor SDK var"
+    ],
+    [
+     "stored",
+     "zhipuai-auth",
+     "zhipuai_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "knobs": {
+    "api_params": {
+     "keys": [
+      "enable_thinking",
+      "max_tokens",
+      "temperature",
+      "thinking_budget",
+      "top_k",
+      "top_p"
+     ],
+     "opaque": false
+    },
+    "framework_overrides": {
+     "keys": [
+      "base_url",
+      "context_length"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "zhipuai_openai": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.zhipuai_openai.api_key"
+    ],
+    [
+     "env",
+     "ZHIPUAI_API_KEY",
+     "shared with zhipuai provider"
+    ],
+    [
+     "stored",
+     "zhipuai-auth",
+     "shared zhipuai_auth.json"
+    ]
+   ],
+   "knobs": {
+    "top_level": {
+     "keys": [
+      "base_url",
+      "context_length",
+      "enable_thinking",
+      "output_modalities",
+      "thinking_budget"
+     ],
+     "opaque": false
+    }
+   }
+  }
+ },
+ "snapshot_version": 1
+}

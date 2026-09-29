@@ -147,46 +147,13 @@ def _apply_premium_prompt_overrides() -> None:
 _apply_premium_prompt_overrides()
 
 
-# Cache for premium content paths — resolved once per entry-point name.
-_premium_content_cache: Dict[str, Optional[str]] = {}
-
-
-def _get_premium_content_path(name: str) -> Optional[str]:
-    """Return a filesystem path provided by a ``jaato.premium`` entry point.
-
-    Premium content entry points (``instructions``, ``profiles``, etc.)
-    return a directory path where the premium package stores its content
-    files.  Results are cached for the lifetime of the process.
-
-    Args:
-        name: The entry-point name within the ``jaato.premium`` group
-            (e.g. ``"instructions"``, ``"profiles"``).
-
-    Returns:
-        Absolute path string, or ``None`` if no provider is registered.
-    """
-    if name in _premium_content_cache:
-        return _premium_content_cache[name]
-
-    result = None
-    eps = importlib.metadata.entry_points()
-    if sys.version_info >= (3, 12):
-        matches = eps.select(group="jaato.premium", name=name)
-    elif sys.version_info >= (3, 10):
-        matches = [ep for ep in eps.select(group="jaato.premium") if ep.name == name]
-    else:
-        matches = [ep for ep in eps.get("jaato.premium", []) if ep.name == name]
-
-    for ep in matches:
-        try:
-            provider_fn = ep.load()
-            result = provider_fn()
-            break
-        except Exception:
-            logger.warning("Failed to load premium content path '%s'", name, exc_info=True)
-
-    _premium_content_cache[name] = result
-    return result
+# Moved to a stdlib leaf (#1267) so config-resolution code can ask for a
+# premium path without importing the runtime.  Re-exported here: this module
+# calls it by its global name, and tests monkeypatch it on this module.
+from .premium_content import (  # noqa: E402,F401
+    _get_premium_content_path,
+    _premium_content_cache,
+)
 
 
 def _get_sandbox_guidance() -> Optional[str]:

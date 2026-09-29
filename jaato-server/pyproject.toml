@@ -189,9 +189,12 @@ include = ["jaato_server*", "jaato_embedded*"]
 # applied copy cannot describe a different version than the one running.
 # `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares
 # the stamp it leaves against this distribution's version.
+# `authoring_snapshot.json` is what `jaato-scaffold new` reads about providers
+# and env vars when the source tree it normally parses is absent (#1267).
 [tool.setuptools.package-data]
 "jaato_server.shared.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
-                     "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md"]
+                     "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md",
+                     "authoring_snapshot.json"]
 
 [tool.pytest.ini_options]
 # Register custom marks so pytest doesn't warn on use.  ``apparmor``
