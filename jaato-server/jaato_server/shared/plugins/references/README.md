@@ -239,7 +239,19 @@ tokens); exactly one of `path` (a file inside the workspace) or `content`
 
 The claim's `origin` (`kind: "agent"`, the model binding, the session's
 authenticated user) is stamped from the calling session; it cannot be passed
-in. Promotion into the catalog is a separate, curator-side step.
+in.
+
+### Promoting a claim
+
+A claim becomes a catalog entry only when a person promotes it, through the
+daemon (protocol 1.32): `reference.promote <claim_id>` writes
+`.jaato/references/<id>.json`, and `reference.dismiss <claim_id>` removes the
+claim. SDK: `IPCClient.promote_reference_claim` / `dismiss_reference_claim`
+(TypeScript: `promoteReferenceClaim` / `dismissReferenceClaim`). Only the
+workspace owner may, on an owned workspace. The daemon re-validates the
+claim, re-derives `created_by` from its own session record (never from the
+claim file), stamps `origin.curated_by` with the promoting person, and
+refuses to overwrite an existing entry.
 
 ## Tags and Proactive Reference Access
 

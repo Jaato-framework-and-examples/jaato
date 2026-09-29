@@ -661,6 +661,10 @@ class CommandRouter:
             self._handle_scaffold_integration(
                 client_id, args, workspace_path, session_id=session_id)
             return True
+        if cmd in ("reference.promote", "reference.dismiss"):
+            self._handle_reference_curation(
+                client_id, cmd, args, workspace_path, session_id=session_id)
+            return True
         return False
 
     def resolve_caller_workspace(
@@ -776,6 +780,54 @@ class CommandRouter:
         logger.info("workspace.ignore: client=%s %s %r in %s", client_id,
                     "added" if ignored else "removed", pattern, gitignore_path)
         answer(ok=True, ignored=ignored, gitignore_path=gitignore_path)
+
+    def _handle_reference_curation(
+        self, client_id: str, cmd: str, args: list,
+        client_workspace: Optional[str], session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``reference.promote|dismiss <claim_id>`` (protocol 1.32).
+
+        Daemon-level: the catalog is write-denied to a confined runner, so
+        the daemon, which is not confined, is where a claim becomes a catalog
+        entry.  The workspace is :meth:`resolve_caller_workspace`'s; the
+        owner gate reads the TRANSPORT's identity for this connection and
+        the workspace owner the session manager knows, never anything in the
+        request.  The work itself is
+        :func:`~.reference_curation.curate_claim`.  Every outcome, refusals
+        included, answers with one ``ReferenceCurationResultEvent``.
+        """
+        from jaato_sdk.events import ReferenceCurationResultEvent
+
+        from .reference_curation import CURATION_COMMANDS, curate_claim
+
+        action = CURATION_COMMANDS[cmd]
+        claim_id = args[0] if args else ""
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+        if not workspace:
+            checked = ", ".join(f"{k}={'none' if v is None else repr(v)}"
+                                for k, v in sources.items())
+            self._event_sink.send_event(client_id, ReferenceCurationResultEvent(
+                action=action, claim_id=claim_id, ok=False, category="no_workspace",
+                error=f"{cmd}: the caller has no workspace ({checked})"))
+            return
+        manager = self._session_manager
+        owner_of = getattr(manager, "_workspace_owner_of", None)
+        user_id = self._event_sink.get_client_user(client_id)
+        outcome = curate_claim(
+            workspace, action, claim_id,
+            owner=owner_of(workspace) if callable(owner_of) else None,
+            user_id=user_id,
+            creator_in_workspace=manager.creator_in_workspace)
+        logger.info("%s: client=%s user=%s claim=%s ok=%s category=%s ref=%s",
+                    cmd, client_id, user_id or "-", claim_id, outcome.ok,
+                    outcome.category or "-", outcome.reference_id or "-")
+        self._event_sink.send_event(client_id, ReferenceCurationResultEvent(
+            action=action, claim_id=claim_id, ok=outcome.ok,
+            category=outcome.category, error=outcome.error,
+            reference_id=outcome.reference_id,
+            reference_file=outcome.reference_file,
+            warnings=list(outcome.warnings)))
 
     def _handle_scaffold_explain(
         self, client_id: str, args: list, client_workspace: Optional[str],

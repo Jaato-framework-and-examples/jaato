@@ -2202,6 +2202,56 @@ class IPCClient:
             args=[path],
         ))
 
+    #: Floor for ``reference.promote`` / ``reference.dismiss`` (1.32).  A
+    #: missing verb (the 1.7 rule): an older daemon ignores the command, and
+    #: "promoted" would describe a catalog nobody changed.
+    MIN_REFERENCE_CURATION_PROTOCOL = "1.32"
+
+    async def promote_reference_claim(self, claim_id: str) -> None:
+        """Promote an agent's reference claim into the workspace catalog.
+
+        An agent proposes a reference with ``proposeReference``; that writes
+        a CLAIM under ``.jaato/references-claims/``, never a catalog entry
+        (a confined runner cannot write the catalog).  This asks the daemon
+        to re-validate the claim and write ``.jaato/references/<id>.json``,
+        stamping ``origin.curated_by`` from this connection's identity, and
+        to remove the claim.  Only the workspace owner may, on an owned
+        workspace.  The daemon answers with one
+        ``ReferenceCurationResultEvent`` whatever happened.
+
+        Args:
+            claim_id: The claim's id, as ``listReferences`` shows it.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+        """
+        await self._send_reference_curation("reference.promote", claim_id)
+
+    async def dismiss_reference_claim(self, claim_id: str) -> None:
+        """Drop an agent's reference claim without promoting it.
+
+        Same gate and answer as :meth:`promote_reference_claim`; the claim
+        file is removed and the catalog is not touched.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+        """
+        await self._send_reference_curation("reference.dismiss", claim_id)
+
+    async def _send_reference_curation(self, command: str, claim_id: str) -> None:
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_REFERENCE_CURATION_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"{command}: this daemon speaks protocol {spoken} and does not "
+                f"serve it (needs >= {self.MIN_REFERENCE_CURATION_PROTOCOL}).  "
+                f"It would ignore the command silently, which reads like "
+                f"success.  Upgrade the daemon.")
+        await self._send_event(CommandRequest(command=command, args=[claim_id]))
+
     MIN_SESSION_MESSAGE_PROTOCOL = "1.23"
 
     #: Floor for a ``session.message`` that carries ``file_refs`` or

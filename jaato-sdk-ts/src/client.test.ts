@@ -17,6 +17,7 @@ import {
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_REFERENCE_CURATION_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
   MIN_WORKSPACE_PICKER_PROTOCOL,
@@ -664,6 +665,27 @@ describe("JaatoClient session management", () => {
 
   test("toggleWorkspaceIgnore is refused below protocol 1.12", async () => {
     await assert.rejects(() => client.toggleWorkspaceIgnore("x"), /workspace\.ignore/);
+    assert.equal(getSent().length, 0);
+  });
+
+  test("promote/dismissReferenceClaim send reference.* with the claim id", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.promoteReferenceClaim("20260929T100000Z-abcd1234");
+    await client.dismissReferenceClaim("20260929T100001Z-ef012345");
+    const [promote, dismiss] = getSent() as { command?: string; args?: string[] }[];
+    assert.equal(promote.command, "reference.promote");
+    assert.deepEqual(promote.args, ["20260929T100000Z-abcd1234"]);
+    assert.equal(dismiss.command, "reference.dismiss");
+    assert.deepEqual(dismiss.args, ["20260929T100001Z-ef012345"]);
+  });
+
+  test("reference curation is refused below protocol 1.32", async () => {
+    await assert.rejects(() => client.promoteReferenceClaim("x"), /reference\.promote/);
+    await assert.rejects(() => client.dismissReferenceClaim("x"), /reference\.dismiss/);
     assert.equal(getSent().length, 0);
   });
 

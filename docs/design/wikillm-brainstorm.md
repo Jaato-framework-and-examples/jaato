@@ -536,8 +536,16 @@ the same tool:
 **Shipped:** step 1 — `proposeReference`, the claims directory, the
 `agent` origin kind, the fenced `proposed` listing, `require_curation`,
 and the plugin's own AppArmor grant for the claims directory
-(`CLAUDE.md`, *An Agent Proposes a Reference*). Step 2 (witness) and
-step 3 (promote) are not built; `links` waits on Seam 3.
+(`CLAUDE.md`, *An Agent Proposes a Reference*). Step 3 — promotion —
+too: `reference.promote` / `reference.dismiss` (protocol 1.32), a
+daemon-level verb gated by `may_curate` that re-validates the claim,
+re-derives `created_by` from the daemon's own session record, stamps
+`curated_by`, and writes through `contained_write` (`CLAUDE.md`, *A Person
+Promotes the Claim*). Step 2 (witness) is not built; `links` waits on
+Seam 3. Two departures from the table below: the promoted entry goes to
+the workspace catalog root, not a named bundle (a bundle would need its
+manifest updated), and `created_by` is derived from the session the claim
+NAMES, never read from the claim.
 
 `proposeReference` takes what a catalog entry carries — `id`, `name`,
 `description`, `tags`, `links` (Seam 3) — plus the document itself, as a

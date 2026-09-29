@@ -133,6 +133,12 @@ class ReferenceOrigin:
             transport authenticated nobody -- absence, not a guess.
         claim_id: The claim this reference was proposed as, so a promoted
             entry can be traced back to the claim file a curator read.
+        curated_by: Who PROMOTED the claim into the catalog, stamped by the
+            daemon from the connection that asked (``{"kind": "human",
+            "via": "reference.promote", "user": ...}``, the shape a memory's
+            ``curated_by`` has).  Only a promoted agent reference carries it;
+            a claim still in the claims directory never does, and one that
+            says so was written by something other than the promotion verb.
     """
 
     kind: str
@@ -142,6 +148,7 @@ class ReferenceOrigin:
     generated_by: Optional[Dict[str, Any]] = None
     created_by: Optional[str] = None
     claim_id: Optional[str] = None
+    curated_by: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize, omitting keys whose value was never established.
@@ -156,7 +163,8 @@ class ReferenceOrigin:
                            ("at", self.at),
                            ("generated_by", self.generated_by),
                            ("created_by", self.created_by),
-                           ("claim_id", self.claim_id)):
+                           ("claim_id", self.claim_id),
+                           ("curated_by", self.curated_by)):
             if value:
                 payload[key] = value
         return payload
@@ -182,6 +190,7 @@ class ReferenceOrigin:
             generated_by=_dict_or_none(data.get("generated_by")),
             created_by=data.get("created_by") or None,
             claim_id=data.get("claim_id") or None,
+            curated_by=_dict_or_none(data.get("curated_by")),
         )
 
     def describe(self) -> str:
@@ -207,7 +216,10 @@ class ReferenceOrigin:
         session = f" in session {gen['session_id']}" if gen.get("session_id") else ""
         user = f" for {self.created_by}" if self.created_by else ""
         when = f" on {self.at}" if self.at else ""
-        return f"proposed by{agent}{model}{session}{user}{when}"
+        curator = (self.curated_by or {}).get("user")
+        promoted = (f", promoted by {curator}" if curator
+                    else ", promoted" if self.curated_by else "")
+        return f"proposed by{agent}{model}{session}{user}{when}{promoted}"
 
 
 def _dict_or_none(value: Any) -> Optional[Dict[str, Any]]:

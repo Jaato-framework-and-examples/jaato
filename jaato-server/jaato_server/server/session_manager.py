@@ -3616,6 +3616,31 @@ class SessionManager:
         session = self.get_session(session_id)
         return session.created_by if session else None
 
+    def creator_in_workspace(self, session_id: str, workspace_path: str) -> Optional[str]:
+        """Who ``session_id`` was created for, if it ran in ``workspace_path``.
+
+        The daemon's own record, for a caller holding a session id it read
+        from somewhere it cannot trust (a reference claim, which a model can
+        write): a loaded session answers from its ``created_by``, a cold one
+        from the workspace index's membership row.  Either way the session
+        must be placed in ``workspace_path`` (both sides resolved), so an id
+        naming another workspace's session -- or an ambiguous one -- answers
+        ``None`` rather than lending that session's creator to this one.
+        """
+        want = os.path.realpath(workspace_path)
+        session = self.get_session(session_id)
+        if session is not None:
+            where = getattr(session, "workspace_path", None)
+            if where and os.path.realpath(where) == want:
+                return getattr(session, "created_by", None) or None
+            return None
+        index = self._session_workspace_index
+        where = index.resolve(session_id)
+        if not where or os.path.realpath(where) != want:
+            return None
+        row = index.membership(session_id) or {}
+        return row.get("created_by") or None
+
     def _build_isolated_envelope(
         self,
         *,

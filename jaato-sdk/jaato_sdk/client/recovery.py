@@ -878,6 +878,25 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.toggle_workspace_ignore(path)
 
+    async def promote_reference_claim(self, claim_id: str) -> None:
+        """Promote an agent's reference claim into the catalog.
+
+        See :meth:`IPCClient.promote_reference_claim`; the inner client
+        refuses a daemon below protocol 1.32.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.promote_reference_claim(claim_id)
+
+    async def dismiss_reference_claim(self, claim_id: str) -> None:
+        """Drop an agent's reference claim.
+
+        See :meth:`IPCClient.dismiss_reference_claim`.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.dismiss_reference_claim(claim_id)
+
     async def send_external_event(
         self,
         name: str,

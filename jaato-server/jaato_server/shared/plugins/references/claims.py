@@ -64,6 +64,11 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
 
+def valid_id(value: Any) -> bool:
+    """Whether ``value`` is one id token (a reference id or a claim id)."""
+    return isinstance(value, str) and bool(_ID_RE.match(value))
+
+
 def claims_dir(workspace: str) -> Path:
     """``<workspace>/.jaato/references-claims``."""
     return Path(workspace) / ".jaato" / CLAIMS_DIRNAME
@@ -220,14 +225,14 @@ def load_claims(workspace: Optional[str]) -> Tuple[List[Dict[str, Any]], List[st
         except (OSError, ValueError):
             skipped.append(path.name)
             continue
-        if _is_claim(data):
+        if is_claim(data):
             claims.append(data)
         else:
             skipped.append(path.name)
     return claims, skipped
 
 
-def _is_claim(data: Any) -> bool:
+def is_claim(data: Any) -> bool:
     """A claim file this module would have written, checked on READ.
 
     The directory is model-writable, so shape is re-checked here rather
@@ -237,9 +242,7 @@ def _is_claim(data: Any) -> bool:
     if not isinstance(data, dict) or data.get("status") != CLAIM_STATUS_PROPOSED:
         return False
     ref, claim_id = data.get("reference"), data.get("claim_id")
-    return (isinstance(claim_id, str) and bool(_ID_RE.match(claim_id))
-            and isinstance(ref, dict) and isinstance(ref.get("id"), str)
-            and bool(_ID_RE.match(ref["id"])))
+    return valid_id(claim_id) and isinstance(ref, dict) and valid_id(ref.get("id"))
 
 
 def claim_tags(claim: Dict[str, Any]) -> List[str]:
@@ -248,6 +251,23 @@ def claim_tags(claim: Dict[str, Any]) -> List[str]:
     if not isinstance(tags, list):
         return []
     return [t for t in tags if isinstance(t, str) and _TAG_RE.match(t)]
+
+
+def claim_as_args(claim: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``proposeReference`` arguments a claim's entry corresponds to.
+
+    Promotion re-validates a claim by running it back through
+    :func:`build_proposed_reference` -- the one door a proposal passed --
+    because the claims directory is model-writable and the file may no
+    longer be what ``proposeReference`` wrote.
+    """
+    ref = claim["reference"]
+    args = {k: ref.get(k) for k in ("id", "name", "description", "tags")}
+    if ref.get("type") == "inline":
+        args["content"] = ref.get("content")
+    else:
+        args["path"] = ref.get("path")
+    return args
 
 
 def listing_entry(claim: Dict[str, Any]) -> Dict[str, Any]:

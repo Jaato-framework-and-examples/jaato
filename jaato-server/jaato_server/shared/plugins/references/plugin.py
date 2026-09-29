@@ -2550,7 +2550,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "claim_file": os.path.relpath(target, workspace),
             "message": (
                 "Proposed, not yet in the catalog. Other agents see it in "
-                "listReferences as 'proposed'; a curator promotes it."
+                "listReferences as 'proposed'; the workspace owner promotes "
+                "it into the catalog (reference.promote) or dismisses it."
             ),
         }
 

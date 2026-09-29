@@ -556,7 +556,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # is built, on the runner path as a ``tool_result_enriched`` notification.
 # A NEW event type: an older client does not know it, logs it and continues
 # (the 1.8 shape), so nothing is refused.
-PROTOCOL_VERSION = "1.31"
+# 1.32 -- ``reference.promote <claim_id>`` / ``reference.dismiss <claim_id>``
+# (``ReferenceCurationResultEvent``): a person turns an agent's reference
+# CLAIM (``proposeReference``) into a catalog entry, or drops it.  The daemon
+# does the write, because a confined runner is write-denied on the catalog.
+# Gated by the memory rail's owner rule.  A NEW verb: an older daemon ignores
+# the command silently, and "promoted" would describe a catalog nobody
+# changed, so the SDKs refuse below ``MIN_REFERENCE_CURATION_PROTOCOL``.
+PROTOCOL_VERSION = "1.32"
 
 
 # =============================================================================
@@ -776,6 +783,7 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
+    REFERENCE_CURATION_RESULT = "reference.curation.result"  # Answer to `reference.promote|dismiss` (1.32)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
@@ -2769,6 +2777,45 @@ class WorkspaceIgnoreResultEvent(Event):
     ok: bool = True
     error: str = ""
     gitignore_path: str = ""
+
+
+class ReferenceCurationResultEvent(Event):
+    """Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.32).
+
+    An agent PROPOSES a reference with ``proposeReference``; the result is a
+    claim under ``<workspace>/.jaato/references-claims/``, never a catalog
+    entry, because a confined runner cannot write the catalog.  A person
+    promotes the claim (the daemon writes ``.jaato/references/<id>.json``,
+    stamping ``origin.curated_by`` from this connection's identity) or
+    dismisses it (the claim file is removed).  Both are gated by the
+    workspace-owner rule the memory rail uses.
+
+    The daemon answers every request with exactly one of these, refusals
+    included.
+
+    Fields:
+        action: ``promote`` or ``dismiss``.
+        claim_id: The claim acted on, as the caller named it.
+        ok: Whether the verb did what was asked.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``not_found``,
+            ``invalid_claim``, ``collision``, ``unsafe_path`` or
+            ``io_error``.  Branch on this, not on ``error``.
+        error: The reason, for a person.
+        reference_id: The catalog id a promotion wrote.
+        reference_file: The workspace-relative catalog file it wrote.
+        warnings: Anything that happened beside success -- a promoted claim
+            whose file could not be removed afterwards.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CURATION_RESULT)
+    action: str = ""
+    claim_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    reference_id: str = ""
+    reference_file: str = ""
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SessionMessageResultEvent(Event):
@@ -5102,6 +5149,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
+    EventType.REFERENCE_CURATION_RESULT.value: ReferenceCurationResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,

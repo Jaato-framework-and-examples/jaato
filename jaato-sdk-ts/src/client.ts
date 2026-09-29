@@ -160,6 +160,14 @@ export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
 export const MIN_FILE_FETCH_PROTOCOL = "1.20";
 
 /**
+ * Protocol floor for {@link JaatoClient.promoteReferenceClaim} and
+ * {@link JaatoClient.dismissReferenceClaim}.  Same rule as
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verb,
+ * and "promoted" would describe a catalog nobody changed.
+ */
+export const MIN_REFERENCE_CURATION_PROTOCOL = "1.32";
+
+/**
  * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
  * as {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
  * ``scaffold.integration`` silently, and a client that then reported the
@@ -1197,6 +1205,49 @@ export class JaatoClient {
       type: EventTypeValue.COMMAND,
       command: "workspace.ignore",
       args: [path],
+    } as CommandRequest);
+  }
+
+  /**
+   * Promote an agent's reference claim into the workspace catalog
+   * (protocol 1.32).  An agent's ``proposeReference`` writes a CLAIM, never
+   * a catalog entry; the daemon re-validates it, writes
+   * ``.jaato/references/<id>.json`` stamped with this connection's identity
+   * as ``origin.curated_by``, and removes the claim.  Only the workspace
+   * owner may, on an owned workspace.  Answered by one
+   * ``reference.curation.result``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async promoteReferenceClaim(claimId: string): Promise<void> {
+    await this._sendReferenceCuration("reference.promote", claimId);
+  }
+
+  /**
+   * Drop an agent's reference claim without promoting it (protocol 1.32).
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async dismissReferenceClaim(claimId: string): Promise<void> {
+    await this._sendReferenceCuration("reference.dismiss", claimId);
+  }
+
+  private async _sendReferenceCuration(command: string, claimId: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_REFERENCE_CURATION_PROTOCOL)
+    ) {
+      throw new Error(
+        `${command}: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve it ` +
+          `(needs >= ${MIN_REFERENCE_CURATION_PROTOCOL}).  It would ignore the ` +
+          `command silently.  Upgrade the daemon.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command,
+      args: [claimId],
     } as CommandRequest);
   }
 

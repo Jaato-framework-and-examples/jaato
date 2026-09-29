@@ -578,6 +578,7 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
+- `reference.promote <claim_id>` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry, or drop it (→ `ReferenceCurationResultEvent`; protocol 1.32, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-132))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
@@ -4066,15 +4067,44 @@ file per call under `<workspace>/.jaato/references-claims/`
 **What a claim's origin is worth.** The directory is writable by anything
 the model drives with a file tool, so a hand-written claim can carry any
 origin: the same trust tier as memory's `raw/` queue. That is why a claim is
-listed as unreviewed and fenced. Making the stamp trustworthy belongs to the
-second half, **promotion**: a daemon verb that copies a claim into a bundle
-through `contained_write` (#1386), gated by `may_curate` (#1232), stamping
-`curated_by`. Not built yet; until then a claim is listed but not selectable, and a
-person promotes it by copying the entry into the catalog.
+listed as unreviewed and fenced, and why the stamp is made trustworthy only
+by promotion, below.
 
 Guard: `shared/tests/test_an_agent_proposes_a_reference.py`, six reversions,
 including two checked against the RENDERED profile with the #1348 rule
 matcher: claims writable, catalog still denied. No kernel.
+
+### A Person Promotes the Claim; the Daemon Writes the Catalog (protocol 1.32)
+
+`reference.promote <claim_id>` turns a claim into
+`<workspace>/.jaato/references/<id>.json`; `reference.dismiss <claim_id>`
+removes the claim. Both are daemon-level commands
+(`CommandRouter._handle_reference_curation`, work in
+`server/reference_curation.py`), answered with one
+`ReferenceCurationResultEvent` whatever happened
+(`category`: `invalid_request` / `no_workspace` / `not_owner` / `not_found`
+/ `invalid_claim` / `collision` / `unsafe_path` / `io_error`). The daemon
+writes because it is the one process that is not confined; the runner's
+AppArmor contribution is unchanged, since the runner still writes only
+claims. `IPCClient.promote_reference_claim` / `dismiss_reference_claim` and
+`promoteReferenceClaim` / `dismissReferenceClaim` refuse a daemon below 1.32
+(the 1.7 missing-verb rule).
+
+| Rule | Why |
+|---|---|
+| **the owner gate** | `memory_verbs.may_curate`, the #1232 rule: the owner may, anyone may on an unowned workspace, an identity-less connection may not on an owned one. The identity is the transport's (`get_client_user`) |
+| **the claim is re-validated** | the claims directory is model-writable, so the file is re-read (no link out of the workspace, a symlinked claim file refused, `is_claim`) and its entry run back through `build_proposed_reference`, the one door a proposal passed: a `path` edited to point out of the workspace is `invalid_claim` |
+| **`created_by` is re-derived** | never copied from the claim. `SessionManager.creator_in_workspace` answers from the loaded session or the index's membership row, and only for a session placed in THIS workspace; otherwise absent. `generated_by` is kept as recorded (what the curator saw), `curated_by` is `{kind: "human", via: "reference.promote", user}`, `at` is the arrival |
+| **nothing is overwritten** | an id in the catalog (sub-bundles included) or an existing `<id>.json` is `collision`; the write goes through `write_contained` (#1386), so a catalog directory linked out of the workspace is `unsafe_path` |
+| **a promoted local reference loads** | the claim's workspace-relative `path` is re-anchored to the catalog file (`../../docs/x.md`), because the loader resolves a relative path against the reference file's directory |
+
+Not done: promotion into a named sub-bundle (it would need the bundle
+manifest updated), a claims listing verb for a client (a client reads
+`listReferences` through a session today), and a web-client control. A
+running session sees the new entry at its next catalog reload.
+
+Guard: `server/tests/test_a_person_promotes_a_reference_claim.py`, eight
+reversions.
 
 ### Plugin-Level Traits
 
