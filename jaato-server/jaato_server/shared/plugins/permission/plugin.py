@@ -456,6 +456,10 @@ class PermissionPlugin(RunnerForwardingMixin):
 
         Returns ``None`` when nothing has been decided at runtime, so a
         session that never touched permissions writes no key at all.
+
+        Called on the ENFORCER's instance: on a runner-served session that
+        is the runner's copy, reached through ``session.get_permission_
+        persistence``; the daemon's copy decides nothing there (#1412).
         """
         if not self._policy:
             return None
@@ -476,6 +480,9 @@ class PermissionPlugin(RunnerForwardingMixin):
         Runs after ``initialize()`` has loaded ``permissions.json``, so
         these runtime decisions are layered ON TOP of the file rather than
         being overwritten by it — restoring earlier would reproduce #706.
+        On a runner-served session the daemon reaches the runner's instance
+        through ``session.restore_permission_persistence`` after the revived
+        session's bootstrap (#1412).
 
         Reads defensively: a snapshot from an older plugin version, or a
         hand-edited session file, must not make the session unloadable.

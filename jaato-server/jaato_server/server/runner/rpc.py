@@ -281,6 +281,14 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # not model or user code, and a diagnostic reachable only between
     # turns would not be much of one.
     "session.diagnostics": "_handle_session_diagnostics",
+    # Re-apply a revived session's persisted runtime permission decisions
+    # (#1412) to THIS process's permission plugin -- the enforcer.  #706
+    # restored them into the daemon's copy, which decides nothing on a
+    # runner-served session.  Control lane: it sets session state and runs
+    # no model or user code.  Read counterpart: ``session.get_permission_
+    # persistence`` in ``RunnerRPC._SESSION_READS``.
+    "session.restore_permission_persistence":
+        "_handle_session_restore_permission_persistence",
 }
 
 #: How many recently-registered request ids the reader thread remembers,
@@ -5413,6 +5421,13 @@ class RunnerRPC:
         # reading the daemon's copy reported ``ask`` to every client
         # while the enforcer denied.  Returns ``{"status": {...}}``.
         "session.get_permission_status": "_handle_session_get_permission_status",
+        # The enforcer's runtime decisions as a persistence snapshot
+        # (#1412): ``permissions allow|deny|default`` and ``always`` /
+        # ``never`` answers.  The daemon's save read its own copy, which
+        # nothing mutates, so a runner-served session saved nothing.
+        # Returns ``{"state": <dict> | None}``.
+        "session.get_permission_persistence":
+            "_handle_session_get_permission_persistence",
         # Phase 3 §7c step 6.6.4.5c.2: the user-command catalog.
         # Replaces 2 daemon-side reaches into
         # ``self._jaato.get_user_commands()``.  Returns ``{"commands":
@@ -5554,6 +5569,122 @@ class RunnerRPC:
                 "stage": "call",
             }
         return True, {"status": status}
+
+    def _session_permission_plugin(
+        self, verb: str,
+    ) -> "tuple[bool, Any, Any]":
+        """``(ok, err, plugin)`` -- the permission plugin THIS session enforces with.
+
+        The plugin is the runtime's ``permission_plugin``, which
+        ``bootstrap_session`` constructs fresh on every bootstrap (Step
+        8).  That freshness is what keeps a pool slot from carrying one
+        session's decisions into the next: the next session's handler
+        reaches a different object.  ``no_plugin`` is refused rather than
+        answered for, as ``session.get_permission_status`` refuses it.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return False, err, None
+        plugin = getattr(
+            getattr(session, "_runtime", None), "permission_plugin", None,
+        )
+        if plugin is None:
+            return False, (False, {
+                "error": (
+                    f"{verb}: the runner session's runtime carries no "
+                    f"permission plugin"
+                ),
+                "stage": "no_plugin",
+            }), None
+        return True, None, plugin
+
+    def _handle_session_get_permission_persistence(self) -> "tuple[bool, Any]":
+        """Snapshot the enforcer's runtime permission decisions (#1412).
+
+        #706 persisted ``PermissionPlugin.get_persistence_state()``, and
+        the daemon's save called it on the DAEMON's copy.  On a
+        runner-served session -- the default -- nothing mutates that copy:
+        ``permissions default allow`` and a prompt's ``never`` land on the
+        plugin this handler reads.  So the save wrote nothing and the
+        decisions were lost on every real unload.
+
+        Returns:
+            ``(True, {"state": dict | None})`` -- ``None`` is a real
+            answer ("nothing was decided at runtime"), and the daemon
+            writes no key for it.
+
+            ``(False, {"error", "stage"})`` on ``no_host`` /
+            ``no_session`` / ``no_plugin`` / ``call``.  The daemon reads
+            any failure as "unknown" and keeps the last snapshot it had,
+            never as "nothing" (the #1355 rule, applied to permissions).
+        """
+        ok, err, plugin = self._session_permission_plugin(
+            "session.get_permission_persistence",
+        )
+        if not ok:
+            return err
+        try:
+            state = plugin.get_persistence_state()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_permission_persistence: "
+                    f"get_persistence_state raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        if state is not None and not isinstance(state, dict):
+            return False, {
+                "error": (
+                    f"session.get_permission_persistence: expected a dict "
+                    f"or None, got {type(state).__name__}"
+                ),
+                "stage": "call",
+            }
+        return True, {"state": state}
+
+    def _handle_session_restore_permission_persistence(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Re-apply persisted runtime permission decisions to the enforcer (#1412).
+
+        ``args = {"state": <the dict session.get_permission_persistence
+        returned>}``.  The daemon calls this after the revived session's
+        ``session.bootstrap`` has returned, so the plugin's
+        ``initialize()`` has already loaded ``permissions.json`` and the
+        runtime decisions layer ON TOP of the file -- the ordering #706
+        required, now honoured on the object that decides.
+
+        Returns ``(True, {"status": <get_permission_status()>})`` so the
+        daemon can announce the restored default without a second round
+        trip; ``(False, {"error", "stage"})`` otherwise.
+        """
+        state = args.get("state")
+        if not isinstance(state, dict):
+            return False, {
+                "error": (
+                    "session.restore_permission_persistence: 'state' must be "
+                    f"a dict, got {type(state).__name__}"
+                ),
+                "stage": "args",
+            }
+        ok, err, plugin = self._session_permission_plugin(
+            "session.restore_permission_persistence",
+        )
+        if not ok:
+            return err
+        try:
+            plugin.restore_persistence_state(state)
+            status = plugin.get_permission_status()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.restore_permission_persistence: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        return True, {"status": status if isinstance(status, dict) else {}}
 
     def _handle_session_get_user_commands(self) -> "tuple[bool, Any]":
         """Read the runner-side session's user-command catalog.
