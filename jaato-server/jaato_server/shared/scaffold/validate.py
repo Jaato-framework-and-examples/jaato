@@ -63,13 +63,27 @@ class Diagnostic:
     where: Optional[str] = None   # dotted field path, e.g. "plugin_configs.nebius.api_params.temprature"
     tier: Optional[str] = None    # source tier of the asset: "workspace" | "user".
                                   # None = not tier-attributable (e.g. unscoped).
+    source: Optional[str] = None  # the contributed validator that emitted it
+                                  # (#1306), "<distribution>:<name>"; None =
+                                  # the framework's own checks.
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        """The ``--json`` shape.
+
+        ``source`` is present ONLY on a contributed finding.  The framework's
+        own findings keep the six keys they have always had, so a run with no
+        validator installed is byte-identical to one before the seam existed,
+        and a consumer that reads the key can tell a contributed finding from
+        a built-in one without consulting a list of codes.
+        """
+        out = {
             "severity": self.severity, "code": self.code,
             "message": self.message, "profile": self.profile, "where": self.where,
             "tier": self.tier,
         }
+        if self.source is not None:
+            out["source"] = self.source
+        return out
 
 
 # ---------------------------------------------------------------- per-profile
@@ -2982,6 +2996,10 @@ def validate_workspace(
     effective profiles match what the daemon would load.  ``config_root``
     overrides the ``<workspace>/.jaato`` tier the same way a client's
     ``config_root`` does at session creation (the doctor passes its own).
+
+    Findings from validators installed packages contribute through
+    ``jaato.scaffold_validators`` (#1306) come last, attributed by ``source``;
+    see :func:`contributed_findings`.
     """
     from jaato_server.shared.plugins.subagent.config import discover_profiles
 
@@ -3062,6 +3080,10 @@ def validate_workspace(
     _check_reference_links(config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"
+    out.extend(contributed_findings(
+        workspace=str(ws), config_root=config_root, profile_set=profile_set,
+        only=only, profiles=result.profiles, providers=providers,
+        plugins=plugins, gc_names=gc_names))
     return out
 
 
@@ -3268,3 +3290,195 @@ def _report_provider_unknown_knob(cfg_provider, cfg_name, layer_name, key,
         cfg_provider, cfg_name, layer_name, key)
     known_txt = f" (known: {', '.join(sorted(known))})" if known else ""
     add(severity, code, f"'{key}' is {tail}{known_txt}", where=where)
+
+
+# ------------------------------------------- contributed validators (#1306)
+
+#: Severities a contributed finding may carry.  The CLI's exit code counts
+#: ``error``; a word outside this set would be counted as nothing and read by
+#: a person as something, so it is refused rather than passed through.
+CONTRIBUTED_SEVERITIES = ("error", "warn", "info")
+
+#: ``(validators, load_findings)`` once discovered, ``None`` before.
+#:
+#: Cached because discovery IMPORTS the contributing modules, and a process
+#: may validate several workspaces (``new profile-set`` re-validates what it
+#: wrote; the doctor validates once more).  :func:`reset_external_validators`
+#: clears it; nothing but a test has a reason to.
+_EXTERNAL_VALIDATORS: Optional[tuple] = None
+
+
+def reset_external_validators() -> None:
+    """Drop the discovery cache so the next run re-scans the entry points."""
+    global _EXTERNAL_VALIDATORS
+    _EXTERNAL_VALIDATORS = None
+
+
+def _validator_entry_points() -> list:
+    """The entry points in the validator group, in a stable order.
+
+    Sorted by name and distribution: ``entry_points()`` promises no order, and
+    the order decides which of two same-named contributors wins and where each
+    one's findings land in the output.
+    """
+    from importlib.metadata import entry_points
+
+    from .api import VALIDATOR_ENTRY_POINT_GROUP
+
+    eps = list(entry_points(group=VALIDATOR_ENTRY_POINT_GROUP))
+    return sorted(eps, key=lambda ep: (
+        ep.name, getattr(getattr(ep, "dist", None), "name", "") or ""))
+
+
+def _load_validator(ep):
+    """Load one entry point into ``(validator, source)``, or raise.
+
+    ``source`` is ``"<distribution>:<name>"`` — what every finding the
+    validator emits is stamped with — or the bare name when the entry point
+    carries no distribution (a hand-built one, in a test).
+    """
+    obj = ep.load()
+    validator = obj() if isinstance(obj, type) else obj
+    if not getattr(validator, "name", None) or not callable(
+            getattr(validator, "validate", None)):
+        raise TypeError("does not satisfy ScaffoldValidator "
+                        "(needs a `name` and a `validate(request)` method)")
+    dist = getattr(getattr(ep, "dist", None), "name", "") or ""
+    return validator, (f"{dist}:{validator.name}" if dist else validator.name)
+
+
+def _discover_external_validators() -> tuple:
+    """Load the validators contributed through ``jaato.scaffold_validators``.
+
+    Returns ``(validators, load_findings)``: the loaded ``(validator, source)``
+    pairs, and one ``validator_unavailable`` finding per contributor that could
+    not be used.
+
+    The topic seam logs a contributor that fails to load and moves on.  That is
+    right for ``explain``, where a missing topic is visible by its absence, and
+    wrong here: a validator that did not load is a set of checks that did not
+    run, and a run that says nothing about them reads as a pass over files it
+    never looked at.  So the failure is a FINDING (``warn``), in the output a
+    person or CI reads, and never an exception — one broken contributor must
+    not take the framework's own checks down with it.
+    """
+    global _EXTERNAL_VALIDATORS
+    if _EXTERNAL_VALIDATORS is not None:
+        return _EXTERNAL_VALIDATORS
+
+    loaded: List[tuple] = []
+    failures: List[Diagnostic] = []
+    seen: Dict[str, str] = {}
+    for ep in _validator_entry_points():
+        try:
+            validator, source = _load_validator(ep)
+        except Exception as exc:
+            failures.append(Diagnostic(
+                "warn", "validator_unavailable",
+                f"contributed validator '{ep.name}' could not be loaded "
+                f"({type(exc).__name__}: {exc}) — its checks did NOT run, so "
+                f"nothing below says anything about what it would have "
+                f"checked", tier="workspace", source=ep.name))
+            continue
+        if validator.name in seen:
+            failures.append(Diagnostic(
+                "warn", "validator_unavailable",
+                f"two contributed validators are named '{validator.name}' "
+                f"({seen[validator.name]}, {source}); the first ran and the "
+                f"second did NOT", tier="workspace", source=source))
+            continue
+        seen[validator.name] = source
+        loaded.append((validator, source))
+    _EXTERNAL_VALIDATORS = (loaded, failures)
+    return _EXTERNAL_VALIDATORS
+
+
+def _malformed(source: str, what: str) -> Diagnostic:
+    """A ``validator_failed`` finding naming what the contributor got wrong."""
+    return Diagnostic(
+        "warn", "validator_failed",
+        f"contributed validator '{source}' {what} — its checks did NOT all "
+        f"run, so its silence is not a pass", tier="workspace", source=source)
+
+
+def _adopt(item: Any, source: str) -> Diagnostic:
+    """Copy one contributed finding into a framework ``Diagnostic``, or raise.
+
+    A copy, never the contributor's object: the stamp below must not be
+    something a contributor can undo, and a finding it keeps a reference to
+    must not change after it is reported.  ``source`` is always the
+    framework's stamp — a contributor cannot attribute its finding to the
+    framework, or to another package.
+    """
+    severity = getattr(item, "severity", None)
+    code = getattr(item, "code", None)
+    message = getattr(item, "message", None)
+    if severity not in CONTRIBUTED_SEVERITIES:
+        raise ValueError(f"returned a finding with severity {severity!r} "
+                         f"(one of {', '.join(CONTRIBUTED_SEVERITIES)})")
+    if not isinstance(code, str) or not code or not isinstance(message, str):
+        raise ValueError("returned a finding with no string `code` / `message`")
+    return Diagnostic(
+        severity, code, message,
+        profile=getattr(item, "profile", None),
+        where=getattr(item, "where", None),
+        tier=getattr(item, "tier", None) or "workspace",
+        source=source)
+
+
+def _run_validator(validator: Any, source: str, request: Any) -> List[Diagnostic]:
+    """Run one contributed validator, isolating every way it can fail."""
+    try:
+        result = validator.validate(request)
+    except Exception as exc:
+        return [_malformed(source, f"raised {type(exc).__name__}: {exc}")]
+    if not isinstance(result, (list, tuple)):
+        return [_malformed(source, f"returned {type(result).__name__}, "
+                                   f"not a list of Diagnostic")]
+    out: List[Diagnostic] = []
+    for item in result:
+        try:
+            out.append(_adopt(item, source))
+        except ValueError as exc:
+            out.append(_malformed(source, str(exc)))
+    return out
+
+
+def contributed_findings(
+    *,
+    workspace: str,
+    config_root: str,
+    profile_set: Optional[str],
+    only: Optional[str],
+    profiles: Dict[str, Any],
+    providers: Dict[str, Any],
+    plugins: Dict[str, Any],
+    gc_names: List[str],
+) -> List[Diagnostic]:
+    """Findings from every validator contributed by an installed package.
+
+    Called once per :func:`validate_workspace`, after the framework's own
+    checks, with what those checks already had in hand — so a contributor
+    judges the same RESOLVED profiles the framework judged, and does not pay
+    for a second plugin discovery.  Workspace-scoped by design (#1306): the
+    asset that motivated the seam, premium's reactor rules, is a workspace /
+    user-tier file that belongs to no single profile, and a validator that
+    does care about profiles iterates ``request.profiles`` itself.
+
+    Returns ``[]`` when nothing is installed, so a run with no contributor is
+    exactly the run it was before the seam.
+    """
+    validators, load_findings = _discover_external_validators()
+    if not validators and not load_findings:
+        return []
+    from .api import ValidationRequest
+
+    request = ValidationRequest(
+        workspace=workspace, config_root=config_root, profile_set=profile_set,
+        only=only, profiles=dict(profiles or {}), providers=providers,
+        plugins=plugins, gc_names=list(gc_names))
+    out = [Diagnostic(d.severity, d.code, d.message, d.profile, d.where,
+                      d.tier, d.source) for d in load_findings]
+    for validator, source in validators:
+        out.extend(_run_validator(validator, source, request))
+    return out

@@ -47,6 +47,8 @@ What a verb gets *here* (the seam):
   exactly like the built-in ``new`` verb.
 * :func:`validate_workspace` / :class:`Diagnostic` and the :mod:`introspect`
   module — the reusable validation + framework-introspection internals.
+* :class:`ScaffoldValidator` / :class:`ValidationRequest` — the seam a package
+  uses to add its own ``validate`` findings without contributing a verb.
 """
 
 from __future__ import annotations
@@ -66,7 +68,13 @@ from .validate import Diagnostic, validate_workspace  # noqa: F401  (re-export)
 #: ``1.1`` added the ``explain`` TOPIC seam beside the verb seam:
 #: :data:`TOPIC_ENTRY_POINT_GROUP`, :class:`ExplainTopic`, :class:`TopicRequest`
 #: and :data:`Rendered`.  Additive — every 1.0 verb is unchanged.
-SCAFFOLD_EXTENSION_API = "1.1"
+#:
+#: ``1.2`` added the ``validate`` VALIDATOR seam (#1306):
+#: :data:`VALIDATOR_ENTRY_POINT_GROUP`, :class:`ScaffoldValidator`,
+#: :class:`ValidationRequest`, and ``Diagnostic.source``.  Additive — a 1.1
+#: verb or topic is unchanged, and ``Diagnostic.as_dict()`` gains the
+#: ``source`` key only on a contributed finding.
+SCAFFOLD_EXTENSION_API = "1.2"
 
 #: The entry-point group the CLI scans for external verbs.  Defined by the
 #: shell that scans it, in jaato-sdk (#1267); re-exported here because this
@@ -82,6 +90,15 @@ from jaato_sdk.scaffold.cli import VERB_ENTRY_POINT_GROUP  # noqa: E402,F401
 #: the verb seam could only ever have given it a subcommand nobody would think
 #: to type.
 TOPIC_ENTRY_POINT_GROUP = "jaato.scaffold_topics"
+
+#: The entry-point group ``validate`` scans for contributed validators (#1306).
+#:
+#: The third seam, and the one a package needs when it ships an ASSET — a file
+#: an author writes, which the framework's own checks know nothing about.
+#: premium's reactor rules are the case that motivated it: ``explain reactors``
+#: tells an author how to write ``reactors.json``, and until this group existed
+#: nothing checked the file they then wrote.
+VALIDATOR_ENTRY_POINT_GROUP = "jaato.scaffold_validators"
 
 #: What every ``explain`` renderer returns: ``(structured_data, human_text)``.
 #: ``--json`` prints the first, a terminal prints the second, and a topic that
@@ -194,6 +211,76 @@ class ExplainTopic(Protocol):
 
     def render(self, request: TopicRequest) -> Rendered:
         """Render this topic; return ``(structured_data, human_text)``."""
+        ...
+
+
+@dataclass(frozen=True)
+class ValidationRequest:
+    """Everything a contributed validator is handed, once per ``validate`` run.
+
+    WORKSPACE-scoped (#1306): one call per run, not one per profile.  The asset
+    that motivated the seam — premium's reactor rules under
+    ``<workspace>/.jaato/reactors/`` — belongs to no profile, and a validator
+    that does care about profiles has them all here and iterates itself.  The
+    reverse would not work: a profile-scoped call cannot see a file that no
+    profile names.
+
+    The fields are what the framework's own checks already had in hand, so a
+    contributor judges the same inputs and pays for no second discovery.
+
+    Attributes:
+        workspace: Absolute workspace root.
+        config_root: Absolute config root (``<workspace>/.jaato`` unless a
+            caller overrode it, as the doctor may).
+        profile_set: The set being validated (``--set``), or ``None``.
+        only: The one profile asked for (``--profile``), or ``None`` for all.
+            A contributor that reports per profile should honour it; one that
+            checks workspace files may ignore it.
+        profiles: The RESOLVED profiles, keyed by name — ``inherits:`` and the
+            set overlay already applied, exactly what the daemon would load.
+        providers: ``introspect.providers()``, as the framework's checks saw it.
+        plugins: ``introspect.plugins()``, likewise.
+        gc_names: Installed GC strategy names.
+    """
+
+    workspace: str
+    config_root: str
+    profile_set: Optional[str]
+    only: Optional[str]
+    profiles: Dict[str, Any]
+    providers: Dict[str, Any]
+    plugins: Dict[str, Any]
+    gc_names: List[str]
+
+
+@runtime_checkable
+class ScaffoldValidator(Protocol):
+    """The contract a contributed ``validate`` check must satisfy (#1306).
+
+    An entry point in :data:`VALIDATOR_ENTRY_POINT_GROUP` loads to an instance
+    or a zero-arg class/factory producing one, like :class:`ScaffoldVerb`.
+
+    Its findings are merged into the run after the framework's own, each
+    stamped ``source = "<distribution>:<name>"`` — the stamp is the
+    framework's, not the contributor's, so a finding can never be passed off
+    as one of the framework's.  A validator that fails to load, raises, or
+    returns something that is not a list of findings is reported as a
+    ``validator_unavailable`` / ``validator_failed`` WARNING rather than
+    dropped: a check that did not run must not read as a pass.
+
+    Attributes:
+        name: Stable identity, unique across installed validators.
+
+    ``validate`` returns a list of :class:`Diagnostic` (anything with
+    ``severity`` in ``error`` / ``warn`` / ``info``, a string ``code`` and a
+    string ``message``; ``profile`` / ``where`` / ``tier`` optional, ``tier``
+    defaulting to ``workspace``).  An ``error`` fails the run like any other.
+    """
+
+    name: str
+
+    def validate(self, request: ValidationRequest) -> List[Diagnostic]:
+        """Check the workspace; return findings (``[]`` when all is well)."""
         ...
 
 

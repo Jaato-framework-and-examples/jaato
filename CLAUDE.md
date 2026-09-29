@@ -4507,11 +4507,40 @@ substring test for `auto_start=False` was then satisfied by the *comment* two
 lines above the call. It asserts the call by AST now. **A guard on prose is a
 guard on nothing.**
 
-Not addressed here: `validate` has no extension seam at all, so a package that
-contributes a topic still cannot contribute a *finding* — `jaato-scaffold
-validate . --set drive` reports nothing about reactor rules however wrong they
-are, in either venv. That is its own change, and the entry-point group
-`jaato.premium_reactors` the report names has never existed.
+`validate` had no extension seam at all, so a package that contributed a
+topic could not contribute a *finding*. That is now the
+`jaato.scaffold_validators` group (#1306), next section.
+
+### A Finding a Package Can Contribute (#1306)
+
+`jaato-scaffold` had seams for verbs and `explain` topics and none for
+`validate`. So premium's `explain reactors` told an author how to write
+`reactors.json`, and nothing checked the file they wrote: a malformed rule
+passed `validate` silently. `jaato.scaffold_validators` is the third
+entry-point group, `SCAFFOLD_EXTENSION_API` **1.2**.
+
+| Piece | Where |
+|---|---|
+| the contract: `ScaffoldValidator` (`name`, `validate(request) -> List[Diagnostic]`), `ValidationRequest`, the group name | `shared/scaffold/api.py` |
+| discovery, isolation, attribution | `shared/scaffold/validate.py::contributed_findings`, called at the end of `validate_workspace` |
+| the text line's `(from <dist>:<name>)` | `introspection_verbs._format_diagnostic` |
+
+| Rule | Why |
+|---|---|
+| **workspace-scoped**, one call per run, handed the RESOLVED profiles and the introspect maps the framework's checks used | the motivating asset belongs to no profile, and a profile-scoped call cannot see a file no profile names; the reverse is one loop in the contributor |
+| **attributed by the framework**: every finding is copied and stamped `source="<distribution>:<name>"`, a contributor's own `source` overwritten | a finding cannot pass as the framework's, or another package's |
+| **`source` only on a contributed finding** (`as_dict` adds the key only when set) | with nothing installed, text and `--json` are byte-identical to before; verified on the repo's workspaces and scaffolded ones |
+| **a check that did not run is a finding**: a load failure, a non-validator, a raise, a non-list, a bad severity (`error`/`warn`/`info` only) or code are `validator_unavailable` / `validator_failed` **warnings**, and the rest of the run carries on | the topic seam logs and moves on, which is right for `explain` and wrong here: silence reads as a pass over files nobody looked at |
+| a duplicate `name`: the first by (name, distribution) runs, the second is reported | `entry_points()` promises no order |
+
+Every caller of `validate_workspace` gets contributed findings: the `validate`
+verb, `new profile-set`'s re-check, `emit_then_validate` and `jaato-doctor`. A
+standalone profile file (`validate x.yaml` outside a workspace) runs none:
+there is no workspace to hand over. Contract for authors in
+`shared/scaffold/EXTENDING.md`.
+
+Guard: `jaato_server/shared/tests/test_contributed_validators_1306.py`, five
+reversions.
 
 ### The Authoring Half of `jaato-scaffold` Stands Alone (#1267, step 1)
 

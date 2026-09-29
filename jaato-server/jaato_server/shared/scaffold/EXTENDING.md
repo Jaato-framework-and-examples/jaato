@@ -1,9 +1,11 @@
 # Extending `jaato-scaffold`
 
-Two seams: a **verb** (a new subcommand) and a **topic** (a new, or extended,
-`explain` answer).  Pick the topic seam when your package has something to
-SAY — a daemon extension, a subsystem with its own config files — and the verb
-seam when it has something to RUN.
+Three seams: a **verb** (a new subcommand), a **topic** (a new, or extended,
+`explain` answer) and a **validator** (findings added to `validate`).  Pick
+the topic seam when your package has something to SAY — a daemon extension, a
+subsystem with its own config files — the verb seam when it has something to
+RUN, and the validator seam when it ships a file an author writes and the
+framework's own checks know nothing about.
 
 ## A verb
 
@@ -200,3 +202,70 @@ without a socket — followed by a note that the daemon was asked too.  A topic 
 offline introspection an egress changes what running it means — and the probe
 never starts a daemon, because a report about a process the report created is a
 report about the wrong process.
+
+---
+
+## A validator
+
+`jaato-scaffold validate` checks what the framework knows about: profiles,
+providers, plugins, knobs, the completion gate.  A package that ships its own
+asset — premium's reactor rules in `<workspace>/.jaato/reactors/` are the
+case that motivated this (#1306) — needs its own checks in the same run, or a
+malformed file passes `validate` silently.  Register a `ScaffoldValidator`
+under the `jaato.scaffold_validators` entry-point group (extension API `1.2`):
+
+```python
+from jaato_server.shared.scaffold.api import (
+    Diagnostic, ScaffoldValidator, ValidationRequest,
+)
+
+class ReactorRules:
+    name = "reactors"
+
+    def validate(self, request: ValidationRequest) -> list:
+        rules = Path(request.config_root) / "reactors"
+        out = []
+        for f in sorted(rules.glob("*.json")):
+            ...   # parse it with YOUR engine's own parser
+            out.append(Diagnostic("error", "reactor_rule_invalid",
+                                  "unknown event_type 'tool.end'",
+                                  where=f"reactors/{f.name}"))
+        return out
+```
+
+```toml
+[project.entry-points."jaato.scaffold_validators"]
+reactors = "my_package.validation:ReactorRules"
+```
+
+The contract:
+
+- **Workspace-scoped: one call per run.**  `ValidationRequest` carries the
+  workspace, the config root, `--set` / `--profile`, the RESOLVED profiles
+  (`inherits:` and the set overlay applied, exactly what the daemon loads),
+  and the `providers` / `plugins` / `gc_names` maps the framework's own checks
+  used.  A file that belongs to no profile is reachable from here; a check
+  that is about profiles iterates `request.profiles` itself, and should honour
+  `request.only`.
+- **Return a list of `Diagnostic`.**  `severity` is `error`, `warn` or
+  `info`; `code` and `message` are strings; `profile` / `where` / `tier` are
+  optional (`tier` defaults to `workspace`).  An `error` fails the run like
+  any other.
+- **Findings are attributed by the framework.**  Each one is stamped
+  `source = "<distribution>:<name>"`; the text line ends
+  `(from jaato-premium:reactors)` and the `--json` object gains a `source`
+  key.  A `source` you set yourself is overwritten.  The framework's own
+  findings carry no `source`, so a run with nothing installed is
+  byte-identical to one before this seam existed.
+- **A check that did not run is reported, never dropped.**  A validator that
+  fails to import, is not a `ScaffoldValidator`, raises, or returns something
+  that is not a list of well-formed findings produces a
+  `validator_unavailable` / `validator_failed` **warning** naming it, and the
+  rest of the run carries on.  Two validators with one `name`: the first (by
+  name, then distribution) runs, the second is reported.
+- **Not run for a standalone profile file** (`validate path/to/x.yaml` outside
+  a workspace layout): there is no workspace to hand you.
+
+Every caller of `validate_workspace` runs contributed validators: the
+`validate` verb, `new profile-set`'s re-check, `emit_then_validate`, and
+`jaato-doctor`.
