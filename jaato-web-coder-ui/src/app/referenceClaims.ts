@@ -84,6 +84,22 @@ export function describeClaimOrigin(origin: Record<string, unknown> | null | und
   return parts.join(" · ");
 }
 
+/**
+ * One declared edge in words, as a curator reads it before promoting:
+ * ``supersedes adr-1 — rewritten``.  ``supersedes`` is the one with a
+ * consequence past the listing (a request for the target is routed to this
+ * reference once promoted), so {@link isRoutingLink} lets the panel mark it.
+ */
+export function describeClaimLink(link: { to: string; rel: string; note?: string }): string {
+  const rel = link.rel.replace(/-/g, " ");
+  return link.note ? `${rel} ${link.to} — ${link.note}` : `${rel} ${link.to}`;
+}
+
+/** Whether promoting a claim with this edge changes what OTHER requests get. */
+export function isRoutingLink(link: { rel: string }): boolean {
+  return link.rel === "supersedes";
+}
+
 // ── the list ────────────────────────────────────────────────────────────
 
 let generation = 0;

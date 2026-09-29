@@ -537,6 +537,20 @@ export interface ReferenceClaimRow {
   content?: string;
   origin?: Record<string, unknown> | null;
   problems: string[];
+  /**
+   * The typed edges the claim declares (``depends-on`` / ``elaborates`` /
+   * ``supersedes`` / ``contradicts``), taking effect only once promoted.
+   */
+  links?: ReferenceClaimLink[];
+  /** What the curator should know that does NOT block Promote (a dangling edge). */
+  warnings?: string[];
+}
+
+/** One declared edge on a reference claim; ``note`` is model-written text. */
+export interface ReferenceClaimLink {
+  to: string;
+  rel: string;
+  note?: string;
 }
 
 /**

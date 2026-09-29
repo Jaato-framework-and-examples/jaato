@@ -170,15 +170,19 @@ class LinkIndex:
         """``ref_id``, or the reference that supersedes it, followed to the end.
 
         Stops at an id nobody supersedes, at one superseded by more than one
-        reference (ambiguous: routed nowhere rather than guessed), and at a
-        cycle.
+        reference (ambiguous: routed nowhere rather than guessed), and on a
+        cycle, where ``ref_id`` itself is returned: a chain that loops names
+        no current version, and routing to whichever member was reached
+        last would depend on where the request entered it.
         """
         seen = {ref_id}
         current = ref_id
         while True:
             newer = [s for s in self.successors.get(current, []) if s in self.ids]
-            if len(newer) != 1 or newer[0] in seen:
+            if len(newer) != 1:
                 return current
+            if newer[0] in seen:
+                return ref_id  # a cycle names no current version
             current = newer[0]
             seen.add(current)
 

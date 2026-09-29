@@ -377,7 +377,7 @@ both land on the same dataclass:
    | the vocabulary | closed: `depends-on`, `elaborates`, `supersedes`, `contradicts`. An unknown `rel` is an error, never read as a mention |
    | declared vs inferred, same pair | the declared edge WINS. A mention of B inside A that A declares `elaborates` does not expand B: that is how a declaration makes traversal cheaper, not only better |
    | a declared edge on a source with no readable body | still an edge. Declared `depends-on` expands a URL or MCP reference, which inference never could |
-   | `supersedes` | declared on the NEWER reference. A selection or an expansion reaching the older one is routed to the newer, and the answer says so (`superseded`); two successors are ambiguous and route nowhere |
+   | `supersedes` | declared on the NEWER reference. A selection or an expansion reaching the older one is routed to the newer, and the answer says so (`superseded`); two successors are ambiguous and a cycle names no current version, so both route nowhere (`validate`: `reference_supersedes_ambiguous` / `_cycle`) |
    | `elaborates` | a hint on the selection result (`related`), never expanded |
    | `contradicts` | never expanded and never hinted to a working agent; it is listed (`listReferences`, the curator's listing) |
    | a dangling edge | kept, marked `dangling` wherever it is listed, and reported by `jaato-scaffold validate` (`reference_link_dangling`) -- dropping it would be the silent loss this section argues against |
@@ -387,8 +387,12 @@ both land on the same dataclass:
    path §6 now has: **an agent may propose one, and nobody's edge takes
    effect until a person promotes the claim that carries it.** A claim
    never enters the catalog, so its `links` steer nothing while it is a
-   claim; the curator reads them in the listing, beside `problems` for an
-   edge whose target is not in the catalog, and promotion is the review.
+   claim. `proposeReference` refuses an edge to an id the agent's own
+   catalog does not hold (the agent can see its catalog, so that is a
+   typo); the curator reads the edges in the listing, with a non-blocking
+   `warnings` entry for one the workspace catalog cannot place (the
+   daemon's catalog is the workspace tier only), and promotion is the
+   review.
    The asymmetry the question names -- a wrong `supersedes` suppresses the
    article that should have been read -- is why that review is a human's.
 

@@ -247,6 +247,8 @@ function claimsFor(c: Client): Record<string, unknown>[] {
   if (!list) {
     list = [
       { claim_id: "20260929T100000Z-aaaa1111", id: "deploy-runbook", name: "Deploy runbook", description: "How to ship the service", tags: ["ops"], type: "local", path: "docs/deploy.md", problems: [],
+        links: [{ to: "old-deploy", rel: "supersedes", note: "rewritten for the new pipeline" }],
+        warnings: ["links to 'old-deploy' (supersedes), which is not in this workspace's catalog"],
         origin: { kind: "agent", at: ts(), claim_id: "20260929T100000Z-aaaa1111", created_by: "mock:tester", generated_by: { kind: "ai", provider: "mock", model: "mock-1", agent_id: "main" }, witnessed_by: { via: "permission-prompt", method: "user_approved", user: "mock:tester" } } },
       { claim_id: "20260929T100001Z-bbbb2222", id: "adr-1", name: "ADR 1 again", description: "", tags: [], type: "inline", content: "Use pnpm.", problems: ["'adr-1' is already in the catalog; propose a different id, or ask a curator to revise the existing reference."],
         origin: { kind: "agent", at: ts(), claim_id: "20260929T100001Z-bbbb2222", generated_by: { kind: "ai", provider: "mock", model: "mock-1", agent_id: "main" } } },

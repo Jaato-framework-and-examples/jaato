@@ -1594,6 +1594,11 @@ test("proposals rail lists reference claims, explains a blocked one, promotes an
   await expect(runbook).toContainText("unreviewed");
   await runbook.getByRole("button", { name: /^Show proposal/ }).click();
   await expect(runbook).toContainText("approved at the prompt by mock:tester");
+  // Its typed link, the rerouting marked, and a dangling-edge warning that
+  // does not block Promote.
+  await expect(runbook.getByTestId("proposal-links")).toContainText("supersedes old-deploy — rewritten for the new pipeline");
+  await expect(runbook).toContainText("not in this workspace's catalog");
+  await expect(runbook.getByRole("button", { name: /^Promote proposal/ })).toBeEnabled();
 
   // The daemon's reason is shown before Promote, which is disabled.
   await expect(blocked).toContainText("already in the catalog");

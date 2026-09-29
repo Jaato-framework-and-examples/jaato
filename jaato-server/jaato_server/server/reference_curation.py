@@ -68,6 +68,7 @@ from jaato_server.shared.plugins.references.claims import (
     claim_as_args,
     claim_tags,
     is_claim,
+    link_warnings,
     valid_id,
 )
 from jaato_server.shared.plugins.references.models import (
@@ -298,7 +299,10 @@ def claim_row(claim: Dict[str, Any], *, root: str, ids: Set[str]) -> Dict[str, A
     Name, description and inline content are passed as they are -- they are
     model-written, and the client renders them as text -- and ``problems``
     is what :func:`build_proposed_reference` would refuse today, so the
-    curator sees why Promote would fail before pressing it.
+    curator sees why Promote would fail before pressing it.  ``links`` are
+    the claim's declared edges (notes included, as text) and ``warnings``
+    what the curator should know that does not block Promote -- today, an
+    edge whose target this workspace's catalog does not hold.
     """
     ref = claim["reference"]
     row: Dict[str, Any] = {
@@ -316,9 +320,12 @@ def claim_row(claim: Dict[str, Any], *, root: str, ids: Set[str]) -> Dict[str, A
     origin = ReferenceOrigin.from_dict(claim.get("origin"))
     if origin is not None:
         row["origin"] = origin.to_dict()
-    _entry, problems = build_proposed_reference(claim_as_args(claim), workspace=root,
-                                                catalog_ids=ids)
+    entry, problems = build_proposed_reference(claim_as_args(claim), workspace=root,
+                                               catalog_ids=ids)
     row["problems"] = problems
+    if entry is not None and entry.get("links"):
+        row["links"] = entry["links"]
+        row["warnings"] = link_warnings(entry["links"], ids)
     return row
 
 

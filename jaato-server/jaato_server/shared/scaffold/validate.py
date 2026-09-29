@@ -25,6 +25,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from jaato_server.shared.plugins.model_provider.base import KNOB_LAYERS
@@ -3058,9 +3059,92 @@ def validate_workspace(
     _check_sibling_tools_moved(result.profiles, ws, config_root, out)
     _check_memory_curation(result.profiles, out)
     _check_regulatory_declared(result.profiles, out)
+    _check_reference_links(config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"
     return out
+
+
+def _catalog_reference_files(root: Path) -> List[tuple]:
+    """``(relative file, parsed dict)`` for each reference file under ``root``.
+
+    Sub-bundles included, symlinks and the bundle's own non-source files
+    skipped, unreadable files skipped (the loader reports those).
+    """
+    from jaato_server.shared.plugins.references.bundle import REFERENCE_NON_SOURCE_FILENAMES
+    found: List[tuple] = []
+    if not root.is_dir():
+        return found
+    for path in sorted(root.rglob("*.json")):
+        if path.name in REFERENCE_NON_SOURCE_FILENAMES or path.is_symlink():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("id"), str):
+            found.append((path.relative_to(root).as_posix(), data))
+    return found
+
+
+def _supersedes_findings(index) -> List[Diagnostic]:
+    """An id two references both claim to supersede, and a supersedes cycle.
+
+    Either way a request for the older reference is routed NOWHERE
+    (``LinkIndex.current_version`` refuses to guess), so the declaration the
+    author wrote does nothing.
+    """
+    found: List[Diagnostic] = []
+    for older in sorted(index.successors):
+        newer = sorted(s for s in index.successors[older] if s in index.ids)
+        if len(newer) > 1:
+            found.append(Diagnostic(
+                "warn", "reference_supersedes_ambiguous",
+                f"{', '.join(newer)} all declare they supersede '{older}'; a "
+                f"request for '{older}' is routed to none of them.",
+                where=f"references/{older}"))
+        elif newer and index.current_version(older) == older:
+            found.append(Diagnostic(
+                "warn", "reference_supersedes_cycle",
+                f"'{older}' is part of a supersedes cycle; a request for it is "
+                "not routed anywhere.", where=f"references/{older}"))
+    return found
+
+
+def _check_reference_links(config_root: str, out) -> None:
+    """The typed edges declared in the workspace reference catalog.
+
+    Three findings, in order of how much they cost:
+
+    * ``reference_link_invalid`` (**error**) -- a malformed edge (unknown
+      ``rel``, a target that is not an id, an edge to itself).  The loader
+      is lenient and DROPS it, so without this nothing says so.
+    * ``reference_link_dangling`` (warn) -- a target in neither the
+      workspace catalog nor the user tier (``~/.jaato/references``).  Kept
+      and marked at runtime; a warning because another tier (a config root,
+      a premium bundle) may supply it.
+    * ``reference_supersedes_ambiguous`` / ``reference_supersedes_cycle``
+      (warn) -- see :func:`_supersedes_findings`.
+    """
+    from jaato_server.shared.plugins.references.links import (
+        LinkIndex, link_errors, parse_links)
+    files = _catalog_reference_files(Path(config_root) / "references")
+    known = {data["id"] for _rel, data in files}
+    known |= {data["id"] for _rel, data in
+              _catalog_reference_files(Path.home() / ".jaato" / "references")}
+    sources = []
+    for rel, data in files:
+        where = f"references/{rel}"
+        for err in link_errors(data.get("links"), source_id=data["id"]):
+            out.append(Diagnostic("error", "reference_link_invalid", f"{rel}: {err}", where=where))
+        for link in parse_links(data.get("links")):
+            if link.to not in known:
+                out.append(Diagnostic(
+                    "warn", "reference_link_dangling",
+                    f"{rel}: links to '{link.to}' ({link.rel}), which no reference "
+                    "in this workspace or ~/.jaato/references has.", where=where))
+        sources.append(SimpleNamespace(id=data["id"], links=parse_links(data.get("links"))))
+    out.extend(_supersedes_findings(LinkIndex(sources)))
 
 
 def _check_regulatory_declared(profiles, out) -> None:

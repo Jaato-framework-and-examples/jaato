@@ -86,6 +86,19 @@ describe("ProposalsPanel", () => {
     expect(screen.getByTestId("proposal-content").querySelector("b")).toBeNull();
   });
 
+  it("shows declared links, marks a supersedes, and a warning does not block Promote", () => {
+    load([row("a", {
+      links: [{ to: "old", rel: "supersedes", note: "rewritten" }, { to: "glossary", rel: "depends-on" }],
+      warnings: ["links to 'old' (supersedes), which is not in this workspace's catalog"],
+    })], true);
+    render(<ProposalsPanel />);
+    const links = screen.getByTestId("proposal-links");
+    expect(links.textContent).toContain("supersedes old — rewritten (requests for it will get this one)");
+    expect(links.textContent).toContain("depends on glossary");
+    expect(screen.getByText(/which is not in this workspace's catalog/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Promote proposal Doc a" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("names files it could not show", () => {
     useJaato.setState({ sessionId: "s1", referenceClaims: { ...emptyReferenceClaims(), status: "loaded", unreadable: ["x.json"] } });
     render(<ProposalsPanel />);

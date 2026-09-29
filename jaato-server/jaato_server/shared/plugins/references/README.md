@@ -272,6 +272,34 @@ asked at the prompt and approves, the claim's origin records
 `witnessed_by` (`{via: "permission-prompt", method, user?, approver?}`).
 Nothing is recorded when the policy decided without asking.
 
+### Typed links
+
+A reference may declare edges to others beside its tags:
+
+```json
+{
+  "id": "adr-7",
+  "links": [
+    {"to": "adr-4", "rel": "supersedes", "note": "reverses the storage decision"},
+    {"to": "glossary", "rel": "depends-on"}
+  ]
+}
+```
+
+| `rel` | effect on `selectReferences` |
+|---|---|
+| `depends-on` | the target is selected with the source |
+| `elaborates` | not selected; returned as a `related` hint |
+| `supersedes` | a request for the target gets this reference instead (`superseded` says so) |
+| `contradicts` | listed only |
+
+A declared edge overrides a mention of the same target in the body, and
+mentions are still followed otherwise. An edge to an id not in the catalog
+is kept and listed with `dangling: true`. `listReferences` returns each
+reference's `links` and the edges pointing at it (`linked_from`).
+`proposeReference` accepts `links` too; they take effect when the claim is
+promoted.
+
 ## Tags and Proactive Reference Access
 
 Each reference source can have tags describing its topic. The model is instructed to:

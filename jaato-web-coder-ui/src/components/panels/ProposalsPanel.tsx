@@ -12,6 +12,9 @@
  *     claim is model-written and nobody has looked at it;
  *   • the daemon's ``problems``: why a promotion would be refused right now,
  *     shown BEFORE the button, which is then disabled;
+ *   • the typed ``links`` it declares, a ``supersedes`` marked because
+ *     promoting it reroutes requests for the target, and ``warnings`` (an
+ *     edge this workspace's catalog cannot place) that do not block Promote;
  *   • expanding shows the description and any inline content.
  *
  * Every model-written string is rendered as React text, never as markup.
@@ -24,7 +27,9 @@ import { useEffect, useState } from "react";
 import { useJaato } from "@/store/store";
 import type { ReferenceClaimRow } from "@/store/types";
 import {
+  describeClaimLink,
   describeClaimOrigin,
+  isRoutingLink,
   dismissReferenceClaim,
   promoteReferenceClaim,
   refreshReferenceClaims,
@@ -70,6 +75,20 @@ export function ProposalRow({ row, mayCurate }: { row: ReferenceClaimRow; mayCur
       {blocked && (
         <ul className="m-0 pl-6 pb-1.5 list-none text-[12px] text-error" aria-label={`Why ${title} cannot be promoted`}>
           {row.problems.map((p) => <li key={p}>{p}</li>)}
+        </ul>
+      )}
+      {!!row.links?.length && (
+        <ul className="m-0 pl-6 pb-1.5 list-none font-mono text-[11px] text-text-muted" aria-label={`Links proposed by ${title}`} data-testid="proposal-links">
+          {row.links.map((l) => (
+            <li key={`${l.rel}:${l.to}`} className={isRoutingLink(l) ? "text-warning" : undefined}>
+              {describeClaimLink(l)}{isRoutingLink(l) ? " (requests for it will get this one)" : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!!row.warnings?.length && (
+        <ul className="m-0 pl-6 pb-1.5 list-none text-[12px] text-warning" aria-label={`Warnings for ${title}`}>
+          {row.warnings.map((w) => <li key={w}>{w}</li>)}
         </ul>
       )}
       {expanded && (

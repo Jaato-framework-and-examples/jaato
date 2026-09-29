@@ -42,6 +42,7 @@ from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
 from jaato_server.shared.call_witness import current_call_witness
 
 from .config_loader import validate_reference_file
+from .links import LINK_RELS, link_errors, parse_links
 from .models import ORIGIN_AGENT, ReferenceOrigin
 
 #: Directory under ``<workspace>/.jaato/`` holding claim files.
@@ -152,13 +153,53 @@ def _resolve_document(
     return {"type": "local", "path": target.relative_to(root).as_posix()}, None
 
 
+def _proposed_links(
+    value: Any, *, ref_id: str, link_targets: Optional[Iterable[str]],
+) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
+    """A proposal's declared edges, normalised, or why they are refused.
+
+    Shape is checked by ``links.link_errors``, the rule a catalog file
+    obeys.  With ``link_targets`` (the proposing agent's own catalog), an
+    edge to an id not in it is refused too: the agent can see its catalog,
+    so an unknown target is a typo, not a reference it cannot know about.
+    The daemon passes ``None`` when it re-validates a claim, because its
+    catalog is the workspace tier only; an edge it cannot place is shown to
+    the curator as a warning (``link_warnings``) and kept dangling.
+    """
+    errors = link_errors(value, source_id=ref_id)
+    if errors:
+        return None, errors
+    links = [link.to_dict() for link in parse_links(value)]
+    if link_targets is not None:
+        known = set(link_targets)
+        unknown = sorted({l["to"] for l in links if l["to"] not in known})
+        if unknown:
+            return None, [f"'links' name references not in the catalog: {', '.join(unknown)}"]
+    return links, []
+
+
+def link_warnings(entry_links: Any, ids: Iterable[str]) -> List[str]:
+    """What a curator should know about a claim's edges before promoting it.
+
+    Today one thing: an edge whose target is not in ``ids``.  It is kept
+    and marked dangling in the catalog, so this is a warning, never a
+    reason Promote is refused.
+    """
+    known = set(ids)
+    return [f"links to '{link.to}' ({link.rel}), which is not in this workspace's catalog"
+            for link in parse_links(entry_links) if link.to not in known]
+
+
 def build_proposed_reference(
     args: Dict[str, Any], *, workspace: str, catalog_ids: Iterable[str],
+    link_targets: Optional[Iterable[str]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """The catalog entry a claim proposes, or the reasons it cannot be one.
 
     Returns ``(entry, [])`` on success and ``(None, errors)`` otherwise.  The
     entry passes ``validate_reference_file``, so promotion copies it as is.
+    ``links`` (typed edges, ``links.py``) are carried when valid; see
+    :func:`_proposed_links` for what ``link_targets`` adds.
     """
     ref_id = args.get("id")
     if not isinstance(ref_id, str) or not _ID_RE.match(ref_id):
@@ -177,8 +218,14 @@ def build_proposed_reference(
     document, error = _resolve_document(args, workspace)
     if document is None:
         return None, [error or "invalid document"]
+    links, link_problems = _proposed_links(args.get("links"), ref_id=ref_id,
+                                           link_targets=link_targets)
+    if links is None:
+        return None, link_problems
     entry = {"id": ref_id, "name": name.strip(), "description": description,
              "mode": "selectable", "tags": tags, **document}
+    if links:
+        entry["links"] = links
     ok, errors, _warnings = validate_reference_file(entry)
     return (entry, []) if ok else (None, errors)
 
@@ -272,6 +319,8 @@ def claim_as_args(claim: Dict[str, Any]) -> Dict[str, Any]:
     """
     ref = claim["reference"]
     args = {k: ref.get(k) for k in ("id", "name", "description", "tags")}
+    if ref.get("links") is not None:
+        args["links"] = ref.get("links")
     if ref.get("type") == "inline":
         args["content"] = ref.get("content")
     else:
@@ -304,7 +353,22 @@ def listing_entry(claim: Dict[str, Any]) -> Dict[str, Any]:
     }
     if ref.get("type") == "local" and isinstance(ref.get("path"), str):
         entry["path"] = ref["path"]
+    links = claim_links(claim)
+    if links:
+        entry["links"] = links
     origin = ReferenceOrigin.from_dict(claim.get("origin"))
     if origin is not None:
         entry["origin"] = origin.to_dict()
     return entry
+
+
+def claim_links(claim: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The claim's edges a MODEL is shown: ``{to, rel}``, the target re-checked.
+
+    Outside the untrusted fence, so only what is one token is kept: a
+    target that is not a valid id is dropped, and the free-text ``note`` is
+    never shown here (the curator's listing carries it, rendered as text).
+    """
+    return [{"to": link.to, "rel": link.rel}
+            for link in parse_links(claim["reference"].get("links"))
+            if valid_id(link.to) and link.rel in LINK_RELS]

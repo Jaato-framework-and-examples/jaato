@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
-from .links import LinkIndex, expansion_neighbours
+from .links import LINK_RELS, LinkIndex, expansion_neighbours
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import (
     load_config,
@@ -2205,6 +2205,26 @@ class ReferencesPlugin(RunnerForwardingMixin):
                             "type": "string",
                             "description": "The document inline (short only). Exclusive with 'path'.",
                         },
+                        "links": {
+                            "type": "array",
+                            "description": (
+                                "Typed edges to references already in the catalog. "
+                                "'depends-on': a reader needs the target too (selected "
+                                "with it). 'elaborates': the target goes deeper (offered, "
+                                "not selected). 'supersedes': this replaces the target "
+                                "(a request for the target gets this one, once promoted). "
+                                "'contradicts': this disagrees with the target."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "to": {"type": "string", "description": "Target reference id."},
+                                    "rel": {"type": "string", "enum": list(LINK_RELS)},
+                                    "note": {"type": "string", "description": "Why, in one sentence."},
+                                },
+                                "required": ["to", "rel"],
+                            },
+                        },
                     },
                     "required": ["id", "name"],
                 },
@@ -2629,6 +2649,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         entry, errors = build_proposed_reference(
             args, workspace=workspace,
             catalog_ids=[s.id for s in self._sources],
+            link_targets=[s.id for s in self._sources],
         )
         if entry is None:
             return False, {"error": "; ".join(errors), "errors": errors}

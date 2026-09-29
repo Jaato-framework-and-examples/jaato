@@ -226,7 +226,8 @@ class TestSupersedesRoutes:
     def test_a_cycle_terminates(self):
         a = ReferenceSource.from_dict(_inline("a", links=[{"to": "b", "rel": "supersedes"}]))
         b = ReferenceSource.from_dict(_inline("b", links=[{"to": "a", "rel": "supersedes"}]))
-        assert LinkIndex([a, b]).current_version("a") in {"a", "b"}
+        index = LinkIndex([a, b])
+        assert (index.current_version("a"), index.current_version("b")) == ("a", "b")
 
 
 class TestContradictsIsListedOnly:

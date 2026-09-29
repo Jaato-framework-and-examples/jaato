@@ -4209,6 +4209,53 @@ reversions), `server/tests/test_a_curator_lists_reference_claims.py`
 (five) and `shared/tests/test_a_proposal_names_who_approved_it.py`
 (seven).
 
+### Typed Links Between References (wikiLLM Seam 3)
+
+The only edge between references was a MENTION: an id or path that happens
+to appear in a body, walked by `selectReferences`' transitive expansion.
+Nobody authors it, and "mentioned" is the only relation. A reference may
+now also declare edges beside its tags,
+`links: [{to, rel, note?}]`, with a closed vocabulary
+(`references/links.py`) whose relation decides the traversal:
+
+| `rel` | what a selection does |
+|---|---|
+| `depends-on` | expanded, even with no mention and even from a URL / MCP reference with no readable body |
+| `elaborates` | not expanded; offered on the result as `related` |
+| `supersedes` | declared on the NEWER reference; a selection or expansion reaching the older one gets the newer instead and says so (`superseded`). Two successors, or a cycle, route nowhere |
+| `contradicts` | listed only; never expanded, never hinted |
+
+| Rule | Why |
+|---|---|
+| **a declared edge wins over the mention of the same pair** | that is what makes declaration cheaper as well as better: an `elaborates` target the body names is not pulled in |
+| **mentions are still walked** | declaration is added beside inference, not instead of it |
+| **a dangling edge is kept and marked** (`dangling: true`), never dropped | losing an edge silently is the defect declared edges exist to end |
+| **the reverse index is computed when asked** (`linked_from` on `listReferences`), never cached | the plugin reassigns its catalog in many places |
+| **loading is lenient, validation is not** | a malformed edge is dropped at load so it cannot cost the reference, and reported as an error by `validate_reference_file` and `jaato-scaffold validate` |
+
+The instruction the model reads carries a `**Links**` line
+(`supersedes `adr-1`; depends on `glossary``), inline references included.
+
+**Who declares an edge** (the brainstorm's open question 7): an agent may
+propose one, and none takes effect until a person promotes it.
+`proposeReference` takes `links`, refused at the call when a target is not
+in the agent's own catalog; the claim carries them, the curator's row shows
+them (`links`, notes as text) with a non-blocking `warnings` entry for a
+target the workspace catalog cannot place, and promotion writes them into
+the catalog file. `listReferences` shows a claim's edges to another model
+as `{to, rel}` with the target re-checked as one token and no note, since
+that listing is outside the untrusted fence. The web Proposals panel draws
+each edge and marks a `supersedes`, because promoting it reroutes requests
+for its target.
+
+`jaato-scaffold validate` reads the workspace catalog's edges:
+`reference_link_invalid` (**error**), `reference_link_dangling` (warn; a
+target in neither the workspace catalog nor `~/.jaato/references`),
+`reference_supersedes_ambiguous` and `reference_supersedes_cycle` (warn).
+
+Guards: `shared/tests/test_typed_reference_links.py` (seven reversions)
+and `server/tests/test_a_proposal_carries_typed_links.py` (five).
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.

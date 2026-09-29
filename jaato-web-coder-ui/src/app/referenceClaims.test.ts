@@ -134,6 +134,15 @@ describe("the origin line", () => {
   });
 });
 
+describe("links", () => {
+  it("reads an edge in words and marks only supersedes as routing", () => {
+    expect(rc.describeClaimLink({ to: "adr-1", rel: "supersedes", note: "newer" })).toBe("supersedes adr-1 — newer");
+    expect(rc.describeClaimLink({ to: "g", rel: "depends-on" })).toBe("depends on g");
+    expect(rc.isRoutingLink({ rel: "supersedes" })).toBe(true);
+    expect(rc.isRoutingLink({ rel: "elaborates" })).toBe(false);
+  });
+});
+
 describe("triggers", () => {
   const end = (tool_name: string, extra: Record<string, unknown> = {}) =>
     ({ type: "tool.call_end", tool_name, success: true, ...extra });
