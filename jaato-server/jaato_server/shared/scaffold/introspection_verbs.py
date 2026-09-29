@@ -566,11 +566,23 @@ def _cmd_validate(args) -> int:
             sset = f" (set {profile_set})" if profile_set else ""
             print(f"✓ {scope}{sset} valid — no findings")
         for d in diags:
-            loc = f" @ {d.where}" if d.where else ""
-            who = f"{d.profile}: " if d.profile else ""
-            tier = f"[{d.tier}] " if d.tier else ""
-            print(f"[{d.severity}] {tier}{who}{d.code}: {d.message}{loc}")
+            print(_format_diagnostic(d))
     return 1 if any(d.severity == "error" for d in diags) else 0
+
+
+def _format_diagnostic(d) -> str:
+    """One finding as the text line ``validate`` prints.
+
+    A contributed finding (#1306) ends ``(from <distribution>:<name>)``, so a
+    reader knows which package to read or uninstall; the framework's own
+    findings print exactly as they always have.
+    """
+    loc = f" @ {d.where}" if d.where else ""
+    who = f"{d.profile}: " if d.profile else ""
+    tier = f"[{d.tier}] " if d.tier else ""
+    source = getattr(d, "source", None)
+    src = f"  (from {source})" if source else ""
+    return f"[{d.severity}] {tier}{who}{d.code}: {d.message}{loc}{src}"
 
 
 # ------------------------------------------------- external topics (plugins)

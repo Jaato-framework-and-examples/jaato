@@ -496,7 +496,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/retry_utils.py::is_context_limit_error": 22,
     "jaato-server/jaato_server/shared/retry_utils.py::with_retry": 23,
     "jaato-server/jaato_server/shared/rewind.py::detect_truncated_tool_call": 16,
-    "jaato-server/jaato_server/shared/scaffold/introspection_verbs.py::_cmd_validate": 16,
     "jaato-server/jaato_server/shared/scaffold/explain.py::event": 21,
     "jaato-server/jaato_server/shared/scaffold/explain.py::events": 17,
     "jaato-server/jaato_server/shared/scaffold/explain.py::profile_cost": 23,
