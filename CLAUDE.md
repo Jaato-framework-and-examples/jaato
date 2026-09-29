@@ -9850,6 +9850,36 @@ the rules of the plugins the runner loads either way.
 Not verified here: no AppArmor kernel. The exec grants and the resolved-path
 reasoning are exercised as rendered strings, not against an enforcing host.
 
+### A Checkout the Notebook Does Not Import (#1413)
+
+#1322 keeps one process on the daemon's jaato: the notebook kernel, which is
+launched with the daemon's import dirs (`_kernel_argv`). So a cell's
+`import jaato_server`, `pytest.main([...])` or `importlib.reload` resolves to
+the daemon's install, whatever the workspace holds. A session developing
+jaato inside jaato ran `pip install -e ./jaato-server` (rc=0) and then spent
+several rounds on "the edit didn't land", because its in-cell tests ran the
+daemon's code. What the kernel imports is unchanged; the model is now told.
+
+`jaato_server/shared/jaato_self_shadowing.py` (stdlib-only) is the one
+answer. The workspace holds jaato when `jaato-server/jaato_server`,
+`jaato-sdk/jaato_sdk` or `jaato-premium/jaato_premium` (or `jaato_premium`)
+has an `__init__.py` at the root or in an immediate clone, or a workspace
+venv (the configured `workspace_venv`, `.jaato/tool-venv`, `.venv`) has an
+editable install of one of them (`direct_url.json`). A source that IS the
+package the daemon imports is not reported.
+
+| Surface | What it gains, only when the workspace holds jaato |
+|---|---|
+| the notebook boundary notice in the system prompt | one line: cells import the daemon's jaato from `<path>`; run tests with `!python -m pytest` or `cli` |
+| the first `notebook_execute` result of a kernel | the same line in `execution_boundary.notes` |
+| `get_environment(aspect="runtime")` | `notebook: {imports_daemon_jaato, daemon_paths, workspace_paths, note}`, and the note under `aspect="all"` |
+
+An ordinary workspace gets nothing, so its prompt-cache prefix is unchanged.
+Not done: a per-cell warning when a cell imports `jaato_server` or calls
+`pytest.main` (`_execute_code` is on the complexity ratchet). Guard:
+`jaato_server/shared/tests/test_notebook_discloses_the_daemons_jaato_1413.py`,
+four reversions.
+
 ### The Files Panel Asks Git What a Clone Ignores
 
 The workspace monitor filtered paths through `GitignoreParser`, which reads

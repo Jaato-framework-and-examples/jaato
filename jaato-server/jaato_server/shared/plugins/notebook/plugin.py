@@ -32,7 +32,8 @@ from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
-from ..workspace_venv import pip_apparmor_rules
+from ..workspace_venv import pip_apparmor_rules, resolve_venv_path
+from jaato_server.shared.session_context import get_workspace_root
 from ..workspace_home import home_exec_apparmor_rules
 from jaato_server.shared.trace import trace as _trace_write
 
@@ -940,8 +941,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
 - Best for: ML training, large computations
 {boundary_info}{sandbox_info}{bindings_info}"""
 
-    @staticmethod
-    def _boundary_announcement(result: Any) -> Dict[str, Any]:
+    def _boundary_announcement(self, result: Any) -> Dict[str, Any]:
         """The boundary this KERNEL established, for its FIRST result (#1012).
 
         The system prompt carries the same fact as a standing statement; this
@@ -969,10 +969,33 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         announced = getattr(result, "boundary_kind", None)
         if not announced:
             return {}
-        return {"execution_boundary": {
-            "boundary": announced,
-            "notes": list(boundary_notice(announced)),
-        }}
+        notes = list(boundary_notice(announced))
+        shadow = self._jaato_shadowing_note() if notes else None
+        if shadow:
+            notes.append(shadow)
+        return {"execution_boundary": {"boundary": announced, "notes": notes}}
+
+    def _jaato_shadowing_note(self) -> Optional[str]:
+        """The #1413 sentence when the workspace holds jaato's own source.
+
+        In-process cells import the daemon's jaato (the kernel is launched
+        with its import dirs, #1322), so a checkout of jaato in the workspace
+        is NOT what ``import jaato_server`` or ``pytest.main`` sees. Read
+        from :mod:`jaato_server.shared.jaato_self_shadowing`, the one answer
+        the ``runtime`` aspect reads too. ``None`` in an ordinary workspace,
+        so nothing is added to the prompt there.
+        """
+        from ...jaato_self_shadowing import workspace_jaato_shadowing
+        backend = self._backends.get(self._active_backend_name)
+        venv = getattr(backend, "_workspace_venv", None)
+        workspace = get_workspace_root() or self._workspace_root
+        try:
+            if venv:
+                venv = resolve_venv_path(venv, workspace)
+            report = workspace_jaato_shadowing(workspace, [venv])
+        except Exception:  # a disclosure must never break a cell
+            return None
+        return report["note"] if report else None
 
     def _boundary_instruction_block(self) -> str:
         """State the ACTIVE execution boundary and its consequences (#1012).
@@ -1008,6 +1031,9 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         lines = boundary_notice(kind)
         if not lines:
             return ""
+        shadow = self._jaato_shadowing_note()
+        if shadow:
+            lines = tuple(lines) + (shadow,)
         bullets = "\n".join(f"- {line}" for line in lines)
         return (f"\n**Notebook execution boundary: {kind}**\n{bullets}\n")
 

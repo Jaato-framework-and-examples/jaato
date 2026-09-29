@@ -13,6 +13,7 @@ them; it derives none of them a second time:
 | profile, exec scope, exec roots | the session's ``//child`` grant record, via :mod:`jaato_server.shared.confinement_grants` (#1348) |
 | subprocess ``PATH``, ``HOME``, ``XDG_*``, tool-venv | ``CLIToolPlugin._build_subprocess_env()`` on the session's own ``cli`` instance |
 | bound toolchains | ``<workspace>/.jaato/environment.json`` (#1344), when present |
+| ``notebook.imports_daemon_jaato`` | :mod:`jaato_server.shared.jaato_self_shadowing` (#1413), only when the workspace holds jaato's own source |
 
 The ``PATH`` is the one ``cli`` builds for its next command, not a
 re-assembly of it: a second assembly is how the report and the command
@@ -238,6 +239,36 @@ def toolchains_report(workspace: Optional[str]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# jaato developing jaato (#1413)
+# ---------------------------------------------------------------------------
+
+
+def notebook_shadowing_report(
+    workspace: Optional[str], venvs: List[Optional[str]],
+) -> Optional[Dict[str, Any]]:
+    """The ``notebook`` block, or ``None`` when there is nothing to disclose.
+
+    In-process notebook cells import the daemon's jaato, not a checkout of it
+    in the workspace (#1322 keeps that deliberately).  Present only when the
+    workspace holds jaato's own source, so an ordinary workspace's report is
+    unchanged.
+    """
+    from jaato_server.shared.jaato_self_shadowing import workspace_jaato_shadowing
+    try:
+        shadow = workspace_jaato_shadowing(workspace, venvs)
+    except Exception:
+        return None
+    if not shadow:
+        return None
+    return {
+        "imports_daemon_jaato": True,
+        "daemon_paths": shadow["daemon"],
+        "workspace_paths": shadow["workspace"],
+        "note": shadow["note"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # The aspect
 # ---------------------------------------------------------------------------
 
@@ -277,6 +308,10 @@ def runtime_report(
         workspace = workspace or getattr(cli, "_workspace_root", None)
     report["private_tmp"] = private_tmp_report()
     report["toolchains"] = toolchains_report(workspace)
+    venv = (report["subprocess"].get("tool_venv") or {}).get("path")
+    shadow = notebook_shadowing_report(workspace, [venv])
+    if shadow:
+        report["notebook"] = shadow
     return report
 
 
@@ -320,5 +355,7 @@ def runtime_summary(report: Dict[str, Any]) -> Dict[str, str]:
     lines["private_tmp"] = _private_tmp_line(report.get("private_tmp") or {})
     chains = report["toolchains"]
     lines["toolchains"] = chains["status"]
+    if "notebook" in report:
+        lines["notebook"] = report["notebook"]["note"]
     lines["detail"] = "get_environment(aspect='runtime') for the full report"
     return lines
