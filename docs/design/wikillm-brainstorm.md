@@ -368,6 +368,30 @@ both land on the same dataclass:
    and why `supersedes` is the most valuable entry in the vocabulary: it
    is the one relation whose staleness is self-announcing.
 
+   **Decided, for the first increment.** Where this section left a choice,
+   the choice made:
+
+   | Question | Answer |
+   |---|---|
+   | where an edge lives | on the SOURCE reference: `links: [{"to": <id>, "rel": <rel>, "note"?: <text>}]`, beside `tags`. One file per reference is the catalog's unit; a separate `links.json` (§9) would be a second file to keep in step |
+   | the vocabulary | closed: `depends-on`, `elaborates`, `supersedes`, `contradicts`. An unknown `rel` is an error, never read as a mention |
+   | declared vs inferred, same pair | the declared edge WINS. A mention of B inside A that A declares `elaborates` does not expand B: that is how a declaration makes traversal cheaper, not only better |
+   | a declared edge on a source with no readable body | still an edge. Declared `depends-on` expands a URL or MCP reference, which inference never could |
+   | `supersedes` | declared on the NEWER reference. A selection or an expansion reaching the older one is routed to the newer, and the answer says so (`superseded`); two successors are ambiguous and route nowhere |
+   | `elaborates` | a hint on the selection result (`related`), never expanded |
+   | `contradicts` | never expanded and never hinted to a working agent; it is listed (`listReferences`, the curator's listing) |
+   | a dangling edge | kept, marked `dangling` wherever it is listed, and reported by `jaato-scaffold validate` (`reference_link_dangling`) -- dropping it would be the silent loss this section argues against |
+   | the reverse index | computed from the catalog when asked (`linked_from`), not cached: the plugin reassigns its catalog in a dozen places, and a stale cache would be the defect |
+
+   And open question 7, *who declares a `rel` edge*, answered by the write
+   path §6 now has: **an agent may propose one, and nobody's edge takes
+   effect until a person promotes the claim that carries it.** A claim
+   never enters the catalog, so its `links` steer nothing while it is a
+   claim; the curator reads them in the listing, beside `problems` for an
+   edge whose target is not in the catalog, and promotion is the review.
+   The asymmetry the question names -- a wrong `supersedes` suppresses the
+   article that should have been read -- is why that review is a human's.
+
 4. **A reference records nothing about who produced it.**
    `ReferenceSource` is `id`, `name`, `description`, `type`, `mode`, the
    access fields, `fetch_hint`, `tags`, `contents`, `embedding`,
@@ -966,6 +990,8 @@ by running the same task corpus with the wiki injected and withheld.
    *actively suppresses* the article that should have been read. The
    asymmetry says declared edges want a narrower writer than declared
    articles do, which may mean the curator and nobody else.
+   **Answered (§5, Seam 3):** an agent may propose an edge on a claim;
+   none takes effect until a person promotes the claim.
 8. **Does the wiki version with the code?** A git-tracked wiki answers
    *"what did we believe at commit X"* for free, and makes every branch a
    fork of the knowledge base — which may be an excellent property or a

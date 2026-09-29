@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from .links import ReferenceLink, parse_links
+
 
 # Valid keys for the ``contents`` mapping on a ReferenceSource.
 # Each key names a type of subfolder that a reference directory may contain.
@@ -364,6 +366,26 @@ class ReferenceSource:
     # ``ReferenceOrigin``.
     origin: Optional[ReferenceOrigin] = None
 
+    # Declared, typed edges to other references (``links.py``): what a
+    # selection expands (``depends-on``), hints (``elaborates``), routes
+    # (``supersedes``) or only lists (``contradicts``).  Empty = none
+    # declared; the mentions in the body are still walked.
+    links: List[ReferenceLink] = field(default_factory=list)
+
+    def _links_lines(self) -> List[str]:
+        """The ``**Links**`` line naming this reference's declared edges.
+
+        Where the MODEL reads the reference, so it can navigate by meaning
+        (``depends on `b`; supersedes `c```) rather than only by the
+        mentions it happens to notice.  A method for the same reason as
+        :meth:`_origin_lines`: ``to_instruction`` is on the complexity
+        ratchet.
+        """
+        if not self.links:
+            return []
+        rendered = "; ".join(f"{link.rel.replace('-', ' ')} `{link.to}`" for link in self.links)
+        return [f"**Links**: {rendered}"]
+
     def _origin_lines(self) -> List[str]:
         """The ``**Origin**`` line, or nothing when arrival was unobserved.
 
@@ -383,7 +405,7 @@ class ReferenceSource:
     def to_instruction(self) -> str:
         """Generate instruction text for the model describing how to access this reference."""
         if self.type == SourceType.INLINE:
-            return f"### {self.name}\n\n{self.content}"
+            return "\n\n".join([f"### {self.name}", *self._links_lines(), f"{self.content}"])
 
         parts = [f"### {self.name}"]
         parts.append(f"*{self.description}*")
@@ -393,6 +415,7 @@ class ReferenceSource:
             parts.append(f"**Tags**: {', '.join(self.tags)}")
 
         parts.extend(self._origin_lines())
+        parts.extend(self._links_lines())
 
         if self.type == SourceType.LOCAL:
             # Use resolved path if available, otherwise original path
@@ -500,6 +523,9 @@ class ReferenceSource:
         if self.origin is not None:
             result["origin"] = self.origin.to_dict()
 
+        if self.links:
+            result["links"] = [link.to_dict() for link in self.links]
+
         return result
 
     @classmethod
@@ -535,6 +561,7 @@ class ReferenceSource:
             contents=ReferenceContents.from_dict(data.get("contents")),
             embedding=EmbeddingMetadata.from_dict(data.get("embedding")),
             origin=ReferenceOrigin.from_dict(data.get("origin")),
+            links=parse_links(data.get("links")),
         )
 
 

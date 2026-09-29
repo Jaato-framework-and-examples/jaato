@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
+from .links import LinkIndex, expansion_neighbours
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import (
     load_config,
@@ -133,6 +134,44 @@ def _origin_fields(source: ReferenceSource) -> Dict[str, Any]:
     if source.origin is None:
         return {}
     return {"origin": source.origin.to_dict()}
+
+def _link_fields(source: ReferenceSource, links: LinkIndex) -> Dict[str, Any]:
+    """A listed reference's declared edges and the edges pointing at it.
+
+    ``links`` carries ``dangling: true`` on an edge whose target is not in
+    the catalog -- kept and said, never dropped.  ``linked_from`` is the
+    reverse index: what declares an edge to THIS reference.  Both absent
+    when there is nothing to say.  A function for the complexity ratchet,
+    like :func:`_origin_fields`.
+    """
+    fields: Dict[str, Any] = {}
+    outbound = links.links_of(source.id)
+    if outbound:
+        fields["links"] = outbound
+    inbound = links.linked_from(source.id)
+    if inbound:
+        fields["linked_from"] = inbound
+    return fields
+
+
+def _selection_link_fields(
+    links: LinkIndex, selected_ids: List[str], superseded: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """What a selection reports about declared edges.
+
+    ``superseded``: requested references routed to the one that supersedes
+    them.  ``related``: ``elaborates`` targets of the selection it does not
+    hold -- offered, never expanded.  ``contradicts`` is deliberately not
+    here: it is for a curator (``listReferences``), not a working agent.
+    """
+    fields: Dict[str, Any] = {}
+    if superseded:
+        fields["superseded"] = superseded
+    related = links.related(selected_ids)
+    if related:
+        fields["related"] = related
+    return fields
+
 
 # Characters that delimit a reference id from its surroundings.  ONE
 # definition, because two spellings of "what bounds an id" is how the fast
@@ -936,6 +975,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 norm = os.path.normpath(source.resolved_path).replace('\\', '/')
                 path_to_ids.setdefault(norm, set()).add(sid)
 
+        # Declared, typed edges (``links.py``): they retype the mentions
+        # below and add ``depends-on`` targets a body never mentioned.
+        links = LinkIndex(catalog_by_id.values())
+
         limit = (
             max_references if max_references is not None
             else self._max_transitive_references
@@ -964,8 +1007,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 if self._expansion_at_limit(len(resolved_ids), limit):
                     break
 
-                mentioned_ids = self._mentions_of(
-                    ref_id, catalog_by_id, catalog_ids, path_to_ids)
+                mentioned_ids = expansion_neighbours(
+                    ref_id,
+                    self._mentions_of(ref_id, catalog_by_id, catalog_ids, path_to_ids),
+                    links)
                 if mentioned_ids is None:
                     continue
 
@@ -2297,6 +2342,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "message": " ".join(parts)
             }
 
+        # A requested reference someone declared superseded is routed to
+        # the newer one -- instead of, never as well as (``links.py``).
+        links = LinkIndex(self._sources)
+        matched, superseded = self._route_superseded(matched, links)
+
         # Track selections and authorize paths.  When a kernel-layer
         # AppArmor fragment fails (confined WS only), roll back the
         # selection for that source — granting it would mislead the
@@ -2349,6 +2399,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "tags": source.tags,
             }
             entry.update(_origin_fields(source))
+            entry.update(_link_fields(source, links))
             # Mark transitively included sources with their parent references
             if source.id in transitive_ids_set:
                 entry["transitive"] = True
@@ -2393,6 +2444,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "sources": source_results,
         }
         result.update(self._transitive_result_fields(transitive_sources))
+        result.update(_selection_link_fields(links, all_selected_ids, superseded))
         if kernel_failed:
             result["kernel_authorization_failed"] = kernel_failed
             result["kernel_authorization_failure_hint"] = (
@@ -2410,6 +2462,32 @@ class ReferencesPlugin(RunnerForwardingMixin):
         }
 
         return result
+
+    def _route_superseded(
+        self, matched: List[ReferenceSource], links: LinkIndex,
+    ) -> Tuple[List[ReferenceSource], List[Dict[str, str]]]:
+        """Replace each matched reference someone supersedes with the newer one.
+
+        Returns the matched list with every superseded source replaced by
+        its current version (``LinkIndex.current_version``: the chain of
+        ``supersedes`` followed to its end; ambiguous or cyclic chains are
+        routed nowhere), de-duplicated and without references already
+        selected, and one ``{"requested", "replaced_by"}`` note per
+        replacement so the model is told rather than silently redirected.
+        """
+        by_id = {s.id: s for s in self._sources}
+        routed: List[ReferenceSource] = []
+        notes: List[Dict[str, str]] = []
+        seen: Set[str] = set()
+        for source in matched:
+            target = by_id.get(links.current_version(source.id), source)
+            if target is not source:
+                notes.append({"requested": source.id, "replaced_by": target.id})
+            if target.id in seen or target.id in self._selected_source_ids:
+                continue
+            seen.add(target.id)
+            routed.append(target)
+        return routed, notes
 
     def _execute_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all available reference sources, and the proposed claims.
@@ -2464,6 +2542,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         source_ids = [s.id for s in sources]
         self._trace(f"listReferences: returning {len(sources)} sources={source_ids}")
 
+        links = LinkIndex(self._sources)
         source_entries = []
         for s in sources:
             entry = {
@@ -2487,6 +2566,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 entry["tool"] = s.tool
             elif s.type == SourceType.INLINE:
                 entry["has_content"] = bool(s.content)
+            entry.update(_link_fields(s, links))
             source_entries.append(entry)
 
         return {
