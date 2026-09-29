@@ -28410,7 +28410,7 @@ export interface WorkspaceIgnoreResultEvent {
   gitignore_path?: GitignorePath;
 }
 /**
- * Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.32).
+ * Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.33).
  *
  * An agent PROPOSES a reference with ``proposeReference``; the result is a
  * claim under ``<workspace>/.jaato/references-claims/``, never a catalog
@@ -28468,7 +28468,7 @@ export interface ReferenceCurationResultEvent {
   reconcile_detail?: ReconcileDetail;
 }
 /**
- * The reference claims agents proposed in the caller's workspace (1.32).
+ * The reference claims agents proposed in the caller's workspace (1.33).
  *
  * Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
  * A claim is what ``proposeReference`` wrote under
@@ -28512,7 +28512,7 @@ export interface ReferenceClaimsEvent {
   bundles?: Bundles;
 }
 /**
- * List the reference claims in the caller's workspace (1.32).
+ * List the reference claims in the caller's workspace (1.33).
  *
  * Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
  * Writes nothing; any connection whose workspace it is may list.
@@ -28524,7 +28524,7 @@ export interface ReferenceClaimsRequest {
   request_id?: RequestId40;
 }
 /**
- * Promote or dismiss one reference claim (1.32).
+ * Promote or dismiss one reference claim (1.33).
  *
  * The correlated form of the ``reference.promote`` / ``reference.dismiss``
  * commands: answered by :class:`ReferenceCurationResultEvent` carrying this
