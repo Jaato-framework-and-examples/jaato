@@ -556,7 +556,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # is built, on the runner path as a ``tool_result_enriched`` notification.
 # A NEW event type: an older client does not know it, logs it and continues
 # (the 1.8 shape), so nothing is refused.
-PROTOCOL_VERSION = "1.31"
+#
+# 1.32 -- ``workspace.files.search`` / ``workspace.files.search_result``
+# (WS only): find files in the caller's workspace by name.  The Files panel
+# lists what CHANGED; a file nobody touched, one the user hid or one git
+# ignores had no way to be reached.  The daemon walks the workspace this
+# connection is in (the ``workspace.file.fetch`` resolution) and answers
+# with ranked relative paths, a ``total`` before the cap and ``truncated``
+# when the walk stopped at its bound, so a partial search never reads as
+# "no such file".  A missing VERB (the 1.7 rule): an older daemon never
+# answers, so the TS SDK refuses below ``MIN_FILE_SEARCH_PROTOCOL``.
+PROTOCOL_VERSION = "1.32"
 
 
 # =============================================================================
@@ -768,6 +778,8 @@ class EventType(str, Enum):
     # by ONE raw BINARY frame of ``size`` bytes.  See docs/sdk-file-staging.md.
     WORKSPACE_FILE_FETCH_REQUEST = "workspace.file.fetch"  # Client -> Server
     WORKSPACE_FILE_CONTENT = "workspace.file.content"  # Server -> Client
+    WORKSPACE_FILES_SEARCH_REQUEST = "workspace.files.search"  # Client -> Server
+    WORKSPACE_FILES_SEARCH_RESULT = "workspace.files.search_result"  # Server -> Client
 
     # Agent profiles (Client <-> Server)
     SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
@@ -4271,6 +4283,48 @@ class WorkspaceFileContentEvent(Event):
     error: str = ""
 
 
+class WorkspaceFilesSearchRequest(Event):
+    """Find files in the caller's workspace by name (WS only, protocol 1.32).
+
+    ``query`` is split on whitespace and every term must appear, ignoring
+    case, in a file's workspace-relative path.  The whole tree is searched --
+    dotfiles, gitignored paths and entries the Files panel hides -- except the
+    contents of ``.git`` directories.  ``max_results`` caps the answer
+    (default 100, at most 500).  Answered by one
+    :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SEARCH_REQUEST)
+    request_id: str = ""
+    query: str = ""
+    max_results: int = 100
+
+
+class WorkspaceFilesSearchResultEvent(Event):
+    """Server's answer to :class:`WorkspaceFilesSearchRequest` (protocol 1.32).
+
+    ``matches`` is ranked best first (a match in the file NAME before one in
+    a directory, shallower paths first); each is ``{"path", "size",
+    "credential"}`` with ``path`` relative to the workspace root, the key
+    ``workspace.file.fetch`` takes.  ``credential`` marks a file the fetch
+    verb refuses (a ``.env``, a stored ``*_auth.json``), so a client does not
+    offer to download it.  ``total`` is how many matched before the cap.
+    ``truncated`` means the walk stopped at its entry or time bound, so files
+    beyond it were not looked at.
+
+    On failure ``ok`` is false and ``category`` is ``"workspace_not_found"``
+    (this connection is in no workspace).
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SEARCH_RESULT)
+    request_id: str = ""
+    ok: bool = False
+    query: str = ""
+    matches: List[Dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+    truncated: bool = False
+    category: str = ""
+    error: str = ""
+
+
 class ClientType(str, Enum):
     """Presentation-layer categories for PresentationContext.
 
@@ -5111,6 +5165,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file download (TEXT header + one BINARY frame, 1.20)
     EventType.WORKSPACE_FILE_FETCH_REQUEST.value: WorkspaceFileFetchRequest,
     EventType.WORKSPACE_FILE_CONTENT.value: WorkspaceFileContentEvent,
+    EventType.WORKSPACE_FILES_SEARCH_REQUEST.value: WorkspaceFilesSearchRequest,
+    EventType.WORKSPACE_FILES_SEARCH_RESULT.value: WorkspaceFilesSearchResultEvent,
     # Peer channel
     EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
     EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,
