@@ -4009,14 +4009,13 @@ brainstorm, §8: locally reproducible evidence in the trusted region,
 third-party content fenced) was not merely unimplemented for references but
 **unrepresentable** — there was no field for a fence to read.
 
-`ReferenceOrigin` is that field, and it is **deliberately narrower than
-memory's**. `generated_by` names the model that wrote a memory because a
-model writes memories; **nothing in this tree writes a reference**. One is
-authored by a human, emitted by `gen-references`, or copied in from another
-workspace's bundle — and only the last is an event the framework is present
-for. A field naming an *author* would have no stamper, which is the inert
-mechanism this repository has already had to review out once (`85c3bfd`,
-"three inert mechanisms"). So it records **arrival**:
+`ReferenceOrigin` is that field, and it records only events the framework
+is **present for**: a copy from another workspace's bundle (`imported`) and
+a proposal through `proposeReference` (`agent`, below). A reference authored
+by a human or emitted by `gen-references` is neither, and carries no origin:
+a field naming an author with no stamper is the inert mechanism this
+repository has already had to review out once (`85c3bfd`, "three inert
+mechanisms"). For an import it records **arrival**:
 
 ```json
 "origin": {"kind": "imported", "bundle": "teammate",
@@ -4040,12 +4039,42 @@ what this closes is that the boundary was not expressible at all.
 
 `kind` is a string rather than a bool, and the same key `generated_by`
 uses (`ai_generated_by` mints `{"kind": "ai", ...}`), so a reader branches
-identically wherever provenance appears and the vocabulary can grow — an
-agent write path would add its own kind without the field changing shape.
+identically wherever provenance appears and the vocabulary can grow.
 
 Tests: `shared/tests/test_reference_origin_is_observed_not_claimed.py`,
 carrying two `REVERSIONS` — deferring to the foreign claim, and inventing a
 `kind` for a payload that states none.
+
+### An Agent Proposes a Reference; It Does Not Edit the Catalog
+
+Memory had an agent write path (`store_memory`) and references had none, so
+a document an agent produced (a runbook, an API map) could not be offered to
+the next agent. `proposeReference` is the first half of that path (wikiLLM
+brainstorm §6). It takes `id`, `name`, `description`, `tags` and either a
+workspace `path` or short inline `content`, and writes a **claim**, one JSON
+file per call under `<workspace>/.jaato/references-claims/`
+(`references/claims.py`). It never writes the catalog.
+
+| Rule | Why |
+|---|---|
+| **a claim, never a catalog entry** | the confined runner is `audit deny ... wlk` on `.jaato/references/**`; the claims directory is a SIBLING, never a carve-out beneath the deny. A catalog id cannot be reused, `mode` is always `selectable` (auto-injection is a curator's call), a `path` must resolve inside the workspace, inline content is capped at 32 KiB |
+| **stamped, never supplied** | `origin: {kind: "agent", generated_by, created_by, claim_id, at}` is read off the calling session: `generated_by` from `JaatoSession._model_provenance` (the one definition memory and media use), `created_by` from `_client_user_id` (the `get_client_user` chain, no env fallback). Nothing in the arguments can set it; no session means no author, never a guess |
+| **unreviewed is fenced** | `listReferences` returns claims under `proposed`, their name and description only inside `wrap_untrusted_content`. Id, claim id and tags are re-checked as single tokens on READ, because the claims directory is model-writable. `mode=auto` lists none |
+| **withheld is counted** | `plugin_configs.references.require_curation: true` hides claims and reports `proposed_withheld: N`; an unreadable claim file is named under `proposed_unreadable` |
+| **the plugin declares its write** | `ReferencesPlugin.get_apparmor_rules` grants `"<ws>/.jaato/references-claims/{,**}" rw` itself rather than leaning on the template's workspace-wide `rwkl` |
+
+**What a claim's origin is worth.** The directory is writable by anything
+the model drives with a file tool, so a hand-written claim can carry any
+origin: the same trust tier as memory's `raw/` queue. That is why a claim is
+listed as unreviewed and fenced. Making the stamp trustworthy belongs to the
+second half, **promotion**: a daemon verb that copies a claim into a bundle
+through `contained_write` (#1386), gated by `may_curate` (#1232), stamping
+`curated_by`. Not built yet; until then a claim is listed but not selectable, and a
+person promotes it by copying the entry into the catalog.
+
+Guard: `shared/tests/test_an_agent_proposes_a_reference.py`, six reversions,
+including two checked against the RENDERED profile with the #1348 rule
+matcher: claims writable, catalog still denied. No kernel.
 
 ### Plugin-Level Traits
 

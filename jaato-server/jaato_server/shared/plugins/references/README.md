@@ -211,6 +211,36 @@ Lists all available reference sources.
 }
 ```
 
+**Proposed references.** Claims agents wrote with `proposeReference` (below)
+are returned under `proposed`, not `sources`: not selectable, their name and
+description fenced as untrusted content, each with its `claim_file`, `path`
+(for a file proposal) and `origin`. With `require_curation: true` only
+`proposed_withheld` (a count) is returned.
+
+### proposeReference
+
+Proposes a document the agent wrote as a reference. Writes a **claim** to
+`<workspace>/.jaato/references-claims/<claim_id>.json`, never the catalog
+(the confined runner is write-denied on `.jaato/references/**`).
+
+```json
+{
+  "id": "pool-notes",
+  "name": "Runner pool notes",
+  "description": "Read before changing slot reuse.",
+  "tags": ["pool", "runner"],
+  "path": "notes/pool.md"
+}
+```
+
+**Parameters:** `id` and `name` required; `description`, `tags` (single
+tokens); exactly one of `path` (a file inside the workspace) or `content`
+(inline, up to 32 KiB).
+
+The claim's `origin` (`kind: "agent"`, the model binding, the session's
+authenticated user) is stamped from the calling session; it cannot be passed
+in. Promotion into the catalog is a separate, curator-side step.
+
 ## Tags and Proactive Reference Access
 
 Each reference source can have tags describing its topic. The model is instructed to:

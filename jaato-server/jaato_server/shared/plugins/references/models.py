@@ -70,27 +70,39 @@ class ReferenceContents:
         )
 
 
-#: The one ``kind`` the framework can OBSERVE today: this reference was
-#: copied into a bundle it did not start in, by ``references bundle merge``.
-#: A string rather than a bool, and the same key ``generated_by`` uses
-#: (``jaato_sdk.events.ai_generated_by`` mints ``{"kind": "ai", ...}``), so a
-#: reader branches on ``kind`` identically wherever provenance appears and the
-#: vocabulary can grow without the field changing shape.
+#: This reference was copied into a bundle it did not start in, by
+#: ``references bundle merge``.  A string rather than a bool, and the same key
+#: ``generated_by`` uses (``jaato_sdk.events.ai_generated_by`` mints
+#: ``{"kind": "ai", ...}``), so a reader branches on ``kind`` identically
+#: wherever provenance appears and the vocabulary can grow without the field
+#: changing shape.
 ORIGIN_IMPORTED = "imported"
+
+#: This reference was PROPOSED by an agent through ``proposeReference``.  The
+#: plugin stamps it from the proposing session -- the model binding, the
+#: authenticated creator -- and never from the tool's arguments.
+ORIGIN_AGENT = "agent"
 
 
 @dataclass
 class ReferenceOrigin:
     """Where a reference came from, as the framework OBSERVED it arrive.
 
-    Deliberately narrower than the provenance a *memory* carries, and the
-    difference is not an omission.  ``Memory.generated_by`` names the model
-    that wrote it because a model writes memories; **nothing in this tree
-    writes a reference**.  A reference is authored by a human, emitted by
-    ``gen-references``, or copied in from somebody else's bundle -- and only
-    the last of those is a fact the framework is present for.  So this
-    records ARRIVAL, not authorship, and a field naming an author would have
-    no stamper: an inert mechanism, which is worse than an absent one.
+    Two arrivals are events the framework is present for, and each ``kind``
+    carries only the fields its stamper can observe:
+
+    * :data:`ORIGIN_IMPORTED` -- copied in from another bundle by
+      ``merge_bundle``: ``bundle``, ``source_id``, ``at``.
+    * :data:`ORIGIN_AGENT` -- proposed by an agent through
+      ``proposeReference``: ``generated_by`` (the model binding, the
+      ``ai_generated_by`` shape a memory carries), ``created_by`` (the
+      session's authenticated creator, the ``get_client_user`` chain, never
+      an environment value), ``claim_id``, ``at``.
+
+    A reference authored by a human or emitted by ``gen-references`` is not
+    an event the framework witnesses, so it carries no origin at all; a
+    field naming an author with no stamper would be an inert mechanism,
+    which is worse than an absent one.
 
     Absent means **origin unobserved**, never "authored here".  A reference
     that predates this field, one hand-written into the catalog and one
@@ -106,19 +118,30 @@ class ReferenceOrigin:
     cannot survive it.
 
     Attributes:
-        kind: What was observed.  :data:`ORIGIN_IMPORTED` today.
+        kind: What was observed: :data:`ORIGIN_IMPORTED` or
+            :data:`ORIGIN_AGENT`.  An unknown string round-trips untouched.
         bundle: The name of the bundle it was copied FROM.
         source_id: The id it carried in that bundle.  ``bundle merge
             --prefix`` renames on collision, so the local id is not
             necessarily the one the other workspace knows it by, and an
             operator reconciling two catalogs needs the one that is.
-        at: ISO-8601 UTC instant of the copy.
+        at: ISO-8601 UTC instant of the copy, or of the proposal.
+        generated_by: ``{"kind": "ai", provider, model, session_id,
+            agent_id}`` of the proposing session (agent kind only).
+        created_by: The proposing session's authenticated creator
+            (``app:user`` on WS, the OS account on IPC).  ``None`` when the
+            transport authenticated nobody -- absence, not a guess.
+        claim_id: The claim this reference was proposed as, so a promoted
+            entry can be traced back to the claim file a curator read.
     """
 
     kind: str
     bundle: Optional[str] = None
     source_id: Optional[str] = None
     at: Optional[str] = None
+    generated_by: Optional[Dict[str, Any]] = None
+    created_by: Optional[str] = None
+    claim_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize, omitting keys whose value was never established.
@@ -130,7 +153,10 @@ class ReferenceOrigin:
         payload: Dict[str, Any] = {"kind": self.kind}
         for key, value in (("bundle", self.bundle),
                            ("source_id", self.source_id),
-                           ("at", self.at)):
+                           ("at", self.at),
+                           ("generated_by", self.generated_by),
+                           ("created_by", self.created_by),
+                           ("claim_id", self.claim_id)):
             if value:
                 payload[key] = value
         return payload
@@ -153,17 +179,40 @@ class ReferenceOrigin:
             bundle=data.get("bundle") or None,
             source_id=data.get("source_id") or None,
             at=data.get("at") or None,
+            generated_by=_dict_or_none(data.get("generated_by")),
+            created_by=data.get("created_by") or None,
+            claim_id=data.get("claim_id") or None,
         )
 
     def describe(self) -> str:
         """One human/model-readable clause naming the arrival."""
-        if self.kind != ORIGIN_IMPORTED:
-            return self.kind
+        if self.kind == ORIGIN_IMPORTED:
+            return self._describe_imported()
+        if self.kind == ORIGIN_AGENT:
+            return self._describe_agent()
+        return self.kind
+
+    def _describe_imported(self) -> str:
         where = f" from bundle '{self.bundle}'" if self.bundle else ""
         when = f" on {self.at}" if self.at else ""
         alias = (f" (known there as '{self.source_id}')"
                  if self.source_id else "")
         return f"imported{where}{when}{alias}"
+
+    def _describe_agent(self) -> str:
+        gen = self.generated_by or {}
+        agent = f" agent '{gen['agent_id']}'" if gen.get("agent_id") else " an agent"
+        binding = "/".join(v for v in (gen.get("provider"), gen.get("model")) if v)
+        model = f" ({binding})" if binding else ""
+        session = f" in session {gen['session_id']}" if gen.get("session_id") else ""
+        user = f" for {self.created_by}" if self.created_by else ""
+        when = f" on {self.at}" if self.at else ""
+        return f"proposed by{agent}{model}{session}{user}{when}"
+
+
+def _dict_or_none(value: Any) -> Optional[Dict[str, Any]]:
+    """A non-empty dict, else ``None`` -- a malformed stamp reads as absent."""
+    return dict(value) if isinstance(value, dict) and value else None
 
 
 class SourceType(Enum):

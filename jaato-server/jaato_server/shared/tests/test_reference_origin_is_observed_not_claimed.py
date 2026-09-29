@@ -7,15 +7,13 @@ placement, which the wikiLLM brainstorm states in §8, was not merely
 unimplemented for references but *unrepresentable*: there was no field for
 a fence to read.
 
-What is added is deliberately narrower than memory's, and the narrowing is
-the design rather than a shortfall.  ``generated_by`` names the model that
-wrote a memory because a model writes memories; **nothing in this tree
-writes a reference**.  A reference is authored by a human, emitted by
-``gen-references``, or copied in from another workspace's bundle -- and
-only the last is an event the framework is present for.  A field naming an
-author would therefore have no stamper: an inert mechanism, which this
-repository has already had to review out once (``85c3bfd``, "three inert
-mechanisms").  So ``origin`` records ARRIVAL.
+What is added records only events the framework is present for.  A
+reference authored by a human or emitted by ``gen-references`` is not one,
+so it carries no origin -- a field naming an author would have no stamper:
+an inert mechanism, which this repository has already had to review out
+once (``85c3bfd``, "three inert mechanisms").  This module guards the
+``imported`` kind: ARRIVAL by bundle merge.  The ``agent`` kind, stamped by
+``proposeReference``, is guarded in ``test_an_agent_proposes_a_reference``.
 
 Three properties, each its own failure if dropped:
 

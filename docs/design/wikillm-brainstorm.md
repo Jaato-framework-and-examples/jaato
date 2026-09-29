@@ -432,8 +432,8 @@ both land on the same dataclass:
    ships (`ReferenceSource.origin`, round-tripped, stamped by
    `merge_bundle`, rendered by `to_instruction` and `listReferences`), and
    it records **none of the six fields listed above**. That list assumed an
-   agent write path, and there is none: nothing in this tree writes a
-   reference, so `source_agent`, `binding` and the rest would each have had
+   agent write path, and when `origin` shipped there was none: nothing
+   wrote a reference, so `source_agent`, `binding` and the rest would each have had
    no stamper — the inert mechanism `85c3bfd` had to review out of a
    neighbouring change. What the framework can *observe* about a reference
    is exactly one event: that it was copied in from another workspace's
@@ -532,6 +532,12 @@ the same tool:
 |---|---|---|---|
 | something it **observed** — a fact, a gotcha, a decision and its reason | memory (an event) | `store_memory` → `.jaato/memories/raw/` | **yes**, with `source_agent`, `source_session`, `generated_by`; `curated_by` on promotion |
 | a **document** it produced — a design note, a runbook, an API map — that others should be able to select | reference (a document) | `proposeReference` | **no** |
+
+**Shipped:** step 1 — `proposeReference`, the claims directory, the
+`agent` origin kind, the fenced `proposed` listing, `require_curation`,
+and the plugin's own AppArmor grant for the claims directory
+(`CLAUDE.md`, *An Agent Proposes a Reference*). Step 2 (witness) and
+step 3 (promote) are not built; `links` waits on Seam 3.
 
 `proposeReference` takes what a catalog entry carries — `id`, `name`,
 `description`, `tags`, `links` (Seam 3) — plus the document itself, as a
