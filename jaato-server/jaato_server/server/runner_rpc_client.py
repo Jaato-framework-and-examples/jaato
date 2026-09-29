@@ -2445,6 +2445,69 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_permission_persistence(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Optional[Dict[str, Any]]":
+        """The ENFORCER's runtime permission decisions, as a snapshot (#1412).
+
+        Returns the runner-side ``PermissionPlugin.get_persistence_state()``
+        -- ``None`` when nothing was decided at runtime.
+
+        Raises:
+            RunnerCallError on any failure.  The caller must read that as
+                "unknown" and keep the snapshot it last had: writing
+                nothing would erase a denial the operator made, and a lost
+                denial is worse than a lost grant (#706).
+        """
+        result = await self._call_named(
+            "session.get_permission_persistence", {}, timeout=timeout,
+        )
+        state = result.get("state")
+        if state is not None and not isinstance(state, dict):
+            raise RunnerCallError(
+                f"session_get_permission_persistence: expected dict or "
+                f"None for 'state', got {type(state).__name__}"
+            )
+        return state
+
+    def session_get_permission_persistence_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Optional[Dict[str, Any]]":
+        return self._run_threadsafe(
+            self.session_get_permission_persistence(timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_restore_permission_persistence(
+        self, state: "Dict[str, Any]", *, timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        """Re-apply a persisted snapshot to the ENFORCER (#1412).
+
+        Returns the runner plugin's ``get_permission_status()`` after the
+        restore, so the caller can emit ``PermissionStatusEvent`` from the
+        value that will actually decide.
+
+        Raises:
+            RunnerCallError on any failure (no_host / no_session /
+                no_plugin / args / call).
+        """
+        result = await self._call_named(
+            "session.restore_permission_persistence", {"state": state},
+            timeout=timeout,
+        )
+        status = result.get("status")
+        return status if isinstance(status, dict) else {}
+
+    def session_restore_permission_persistence_threadsafe(
+        self, state: "Dict[str, Any]", *, timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        return self._run_threadsafe(
+            self.session_restore_permission_persistence(
+                state, timeout=timeout,
+            ),
+            timeout=timeout,
+        )
+
     async def session_memory(
         self,
         op: str,

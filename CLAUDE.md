@@ -8048,6 +8048,53 @@ a test that stubbed enough of a server to run it would be asserting the
 stubs — and what the defect was is a missing call site, which is exactly
 what a walk of the call sites can answer.
 
+### Decisions Saved From the Copy Nobody Changed (#1412)
+
+#706 made the operator's runtime permission decisions survive an unload:
+`permissions allow|deny|default` and an `always` / `never` answer.
+`PermissionPlugin` declares `TRAIT_SESSION_PERSISTENT`, and the session
+manager's generic loop saved `get_persistence_state()` into
+`metadata['plugin_states']` and called `restore_persistence_state()` on a
+revive. Both through the **daemon's** registry, which is the copy the section
+above is about: on a runner-served session it decides nothing and nothing
+mutates it.
+
+| Step | Before | Now |
+|---|---|---|
+| save | the daemon's copy answered `None`, nothing was written | `session.get_permission_persistence` (control lane, in `_SESSION_READS`) asks the enforcer |
+| restore | into the daemon's copy; the runner came back on the profile's `ask` | `session.restore_permission_persistence` (control lane, in `NAMED_METHOD_HANDLERS`) into the enforcer, then `emit_permission_status()` from the runner's value |
+
+A reattach inside the #1106 unload grace kept the runner and lost nothing,
+which is why it read as intermittent. A real unload lost everything: an
+expired grace, a daemon restart, a `session.wake` from disk. A lost `never`
+is worse than a lost grant.
+
+| Rule | Why |
+|---|---|
+| **a failed ask keeps the last known snapshot** | `Session.permission_state` holds it (set from the record at revive, replaced by every answered ask). Writing nothing would erase a denial; #1355's rule for history, applied here. Logged at WARNING. An answered `None` (after `permissions clear`) is a decision and is written as no key |
+| **the restore runs after `server.initialize()`** | the runner's `session.bootstrap` has returned, so the enforcer's `initialize()` has loaded `permissions.json` and the snapshot layers on top, the order #706 required. It is the same place and shape as the conversation-budget restore, which is why an RPC was chosen over carrying the snapshot on `SessionInitEnvelope`: no envelope version, no second route for the daemon-local path |
+| **a pool slot cannot leak one session's decisions into the next** | `build_session_permission_plugin` (bootstrap Step 8) constructs a new `PermissionPlugin` on every bootstrap, and `permission` is not `TRAIT_SLOT_SCOPED`, so the next session's verbs reach a different object. `reset_for_next_session` runs at the outgoing session's end, before the restore, and does not touch the session rules anyway |
+| **daemon-local is unchanged** | with no `_runner_rpc` (embedded, standalone WS, legacy) the daemon's plugin is the enforcer and the loop saves and restores it as before |
+
+Decided, not inherited:
+
+- **Suspensions stay unpersisted**, per #706: they are time-scoped.
+- **Scoped subagent policies (#957) are not persisted.** A scoped policy is
+  keyed by the `permission_scope` a `JaatoSession` mints at construction, so
+  a revive has no key to bind a snapshot to. A revived subagent reinstalls
+  its policy from its own profile's `plugin_configs.permission` block; an
+  `always` answered for a subagent is lost on unload.
+
+Still open: the other `TRAIT_SESSION_PERSISTENT` plugins (`reliability`,
+`service_connector`) are saved and restored through the daemon registry
+the same way, and the `a` / `t` / `i` re-emit gap above.
+
+Guard: `jaato_server/server/tests/test_permission_decisions_survive_a_revive_1412.py`,
+five reversions. It drives a real `RunnerRPCClient` over a socketpair to a
+real `RunnerRPC`, with the enforcer built by the bootstrap's own function:
+decide through the command path on runner A, save, revive on runner B, and
+B enforces both decisions and announces `allow`.
+
 ### A Memory Store Nobody Could See From the Browser (#1232)
 
 The web client had no view of the session's memories. The only route was
