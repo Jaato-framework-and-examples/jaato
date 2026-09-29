@@ -337,6 +337,13 @@ both land on the same dataclass:
    where `rel` would cut by meaning. So the ask below stands, now with
    measurement behind it rather than argument.
 
+   **Both halves are now built.** The ask below shipped as typed links,
+   and the cut ranks by them: each depth is read whole and ordered by
+   declared `depends-on`, then by how many references at the previous
+   depth reach a candidate, then by id (`links.rank_frontier`), and the
+   truncation record says so (`ranked_by`). Ranking by similarity to the
+   task stays a refinement for workspaces that have an embedding index.
+
    **The ask is a `links` field with a small closed `rel` vocabulary**,
    and inference is *kept* beside it: an inferred edge can never go
    stale, because it is recomputed from content, and it is what makes

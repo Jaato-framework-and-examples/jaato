@@ -38,7 +38,7 @@ Stdlib only; no plugin state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
 REL_DEPENDS_ON = "depends-on"
 REL_ELABORATES = "elaborates"
@@ -236,3 +236,44 @@ def expansion_neighbours(
         return None
     base = (set(mentions or ()) - index.declared_targets(source_id)) | expanding
     return {index.current_version(n) for n in base}
+
+
+#: How :func:`rank_frontier` orders one depth's candidates, in words, for the
+#: truncation record: a reader of a cut neighbourhood should know what the
+#: cut preferred.
+FRONTIER_RANKING = (
+    "declared depends-on edges first, then references more of the previous "
+    "depth points to, then id"
+)
+
+
+def rank_frontier(
+    candidates: Mapping[str, Set[str]], index: LinkIndex,
+) -> List[str]:
+    """One depth's newly reached references, most wanted first.
+
+    ``candidates`` maps each id reached at this depth to the ids at the
+    previous depth that reached it.  The order matters only when
+    ``max_transitive_references`` cuts the depth -- it decides which
+    references survive -- and it is:
+
+    1. how many of those parents DECLARE ``depends-on`` to it: an author
+       said the parent is not comprehensible without it, which no mention
+       says;
+    2. how many parents reached it at all: a reference several selected
+       documents point to is more central to the selection than one only
+       one of them names;
+    3. the id, so the order is total and reproducible (it reaches the
+       prompt-cache prefix, and a set's order varies across processes).
+
+    A declared target is counted by its current version, the same routing
+    :func:`expansion_neighbours` applies, so the two agree about which id
+    a declaration names.
+    """
+    def declared_votes(cid: str) -> int:
+        return sum(
+            1 for parent in candidates[cid]
+            if cid in {index.current_version(t) for t in index.expanding_targets(parent)}
+        )
+
+    return sorted(candidates, key=lambda cid: (-declared_votes(cid), -len(candidates[cid]), cid))

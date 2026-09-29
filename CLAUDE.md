@@ -4021,7 +4021,7 @@ beneath it (`_get_reference_content` rglobs and concatenates).
 | 3 | `max_transitive_references` + a truncation record | a bound that binds |
 
 **Sorting had to land before the bound, not with it.** `pending` and
-`new_mentions` are sets, so iteration order varies across processes
+`new_mentions` were sets, so iteration order varies across processes
 (string hash randomisation). Unbounded that only shuffled the manifest;
 with a cap it decides **which** references survive — measured on the same
 catalog capped at 25, **six of the 25 differed** between two
@@ -4066,14 +4066,29 @@ silently-cut neighbourhood reads absence as *"no such reference exists"*,
 which on a knowledge graph is exactly the wrong conclusion and is
 unfalsifiable from its side.
 
-**Deliberately not done.** Ranking the frontier — keep the *nearest* 25
-rather than the first 25. The machinery nearly exists (`score_sources`
-takes a vector and does not care where it came from), but it is reachable
-only where a vector index has been generated, and `initialize()` skips the
-embedding provider entirely otherwise. A bound has to work for everyone;
-ranking is a refinement for workspaces that have embeddings. Also not done:
-typed edges, which would let `rel` decide what counts as adjacency rather
-than "the string appeared".
+**What the cut keeps is decided by the links, not the spelling.** The
+first version admitted each depth parent by parent in id order, so under a
+cap the reference the selection most needed lost to one whose id sorted
+earlier. Each depth is now read WHOLE (`_reached_at_depth`) and ordered by
+`links.rank_frontier` before the cap applies:
+
+1. how many parents at the previous depth DECLARE `depends-on` to it,
+   counted by its current version (the routing `supersedes` applies);
+2. how many parents reach it at all;
+3. the id, which keeps the order total, so determinism now comes from the
+   ranking rather than from sorting `pending`.
+
+Unbounded, the SET is unchanged and only the order within a depth moves.
+The truncation record carries `ranked_by`. Guard:
+`shared/tests/test_the_cap_keeps_what_the_links_rank_first.py`, five
+reversions.
+
+**Still not done:** ranking by *similarity*, keeping the nearest 25 rather
+than the best-linked 25. `score_sources` takes a vector and does not care
+where it came from, but it is reachable only where a vector index has been
+generated, and `initialize()` skips the embedding provider otherwise. A
+bound has to work for everyone; the link ranking does, similarity is a
+refinement for workspaces that have embeddings.
 
 ### A Reference Records Where It Arrived, Not Who Wrote It
 
@@ -4252,6 +4267,11 @@ for its target.
 `reference_link_invalid` (**error**), `reference_link_dangling` (warn; a
 target in neither the workspace catalog nor `~/.jaato/references`),
 `reference_supersedes_ambiguous` and `reference_supersedes_cycle` (warn).
+
+Under `max_transitive_references` the links also decide what a cut keeps:
+declared `depends-on` first, then references more of the previous depth
+points to (see [A Guard That Only Binds When Nothing Needs
+Bounding](#a-guard-that-only-binds-when-nothing-needs-bounding)).
 
 Guards: `shared/tests/test_typed_reference_links.py` (seven reversions)
 and `server/tests/test_a_proposal_carries_typed_links.py` (five).

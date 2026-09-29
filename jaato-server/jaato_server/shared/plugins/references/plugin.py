@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
-from .links import LINK_RELS, LinkIndex, expansion_neighbours
+from .links import FRONTIER_RANKING, LINK_RELS, LinkIndex, expansion_neighbours, rank_frontier
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import (
     load_config,
@@ -992,46 +992,28 @@ class ReferencesPlugin(RunnerForwardingMixin):
             if self._expansion_at_limit(len(resolved_ids), limit):
                 break
 
-            newly_found: Set[str] = set()
             self._trace(f"transitive: [depth={depth}] scanning {sorted(pending)}")
+            candidates = self._reached_at_depth(
+                pending, resolved_set, initial_set, parent_map,
+                lambda rid: expansion_neighbours(
+                    rid,
+                    self._mentions_of(rid, catalog_by_id, catalog_ids, path_to_ids),
+                    links))
 
-            # SORTED, and load-bearing rather than cosmetic: ``pending`` is a
-            # set, so iteration order varies across processes (string hash
-            # randomisation).  Unbounded that only shuffled the manifest; with
-            # a limit it decides WHICH references survive the cut -- measured
-            # at six of twenty-five differing between two PYTHONHASHSEED
-            # values.  Same argument CLAUDE.md makes for sorting the
-            # spawn_subagent profile enum: this output reaches the
-            # prompt-cache prefix.
-            for ref_id in sorted(pending):
+            # RANKED, then cut: when the limit binds, the order decides
+            # WHICH references survive, so it is the declared edges and
+            # the link structure that decide it (``rank_frontier``), and
+            # never set order -- ``pending`` is a set, and its iteration
+            # order varies across processes (measured at six of
+            # twenty-five differing between two PYTHONHASHSEED values).
+            newly_found: Set[str] = set()
+            for mentioned_id in rank_frontier(candidates, links):
                 if self._expansion_at_limit(len(resolved_ids), limit):
                     break
-
-                mentioned_ids = expansion_neighbours(
-                    ref_id,
-                    self._mentions_of(ref_id, catalog_by_id, catalog_ids, path_to_ids),
-                    links)
-                if mentioned_ids is None:
-                    continue
-
-                new_mentions = mentioned_ids - resolved_set - {ref_id}
-                if new_mentions:
-                    self._trace(f"transitive:   '{ref_id}' => {sorted(new_mentions)}")
-                    for mentioned_id in sorted(new_mentions):
-                        if self._expansion_at_limit(len(resolved_ids), limit):
-                            break
-                        newly_found.add(mentioned_id)
-                        resolved_set.add(mentioned_id)
-                        resolved_ids.append(mentioned_id)
-                        parent_map.setdefault(mentioned_id, set()).add(ref_id)
-
-                # Record parent relationships for IDs already resolved
-                # (discovered earlier by a sibling at the same BFS depth).
-                # This ensures multi-parent tracking is complete.
-                for mentioned_id in (
-                    (mentioned_ids & resolved_set) - initial_set - {ref_id}
-                ):
-                    parent_map.setdefault(mentioned_id, set()).add(ref_id)
+                newly_found.add(mentioned_id)
+                resolved_set.add(mentioned_id)
+                resolved_ids.append(mentioned_id)
+                parent_map.setdefault(mentioned_id, set()).update(candidates[mentioned_id])
 
             # Next iteration processes newly found IDs
             pending = newly_found
@@ -1039,6 +1021,36 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._conclude_expansion(
             initial_ids, resolved_ids, pending, limit, depth, max_depth)
         return resolved_ids, parent_map
+
+    def _reached_at_depth(
+        self,
+        pending: Set[str],
+        resolved_set: Set[str],
+        initial_set: Set[str],
+        parent_map: Dict[str, Set[str]],
+        neighbours_of: Callable[[str], Optional[Set[str]]],
+    ) -> Dict[str, Set[str]]:
+        """Every id one depth of the walk reaches, with the parents that reach it.
+
+        Reads EVERY node at this depth before anything is admitted, so the
+        ranking sees the whole depth rather than whichever parents sort
+        first.  An id already resolved gains the parent in ``parent_map``
+        (multi-parent tracking stays complete) and is not a candidate.
+        Nodes are visited in sorted order so the traces are reproducible.
+        """
+        candidates: Dict[str, Set[str]] = {}
+        for ref_id in sorted(pending):
+            reached = neighbours_of(ref_id)
+            if reached is None:
+                continue
+            new = reached - resolved_set - {ref_id}
+            if new:
+                self._trace(f"transitive:   '{ref_id}' => {sorted(new)}")
+            for mentioned_id in new:
+                candidates.setdefault(mentioned_id, set()).add(ref_id)
+            for mentioned_id in (reached & resolved_set) - initial_set - {ref_id}:
+                parent_map.setdefault(mentioned_id, set()).add(ref_id)
+        return candidates
 
     @staticmethod
     def _expansion_at_limit(resolved_count: int, limit: Optional[int]) -> bool:
@@ -1214,6 +1226,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "limit": limit,
             "resolved": resolved,
             "stopped_at_depth": depth,
+            "ranked_by": FRONTIER_RANKING,
             "note": (
                 "Transitive expansion stopped at the configured limit. "
                 "Absence from this list does not mean a reference does not "
