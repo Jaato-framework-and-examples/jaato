@@ -556,13 +556,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # is built, on the runner path as a ``tool_result_enriched`` notification.
 # A NEW event type: an older client does not know it, logs it and continues
 # (the 1.8 shape), so nothing is refused.
-# 1.32 -- ``reference.promote <claim_id>`` / ``reference.dismiss <claim_id>``
-# (``ReferenceCurationResultEvent``): a person turns an agent's reference
-# CLAIM (``proposeReference``) into a catalog entry, or drops it.  The daemon
-# does the write, because a confined runner is write-denied on the catalog.
-# Gated by the memory rail's owner rule.  A NEW verb: an older daemon ignores
-# the command silently, and "promoted" would describe a catalog nobody
-# changed, so the SDKs refuse below ``MIN_REFERENCE_CURATION_PROTOCOL``.
+# 1.32 -- reference claims, the curator's half of the agent write path.
+# ``ReferenceClaimsRequest`` -> ``ReferenceClaimsEvent`` lists the agent
+# proposals (``proposeReference`` claims) in the caller's workspace, with
+# ``may_curate``; ``ReferenceCurationRequest`` (or the typable
+# ``reference.promote <claim_id>`` / ``reference.dismiss <claim_id>``
+# commands) -> ``ReferenceCurationResultEvent`` turns one into a catalog
+# entry or drops it.  The daemon does the write, because a confined runner
+# is write-denied on the catalog.  Gated by the memory rail's owner rule.
+# NEW verbs: an older daemon ignores them silently, and "promoted" would
+# describe a catalog nobody changed, so the SDKs refuse below
+# ``MIN_REFERENCE_CURATION_PROTOCOL``.
 PROTOCOL_VERSION = "1.32"
 
 
@@ -784,6 +788,9 @@ class EventType(str, Enum):
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
     REFERENCE_CURATION_RESULT = "reference.curation.result"  # Answer to `reference.promote|dismiss` (1.32)
+    REFERENCE_CLAIMS = "reference.claims"  # Answer to ReferenceClaimsRequest (1.32)
+    REFERENCE_CLAIMS_REQUEST = "reference.claims.request"  # Client -> Server (1.32)
+    REFERENCE_CURATION_REQUEST = "reference.curation.request"  # Client -> Server (1.32)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
@@ -2794,6 +2801,8 @@ class ReferenceCurationResultEvent(Event):
     included.
 
     Fields:
+        request_id: Echoed from a :class:`ReferenceCurationRequest`; ``""``
+            for the answer to a typed ``reference.promote|dismiss`` command.
         action: ``promote`` or ``dismiss``.
         claim_id: The claim acted on, as the caller named it.
         ok: Whether the verb did what was asked.
@@ -2808,6 +2817,7 @@ class ReferenceCurationResultEvent(Event):
             whose file could not be removed afterwards.
     """
     type: EventType = Field(default=EventType.REFERENCE_CURATION_RESULT)
+    request_id: str = ""
     action: str = ""
     claim_id: str = ""
     ok: bool = True
@@ -2816,6 +2826,65 @@ class ReferenceCurationResultEvent(Event):
     reference_id: str = ""
     reference_file: str = ""
     warnings: List[str] = Field(default_factory=list)
+
+
+class ReferenceClaimsEvent(Event):
+    """The reference claims agents proposed in the caller's workspace (1.32).
+
+    Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
+    A claim is what ``proposeReference`` wrote under
+    ``<workspace>/.jaato/references-claims/``: a proposed catalog entry
+    nobody has reviewed.  Read by the DAEMON, without following a link out
+    of the workspace; a file that is not a well-formed claim is named under
+    ``unreadable`` rather than dropped.
+
+    ``ok`` is ``False`` -- with ``category`` ``no_workspace`` or
+    ``unsafe_path`` -- when the claims could not be read; ``claims`` is then
+    meaningless, never "nothing proposed".
+
+    Each row: ``claim_id``, ``id``, ``name``, ``description``, ``tags``,
+    ``type`` (``local`` / ``inline``), ``path`` (local) or ``content``
+    (inline), ``origin`` (the claim's recorded origin: ``generated_by``,
+    ``created_by``, ``witnessed_by``, ``at``) and ``problems`` -- the
+    reasons a promotion would be refused right now (the id is already in the
+    catalog, the file is gone), empty when it would pass.  ``name``,
+    ``description`` and ``content`` were written by a MODEL and reviewed by
+    nobody: a client shows them as text, never as markup.
+
+    ``may_curate`` says whether THIS connection may promote or dismiss --
+    the workspace-owner rule the daemon also enforces.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CLAIMS)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    claims: List[Dict[str, Any]] = Field(default_factory=list)
+    unreadable: List[str] = Field(default_factory=list)
+    may_curate: bool = False
+
+
+class ReferenceClaimsRequest(Event):
+    """List the reference claims in the caller's workspace (1.32).
+
+    Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
+    Writes nothing; any connection whose workspace it is may list.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CLAIMS_REQUEST)
+    request_id: str = ""
+
+
+class ReferenceCurationRequest(Event):
+    """Promote or dismiss one reference claim (1.32).
+
+    The correlated form of the ``reference.promote`` / ``reference.dismiss``
+    commands: answered by :class:`ReferenceCurationResultEvent` carrying this
+    ``request_id``.  ``action`` is ``promote`` or ``dismiss``.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CURATION_REQUEST)
+    request_id: str = ""
+    action: str = ""
+    claim_id: str = ""
 
 
 class SessionMessageResultEvent(Event):
@@ -5150,6 +5219,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
     EventType.REFERENCE_CURATION_RESULT.value: ReferenceCurationResultEvent,
+    EventType.REFERENCE_CLAIMS.value: ReferenceClaimsEvent,
+    EventType.REFERENCE_CLAIMS_REQUEST.value: ReferenceClaimsRequest,
+    EventType.REFERENCE_CURATION_REQUEST.value: ReferenceCurationRequest,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,

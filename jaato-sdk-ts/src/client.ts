@@ -69,6 +69,8 @@ import {
   type WorkspaceFileContentEvent,
   type WorkspaceFileFetchRequest,
   type MemoryListEvent,
+  type ReferenceClaimsEvent,
+  type ReferenceCurationResultEvent,
   type MemoryGetResultEvent,
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
@@ -160,9 +162,10 @@ export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
 export const MIN_FILE_FETCH_PROTOCOL = "1.20";
 
 /**
- * Protocol floor for {@link JaatoClient.promoteReferenceClaim} and
+ * Protocol floor for {@link JaatoClient.listReferenceClaims},
+ * {@link JaatoClient.promoteReferenceClaim} and
  * {@link JaatoClient.dismissReferenceClaim}.  Same rule as
- * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verb,
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verbs,
  * and "promoted" would describe a catalog nobody changed.
  */
 export const MIN_REFERENCE_CURATION_PROTOCOL = "1.32";
@@ -1209,18 +1212,45 @@ export class JaatoClient {
   }
 
   /**
-   * Promote an agent's reference claim into the workspace catalog
-   * (protocol 1.32).  An agent's ``proposeReference`` writes a CLAIM, never
-   * a catalog entry; the daemon re-validates it, writes
-   * ``.jaato/references/<id>.json`` stamped with this connection's identity
-   * as ``origin.curated_by``, and removes the claim.  Only the workspace
-   * owner may, on an owned workspace.  Answered by one
-   * ``reference.curation.result``.
+   * List the reference claims agents proposed in this workspace (protocol
+   * 1.32).  An agent's ``proposeReference`` writes a CLAIM under
+   * ``.jaato/references-claims/``, never a catalog entry; this is the
+   * curator's view of them, read by the daemon.  Each row carries the
+   * proposed entry, its recorded ``origin`` (who proposed it, and
+   * ``witnessed_by`` when a person approved the call) and ``problems`` --
+   * why a promotion would be refused right now.  ``may_curate`` says
+   * whether this connection may act.  ``ok === false`` means the claims
+   * could not be read, never "nothing proposed".
    *
    * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
    */
-  async promoteReferenceClaim(claimId: string): Promise<void> {
-    await this._sendReferenceCuration("reference.promote", claimId);
+  async listReferenceClaims(options: { timeoutMs?: number } = {}): Promise<ReferenceClaimsEvent> {
+    return this._quietRequest<ReferenceClaimsEvent>(
+      "listReferenceClaims",
+      { type: EventTypeValue.REFERENCE_CLAIMS_REQUEST },
+      EventTypeValue.REFERENCE_CLAIMS,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference-claim verbs (upgrade the daemon)",
+      "refc",
+    );
+  }
+
+  /**
+   * Promote an agent's reference claim into the workspace catalog
+   * (protocol 1.32).  The daemon re-validates it, writes
+   * ``.jaato/references/<id>.json`` stamped with this connection's identity
+   * as ``origin.curated_by``, and removes the claim.  Only the workspace
+   * owner may, on an owned workspace.  Resolves with the daemon's answer; a
+   * refusal is ``ok === false`` with a ``category``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async promoteReferenceClaim(
+    claimId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._sendReferenceCuration("promote", claimId, options.timeoutMs);
   }
 
   /**
@@ -1228,27 +1258,27 @@ export class JaatoClient {
    *
    * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
    */
-  async dismissReferenceClaim(claimId: string): Promise<void> {
-    await this._sendReferenceCuration("reference.dismiss", claimId);
+  async dismissReferenceClaim(
+    claimId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._sendReferenceCuration("dismiss", claimId, options.timeoutMs);
   }
 
-  private async _sendReferenceCuration(command: string, claimId: string): Promise<void> {
-    if (
-      this._serverProtocolVersion === null ||
-      !isProtocolCompatible(this._serverProtocolVersion, MIN_REFERENCE_CURATION_PROTOCOL)
-    ) {
-      throw new Error(
-        `${command}: this daemon speaks protocol ` +
-          `${this._serverProtocolVersion ?? "unknown"} and does not serve it ` +
-          `(needs >= ${MIN_REFERENCE_CURATION_PROTOCOL}).  It would ignore the ` +
-          `command silently.  Upgrade the daemon.`,
-      );
-    }
-    await this._sendEvent({
-      type: EventTypeValue.COMMAND,
-      command,
-      args: [claimId],
-    } as CommandRequest);
+  private async _sendReferenceCuration(
+    action: "promote" | "dismiss",
+    claimId: string,
+    timeoutMs?: number,
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._quietRequest<ReferenceCurationResultEvent>(
+      `${action}ReferenceClaim`,
+      { type: EventTypeValue.REFERENCE_CURATION_REQUEST, action, claim_id: claimId },
+      EventTypeValue.REFERENCE_CURATION_RESULT,
+      timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference-claim verbs (upgrade the daemon)",
+      "refc",
+    );
   }
 
   /**

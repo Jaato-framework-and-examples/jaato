@@ -139,6 +139,16 @@ class ReferenceOrigin:
             ``curated_by`` has).  Only a promoted agent reference carries it;
             a claim still in the claims directory never does, and one that
             says so was written by something other than the promotion verb.
+        witnessed_by: Who APPROVED the ``proposeReference`` call at the
+            permission prompt, when a person was asked (``{"via":
+            "permission-prompt", "method", "user"?, "approver"?,
+            "edited"?}``, :mod:`jaato_server.shared.call_witness`).  Absent
+            whenever the policy decided without asking -- which is the
+            default, since ``proposeReference`` is auto-approved unless
+            ``plugin_configs.references.witness_proposals`` is set.  Like
+            every other field on a claim it is written by the runner into a
+            model-writable file, so it is carried to the catalog AS
+            RECORDED; ``curated_by`` is the stamp the daemon makes itself.
     """
 
     kind: str
@@ -149,6 +159,7 @@ class ReferenceOrigin:
     created_by: Optional[str] = None
     claim_id: Optional[str] = None
     curated_by: Optional[Dict[str, Any]] = None
+    witnessed_by: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize, omitting keys whose value was never established.
@@ -164,7 +175,8 @@ class ReferenceOrigin:
                            ("generated_by", self.generated_by),
                            ("created_by", self.created_by),
                            ("claim_id", self.claim_id),
-                           ("curated_by", self.curated_by)):
+                           ("curated_by", self.curated_by),
+                           ("witnessed_by", self.witnessed_by)):
             if value:
                 payload[key] = value
         return payload
@@ -191,6 +203,7 @@ class ReferenceOrigin:
             created_by=data.get("created_by") or None,
             claim_id=data.get("claim_id") or None,
             curated_by=_dict_or_none(data.get("curated_by")),
+            witnessed_by=_dict_or_none(data.get("witnessed_by")),
         )
 
     def describe(self) -> str:
@@ -216,10 +229,25 @@ class ReferenceOrigin:
         session = f" in session {gen['session_id']}" if gen.get("session_id") else ""
         user = f" for {self.created_by}" if self.created_by else ""
         when = f" on {self.at}" if self.at else ""
-        curator = (self.curated_by or {}).get("user")
-        promoted = (f", promoted by {curator}" if curator
-                    else ", promoted" if self.curated_by else "")
-        return f"proposed by{agent}{model}{session}{user}{when}{promoted}"
+        return (f"proposed by{agent}{model}{session}{user}{when}"
+                f"{_witness_clause(self.witnessed_by)}"
+                f"{_curator_clause(self.curated_by)}")
+
+
+def _witness_clause(witnessed_by: Optional[Dict[str, Any]]) -> str:
+    """``, approved at the prompt by X`` -- or ``""`` when nobody was asked."""
+    if not witnessed_by:
+        return ""
+    who = witnessed_by.get("user") or witnessed_by.get("approver")
+    return f", approved at the prompt by {who}" if who else ", approved at the prompt"
+
+
+def _curator_clause(curated_by: Optional[Dict[str, Any]]) -> str:
+    """``, promoted by X`` -- or ``""`` for a claim not yet promoted."""
+    if not curated_by:
+        return ""
+    who = curated_by.get("user")
+    return f", promoted by {who}" if who else ", promoted"
 
 
 def _dict_or_none(value: Any) -> Optional[Dict[str, Any]]:

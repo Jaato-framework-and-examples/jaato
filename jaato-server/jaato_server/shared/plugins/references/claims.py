@@ -39,6 +39,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
 
+from jaato_server.shared.call_witness import current_call_witness
+
 from .config_loader import validate_reference_file
 from .models import ORIGIN_AGENT, ReferenceOrigin
 
@@ -83,6 +85,12 @@ def proposing_origin(session: Any, *, claim_id: str, at: str) -> ReferenceOrigin
     ``_client_user_id`` -- set from ``SessionInitEnvelope.created_by``, the
     ``EventSink.get_client_user`` chain, which reads no environment.  With no
     session in context both are ``None``: provenance unknown, never invented.
+
+    ``witnessed_by`` is the call's own permission verdict
+    (:func:`~jaato_server.shared.call_witness.current_call_witness`): set only
+    when a person was ASKED at the prompt and approved, absent whenever the
+    policy decided -- including the default, where ``proposeReference`` is
+    auto-approved.
     """
     generated_by: Optional[Dict[str, Any]] = None
     resolver = getattr(session, "_model_provenance", None)
@@ -98,6 +106,7 @@ def proposing_origin(session: Any, *, claim_id: str, at: str) -> ReferenceOrigin
         generated_by=generated_by if isinstance(generated_by, dict) else None,
         created_by=created_by if isinstance(created_by, str) and created_by else None,
         claim_id=claim_id,
+        witnessed_by=current_call_witness(),
     )
 
 

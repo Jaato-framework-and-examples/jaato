@@ -1959,6 +1959,9 @@ class PermissionPlugin(RunnerForwardingMixin):
             - 'method': Decision method ('whitelist', 'blacklist', 'default',
                        'sanitization', 'session_whitelist', 'session_blacklist',
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
+            - 'asked': Whether the call reached the approval channel -- a
+                       person was prompted -- rather than being decided by
+                       policy.  Set at this single exit for every decision.
         """
         who = _describe_permission_caller(context)
         _policy, policy_source = self._resolve_policy(context)
@@ -1979,11 +1982,16 @@ class PermissionPlugin(RunnerForwardingMixin):
                 f"call_id={call_id}{who} error={type(exc).__name__}: {exc}"
             )
             raise
+        # ``asked`` rides the returned metadata too, so a caller can tell
+        # a person's approval from a policy's without reading the trace
+        # (the executor turns it into the call's witness).
+        asked = self._was_prompted()
+        info = {**info, "asked": asked}
         self._trace(
             f"{DECISION_TRACE_PREFIX}tool={tool_name} call_id={call_id}"
             f"{who} allowed={allowed} "
             f"method={info.get('method', 'unknown')} "
-            f"asked={self._was_prompted()} "
+            f"asked={asked} "
             f"policy={policy_source}"
             f"{_describe_permission_decider(info)}"
             f" reason={info.get('reason', '')!r}"

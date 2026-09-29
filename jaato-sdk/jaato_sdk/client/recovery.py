@@ -878,24 +878,21 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.toggle_workspace_ignore(path)
 
-    async def promote_reference_claim(self, claim_id: str) -> None:
-        """Promote an agent's reference claim into the catalog.
+    async def list_reference_claims(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_reference_claims`; the inner client
+        refuses a daemon below protocol 1.32."""
+        return await self._memory_client("list_reference_claims").list_reference_claims(
+            timeout=timeout)
 
-        See :meth:`IPCClient.promote_reference_claim`; the inner client
-        refuses a daemon below protocol 1.32.
-        """
-        self._check_can_send()
-        if self._client:
-            await self._client.promote_reference_claim(claim_id)
+    async def promote_reference_claim(self, claim_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.promote_reference_claim`."""
+        return await self._memory_client("promote_reference_claim").promote_reference_claim(
+            claim_id, timeout=timeout)
 
-    async def dismiss_reference_claim(self, claim_id: str) -> None:
-        """Drop an agent's reference claim.
-
-        See :meth:`IPCClient.dismiss_reference_claim`.
-        """
-        self._check_can_send()
-        if self._client:
-            await self._client.dismiss_reference_claim(claim_id)
+    async def dismiss_reference_claim(self, claim_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.dismiss_reference_claim`."""
+        return await self._memory_client("dismiss_reference_claim").dismiss_reference_claim(
+            claim_id, timeout=timeout)
 
     async def send_external_event(
         self,

@@ -212,6 +212,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # proposals (``proposeReference`` claims) from ``listReferences``
         # entirely, reporting only how many were withheld.
         self._require_curation: bool = False
+        # ``plugin_configs.references.witness_proposals``: take
+        # ``proposeReference`` off the auto-approved list, so the session's
+        # permission policy decides it -- and, under ``ask``, a person
+        # approves each proposal and the claim records who
+        # (``origin.witnessed_by``).
+        self._witness_proposals: bool = False
         # Set by ``_resolve_transitive_references`` when it stopped early;
         # surfaced on the selectReferences result so the model is never
         # handed a silently-cut neighbourhood.
@@ -1392,6 +1398,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             config.get("max_transitive_references")
         )
         self._require_curation = config.get("require_curation") is True
+        self._witness_proposals = config.get("witness_proposals") is True
         if self._transitive_enabled and self._selected_source_ids:
             # Build complete catalog including inline sources
             full_catalog = dict(catalog_by_id)
@@ -1972,6 +1979,18 @@ class ReferencesPlugin(RunnerForwardingMixin):
                         "marked unreviewed, their text fenced as untrusted."
                     ),
                 },
+                "witness_proposals": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Stop auto-approving proposeReference, so the "
+                        "session's permission policy decides each proposal. "
+                        "Under an 'ask' policy a person approves it at the "
+                        "prompt and the claim records who (origin."
+                        "witnessed_by). Off: proposals are auto-approved and "
+                        "carry no witness."
+                    ),
+                },
                 "preselected": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -2549,6 +2568,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "claim_id": claim["claim_id"],
             "id": entry["id"],
             "claim_file": os.path.relpath(target, workspace),
+            "witnessed": bool(claim["origin"].get("witnessed_by")),
             "message": (
                 "Proposed, not yet in the catalog. Other agents see it in "
                 "listReferences as 'proposed'; the workspace owner promotes "
@@ -4867,8 +4887,14 @@ class ReferencesPlugin(RunnerForwardingMixin):
         return "\n".join(parts)
 
     def get_auto_approved_tools(self) -> List[str]:
-        """All tools are auto-approved - this is a user-triggered plugin."""
-        return [
+        """The plugin's tools the permission gate need not ask about.
+
+        All of them, except ``proposeReference`` under
+        ``witness_proposals``: a proposal only writes a claim, so it is
+        auto-approved by default, and a deployment that wants a person to
+        approve (and be recorded approving) each one turns that off.
+        """
+        tools = [
             "selectReferences",
             "listReferences",
             "validateReference",
@@ -4876,6 +4902,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "proposeReference",
             "references",
         ]
+        if self._witness_proposals:
+            tools.remove("proposeReference")
+        return tools
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.

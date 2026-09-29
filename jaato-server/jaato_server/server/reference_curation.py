@@ -63,8 +63,10 @@ from jaato_server.shared.plugins.references.bundle import (
 )
 from jaato_server.shared.plugins.references.claims import (
     CLAIMS_DIRNAME,
+    INLINE_CLAIM_MAX_CHARS,
     build_proposed_reference,
     claim_as_args,
+    claim_tags,
     is_claim,
     valid_id,
 )
@@ -203,6 +205,10 @@ def promoted_origin(
 
     ``created_by`` is re-derived from the session named in ``generated_by``
     and never copied from the claim, whose file is model-writable.
+    ``generated_by`` and ``witnessed_by`` are carried AS RECORDED: the
+    daemon holds no record to check either against, and the curator
+    promoting the claim has read both; ``curated_by`` is the stamp this
+    step makes itself.
     """
     recorded = ReferenceOrigin.from_dict(claim.get("origin"))
     generated_by = recorded.generated_by if recorded else None
@@ -214,6 +220,7 @@ def promoted_origin(
         kind=ORIGIN_AGENT, at=at, generated_by=generated_by,
         created_by=created_by, claim_id=claim["claim_id"],
         curated_by=curator_stamp(user_id),
+        witnessed_by=recorded.witnessed_by if recorded else None,
     )
 
 
@@ -260,6 +267,100 @@ def _promote(
     except OSError as exc:
         outcome.warnings.append(f"promoted, but the claim file could not be removed: {exc}")
     return outcome
+
+
+@dataclass
+class ClaimsListing:
+    """The claims in one workspace, as the curator's listing shows them.
+
+    Attributes:
+        ok: Whether the claims directory could be read at all.
+        category: ``""``, or ``unsafe_path`` when the directory resolves out
+            of the workspace.
+        error: The reason, for a person.
+        claims: One row per well-formed claim, oldest first
+            (:func:`claim_row`).
+        unreadable: File names in the claims directory that are not a claim
+            this listing can show -- a symlink, a non-file, unreadable JSON,
+            or a record that is not a proposed-reference claim.
+    """
+
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    claims: List[Dict[str, Any]] = field(default_factory=list)
+    unreadable: List[str] = field(default_factory=list)
+
+
+def claim_row(claim: Dict[str, Any], *, root: str, ids: Set[str]) -> Dict[str, Any]:
+    """One claim as the listing shows it to a PERSON.
+
+    Name, description and inline content are passed as they are -- they are
+    model-written, and the client renders them as text -- and ``problems``
+    is what :func:`build_proposed_reference` would refuse today, so the
+    curator sees why Promote would fail before pressing it.
+    """
+    ref = claim["reference"]
+    row: Dict[str, Any] = {
+        "claim_id": claim["claim_id"],
+        "id": ref["id"],
+        "name": ref.get("name") if isinstance(ref.get("name"), str) else "",
+        "description": ref.get("description") if isinstance(ref.get("description"), str) else "",
+        "tags": claim_tags(claim),
+        "type": ref.get("type") if ref.get("type") in ("local", "inline") else "",
+    }
+    if row["type"] == "local" and isinstance(ref.get("path"), str):
+        row["path"] = ref["path"]
+    if row["type"] == "inline" and isinstance(ref.get("content"), str):
+        row["content"] = ref["content"][:INLINE_CLAIM_MAX_CHARS]
+    origin = ReferenceOrigin.from_dict(claim.get("origin"))
+    if origin is not None:
+        row["origin"] = origin.to_dict()
+    _entry, problems = build_proposed_reference(claim_as_args(claim), workspace=root,
+                                                catalog_ids=ids)
+    row["problems"] = problems
+    return row
+
+
+def _load_claim_file(path: str) -> Any:
+    """The JSON in ``path``, or ``None`` for a link, a non-file or bad JSON."""
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def list_claims(workspace: str) -> ClaimsListing:
+    """Every reference claim in ``workspace``, read the way a promotion reads one.
+
+    The claims directory is resolved inside the workspace
+    (:func:`~.contained_write.contained_dir`), a claim FILE that is a
+    symlink is not followed, and each record is re-checked with
+    :func:`~...claims.is_claim` -- the directory is model-writable.  A
+    workspace with no claims directory lists nothing, which is not an error.
+    Writes nothing; the owner gate applies to promoting, not to looking.
+    """
+    root = os.path.realpath(workspace)
+    try:
+        directory = contained_dir(root, CLAIMS_REL, create=False)
+    except PathLeavesRoot as exc:
+        return ClaimsListing(ok=False, category="unsafe_path", error=str(exc))
+    listing = ClaimsListing()
+    if not directory:
+        return listing
+    ids = catalog_ids(root)
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".json"):
+            continue
+        data = _load_claim_file(os.path.join(directory, name))
+        if is_claim(data) and name == f"{data['claim_id']}.json":
+            listing.claims.append(claim_row(data, root=root, ids=ids))
+        else:
+            listing.unreadable.append(name)
+    return listing
 
 
 def _fail(outcome: CurationOutcome, category: str, error: str) -> CurationOutcome:

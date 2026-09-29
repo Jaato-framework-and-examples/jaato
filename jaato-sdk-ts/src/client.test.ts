@@ -668,24 +668,51 @@ describe("JaatoClient session management", () => {
     assert.equal(getSent().length, 0);
   });
 
-  test("promote/dismissReferenceClaim send reference.* with the claim id", async () => {
+  test("reference claims: list and curate are answered by THEIR request_id", async () => {
     await client.close();
     installMockWebSocket();
     client = new JaatoClient({ url: "ws://localhost:8080" });
     await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
     if (lastInstance) lastInstance.sent = [];
-    await client.promoteReferenceClaim("20260929T100000Z-abcd1234");
-    await client.dismissReferenceClaim("20260929T100001Z-ef012345");
-    const [promote, dismiss] = getSent() as { command?: string; args?: string[] }[];
-    assert.equal(promote.command, "reference.promote");
-    assert.deepEqual(promote.args, ["20260929T100000Z-abcd1234"]);
-    assert.equal(dismiss.command, "reference.dismiss");
-    assert.deepEqual(dismiss.args, ["20260929T100001Z-ef012345"]);
+    const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const last = (): Record<string, unknown> =>
+      JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+
+    const listing = client.listReferenceClaims();
+    await tick();
+    const listReq = last();
+    assert.equal(listReq.type, EventTypeValue.REFERENCE_CLAIMS_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.REFERENCE_CLAIMS, request_id: "other", claims: [] });
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_CLAIMS, request_id: listReq.request_id,
+      claims: [{ claim_id: "c1" }], ok: true, may_curate: true,
+    });
+    const got = await listing;
+    assert.deepEqual(got.claims, [{ claim_id: "c1" }]);
+    assert.equal(got.may_curate, true);
+
+    for (const action of ["promote", "dismiss"] as const) {
+      const pending = action === "promote"
+        ? client.promoteReferenceClaim("20260929T100000Z-abcd1234")
+        : client.dismissReferenceClaim("20260929T100000Z-abcd1234");
+      await tick();
+      const req = last();
+      assert.equal(req.type, EventTypeValue.REFERENCE_CURATION_REQUEST);
+      assert.equal(req.action, action);
+      assert.equal(req.claim_id, "20260929T100000Z-abcd1234");
+      lastInstance!.emit({
+        type: EventTypeValue.REFERENCE_CURATION_RESULT, request_id: req.request_id,
+        action, claim_id: req.claim_id, ok: false, category: "not_owner",
+      });
+      const answer = await pending;
+      assert.equal(answer.category, "not_owner");
+    }
   });
 
-  test("reference curation is refused below protocol 1.32", async () => {
-    await assert.rejects(() => client.promoteReferenceClaim("x"), /reference\.promote/);
-    await assert.rejects(() => client.dismissReferenceClaim("x"), /reference\.dismiss/);
+  test("reference claim verbs are refused below protocol 1.32", async () => {
+    await assert.rejects(() => client.listReferenceClaims(), /listReferenceClaims/);
+    await assert.rejects(() => client.promoteReferenceClaim("x"), /promoteReferenceClaim/);
+    await assert.rejects(() => client.dismissReferenceClaim("x"), /dismissReferenceClaim/);
     assert.equal(getSent().length, 0);
   });
 
