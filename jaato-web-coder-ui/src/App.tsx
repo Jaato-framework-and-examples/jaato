@@ -10,6 +10,8 @@ import { SessionScreen } from "@/screens/SessionScreen";
 // (#1263), on workspace selection and on session start.
 import "@/app/bootstrapSkill";
 import "@/app/memories";
+import "@/app/referenceClaims";
+import "@/app/referenceCatalog";
 import "@/app/toolchainOffer";
 
 export default function App() {

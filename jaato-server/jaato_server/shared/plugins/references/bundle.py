@@ -455,6 +455,23 @@ def resolve_bundle_roots(
     )
 
 
+def embedding_text(source: ReferenceSource) -> str:
+    """The text a reference's vector is computed from.
+
+    ``name + description + tags + fetchHint``: what ``reconcile`` and
+    ``merge`` embed, what :func:`metadata_hash` fingerprints, and what a
+    selection is embedded from when the transitive cap ranks by
+    similarity.  One definition, so a query and the vectors it is compared
+    against are made from the same fields.
+    """
+    return "\n".join([
+        source.name,
+        source.description,
+        ",".join(sorted(source.tags)),
+        source.fetch_hint or "",
+    ])
+
+
 def metadata_hash(source: ReferenceSource) -> str:
     """Compute the canonical fingerprint stored in ``embedding.source_hash``.
 
@@ -475,13 +492,7 @@ def metadata_hash(source: ReferenceSource) -> str:
     Returns:
         A ``sha256:<hex>`` string.
     """
-    text = "\n".join([
-        source.name,
-        source.description,
-        ",".join(sorted(source.tags)),
-        source.fetch_hint or "",
-    ])
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(embedding_text(source).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
 

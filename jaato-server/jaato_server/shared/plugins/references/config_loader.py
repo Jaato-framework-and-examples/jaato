@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from jaato_server.shared.path_utils import normalize_path
 from .bundle import REFERENCE_NON_SOURCE_FILENAMES
 from .models import ReferenceSource, SourceType, InjectionMode, VALID_CONTENTS_KEYS
+from .links import link_errors
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,12 @@ def resolve_source_paths(
         )
 
 
+def _prefixed_link_errors(source: Dict[str, Any], prefix: str) -> List[str]:
+    """``link_errors`` for one ``sources[]`` entry, each naming the entry."""
+    return [f"{prefix}: {e}" for e in link_errors(source.get("links"),
+                                                  source_id=source.get("id"))]
+
+
 def validate_source(source: Dict[str, Any], index: int, errors: List[str]) -> None:
     """Validate a single source definition."""
     prefix = f"sources[{index}]"
@@ -318,6 +325,9 @@ def validate_source(source: Dict[str, Any], index: int, errors: List[str]) -> No
         errors.append(f"{prefix}: 'tags' must be an array")
     elif not all(isinstance(t, str) for t in tags):
         errors.append(f"{prefix}: 'tags' must contain only strings")
+
+    # Validate declared links (typed edges to other references)
+    errors.extend(_prefixed_link_errors(source, prefix))
 
     # Validate contents (typed subfolder declarations)
     contents = source.get("contents")
@@ -398,6 +408,9 @@ def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List
             errors.append("'tags' must be an array")
         elif not all(isinstance(t, str) for t in tags):
             errors.append("'tags' must contain only strings")
+
+    # Validate declared links (typed edges to other references)
+    errors.extend(link_errors(data.get("links"), source_id=data.get("id")))
 
     # Validate contents (typed subfolder declarations)
     contents = data.get("contents")

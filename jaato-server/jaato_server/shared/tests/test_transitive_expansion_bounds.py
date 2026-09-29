@@ -23,12 +23,14 @@ context and an authorization-surface question, not only a latency one.
 
 The guards here cover the three separable properties:
 
-1. **Determinism.**  ``pending`` and ``new_mentions`` are sets.  Iterating
-   them directly makes discovery order vary across processes (string hash
-   randomisation).  Unbounded that only shuffles the manifest; with a
-   limit it decides WHICH references survive -- measured at six of
-   twenty-five differing between two ``PYTHONHASHSEED`` values.  So the
-   sorting must land BEFORE the bound, not with it.
+1. **Determinism.**  ``pending`` is a set.  Iterating it directly makes
+   discovery order vary across processes (string hash randomisation).
+   Unbounded that only shuffles the manifest; with a limit it decides
+   WHICH references survive -- measured at six of twenty-five differing
+   between two ``PYTHONHASHSEED`` values.  Each depth is now collected
+   whole and ordered by ``links.rank_frontier``, whose last key is the id,
+   so the order is total; the ranking itself is guarded in
+   ``test_the_cap_keeps_what_the_links_rank_first.py``.
 2. **The bound.**  ``max_transitive_references`` binds regardless of link
    structure, which is what ``max_depth`` cannot do.
 3. **Honesty.**  A truncated neighbourhood that does not say so is read by
@@ -55,27 +57,17 @@ from jaato_server.shared.plugins.references.models import (
 from jaato_server.shared.tests.reversion import Reversion
 
 _TARGET = "jaato-server/jaato_server/shared/plugins/references/plugin.py"
+_LINKS = "jaato-server/jaato_server/shared/plugins/references/links.py"
 
 REVERSIONS = [
     Reversion(
-        target=_TARGET,
-        find="            for ref_id in sorted(pending):",
-        replace="            for ref_id in pending:",
+        target=_LINKS,
+        find="    return sorted(candidates, key=lambda cid: (-declared_votes(cid), nearness(cid), -len(candidates[cid]), cid))\n",
+        replace="    return list(candidates)\n",
         because=(
-            "iterating the frontier set directly makes expansion order "
-            "vary across processes; with a cap it changes WHICH references "
-            "survive"
-        ),
-        test=("TestDeterministicOrder::"
-              "test_the_frontier_is_expanded_in_sorted_order"),
-    ),
-    Reversion(
-        target=_TARGET,
-        find="                    for mentioned_id in sorted(new_mentions):",
-        replace="                    for mentioned_id in new_mentions:",
-        because=(
-            "discoveries appended in set order make the resolved list "
-            "non-reproducible, and it reaches the prompt-cache prefix"
+            "admitting a depth in set order makes the resolved list "
+            "non-reproducible (it reaches the prompt-cache prefix), and with "
+            "a cap it changes WHICH references survive"
         ),
         test=("TestDeterministicOrder::"
               "test_discoveries_are_appended_in_sorted_order"),
@@ -104,13 +96,13 @@ REVERSIONS = [
     Reversion(
         target=_TARGET,
         find=(
-            "                    for mentioned_id in sorted(new_mentions):\n"
-            "                        if self._expansion_at_limit("
+            "            for mentioned_id in order:\n"
+            "                if self._expansion_at_limit("
             "len(resolved_ids), limit):"
         ),
         replace=(
-            "                    for mentioned_id in sorted(new_mentions):\n"
-            "                        if False:"
+            "            for mentioned_id in order:\n"
+            "                if False:"
         ),
         because="without the inner check one frontier can overshoot the cap",
         test="TestTheBound::test_the_cap_stops_expansion",
@@ -170,12 +162,12 @@ class TestDeterministicOrder:
             "depth-1 discoveries were not appended in sorted order")
 
     def test_the_frontier_is_expanded_in_sorted_order(self) -> None:
-        """The frontier itself is walked ascending, not in set order.
+        """A depth with equal-ranked candidates is admitted ascending.
 
-        Eight parents each owning one child: the children's order in the
-        resolved list mirrors the order their parents were expanded in,
-        so this reads the frontier's iteration order without depending on
-        any one process's hash seed (1/8! to pass by luck).
+        Eight parents each owning one child: every child has one parent
+        and no declared edge, so the ranking falls through to the id and
+        the children appear sorted, not in their parents' set order
+        (1/8! to pass by luck).
         """
         parents = [f"p-{i}" for i in range(8)]
         cat = _catalog(

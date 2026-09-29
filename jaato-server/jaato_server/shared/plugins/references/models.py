@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from .links import ReferenceLink, parse_links
+
 
 # Valid keys for the ``contents`` mapping on a ReferenceSource.
 # Each key names a type of subfolder that a reference directory may contain.
@@ -68,6 +70,191 @@ class ReferenceContents:
             policies=data.get("policies"),
             scripts=data.get("scripts"),
         )
+
+
+#: This reference was copied into a bundle it did not start in, by
+#: ``references bundle merge``.  A string rather than a bool, and the same key
+#: ``generated_by`` uses (``jaato_sdk.events.ai_generated_by`` mints
+#: ``{"kind": "ai", ...}``), so a reader branches on ``kind`` identically
+#: wherever provenance appears and the vocabulary can grow without the field
+#: changing shape.
+ORIGIN_IMPORTED = "imported"
+
+#: This reference was PROPOSED by an agent through ``proposeReference``.  The
+#: plugin stamps it from the proposing session -- the model binding, the
+#: authenticated creator -- and never from the tool's arguments.
+ORIGIN_AGENT = "agent"
+
+
+@dataclass
+class ReferenceOrigin:
+    """Where a reference came from, as the framework OBSERVED it arrive.
+
+    Two arrivals are events the framework is present for, and each ``kind``
+    carries only the fields its stamper can observe:
+
+    * :data:`ORIGIN_IMPORTED` -- copied in from another bundle by
+      ``merge_bundle``: ``bundle``, ``source_id``, ``at``.
+    * :data:`ORIGIN_AGENT` -- proposed by an agent through
+      ``proposeReference``: ``generated_by`` (the model binding, the
+      ``ai_generated_by`` shape a memory carries), ``created_by`` (the
+      session's authenticated creator, the ``get_client_user`` chain, never
+      an environment value), ``claim_id``, ``at``.
+
+    A reference authored by a human or emitted by ``gen-references`` is not
+    an event the framework witnesses, so it carries no origin at all; a
+    field naming an author with no stamper would be an inert mechanism,
+    which is worse than an absent one.
+
+    Absent means **origin unobserved**, never "authored here".  A reference
+    that predates this field, one hand-written into the catalog and one
+    installed by ``bundle unpack`` (which copies whole directories rather
+    than rewriting each reference) all carry ``None``, and none of the three
+    may be read as a claim.
+
+    Why per-REFERENCE rather than per-bundle, which is where the federation
+    unit otherwise lives: ``merge_bundle`` copies source references *into the
+    target bundle's own directory*, so after a merge the source bundle
+    boundary is gone.  Bundle-level provenance would be erased by exactly the
+    operation that creates foreign references, and is the one shape that
+    cannot survive it.
+
+    Attributes:
+        kind: What was observed: :data:`ORIGIN_IMPORTED` or
+            :data:`ORIGIN_AGENT`.  An unknown string round-trips untouched.
+        bundle: The name of the bundle it was copied FROM.
+        source_id: The id it carried in that bundle.  ``bundle merge
+            --prefix`` renames on collision, so the local id is not
+            necessarily the one the other workspace knows it by, and an
+            operator reconciling two catalogs needs the one that is.
+        at: ISO-8601 UTC instant of the copy, or of the proposal.
+        generated_by: ``{"kind": "ai", provider, model, session_id,
+            agent_id}`` of the proposing session (agent kind only).
+        created_by: The proposing session's authenticated creator
+            (``app:user`` on WS, the OS account on IPC).  ``None`` when the
+            transport authenticated nobody -- absence, not a guess.
+        claim_id: The claim this reference was proposed as, so a promoted
+            entry can be traced back to the claim file a curator read.
+        curated_by: Who PROMOTED the claim into the catalog, stamped by the
+            daemon from the connection that asked (``{"kind": "human",
+            "via": "reference.promote", "user": ...}``, the shape a memory's
+            ``curated_by`` has).  Only a promoted agent reference carries it;
+            a claim still in the claims directory never does, and one that
+            says so was written by something other than the promotion verb.
+        witnessed_by: Who APPROVED the ``proposeReference`` call at the
+            permission prompt, when a person was asked (``{"via":
+            "permission-prompt", "method", "user"?, "approver"?,
+            "edited"?}``, :mod:`jaato_server.shared.call_witness`).  Absent
+            whenever the policy decided without asking -- which is the
+            default, since ``proposeReference`` is auto-approved unless
+            ``plugin_configs.references.witness_proposals`` is set.  Like
+            every other field on a claim it is written by the runner into a
+            model-writable file, so it is carried to the catalog AS
+            RECORDED; ``curated_by`` is the stamp the daemon makes itself.
+    """
+
+    kind: str
+    bundle: Optional[str] = None
+    source_id: Optional[str] = None
+    at: Optional[str] = None
+    generated_by: Optional[Dict[str, Any]] = None
+    created_by: Optional[str] = None
+    claim_id: Optional[str] = None
+    curated_by: Optional[Dict[str, Any]] = None
+    witnessed_by: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize, omitting keys whose value was never established.
+
+        Absent rather than ``null``, the rule ``ai_generated_by`` follows:
+        a key that is not there is "not measured", and one rendered ``null``
+        invites a reader to treat the absence as a measured negative.
+        """
+        payload: Dict[str, Any] = {"kind": self.kind}
+        for key, value in (("bundle", self.bundle),
+                           ("source_id", self.source_id),
+                           ("at", self.at),
+                           ("generated_by", self.generated_by),
+                           ("created_by", self.created_by),
+                           ("claim_id", self.claim_id),
+                           ("curated_by", self.curated_by),
+                           ("witnessed_by", self.witnessed_by)):
+            if value:
+                payload[key] = value
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional['ReferenceOrigin']:
+        """Create from a dict, or ``None`` when there is nothing to read.
+
+        A payload with no ``kind`` answers ``None`` rather than inventing
+        one: this field exists to say what was observed, so a record that
+        does not say must not be made to.
+        """
+        if not isinstance(data, dict):
+            return None
+        kind = data.get("kind")
+        if not isinstance(kind, str) or not kind:
+            return None
+        return cls(
+            kind=kind,
+            bundle=data.get("bundle") or None,
+            source_id=data.get("source_id") or None,
+            at=data.get("at") or None,
+            generated_by=_dict_or_none(data.get("generated_by")),
+            created_by=data.get("created_by") or None,
+            claim_id=data.get("claim_id") or None,
+            curated_by=_dict_or_none(data.get("curated_by")),
+            witnessed_by=_dict_or_none(data.get("witnessed_by")),
+        )
+
+    def describe(self) -> str:
+        """One human/model-readable clause naming the arrival."""
+        if self.kind == ORIGIN_IMPORTED:
+            return self._describe_imported()
+        if self.kind == ORIGIN_AGENT:
+            return self._describe_agent()
+        return self.kind
+
+    def _describe_imported(self) -> str:
+        where = f" from bundle '{self.bundle}'" if self.bundle else ""
+        when = f" on {self.at}" if self.at else ""
+        alias = (f" (known there as '{self.source_id}')"
+                 if self.source_id else "")
+        return f"imported{where}{when}{alias}"
+
+    def _describe_agent(self) -> str:
+        gen = self.generated_by or {}
+        agent = f" agent '{gen['agent_id']}'" if gen.get("agent_id") else " an agent"
+        binding = "/".join(v for v in (gen.get("provider"), gen.get("model")) if v)
+        model = f" ({binding})" if binding else ""
+        session = f" in session {gen['session_id']}" if gen.get("session_id") else ""
+        user = f" for {self.created_by}" if self.created_by else ""
+        when = f" on {self.at}" if self.at else ""
+        return (f"proposed by{agent}{model}{session}{user}{when}"
+                f"{_witness_clause(self.witnessed_by)}"
+                f"{_curator_clause(self.curated_by)}")
+
+
+def _witness_clause(witnessed_by: Optional[Dict[str, Any]]) -> str:
+    """``, approved at the prompt by X`` -- or ``""`` when nobody was asked."""
+    if not witnessed_by:
+        return ""
+    who = witnessed_by.get("user") or witnessed_by.get("approver")
+    return f", approved at the prompt by {who}" if who else ", approved at the prompt"
+
+
+def _curator_clause(curated_by: Optional[Dict[str, Any]]) -> str:
+    """``, promoted by X`` -- or ``""`` for a claim not yet promoted."""
+    if not curated_by:
+        return ""
+    who = curated_by.get("user")
+    return f", promoted by {who}" if who else ", promoted"
+
+
+def _dict_or_none(value: Any) -> Optional[Dict[str, Any]]:
+    """A non-empty dict, else ``None`` -- a malformed stamp reads as absent."""
+    return dict(value) if isinstance(value, dict) and value else None
 
 
 class SourceType(Enum):
@@ -173,10 +360,52 @@ class ReferenceSource:
     # directory the JSON file lives in. See ``bundle.Bundle``.
     bundle_name: str = ""
 
+    # Where this reference came from, when the framework observed it arrive
+    # (a ``bundle merge`` copy).  ``None`` = origin unobserved, which covers
+    # a hand-authored reference and one predating the field alike -- see
+    # ``ReferenceOrigin``.
+    origin: Optional[ReferenceOrigin] = None
+
+    # Declared, typed edges to other references (``links.py``): what a
+    # selection expands (``depends-on``), hints (``elaborates``), routes
+    # (``supersedes``) or only lists (``contradicts``).  Empty = none
+    # declared; the mentions in the body are still walked.
+    links: List[ReferenceLink] = field(default_factory=list)
+
+    def _links_lines(self) -> List[str]:
+        """The ``**Links**`` line naming this reference's declared edges.
+
+        Where the MODEL reads the reference, so it can navigate by meaning
+        (``depends on `b`; supersedes `c```) rather than only by the
+        mentions it happens to notice.  A method for the same reason as
+        :meth:`_origin_lines`: ``to_instruction`` is on the complexity
+        ratchet.
+        """
+        if not self.links:
+            return []
+        rendered = "; ".join(f"{link.rel.replace('-', ' ')} `{link.to}`" for link in self.links)
+        return [f"**Links**: {rendered}"]
+
+    def _origin_lines(self) -> List[str]:
+        """The ``**Origin**`` line, or nothing when arrival was unobserved.
+
+        Named where the MODEL reads the reference, not only in an operator
+        listing: content copied in from another workspace is third-party, and
+        a model weighing it should know that at the point of use.  Stated,
+        never enforced -- this annotates, it does not fence (the wikiLLM
+        brainstorm, §8, is where the fence is argued for).
+
+        A method rather than a branch inside :meth:`to_instruction` because
+        that function sits on the complexity ratchet.
+        """
+        if self.origin is None:
+            return []
+        return [f"**Origin**: {self.origin.describe()}"]
+
     def to_instruction(self) -> str:
         """Generate instruction text for the model describing how to access this reference."""
         if self.type == SourceType.INLINE:
-            return f"### {self.name}\n\n{self.content}"
+            return "\n\n".join([f"### {self.name}", *self._links_lines(), f"{self.content}"])
 
         parts = [f"### {self.name}"]
         parts.append(f"*{self.description}*")
@@ -184,6 +413,9 @@ class ReferenceSource:
 
         if self.tags:
             parts.append(f"**Tags**: {', '.join(self.tags)}")
+
+        parts.extend(self._origin_lines())
+        parts.extend(self._links_lines())
 
         if self.type == SourceType.LOCAL:
             # Use resolved path if available, otherwise original path
@@ -288,6 +520,12 @@ class ReferenceSource:
         if self.embedding is not None:
             result["embedding"] = self.embedding.to_dict()
 
+        if self.origin is not None:
+            result["origin"] = self.origin.to_dict()
+
+        if self.links:
+            result["links"] = [link.to_dict() for link in self.links]
+
         return result
 
     @classmethod
@@ -322,6 +560,8 @@ class ReferenceSource:
             tags=data.get("tags", []),
             contents=ReferenceContents.from_dict(data.get("contents")),
             embedding=EmbeddingMetadata.from_dict(data.get("embedding")),
+            origin=ReferenceOrigin.from_dict(data.get("origin")),
+            links=parse_links(data.get("links")),
         )
 
 

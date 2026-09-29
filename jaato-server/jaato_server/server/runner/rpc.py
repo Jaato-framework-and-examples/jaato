@@ -247,6 +247,7 @@ WORK_LANE_METHODS = frozenset({
     "session.send_message",      # runs an entire turn
     "session.replay_messages",   # re-runs the model loop
     "session.execute_user_command",   # runs a user command
+    "session.embed_texts",       # runs the embedding model (may load it)
     "echo",                      # §8.3 RPC-overhead benchmark; deliberately
                                  # in the work lane so a benchmark cannot
                                  # measure the control lane's latency
@@ -289,6 +290,12 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # persistence`` in ``RunnerRPC._SESSION_READS``.
     "session.restore_permission_persistence":
         "_handle_session_restore_permission_persistence",
+    # Vectors for the daemon's reconcile of a bundle's index after a
+    # reference promotion.  The daemon writes ``.jaato/references/**``
+    # (the runner's profile denies it); the embedding model lives here.
+    # WORK lane (``WORK_LANE_METHODS``): the first call may load the model.
+    # A stopgap for #1422: goes once the runner may write its own catalog.
+    "session.embed_texts": "_handle_session_embed_texts",
 }
 
 #: How many recently-registered request ids the reader thread remembers,
@@ -1925,6 +1932,36 @@ class RunnerRPC:
                 "stage": "call",
             }
         return True, answer
+
+    def _handle_session_embed_texts(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
+        """``session.embed_texts`` -- vectors from THIS runner's references plugin.
+
+        ``args = {"texts": [str, ...]}``.  The body is
+        ``ReferencesPlugin.embed_texts``: it writes nothing, so the answer
+        is the same whichever process asks.  The daemon uses it to
+        reconcile a bundle's vector index after a promotion; see
+        ``server/reference_curation.py``.
+
+        Returns:
+            ``(True, <answer>)`` -- the answer carries its own ``ok`` /
+            ``category`` (``no_plugin`` when the session does not load
+            ``references``).  ``(False, {"error", "stage"})`` for
+            ``no_host`` / ``no_session`` / ``call``.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        plugin = registry.get_plugin("references") if registry is not None else None
+        if plugin is None or not hasattr(plugin, "embed_texts"):
+            return True, {"ok": False, "category": "no_plugin",
+                          "error": "this session does not load the references plugin"}
+        try:
+            return True, plugin.embed_texts(args.get("texts"))
+        except Exception as exc:  # noqa: BLE001 -- boundary
+            return False, {"error": f"session.embed_texts: {type(exc).__name__}: {exc}",
+                           "stage": "call"}
 
     @staticmethod
     def _notebook_boundary_kind(registry: Any) -> Optional[str]:

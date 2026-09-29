@@ -106,7 +106,22 @@ def path_like(token: str) -> bool:
     if token.startswith('@') and '/' in token and not token.startswith('@/'):
         return False
     return (token.startswith('/') or '..' in token or
-            token.startswith('./') or token.startswith('~'))
+            token.startswith('./') or token.startswith('~') or
+            names_jaato_dir(token))
+
+
+def names_jaato_dir(token: str) -> bool:
+    """True for a bare relative token naming the workspace's ``.jaato``.
+
+    ``.jaato`` and ``.jaato/...`` carry none of the prefixes
+    :func:`path_like` looks for, so without this ``cat .jaato/x`` and
+    ``echo > .jaato/references-claims/c.json`` were never checked:
+    a bare relative path cannot leave the workspace, which is all the
+    other prefixes are about, but ``.jaato`` is refused INSIDE it
+    (``check_path_with_jaato_containment``) unless ``sandbox add``
+    authorized it, the rule ``file_edit`` and ``readFile`` already apply.
+    """
+    return token == ".jaato" or token.startswith((".jaato/", ".jaato\\"))
 
 
 def arg_path_like(arg: str) -> bool:
@@ -117,7 +132,8 @@ def arg_path_like(arg: str) -> bool:
     exist to avoid mis-reading shell words) must not weaken the check.
     """
     return (arg.startswith('/') or '..' in arg or
-            arg.startswith('./') or arg.startswith('~'))
+            arg.startswith('./') or arg.startswith('~') or
+            names_jaato_dir(arg))
 
 
 def effective_command_name(segment: Segment) -> str:

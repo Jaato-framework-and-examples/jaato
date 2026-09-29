@@ -27,6 +27,7 @@ from jaato_server.shared.trace import trace as _trace_write
 from jaato_server.shared.token_accounting import TokenLedger
 from jaato_server.shared.secret_redaction import current_redactor
 from jaato_server.shared.tool_arg_coercion import coerce_args_to_schema
+from jaato_server.shared.call_witness import bound_call_witness, witness_from_verdict
 from jaato_sdk.plugins.base import OutputCallback
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -316,12 +317,18 @@ class PermissionGateOutcome(NamedTuple):
             is ``False``: ``{'error': ..., '_permission': meta}`` for a
             policy refusal, or an error-only dict when the check itself
             raised (which denies by default).  ``None`` when allowed.
+        witness: Who approved the call at the PROMPT, when a person was
+            asked (:func:`~jaato_server.shared.call_witness.witness_from_verdict`).
+            ``None`` for every policy decision.  :meth:`ToolExecutor._execute_impl`
+            binds it for the duration of the tool body so the tool can read
+            it (``current_call_witness``); it is never injected into a result.
     """
 
     allowed: bool
     meta: Optional[Dict[str, Any]]
     args: Dict[str, Any]
     denial: Optional[Dict[str, Any]]
+    witness: Optional[Dict[str, Any]] = None
 
 
 class ToolExecutor:
@@ -673,7 +680,10 @@ class ToolExecutor:
                 print(f"[ai_tool_runner] using edited args for {name}")
         if debug:
             print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
-        return PermissionGateOutcome(True, permission_meta, args, None)
+        return PermissionGateOutcome(
+            True, permission_meta, args, None,
+            witness_from_verdict(True, perm_info),
+        )
 
     def _permission_gate_failure(
         self,
@@ -1814,10 +1824,14 @@ class ToolExecutor:
             if ctx:
                 ctx.__enter__()
             try:
-                if fn.__name__ == 'mcp_based_tool':
-                    result = fn(name, args)
-                else:
-                    result = fn(args)
+                # The tool body may record who approved it at the prompt
+                # (``current_call_witness``); bound even when None so a
+                # pool thread cannot leak a previous call's witness.
+                with bound_call_witness(gate.witness):
+                    if fn.__name__ == 'mcp_based_tool':
+                        result = fn(name, args)
+                    else:
+                        result = fn(args)
             finally:
                 if ctx:
                     ctx.__exit__(None, None, None)

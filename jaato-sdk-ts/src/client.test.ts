@@ -17,6 +17,7 @@ import {
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_REFERENCE_CURATION_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
   MIN_WORKSPACE_PICKER_PROTOCOL,
@@ -665,6 +666,90 @@ describe("JaatoClient session management", () => {
 
   test("toggleWorkspaceIgnore is refused below protocol 1.12", async () => {
     await assert.rejects(() => client.toggleWorkspaceIgnore("x"), /workspace\.ignore/);
+    assert.equal(getSent().length, 0);
+  });
+
+  test("reference claims: list and curate are answered by THEIR request_id", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const last = (): Record<string, unknown> =>
+      JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+
+    const listing = client.listReferenceClaims();
+    await tick();
+    const listReq = last();
+    assert.equal(listReq.type, EventTypeValue.REFERENCE_CLAIMS_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.REFERENCE_CLAIMS, request_id: "other", claims: [] });
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_CLAIMS, request_id: listReq.request_id,
+      claims: [{ claim_id: "c1" }], ok: true, may_curate: true,
+    });
+    const got = await listing;
+    assert.deepEqual(got.claims, [{ claim_id: "c1" }]);
+    assert.equal(got.may_curate, true);
+
+    for (const action of ["promote", "dismiss"] as const) {
+      const pending = action === "promote"
+        ? client.promoteReferenceClaim("20260929T100000Z-abcd1234")
+        : client.dismissReferenceClaim("20260929T100000Z-abcd1234");
+      await tick();
+      const req = last();
+      assert.equal(req.type, EventTypeValue.REFERENCE_CURATION_REQUEST);
+      assert.equal(req.action, action);
+      assert.equal(req.claim_id, "20260929T100000Z-abcd1234");
+      lastInstance!.emit({
+        type: EventTypeValue.REFERENCE_CURATION_RESULT, request_id: req.request_id,
+        action, claim_id: req.claim_id, ok: false, category: "not_owner",
+      });
+      const answer = await pending;
+      assert.equal(answer.category, "not_owner");
+    }
+  });
+
+  test("reference catalog verbs correlate their answers", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const last = (): Record<string, unknown> =>
+      JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+
+    const listing = client.listReferenceCatalog();
+    await tick();
+    const listReq = last();
+    assert.equal(listReq.type, EventTypeValue.REFERENCE_CATALOG_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.REFERENCE_CATALOG, request_id: "other", references: [] });
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_CATALOG, request_id: listReq.request_id,
+      references: [{ id: "adr-2" }], ok: true, may_curate: true,
+    });
+    assert.deepEqual((await listing).references, [{ id: "adr-2" }]);
+
+    const update = client.updateReferenceLinks("adr-2", [{ to: "adr-1", rel: "supersedes" }]);
+    await tick();
+    const req = last();
+    assert.equal(req.type, EventTypeValue.REFERENCE_LINKS_UPDATE_REQUEST);
+    assert.equal(req.reference_id, "adr-2");
+    assert.deepEqual(req.links, [{ to: "adr-1", rel: "supersedes" }]);
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_LINKS_UPDATE_RESULT, request_id: req.request_id,
+      reference_id: "adr-2", ok: true, links: [{ to: "adr-1", rel: "supersedes" }],
+    });
+    assert.equal((await update).ok, true);
+  });
+
+  test("reference claim verbs are refused below protocol 1.33", async () => {
+    await assert.rejects(() => client.listReferenceClaims(), /listReferenceClaims/);
+    await assert.rejects(() => client.promoteReferenceClaim("x"), /promoteReferenceClaim/);
+    await assert.rejects(() => client.dismissReferenceClaim("x"), /dismissReferenceClaim/);
+    await assert.rejects(() => client.listReferenceCatalog(), /listReferenceCatalog/);
+    await assert.rejects(() => client.updateReferenceLinks("x", []), /updateReferenceLinks/);
     assert.equal(getSent().length, 0);
   });
 

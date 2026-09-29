@@ -70,6 +70,10 @@ import {
   type WorkspaceFilesSearchResultEvent,
   type WorkspaceFileFetchRequest,
   type MemoryListEvent,
+  type ReferenceClaimsEvent,
+  type ReferenceCurationResultEvent,
+  type ReferenceCatalogEvent,
+  type ReferenceLinksUpdateResultEvent,
   type MemoryGetResultEvent,
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
@@ -166,6 +170,17 @@ export const MIN_FILE_FETCH_PROTOCOL = "1.20";
  * ``workspace.files.search``, so the call is refused rather than timed out.
  */
 export const MIN_FILE_SEARCH_PROTOCOL = "1.32";
+
+/**
+ * Protocol floor for {@link JaatoClient.listReferenceClaims},
+ * {@link JaatoClient.promoteReferenceClaim} and
+ * {@link JaatoClient.dismissReferenceClaim}, and for the catalog's
+ * {@link JaatoClient.listReferenceCatalog} /
+ * {@link JaatoClient.updateReferenceLinks}.  Same rule as
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verbs,
+ * and "promoted" would describe a catalog nobody changed.
+ */
+export const MIN_REFERENCE_CURATION_PROTOCOL = "1.33";
 
 /**
  * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
@@ -1206,6 +1221,139 @@ export class JaatoClient {
       command: "workspace.ignore",
       args: [path],
     } as CommandRequest);
+  }
+
+  /**
+   * List the reference claims agents proposed in this workspace (protocol
+   * 1.33).  An agent's ``proposeReference`` writes a CLAIM under
+   * ``.jaato/references-claims/``, never a catalog entry; this is the
+   * curator's view of them, read by the daemon.  Each row carries the
+   * proposed entry, its recorded ``origin`` (who proposed it, and
+   * ``witnessed_by`` when a person approved the call) and ``problems`` --
+   * why a promotion would be refused right now.  ``may_curate`` says
+   * whether this connection may act.  ``ok === false`` means the claims
+   * could not be read, never "nothing proposed".
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async listReferenceClaims(options: { timeoutMs?: number } = {}): Promise<ReferenceClaimsEvent> {
+    return this._quietRequest<ReferenceClaimsEvent>(
+      "listReferenceClaims",
+      { type: EventTypeValue.REFERENCE_CLAIMS_REQUEST },
+      EventTypeValue.REFERENCE_CLAIMS,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference-claim verbs (upgrade the daemon)",
+      "refc",
+    );
+  }
+
+  /**
+   * Promote an agent's reference claim into the workspace catalog
+   * (protocol 1.33).  The daemon re-validates it, writes
+   * ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamped
+   * with this connection's identity as ``origin.curated_by``, and removes
+   * the claim.  When the destination bundle has a vector index the daemon
+   * reconciles it with vectors from this connection's session and says how
+   * in ``reconcile``.  Only the workspace owner may, on an owned workspace.
+   * Resolves with the daemon's answer; a refusal is ``ok === false`` with a
+   * ``category``.  The default timeout is generous (180 s): reconciling may
+   * wait on the session loading its embedding model.  Mirror of Python
+   * ``IPCClient.promote_reference_claim``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async promoteReferenceClaim(
+    claimId: string,
+    options: { bundle?: string; timeoutMs?: number } = {},
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._sendReferenceCuration(
+      "promote", claimId, options.timeoutMs ?? 180_000, options.bundle ?? "",
+    );
+  }
+
+  /**
+   * Drop an agent's reference claim without promoting it (protocol 1.33).
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async dismissReferenceClaim(
+    claimId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._sendReferenceCuration("dismiss", claimId, options.timeoutMs);
+  }
+
+  /**
+   * List this workspace's reference catalog with its typed links (protocol
+   * 1.33).  Every reference in ``.jaato/references/`` and its sub-bundles,
+   * read by the daemon: each row carries its declared ``links`` (a target
+   * this catalog does not hold is ``dangling``) and ``linked_from``, the
+   * edges pointing at it.  ``may_curate`` says whether this connection may
+   * edit them.  Mirror of Python ``IPCClient.list_reference_catalog``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async listReferenceCatalog(options: { timeoutMs?: number } = {}): Promise<ReferenceCatalogEvent> {
+    return this._quietRequest<ReferenceCatalogEvent>(
+      "listReferenceCatalog",
+      { type: EventTypeValue.REFERENCE_CATALOG_REQUEST },
+      EventTypeValue.REFERENCE_CATALOG,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference catalog verbs (upgrade the daemon)",
+      "refk",
+    );
+  }
+
+  /**
+   * Replace one catalog reference's typed links (protocol 1.33).  ``links``
+   * is the complete new list of ``{to, rel, note?}``; ``[]`` removes every
+   * declared edge.  The daemon validates them, writes only the reference
+   * file's ``links`` key, and answers with the links as written and any
+   * ``warnings``.  Only the workspace owner may, on an owned workspace.
+   * Mirror of Python ``IPCClient.update_reference_links``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async updateReferenceLinks(
+    referenceId: string,
+    links: Array<{ to: string; rel: string; note?: string }>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceLinksUpdateResultEvent> {
+    return this._quietRequest<ReferenceLinksUpdateResultEvent>(
+      "updateReferenceLinks",
+      {
+        type: EventTypeValue.REFERENCE_LINKS_UPDATE_REQUEST,
+        reference_id: referenceId,
+        links,
+      },
+      EventTypeValue.REFERENCE_LINKS_UPDATE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference catalog verbs (upgrade the daemon)",
+      "refk",
+    );
+  }
+
+  private async _sendReferenceCuration(
+    action: "promote" | "dismiss",
+    claimId: string,
+    timeoutMs?: number,
+    bundle = "",
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._quietRequest<ReferenceCurationResultEvent>(
+      `${action}ReferenceClaim`,
+      {
+        type: EventTypeValue.REFERENCE_CURATION_REQUEST, action, claim_id: claimId,
+        ...(bundle ? { bundle } : {}),
+      },
+      EventTypeValue.REFERENCE_CURATION_RESULT,
+      timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference-claim verbs (upgrade the daemon)",
+      "refc",
+    );
   }
 
   /**

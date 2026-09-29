@@ -92,6 +92,14 @@ from jaato_sdk.events import (
     PermissionSetDefaultRequest,
     PermissionPolicySnapshotRequest,
     MemoryListRequest,
+    ReferenceClaimsEvent,
+    ReferenceCatalogEvent,
+    ReferenceCatalogRequest,
+    ReferenceClaimsRequest,
+    ReferenceCurationRequest,
+    ReferenceLinksUpdateRequest,
+    ReferenceLinksUpdateResultEvent,
+    ReferenceCurationResultEvent,
     MemoryListEvent,
     MemoryGetRequest,
     MemoryGetResultEvent,
@@ -2201,6 +2209,143 @@ class IPCClient:
             command="workspace.ignore",
             args=[path],
         ))
+
+    #: Floor for ``reference.promote`` / ``reference.dismiss`` (1.33).  A
+    #: missing verb (the 1.7 rule): an older daemon ignores the command, and
+    #: "promoted" would describe a catalog nobody changed.
+    MIN_REFERENCE_CURATION_PROTOCOL = "1.33"
+
+    async def list_reference_claims(
+        self, *, timeout: float = 10.0,
+    ) -> ReferenceClaimsEvent:
+        """List the reference claims agents proposed in this workspace (1.33).
+
+        An agent proposes a reference with ``proposeReference``; that writes
+        a CLAIM under ``.jaato/references-claims/``, never a catalog entry.
+        This is the curator's view of them, read by the daemon: each row
+        carries the proposed entry, the claim's recorded ``origin`` (who
+        proposed it, and ``witnessed_by`` when a person approved the call)
+        and ``problems`` -- why a promotion would be refused right now.
+        ``may_curate`` says whether this connection may act on them.  The
+        answer's ``ok`` is ``False`` when the claims could not be read, never
+        "nothing proposed".
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("list_reference_claims")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "list_reference_claims", ReferenceClaimsRequest(), timeout, "refc")
+
+    async def promote_reference_claim(
+        self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
+    ) -> ReferenceCurationResultEvent:
+        """Promote an agent's reference claim into the workspace catalog (1.33).
+
+        The daemon re-validates the claim, writes
+        ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamping
+        ``origin.curated_by`` from this connection's identity, and removes
+        the claim.  When the destination bundle has a vector index, the
+        daemon reconciles it with vectors from this connection's session and
+        reports the outcome in ``reconcile``.  Only the workspace owner may,
+        on an owned workspace.  Returns the daemon's answer; a refusal is
+        ``ok=False`` with a ``category``.
+
+        Args:
+            claim_id: The claim's id, as :meth:`list_reference_claims` or
+                ``listReferences`` shows it.
+            bundle: A workspace-tier sub-bundle to promote into (one of the
+                listing's ``bundles``); ``""`` for the catalog root.
+            timeout: Generous by default: reconciling an index may wait on
+                the session loading its embedding model.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        return await self._send_reference_curation("promote", claim_id, timeout, bundle)
+
+    async def dismiss_reference_claim(
+        self, claim_id: str, *, timeout: float = 10.0,
+    ) -> ReferenceCurationResultEvent:
+        """Drop an agent's reference claim without promoting it (1.33).
+
+        Same gate and answer as :meth:`promote_reference_claim`; the claim
+        file is removed and the catalog is not touched.
+        """
+        return await self._send_reference_curation("dismiss", claim_id, timeout)
+
+    async def _send_reference_curation(
+        self, action: str, claim_id: str, timeout: float, bundle: str = "",
+    ) -> ReferenceCurationResultEvent:
+        method = f"{action}_reference_claim"
+        self._require_reference_curation_protocol(method)
+        return await self._correlated_request(  # type: ignore[return-value]
+            method,
+            ReferenceCurationRequest(action=action, claim_id=claim_id, bundle=bundle),
+            timeout, "refc")
+
+    async def list_reference_catalog(
+        self, *, timeout: float = 10.0,
+    ) -> ReferenceCatalogEvent:
+        """List this workspace's reference catalog with its typed links (1.33).
+
+        Every reference in ``.jaato/references/`` and its sub-bundles, read
+        by the daemon: each row carries its declared ``links`` (a target
+        this catalog does not hold is marked ``dangling``) and
+        ``linked_from``, the edges pointing at it.  ``may_curate`` says
+        whether this connection may edit them.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("list_reference_catalog")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "list_reference_catalog", ReferenceCatalogRequest(), timeout, "refk")
+
+    async def update_reference_links(
+        self, reference_id: str, links: List[Dict[str, Any]], *,
+        timeout: float = 10.0,
+    ) -> ReferenceLinksUpdateResultEvent:
+        """Replace one catalog reference's typed links (1.33).
+
+        ``links`` is the complete new list of ``{to, rel, note?}``; ``[]``
+        removes every declared edge.  The daemon validates them, writes only
+        the reference file's ``links`` key, and answers with the links as
+        written and any ``warnings`` (a target not in the catalog, a
+        ``supersedes`` another reference also declares).  Only the workspace
+        owner may, on an owned workspace.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("update_reference_links")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "update_reference_links",
+            ReferenceLinksUpdateRequest(reference_id=reference_id, links=list(links)),
+            timeout, "refk")
+
+    def _require_reference_curation_protocol(self, method: str) -> None:
+        """Refuse a daemon that would ignore the reference-claim verbs.
+
+        One below 1.33 drops the request silently: the caller would wait
+        out its timeout, or read "promoted" about a catalog nobody changed.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_REFERENCE_CURATION_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"{method}: this daemon speaks protocol {spoken} and does not "
+                f"serve the reference-claim verbs (needs >= "
+                f"{self.MIN_REFERENCE_CURATION_PROTOCOL}).  Upgrade the daemon.")
 
     MIN_SESSION_MESSAGE_PROTOCOL = "1.23"
 

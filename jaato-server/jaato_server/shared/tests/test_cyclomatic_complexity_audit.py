@@ -419,7 +419,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._get_reference_content": 17,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._post_membership_change": 19,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._references_completions": 19,
-    "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._resolve_transitive_references": 16,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin.get_system_instructions": 29,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin.initialize": 73,
     "jaato-server/jaato_server/shared/plugins/references/reconcile.py::_reconcile_locked": 31,

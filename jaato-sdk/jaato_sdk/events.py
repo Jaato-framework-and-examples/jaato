@@ -566,7 +566,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # when the walk stopped at its bound, so a partial search never reads as
 # "no such file".  A missing VERB (the 1.7 rule): an older daemon never
 # answers, so the TS SDK refuses below ``MIN_FILE_SEARCH_PROTOCOL``.
-PROTOCOL_VERSION = "1.32"
+#
+# 1.33 -- reference claims, the curator's half of the agent write path.
+# ``ReferenceClaimsRequest`` -> ``ReferenceClaimsEvent`` lists the agent
+# proposals (``proposeReference`` claims) in the caller's workspace, with
+# ``may_curate``; ``ReferenceCurationRequest`` (or the typable
+# ``reference.promote <claim_id> [--bundle <name>]`` / ``reference.dismiss``
+# commands) -> ``ReferenceCurationResultEvent`` turns one into a catalog
+# entry or drops it.  The daemon does the write, because a confined runner
+# is write-denied on the catalog.  Gated by the memory rail's owner rule.
+# NEW verbs: an older daemon ignores them silently, and "promoted" would
+# describe a catalog nobody changed, so the SDKs refuse below
+# ``MIN_REFERENCE_CURATION_PROTOCOL``.  The same version carries the
+# curator's view of the CATALOG: ``ReferenceCatalogRequest`` ->
+# ``ReferenceCatalogEvent`` lists every reference with its typed links both
+# ways, and ``ReferenceLinksUpdateRequest`` ->
+# ``ReferenceLinksUpdateResultEvent`` replaces one reference's links, again
+# written by the daemon under the owner rule.
+PROTOCOL_VERSION = "1.33"
 
 
 # =============================================================================
@@ -788,6 +805,14 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
+    REFERENCE_CURATION_RESULT = "reference.curation.result"  # Answer to `reference.promote|dismiss` (1.33)
+    REFERENCE_CLAIMS = "reference.claims"  # Answer to ReferenceClaimsRequest (1.33)
+    REFERENCE_CLAIMS_REQUEST = "reference.claims.request"  # Client -> Server (1.33)
+    REFERENCE_CURATION_REQUEST = "reference.curation.request"  # Client -> Server (1.33)
+    REFERENCE_CATALOG = "reference.catalog"  # Answer to ReferenceCatalogRequest (1.33)
+    REFERENCE_CATALOG_REQUEST = "reference.catalog.request"  # Client -> Server (1.33)
+    REFERENCE_LINKS_UPDATE_REQUEST = "reference.links.request"  # Client -> Server (1.33)
+    REFERENCE_LINKS_UPDATE_RESULT = "reference.links.result"  # Answer to ReferenceLinksUpdateRequest (1.33)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
@@ -2781,6 +2806,214 @@ class WorkspaceIgnoreResultEvent(Event):
     ok: bool = True
     error: str = ""
     gitignore_path: str = ""
+
+
+class ReferenceCurationResultEvent(Event):
+    """Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.33).
+
+    An agent PROPOSES a reference with ``proposeReference``; the result is a
+    claim under ``<workspace>/.jaato/references-claims/``, never a catalog
+    entry, because a confined runner cannot write the catalog.  A person
+    promotes the claim (the daemon writes ``.jaato/references/<id>.json``,
+    stamping ``origin.curated_by`` from this connection's identity) or
+    dismisses it (the claim file is removed).  Both are gated by the
+    workspace-owner rule the memory rail uses.
+
+    The daemon answers every request with exactly one of these, refusals
+    included.
+
+    Fields:
+        request_id: Echoed from a :class:`ReferenceCurationRequest`; ``""``
+            for the answer to a typed ``reference.promote|dismiss`` command.
+        action: ``promote`` or ``dismiss``.
+        claim_id: The claim acted on, as the caller named it.
+        ok: Whether the verb did what was asked.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``unknown_bundle``,
+            ``not_found``, ``invalid_claim``, ``collision``,
+            ``unsafe_path`` or ``io_error``.  Branch on this, not on
+            ``error``.
+        error: The reason, for a person.
+        reference_id: The catalog id a promotion wrote.
+        reference_file: The workspace-relative catalog file it wrote.
+        warnings: Anything that happened beside success -- a promoted claim
+            whose file could not be removed afterwards, or a destination
+            index that was not updated.
+        bundle: The bundle promoted into; ``""`` for the catalog root.
+        reconcile: What happened to the destination bundle's vector index
+            after a promotion: ``none`` (it has none), ``updated``,
+            ``clean``, ``busy``, ``unavailable`` (no session to embed with,
+            no provider, a different model, no numpy) or ``error``.  The
+            reference is placed whatever this says; until the index holds
+            its row, similarity matching cannot find it.
+        reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
+            ``updated`` / ``clean``.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CURATION_RESULT)
+    request_id: str = ""
+    action: str = ""
+    claim_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    reference_id: str = ""
+    reference_file: str = ""
+    warnings: List[str] = Field(default_factory=list)
+    bundle: str = ""
+    reconcile: str = ""
+    reconcile_detail: str = ""
+
+
+class ReferenceClaimsEvent(Event):
+    """The reference claims agents proposed in the caller's workspace (1.33).
+
+    Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
+    A claim is what ``proposeReference`` wrote under
+    ``<workspace>/.jaato/references-claims/``: a proposed catalog entry
+    nobody has reviewed.  Read by the DAEMON, without following a link out
+    of the workspace; a file that is not a well-formed claim is named under
+    ``unreadable`` rather than dropped.
+
+    ``ok`` is ``False`` -- with ``category`` ``no_workspace`` or
+    ``unsafe_path`` -- when the claims could not be read; ``claims`` is then
+    meaningless, never "nothing proposed".
+
+    Each row: ``claim_id``, ``id``, ``name``, ``description``, ``tags``,
+    ``type`` (``local`` / ``inline``), ``path`` (local) or ``content``
+    (inline), ``origin`` (the claim's recorded origin: ``generated_by``,
+    ``created_by``, ``witnessed_by``, ``at``) and ``problems`` -- the
+    reasons a promotion would be refused right now (the id is already in the
+    catalog, the file is gone), empty when it would pass.  ``name``,
+    ``description`` and ``content`` were written by a MODEL and reviewed by
+    nobody: a client shows them as text, never as markup.
+
+    ``may_curate`` says whether THIS connection may promote or dismiss --
+    the workspace-owner rule the daemon also enforces.
+
+    ``bundles`` are the workspace-tier sub-bundles a promotion may name:
+    ``[{"name", "indexed", "model"?}]``, ``model`` only for a bundle with a
+    vector index.  The catalog root is the default destination and is not
+    listed.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CLAIMS)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    claims: List[Dict[str, Any]] = Field(default_factory=list)
+    unreadable: List[str] = Field(default_factory=list)
+    may_curate: bool = False
+    bundles: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReferenceClaimsRequest(Event):
+    """List the reference claims in the caller's workspace (1.33).
+
+    Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
+    Writes nothing; any connection whose workspace it is may list.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CLAIMS_REQUEST)
+    request_id: str = ""
+
+
+class ReferenceCurationRequest(Event):
+    """Promote or dismiss one reference claim (1.33).
+
+    The correlated form of the ``reference.promote`` / ``reference.dismiss``
+    commands: answered by :class:`ReferenceCurationResultEvent` carrying this
+    ``request_id``.  ``action`` is ``promote`` or ``dismiss``.  ``bundle``
+    names a workspace-tier sub-bundle to promote into (``""``: the catalog
+    root); ``dismiss`` ignores it.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CURATION_REQUEST)
+    request_id: str = ""
+    action: str = ""
+    claim_id: str = ""
+    bundle: str = ""
+
+
+class ReferenceCatalogEvent(Event):
+    """The workspace reference catalog, as a curator sees it (1.33).
+
+    Answer to :class:`ReferenceCatalogRequest`, carrying its ``request_id``.
+    Read by the DAEMON from ``<workspace>/.jaato/references/`` and its
+    sub-bundles, without following a link.  Each row: ``id``, ``name``,
+    ``description``, ``bundle`` (``""`` for the catalog root), ``file``
+    (workspace-relative), ``links`` (its declared ``{to, rel, note?,
+    dangling?}`` edges; ``dangling`` when the target is not in this
+    catalog), ``linked_from`` (``{from, rel}`` edges pointing at it) and
+    ``duplicate_id`` when another file declares the same id (such a
+    reference cannot be edited).  ``name``, ``description`` and ``note`` are
+    catalog text: a client shows them as text.
+
+    ``ok`` is ``False`` (``no_workspace`` / ``unsafe_path``) when the catalog
+    could not be read; ``references`` is then meaningless.  ``unreadable``
+    names files under the catalog that are not a reference this view can
+    show.  ``may_curate`` says whether THIS connection may edit links.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CATALOG)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    references: List[Dict[str, Any]] = Field(default_factory=list)
+    unreadable: List[str] = Field(default_factory=list)
+    may_curate: bool = False
+
+
+class ReferenceCatalogRequest(Event):
+    """List the caller's workspace reference catalog (1.33).
+
+    Answered by :class:`ReferenceCatalogEvent` carrying this ``request_id``.
+    Writes nothing.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CATALOG_REQUEST)
+    request_id: str = ""
+
+
+class ReferenceLinksUpdateRequest(Event):
+    """Replace one catalog reference's typed links (1.33).
+
+    ``links`` is the complete new list, ``[{to, rel, note?}]``; ``[]``
+    removes every declared edge.  Answered by
+    :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_LINKS_UPDATE_REQUEST)
+    request_id: str = ""
+    reference_id: str = ""
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReferenceLinksUpdateResultEvent(Event):
+    """What one links update did (1.33).
+
+    The daemon writes the reference's JSON, changing only its ``links`` key,
+    because a confined runner cannot write the catalog.  Gated by the
+    workspace-owner rule the memory rail and promotion use.
+
+    Fields:
+        request_id: Echoed from the request.
+        reference_id: The reference, as the caller named it.
+        ok: Whether the links were written.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``invalid_links``,
+            ``not_found``, ``ambiguous`` (the id is declared in two files),
+            ``unsafe_path`` or ``io_error``.
+        error: The reason, for a person.
+        reference_file: The workspace-relative file written.
+        links: The links as written, normalised.
+        warnings: What did not block the write: a target this catalog does
+            not hold, or a ``supersedes`` another reference also declares.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_LINKS_UPDATE_RESULT)
+    request_id: str = ""
+    reference_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    reference_file: str = ""
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SessionMessageResultEvent(Event):
@@ -5156,6 +5389,14 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
+    EventType.REFERENCE_CURATION_RESULT.value: ReferenceCurationResultEvent,
+    EventType.REFERENCE_CLAIMS.value: ReferenceClaimsEvent,
+    EventType.REFERENCE_CLAIMS_REQUEST.value: ReferenceClaimsRequest,
+    EventType.REFERENCE_CURATION_REQUEST.value: ReferenceCurationRequest,
+    EventType.REFERENCE_CATALOG.value: ReferenceCatalogEvent,
+    EventType.REFERENCE_CATALOG_REQUEST.value: ReferenceCatalogRequest,
+    EventType.REFERENCE_LINKS_UPDATE_REQUEST.value: ReferenceLinksUpdateRequest,
+    EventType.REFERENCE_LINKS_UPDATE_RESULT.value: ReferenceLinksUpdateResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,

@@ -23,7 +23,7 @@ from jaato_sdk.plugins.model_provider.types import (
     EditableContent,
     DISCOVERABILITY_DEFERRED,
 )
-from ..sandbox_utils import detect_jaato_symlink
+from ..sandbox_utils import detect_jaato_symlink, is_jaato_path
 from ..workspace_home import resolve_home_path, apply_home_to_env, home_exec_apparmor_rules
 from ..jaato_tools_path import apply_jaato_tools_to_env
 from ..workspace_venv import (
@@ -1473,6 +1473,17 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 f"from a directory it could also be run from by bare name.  "
                 f"To allow binaries in that directory, the operator adds it "
                 f"to plugin_configs.cli.extra_paths."
+            )
+        elif boundary and is_jaato_path(os.path.join(boundary, path), boundary):
+            # Inside the workspace, and closed anyway: the same rule
+            # ``file_edit`` and ``readFile`` apply.  Saying "outside the
+            # workspace" here would be false.
+            stderr = (
+                f"cli containment (workspace boundary): refused {mode} "
+                f"access to '{path}' — the workspace's .jaato directory holds "
+                f"the session's own configuration and state and is closed to "
+                f"tools unless the operator grants a path in it (`sandbox "
+                f"add`).  {not_a_missing_file}"
             )
         else:
             stderr = (

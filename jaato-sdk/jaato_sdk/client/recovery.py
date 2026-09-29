@@ -878,6 +878,36 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.toggle_workspace_ignore(path)
 
+    async def list_reference_claims(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_reference_claims`; the inner client
+        refuses a daemon below protocol 1.33."""
+        return await self._memory_client("list_reference_claims").list_reference_claims(
+            timeout=timeout)
+
+    async def promote_reference_claim(
+        self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
+    ):
+        """See :meth:`IPCClient.promote_reference_claim`."""
+        return await self._memory_client("promote_reference_claim").promote_reference_claim(
+            claim_id, bundle=bundle, timeout=timeout)
+
+    async def dismiss_reference_claim(self, claim_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.dismiss_reference_claim`."""
+        return await self._memory_client("dismiss_reference_claim").dismiss_reference_claim(
+            claim_id, timeout=timeout)
+
+    async def list_reference_catalog(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_reference_catalog`."""
+        return await self._memory_client("list_reference_catalog").list_reference_catalog(
+            timeout=timeout)
+
+    async def update_reference_links(
+        self, reference_id: str, links, *, timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.update_reference_links`."""
+        return await self._memory_client("update_reference_links").update_reference_links(
+            reference_id, links, timeout=timeout)
+
     async def send_external_event(
         self,
         name: str,

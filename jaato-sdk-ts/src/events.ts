@@ -119,6 +119,14 @@ export type JaatoEvents =
   | WorkspaceFilesChangedEvent
   | WorkspaceFilesSnapshotEvent
   | WorkspaceIgnoreResultEvent
+  | ReferenceCurationResultEvent
+  | ReferenceClaimsEvent
+  | ReferenceClaimsRequest
+  | ReferenceCurationRequest
+  | ReferenceCatalogEvent
+  | ReferenceCatalogRequest
+  | ReferenceLinksUpdateRequest
+  | ReferenceLinksUpdateResultEvent
   | ScaffoldExplainEvent
   | SessionMessageResultEvent
   | ScaffoldIntegrationEvent
@@ -279,6 +287,14 @@ export type EventType =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -438,6 +454,14 @@ export type EventType1 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -602,6 +626,14 @@ export type EventType2 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -764,6 +796,14 @@ export type EventType3 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -925,6 +965,14 @@ export type EventType4 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1094,6 +1142,14 @@ export type EventType5 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1260,6 +1316,14 @@ export type EventType6 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1425,6 +1489,14 @@ export type EventType7 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1584,6 +1656,14 @@ export type EventType8 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1747,6 +1827,14 @@ export type EventType9 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1909,6 +1997,14 @@ export type EventType10 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2082,6 +2178,14 @@ export type EventType11 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2245,6 +2349,14 @@ export type EventType12 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2414,6 +2526,14 @@ export type EventType13 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2583,6 +2703,14 @@ export type EventType14 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2754,6 +2882,14 @@ export type EventType15 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2920,6 +3056,14 @@ export type EventType16 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3081,6 +3225,14 @@ export type EventType17 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3244,6 +3396,14 @@ export type EventType18 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3407,6 +3567,14 @@ export type EventType19 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3576,6 +3744,14 @@ export type EventType20 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3738,6 +3914,14 @@ export type EventType21 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3904,6 +4088,14 @@ export type EventType22 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4065,6 +4257,14 @@ export type EventType23 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4227,6 +4427,14 @@ export type EventType24 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4389,6 +4597,14 @@ export type EventType25 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4549,6 +4765,14 @@ export type EventType26 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4714,6 +4938,14 @@ export type EventType27 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4875,6 +5107,14 @@ export type EventType28 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5035,6 +5275,14 @@ export type EventType29 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5203,6 +5451,14 @@ export type EventType30 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5365,6 +5621,14 @@ export type EventType31 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5528,6 +5792,14 @@ export type EventType32 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5706,6 +5978,14 @@ export type EventType33 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5865,6 +6145,14 @@ export type EventType34 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6041,6 +6329,14 @@ export type EventType35 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6204,6 +6500,14 @@ export type EventType36 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6363,6 +6667,14 @@ export type EventType37 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6530,6 +6842,14 @@ export type EventType38 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6693,6 +7013,14 @@ export type EventType39 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6853,6 +7181,14 @@ export type EventType40 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7012,6 +7348,14 @@ export type EventType41 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7175,6 +7519,14 @@ export type EventType42 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7340,6 +7692,14 @@ export type EventType43 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7503,6 +7863,14 @@ export type EventType44 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7664,6 +8032,14 @@ export type EventType45 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7835,6 +8211,14 @@ export type EventType46 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8016,6 +8400,14 @@ export type EventType47 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8183,6 +8575,14 @@ export type EventType48 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8350,6 +8750,14 @@ export type EventType49 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8517,6 +8925,14 @@ export type EventType50 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8681,6 +9097,14 @@ export type EventType51 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8860,6 +9284,14 @@ export type EventType52 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9021,6 +9453,14 @@ export type EventType53 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9182,6 +9622,14 @@ export type EventType54 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9341,6 +9789,14 @@ export type EventType55 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9525,6 +9981,14 @@ export type EventType56 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9688,6 +10152,14 @@ export type EventType57 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9851,6 +10323,14 @@ export type EventType58 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10012,6 +10492,14 @@ export type EventType59 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10171,6 +10659,14 @@ export type EventType60 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10330,6 +10826,14 @@ export type EventType61 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10490,6 +10994,14 @@ export type EventType62 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10653,6 +11165,14 @@ export type EventType63 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10812,6 +11332,14 @@ export type EventType64 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10971,6 +11499,14 @@ export type EventType65 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11131,6 +11667,14 @@ export type EventType66 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11295,6 +11839,14 @@ export type EventType67 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11455,6 +12007,14 @@ export type EventType68 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11614,6 +12174,14 @@ export type EventType69 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11772,6 +12340,14 @@ export type EventType70 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11933,6 +12509,14 @@ export type EventType71 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12091,6 +12675,14 @@ export type EventType72 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12253,6 +12845,14 @@ export type EventType73 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12411,6 +13011,14 @@ export type EventType74 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12570,6 +13178,14 @@ export type EventType75 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12731,6 +13347,14 @@ export type EventType76 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12892,6 +13516,14 @@ export type EventType77 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13053,6 +13685,14 @@ export type EventType78 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13212,6 +13852,14 @@ export type EventType79 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13377,6 +14025,14 @@ export type EventType80 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13539,6 +14195,14 @@ export type EventType81 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13708,6 +14372,14 @@ export type EventType82 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13876,6 +14548,14 @@ export type EventType83 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14036,6 +14716,14 @@ export type EventType84 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14195,6 +14883,14 @@ export type EventType85 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14361,6 +15057,14 @@ export type EventType86 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14526,6 +15230,14 @@ export type EventType87 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14686,6 +15398,14 @@ export type EventType88 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14847,6 +15567,14 @@ export type EventType89 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15005,6 +15733,14 @@ export type EventType90 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15167,6 +15903,14 @@ export type EventType91 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15326,6 +16070,14 @@ export type EventType92 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15486,6 +16238,14 @@ export type EventType93 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15646,6 +16406,14 @@ export type EventType94 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15807,6 +16575,14 @@ export type EventType95 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15967,6 +16743,14 @@ export type EventType96 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16134,6 +16918,14 @@ export type EventType97 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16297,6 +17089,14 @@ export type EventType98 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16464,6 +17264,14 @@ export type EventType99 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16623,6 +17431,14 @@ export type EventType100 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16787,6 +17603,14 @@ export type EventType101 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16949,6 +17773,14 @@ export type EventType102 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17112,6 +17944,14 @@ export type EventType103 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17275,6 +18115,14 @@ export type EventType104 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17439,6 +18287,14 @@ export type EventType105 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17602,6 +18458,14 @@ export type EventType106 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17645,14 +18509,18 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type Topic = string;
+export type RequestId38 = string;
+export type Action2 = string;
+export type ClaimId = string;
 export type Ok9 = boolean;
-export type Text4 = string;
-export type Topics = {
-  [k: string]: unknown;
-}[];
+export type Category5 = string;
 export type Error18 = string;
-export type ServerVersion1 = string;
+export type ReferenceId = string;
+export type ReferenceFile = string;
+export type Warnings1 = string[];
+export type Bundle = string;
+export type Reconcile = string;
+export type ReconcileDetail = string;
 /**
  * All event types in the protocol.
  */
@@ -17768,6 +18636,14 @@ export type EventType107 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17811,22 +18687,18 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type RequestId38 = string | null;
-export type Target = string;
-export type Status3 = string;
+export type RequestId39 = string;
 export type Ok10 = boolean;
-export type MessageId = string;
-export type TargetSessionId = string;
-export type SiblingName = string;
-export type GroupKey = string;
-export type Woken = boolean;
-export type Headless = boolean;
-export type Spooled = boolean;
-export type Candidates = string[];
-export type Files1 = {
+export type Category6 = string;
+export type Error19 = string;
+export type Claims = {
   [k: string]: unknown;
 }[];
-export type Error19 = string;
+export type Unreadable = string[];
+export type MayCurate1 = boolean;
+export type Bundles = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -17942,6 +18814,14 @@ export type EventType108 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17985,17 +18865,7 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type Integration = string;
-export type Ok11 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target1 = string;
-export type Text5 = string;
-export type Error20 = string;
-export type Available = string[];
-export type ServerVersion2 = string;
+export type RequestId40 = string;
 /**
  * All event types in the protocol.
  */
@@ -18111,6 +18981,14 @@ export type EventType109 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18154,12 +19032,10 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type WorkspaceId = string;
-export type Name12 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files2 = StagedFileSpec[];
+export type RequestId41 = string;
+export type Action3 = string;
+export type ClaimId1 = string;
+export type Bundle1 = string;
 /**
  * All event types in the protocol.
  */
@@ -18275,6 +19151,14 @@ export type EventType110 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18318,11 +19202,15 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
+export type RequestId42 = string;
+export type Ok11 = boolean;
+export type Category7 = string;
+export type Error20 = string;
+export type References = {
+  [k: string]: unknown;
 }[];
+export type Unreadable1 = string[];
+export type MayCurate2 = boolean;
 /**
  * All event types in the protocol.
  */
@@ -18438,6 +19326,14 @@ export type EventType111 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18481,9 +19377,7 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type RequestId39 = string;
-export type Path4 = string;
-export type MetadataOnly = boolean;
+export type RequestId43 = string;
 /**
  * All event types in the protocol.
  */
@@ -18599,6 +19493,14 @@ export type EventType112 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18642,15 +19544,11 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type RequestId40 = string;
-export type Ok12 = boolean;
-export type Path5 = string;
-export type Name13 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category5 = string;
-export type Error21 = string;
+export type RequestId44 = string;
+export type ReferenceId1 = string;
+export type Links = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -18766,6 +19664,14 @@ export type EventType113 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18809,9 +19715,16 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type RequestId41 = string;
-export type Query = string;
-export type MaxResults = number;
+export type RequestId45 = string;
+export type ReferenceId2 = string;
+export type Ok12 = boolean;
+export type Category8 = string;
+export type Error21 = string;
+export type ReferenceFile1 = string;
+export type Links1 = {
+  [k: string]: unknown;
+}[];
+export type Warnings2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -18927,6 +19840,14 @@ export type EventType114 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18970,16 +19891,14 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type RequestId42 = string;
+export type Topic = string;
 export type Ok13 = boolean;
-export type Query1 = string;
-export type Matches = {
+export type Text4 = string;
+export type Topics = {
   [k: string]: unknown;
 }[];
-export type Total2 = number;
-export type Truncated = boolean;
-export type Category6 = string;
 export type Error22 = string;
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -19095,6 +20014,14 @@ export type EventType115 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19138,20 +20065,22 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion3 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags1 = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId46 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok14 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
+}[];
+export type Error23 = string;
 /**
  * All event types in the protocol.
  */
@@ -19267,6 +20196,14 @@ export type EventType116 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19310,17 +20247,17 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type RequestId43 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type Integration = string;
+export type Ok15 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error24 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
 /**
  * All event types in the protocol.
  */
@@ -19436,6 +20373,14 @@ export type EventType117 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19479,8 +20424,12 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type RequestId44 = string;
-export type RemoteAgentId = string;
+export type WorkspaceId = string;
+export type Name12 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -19596,6 +20545,14 @@ export type EventType118 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19639,8 +20596,11 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type RequestId45 = string;
-export type Reason1 = string;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -19756,6 +20716,14 @@ export type EventType119 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19799,10 +20767,9 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type RequestId46 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source5 = string;
+export type RequestId47 = string;
+export type Path4 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -19918,6 +20885,14 @@ export type EventType120 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19961,12 +20936,15 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type RequestId47 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error23 = string;
-export type WorkspaceModified = boolean;
+export type RequestId48 = string;
+export type Ok16 = boolean;
+export type Path5 = string;
+export type Name13 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category9 = string;
+export type Error25 = string;
 /**
  * All event types in the protocol.
  */
@@ -20082,6 +21060,14 @@ export type EventType121 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20125,8 +21111,9 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type RequestId48 = string;
-export type RemoteAgentId3 = string;
+export type RequestId49 = string;
+export type Query = string;
+export type MaxResults = number;
 /**
  * All event types in the protocol.
  */
@@ -20242,6 +21229,14 @@ export type EventType122 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20285,8 +21280,16 @@ export type EventType122 =
   | "gates.snapshot";
 export type Timestamp122 = string;
 export type SessionId122 = string;
-export type RequestId49 = string;
-export type RemoteAgentId4 = string;
+export type RequestId50 = string;
+export type Ok17 = boolean;
+export type Query1 = string;
+export type Matches = {
+  [k: string]: unknown;
+}[];
+export type Total2 = number;
+export type Truncated = boolean;
+export type Category10 = string;
+export type Error26 = string;
 /**
  * All event types in the protocol.
  */
@@ -20402,6 +21405,14 @@ export type EventType123 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20445,10 +21456,20 @@ export type EventType123 =
   | "gates.snapshot";
 export type Timestamp123 = string;
 export type SessionId123 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion3 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -20564,6 +21585,14 @@ export type EventType124 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20607,14 +21636,17 @@ export type EventType124 =
   | "gates.snapshot";
 export type Timestamp124 = string;
 export type SessionId124 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId51 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -20730,6 +21762,14 @@ export type EventType125 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20773,17 +21813,8 @@ export type EventType125 =
   | "gates.snapshot";
 export type Timestamp125 = string;
 export type SessionId125 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State1 = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type RequestId52 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -20899,6 +21930,14 @@ export type EventType126 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20942,13 +21981,8 @@ export type EventType126 =
   | "gates.snapshot";
 export type Timestamp126 = string;
 export type SessionId126 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId50 = string | null;
+export type RequestId53 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -21064,6 +22098,14 @@ export type EventType127 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21107,9 +22149,10 @@ export type EventType127 =
   | "gates.snapshot";
 export type Timestamp127 = string;
 export type SessionId127 = string;
-export type RequestId51 = string;
-export type Status4 = string;
-export type Detail = string | null;
+export type RequestId54 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source5 = string;
 /**
  * All event types in the protocol.
  */
@@ -21225,6 +22268,14 @@ export type EventType128 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21268,13 +22319,12 @@ export type EventType128 =
   | "gates.snapshot";
 export type Timestamp128 = string;
 export type SessionId128 = string;
-export type RequestId52 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type RequestId55 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error27 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -21390,6 +22440,14 @@ export type EventType129 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21433,9 +22491,8 @@ export type EventType129 =
   | "gates.snapshot";
 export type Timestamp129 = string;
 export type SessionId129 = string;
-export type RequestId53 = string;
-export type ResponseText = string;
-export type Error24 = string;
+export type RequestId56 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -21551,6 +22608,14 @@ export type EventType130 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21594,10 +22659,8 @@ export type EventType130 =
   | "gates.snapshot";
 export type Timestamp130 = string;
 export type SessionId130 = string;
-export type RequestId54 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId57 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -21713,6 +22776,14 @@ export type EventType131 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21756,9 +22827,10 @@ export type EventType131 =
   | "gates.snapshot";
 export type Timestamp131 = string;
 export type SessionId131 = string;
-export type RequestId55 = string;
-export type ForkIndex = number;
-export type Error25 = string;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -21874,6 +22946,14 @@ export type EventType132 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21917,11 +22997,14 @@ export type EventType132 =
   | "gates.snapshot";
 export type Timestamp132 = string;
 export type SessionId132 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -22037,6 +23120,14 @@ export type EventType133 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22080,8 +23171,17 @@ export type EventType133 =
   | "gates.snapshot";
 export type Timestamp133 = string;
 export type SessionId133 = string;
-export type WakeRef1 = string;
-export type Source6 = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -22197,6 +23297,14 @@ export type EventType134 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22240,8 +23348,13 @@ export type EventType134 =
   | "gates.snapshot";
 export type Timestamp134 = string;
 export type SessionId134 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId58 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -22357,6 +23470,14 @@ export type EventType135 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22400,8 +23521,9 @@ export type EventType135 =
   | "gates.snapshot";
 export type Timestamp135 = string;
 export type SessionId135 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId59 = string;
+export type Status4 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -22517,6 +23639,14 @@ export type EventType136 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22560,9 +23690,13 @@ export type EventType136 =
   | "gates.snapshot";
 export type Timestamp136 = string;
 export type SessionId136 = string;
-export type Target2 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type RequestId60 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -22678,6 +23812,14 @@ export type EventType137 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22721,7 +23863,9 @@ export type EventType137 =
   | "gates.snapshot";
 export type Timestamp137 = string;
 export type SessionId137 = string;
-export type Target3 = string;
+export type RequestId61 = string;
+export type ResponseText = string;
+export type Error28 = string;
 /**
  * All event types in the protocol.
  */
@@ -22837,6 +23981,14 @@ export type EventType138 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22880,7 +24032,10 @@ export type EventType138 =
   | "gates.snapshot";
 export type Timestamp138 = string;
 export type SessionId138 = string;
-export type Policy = string;
+export type RequestId62 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -22996,6 +24151,14 @@ export type EventType139 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23039,7 +24202,9 @@ export type EventType139 =
   | "gates.snapshot";
 export type Timestamp139 = string;
 export type SessionId139 = string;
-export type RequestId56 = string;
+export type RequestId63 = string;
+export type ForkIndex = number;
+export type Error29 = string;
 /**
  * All event types in the protocol.
  */
@@ -23155,6 +24320,14 @@ export type EventType140 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23198,15 +24371,11 @@ export type EventType140 =
   | "gates.snapshot";
 export type Timestamp140 = string;
 export type SessionId140 = string;
-export type RequestId57 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -23322,6 +24491,14 @@ export type EventType141 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23365,10 +24542,8 @@ export type EventType141 =
   | "gates.snapshot";
 export type Timestamp141 = string;
 export type SessionId141 = string;
-export type RequestId58 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type WakeRef1 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -23484,6 +24659,14 @@ export type EventType142 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23527,13 +24710,8 @@ export type EventType142 =
   | "gates.snapshot";
 export type Timestamp142 = string;
 export type SessionId142 = string;
-export type RequestId59 = string;
-export type Status5 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -23649,6 +24827,14 @@ export type EventType143 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23692,9 +24878,8 @@ export type EventType143 =
   | "gates.snapshot";
 export type Timestamp143 = string;
 export type SessionId143 = string;
-export type RequestId60 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -23810,6 +24995,14 @@ export type EventType144 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23853,10 +25046,9 @@ export type EventType144 =
   | "gates.snapshot";
 export type Timestamp144 = string;
 export type SessionId144 = string;
-export type RequestId61 = string;
-export type Status6 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -23972,6 +25164,14 @@ export type EventType145 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24015,10 +25215,7 @@ export type EventType145 =
   | "gates.snapshot";
 export type Timestamp145 = string;
 export type SessionId145 = string;
-export type RequestId62 = string;
-export type User2 = string;
-export type Workspace3 = string;
-export type Name14 = string;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -24134,6 +25331,14 @@ export type EventType146 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24177,11 +25382,7 @@ export type EventType146 =
   | "gates.snapshot";
 export type Timestamp146 = string;
 export type SessionId146 = string;
-export type RequestId63 = string;
-export type Status7 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -24297,6 +25498,14 @@ export type EventType147 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24341,7 +25550,6 @@ export type EventType147 =
 export type Timestamp147 = string;
 export type SessionId147 = string;
 export type RequestId64 = string;
-export type User3 = string;
 /**
  * All event types in the protocol.
  */
@@ -24457,6 +25665,14 @@ export type EventType148 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24501,9 +25717,14 @@ export type EventType148 =
 export type Timestamp148 = string;
 export type SessionId148 = string;
 export type RequestId65 = string;
-export type Status8 = string;
-export type Reloaded = number;
-export type Detail5 = string | null;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -24619,6 +25840,14 @@ export type EventType149 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24663,11 +25892,9 @@ export type EventType149 =
 export type Timestamp149 = string;
 export type SessionId149 = string;
 export type RequestId66 = string;
-export type User4 = string;
-export type Workspace4 = string;
-export type Files3 = {
-  [k: string]: unknown;
-}[];
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -24783,6 +26010,14 @@ export type EventType150 =
   | "workspace.files_changed"
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24827,6 +26062,1369 @@ export type EventType150 =
 export type Timestamp150 = string;
 export type SessionId150 = string;
 export type RequestId67 = string;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType151 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp151 = string;
+export type SessionId151 = string;
+export type RequestId68 = string;
+export type Ticket1 = string;
+export type User1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType152 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp152 = string;
+export type SessionId152 = string;
+export type RequestId69 = string;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType153 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp153 = string;
+export type SessionId153 = string;
+export type RequestId70 = string;
+export type User2 = string;
+export type Workspace3 = string;
+export type Name14 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType154 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp154 = string;
+export type SessionId154 = string;
+export type RequestId71 = string;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType155 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp155 = string;
+export type SessionId155 = string;
+export type RequestId72 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType156 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp156 = string;
+export type SessionId156 = string;
+export type RequestId73 = string;
+export type Status8 = string;
+export type Reloaded = number;
+export type Detail5 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType157 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp157 = string;
+export type SessionId157 = string;
+export type RequestId74 = string;
+export type User4 = string;
+export type Workspace4 = string;
+export type Files3 = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType158 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp158 = string;
+export type SessionId158 = string;
+export type RequestId75 = string;
 export type Status9 = string;
 export type Files4 = {
   [k: string]: unknown;
@@ -27125,6 +29723,230 @@ export interface WorkspaceIgnoreResultEvent {
   gitignore_path?: GitignorePath;
 }
 /**
+ * Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.33).
+ *
+ * An agent PROPOSES a reference with ``proposeReference``; the result is a
+ * claim under ``<workspace>/.jaato/references-claims/``, never a catalog
+ * entry, because a confined runner cannot write the catalog.  A person
+ * promotes the claim (the daemon writes ``.jaato/references/<id>.json``,
+ * stamping ``origin.curated_by`` from this connection's identity) or
+ * dismisses it (the claim file is removed).  Both are gated by the
+ * workspace-owner rule the memory rail uses.
+ *
+ * The daemon answers every request with exactly one of these, refusals
+ * included.
+ *
+ * Fields:
+ *     request_id: Echoed from a :class:`ReferenceCurationRequest`; ``""``
+ *         for the answer to a typed ``reference.promote|dismiss`` command.
+ *     action: ``promote`` or ``dismiss``.
+ *     claim_id: The claim acted on, as the caller named it.
+ *     ok: Whether the verb did what was asked.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``unknown_bundle``,
+ *         ``not_found``, ``invalid_claim``, ``collision``,
+ *         ``unsafe_path`` or ``io_error``.  Branch on this, not on
+ *         ``error``.
+ *     error: The reason, for a person.
+ *     reference_id: The catalog id a promotion wrote.
+ *     reference_file: The workspace-relative catalog file it wrote.
+ *     warnings: Anything that happened beside success -- a promoted claim
+ *         whose file could not be removed afterwards, or a destination
+ *         index that was not updated.
+ *     bundle: The bundle promoted into; ``""`` for the catalog root.
+ *     reconcile: What happened to the destination bundle's vector index
+ *         after a promotion: ``none`` (it has none), ``updated``,
+ *         ``clean``, ``busy``, ``unavailable`` (no session to embed with,
+ *         no provider, a different model, no numpy) or ``error``.  The
+ *         reference is placed whatever this says; until the index holds
+ *         its row, similarity matching cannot find it.
+ *     reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
+ *         ``updated`` / ``clean``.
+ */
+export interface ReferenceCurationResultEvent {
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
+  request_id?: RequestId38;
+  action?: Action2;
+  claim_id?: ClaimId;
+  ok?: Ok9;
+  category?: Category5;
+  error?: Error18;
+  reference_id?: ReferenceId;
+  reference_file?: ReferenceFile;
+  warnings?: Warnings1;
+  bundle?: Bundle;
+  reconcile?: Reconcile;
+  reconcile_detail?: ReconcileDetail;
+}
+/**
+ * The reference claims agents proposed in the caller's workspace (1.33).
+ *
+ * Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
+ * A claim is what ``proposeReference`` wrote under
+ * ``<workspace>/.jaato/references-claims/``: a proposed catalog entry
+ * nobody has reviewed.  Read by the DAEMON, without following a link out
+ * of the workspace; a file that is not a well-formed claim is named under
+ * ``unreadable`` rather than dropped.
+ *
+ * ``ok`` is ``False`` -- with ``category`` ``no_workspace`` or
+ * ``unsafe_path`` -- when the claims could not be read; ``claims`` is then
+ * meaningless, never "nothing proposed".
+ *
+ * Each row: ``claim_id``, ``id``, ``name``, ``description``, ``tags``,
+ * ``type`` (``local`` / ``inline``), ``path`` (local) or ``content``
+ * (inline), ``origin`` (the claim's recorded origin: ``generated_by``,
+ * ``created_by``, ``witnessed_by``, ``at``) and ``problems`` -- the
+ * reasons a promotion would be refused right now (the id is already in the
+ * catalog, the file is gone), empty when it would pass.  ``name``,
+ * ``description`` and ``content`` were written by a MODEL and reviewed by
+ * nobody: a client shows them as text, never as markup.
+ *
+ * ``may_curate`` says whether THIS connection may promote or dismiss --
+ * the workspace-owner rule the daemon also enforces.
+ *
+ * ``bundles`` are the workspace-tier sub-bundles a promotion may name:
+ * ``[{"name", "indexed", "model"?}]``, ``model`` only for a bundle with a
+ * vector index.  The catalog root is the default destination and is not
+ * listed.
+ */
+export interface ReferenceClaimsEvent {
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
+  request_id?: RequestId39;
+  ok?: Ok10;
+  category?: Category6;
+  error?: Error19;
+  claims?: Claims;
+  unreadable?: Unreadable;
+  may_curate?: MayCurate1;
+  bundles?: Bundles;
+}
+/**
+ * List the reference claims in the caller's workspace (1.33).
+ *
+ * Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
+ * Writes nothing; any connection whose workspace it is may list.
+ */
+export interface ReferenceClaimsRequest {
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
+  request_id?: RequestId40;
+}
+/**
+ * Promote or dismiss one reference claim (1.33).
+ *
+ * The correlated form of the ``reference.promote`` / ``reference.dismiss``
+ * commands: answered by :class:`ReferenceCurationResultEvent` carrying this
+ * ``request_id``.  ``action`` is ``promote`` or ``dismiss``.  ``bundle``
+ * names a workspace-tier sub-bundle to promote into (``""``: the catalog
+ * root); ``dismiss`` ignores it.
+ */
+export interface ReferenceCurationRequest {
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId41;
+  action?: Action3;
+  claim_id?: ClaimId1;
+  bundle?: Bundle1;
+}
+/**
+ * The workspace reference catalog, as a curator sees it (1.33).
+ *
+ * Answer to :class:`ReferenceCatalogRequest`, carrying its ``request_id``.
+ * Read by the DAEMON from ``<workspace>/.jaato/references/`` and its
+ * sub-bundles, without following a link.  Each row: ``id``, ``name``,
+ * ``description``, ``bundle`` (``""`` for the catalog root), ``file``
+ * (workspace-relative), ``links`` (its declared ``{to, rel, note?,
+ * dangling?}`` edges; ``dangling`` when the target is not in this
+ * catalog), ``linked_from`` (``{from, rel}`` edges pointing at it) and
+ * ``duplicate_id`` when another file declares the same id (such a
+ * reference cannot be edited).  ``name``, ``description`` and ``note`` are
+ * catalog text: a client shows them as text.
+ *
+ * ``ok`` is ``False`` (``no_workspace`` / ``unsafe_path``) when the catalog
+ * could not be read; ``references`` is then meaningless.  ``unreadable``
+ * names files under the catalog that are not a reference this view can
+ * show.  ``may_curate`` says whether THIS connection may edit links.
+ */
+export interface ReferenceCatalogEvent {
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId42;
+  ok?: Ok11;
+  category?: Category7;
+  error?: Error20;
+  references?: References;
+  unreadable?: Unreadable1;
+  may_curate?: MayCurate2;
+}
+/**
+ * List the caller's workspace reference catalog (1.33).
+ *
+ * Answered by :class:`ReferenceCatalogEvent` carrying this ``request_id``.
+ * Writes nothing.
+ */
+export interface ReferenceCatalogRequest {
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId43;
+}
+/**
+ * Replace one catalog reference's typed links (1.33).
+ *
+ * ``links`` is the complete new list, ``[{to, rel, note?}]``; ``[]``
+ * removes every declared edge.  Answered by
+ * :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
+ */
+export interface ReferenceLinksUpdateRequest {
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId44;
+  reference_id?: ReferenceId1;
+  links?: Links;
+}
+/**
+ * What one links update did (1.33).
+ *
+ * The daemon writes the reference's JSON, changing only its ``links`` key,
+ * because a confined runner cannot write the catalog.  Gated by the
+ * workspace-owner rule the memory rail and promotion use.
+ *
+ * Fields:
+ *     request_id: Echoed from the request.
+ *     reference_id: The reference, as the caller named it.
+ *     ok: Whether the links were written.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``invalid_links``,
+ *         ``not_found``, ``ambiguous`` (the id is declared in two files),
+ *         ``unsafe_path`` or ``io_error``.
+ *     error: The reason, for a person.
+ *     reference_file: The workspace-relative file written.
+ *     links: The links as written, normalised.
+ *     warnings: What did not block the write: a target this catalog does
+ *         not hold, or a ``supersedes`` another reference also declares.
+ */
+export interface ReferenceLinksUpdateResultEvent {
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
+  request_id?: RequestId45;
+  reference_id?: ReferenceId2;
+  ok?: Ok12;
+  category?: Category8;
+  error?: Error21;
+  reference_file?: ReferenceFile1;
+  links?: Links1;
+  warnings?: Warnings2;
+}
+/**
  * One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
  *
  * ``explain`` introspects the framework installed in the CALLING process,
@@ -27167,15 +29989,15 @@ export interface WorkspaceIgnoreResultEvent {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   topic?: Topic;
-  ok?: Ok9;
+  ok?: Ok13;
   text?: Text4;
   data?: Data2;
   topics?: Topics;
-  error?: Error18;
+  error?: Error22;
   server_version?: ServerVersion1;
 }
 export interface Data2 {
@@ -27243,13 +30065,13 @@ export interface Data2 {
  *     error: Why not, when ``ok`` is ``False``.
  */
 export interface SessionMessageResultEvent {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
-  request_id?: RequestId38;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId46;
   target?: Target;
   status?: Status3;
-  ok?: Ok10;
+  ok?: Ok14;
   message_id?: MessageId;
   target_session_id?: TargetSessionId;
   sibling_name?: SiblingName;
@@ -27259,7 +30081,7 @@ export interface SessionMessageResultEvent {
   spooled?: Spooled;
   candidates?: Candidates;
   files?: Files1;
-  error?: Error19;
+  error?: Error23;
 }
 /**
  * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
@@ -27308,18 +30130,18 @@ export interface SessionMessageResultEvent {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   integration?: Integration;
-  ok?: Ok11;
+  ok?: Ok15;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
   target?: Target1;
   text?: Text5;
-  error?: Error20;
+  error?: Error24;
   available?: Available;
   server_version?: ServerVersion2;
 }
@@ -27363,9 +30185,9 @@ export interface ScaffoldIntegrationEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
   workspace_id?: WorkspaceId;
   files?: Files2;
 }
@@ -27413,9 +30235,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -27441,10 +30263,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId39;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  request_id?: RequestId47;
   path?: Path4;
   metadata_only?: MetadataOnly;
 }
@@ -27470,18 +30292,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
-  request_id?: RequestId40;
-  ok?: Ok12;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
+  request_id?: RequestId48;
+  ok?: Ok16;
   path?: Path5;
   name?: Name13;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
-  category?: Category5;
-  error?: Error21;
+  category?: Category9;
+  error?: Error25;
 }
 /**
  * Find files in the caller's workspace by name (WS only, protocol 1.32).
@@ -27494,10 +30316,10 @@ export interface WorkspaceFileContentEvent {
  * :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
  */
 export interface WorkspaceFilesSearchRequest {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
-  request_id?: RequestId41;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
+  request_id?: RequestId49;
   query?: Query;
   max_results?: MaxResults;
 }
@@ -27517,17 +30339,17 @@ export interface WorkspaceFilesSearchRequest {
  * (this connection is in no workspace).
  */
 export interface WorkspaceFilesSearchResultEvent {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
-  request_id?: RequestId42;
-  ok?: Ok13;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId50;
+  ok?: Ok17;
   query?: Query1;
   matches?: Matches;
   total?: Total2;
   truncated?: Truncated;
-  category?: Category6;
-  error?: Error22;
+  category?: Category10;
+  error?: Error26;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -27537,9 +30359,9 @@ export interface WorkspaceFilesSearchResultEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion3;
@@ -27564,10 +30386,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
-  request_id?: RequestId43;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId51;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -27586,10 +30408,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  request_id?: RequestId44;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId52;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -27599,10 +30421,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
-  request_id?: RequestId45;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
+  request_id?: RequestId53;
   reason?: Reason1;
 }
 /**
@@ -27613,10 +30435,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
-  request_id?: RequestId46;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId54;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source5;
@@ -27629,14 +30451,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId47;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId55;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error23;
+  error?: Error27;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -27646,20 +30468,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId48;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId56;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId49;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId57;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -27671,9 +30493,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -27693,9 +30515,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -27711,9 +30533,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -27764,14 +30586,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId50;
+  request_id?: RequestId58;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -27823,10 +30645,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
-  request_id?: RequestId51;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
+  request_id?: RequestId59;
   status?: Status4;
   detail?: Detail;
 }
@@ -27845,10 +30667,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
-  request_id?: RequestId52;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
+  request_id?: RequestId60;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -27856,12 +30678,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
-  request_id?: RequestId53;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
+  request_id?: RequestId61;
   response_text?: ResponseText;
-  error?: Error24;
+  error?: Error28;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -27879,10 +30701,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType130;
-  timestamp?: Timestamp130;
-  session_id?: SessionId130;
-  request_id?: RequestId54;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
+  request_id?: RequestId62;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -27891,12 +30713,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType131;
-  timestamp?: Timestamp131;
-  session_id?: SessionId131;
-  request_id?: RequestId55;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
+  request_id?: RequestId63;
   fork_index?: ForkIndex;
-  error?: Error25;
+  error?: Error29;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -27908,9 +30730,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType132;
-  timestamp?: Timestamp132;
-  session_id?: SessionId132;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -27937,9 +30759,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType133;
-  timestamp?: Timestamp133;
-  session_id?: SessionId133;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
   wake_ref?: WakeRef1;
   source?: Source6;
 }
@@ -27952,9 +30774,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType134;
-  timestamp?: Timestamp134;
-  session_id?: SessionId134;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -27966,9 +30788,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType135;
-  timestamp?: Timestamp135;
-  session_id?: SessionId135;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -27979,9 +30801,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType136;
-  timestamp?: Timestamp136;
-  session_id?: SessionId136;
+  type?: EventType144;
+  timestamp?: Timestamp144;
+  session_id?: SessionId144;
   target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -27995,9 +30817,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType137;
-  timestamp?: Timestamp137;
-  session_id?: SessionId137;
+  type?: EventType145;
+  timestamp?: Timestamp145;
+  session_id?: SessionId145;
   target?: Target3;
 }
 /**
@@ -28008,19 +30830,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType138;
-  timestamp?: Timestamp138;
-  session_id?: SessionId138;
+  type?: EventType146;
+  timestamp?: Timestamp146;
+  session_id?: SessionId146;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType139;
-  timestamp?: Timestamp139;
-  session_id?: SessionId139;
-  request_id?: RequestId56;
+  type?: EventType147;
+  timestamp?: Timestamp147;
+  session_id?: SessionId147;
+  request_id?: RequestId64;
 }
 /**
  * Structured permission policy snapshot.
@@ -28031,10 +30853,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType140;
-  timestamp?: Timestamp140;
-  session_id?: SessionId140;
-  request_id?: RequestId57;
+  type?: EventType148;
+  timestamp?: Timestamp148;
+  session_id?: SessionId148;
+  request_id?: RequestId65;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -28083,10 +30905,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType141;
-  timestamp?: Timestamp141;
-  session_id?: SessionId141;
-  request_id?: RequestId58;
+  type?: EventType149;
+  timestamp?: Timestamp149;
+  session_id?: SessionId149;
+  request_id?: RequestId66;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -28134,10 +30956,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType142;
-  timestamp?: Timestamp142;
-  session_id?: SessionId142;
-  request_id?: RequestId59;
+  type?: EventType150;
+  timestamp?: Timestamp150;
+  session_id?: SessionId150;
+  request_id?: RequestId67;
   status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -28174,10 +30996,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType143;
-  timestamp?: Timestamp143;
-  session_id?: SessionId143;
-  request_id?: RequestId60;
+  type?: EventType151;
+  timestamp?: Timestamp151;
+  session_id?: SessionId151;
+  request_id?: RequestId68;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -28203,10 +31025,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType144;
-  timestamp?: Timestamp144;
-  session_id?: SessionId144;
-  request_id?: RequestId61;
+  type?: EventType152;
+  timestamp?: Timestamp152;
+  session_id?: SessionId152;
+  request_id?: RequestId69;
   status?: Status6;
   revoked?: Revoked;
   detail?: Detail3;
@@ -28248,10 +31070,10 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType145;
-  timestamp?: Timestamp145;
-  session_id?: SessionId145;
-  request_id?: RequestId62;
+  type?: EventType153;
+  timestamp?: Timestamp153;
+  session_id?: SessionId153;
+  request_id?: RequestId70;
   user?: User2;
   workspace?: Workspace3;
   name?: Name14;
@@ -28290,10 +31112,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType146;
-  timestamp?: Timestamp146;
-  session_id?: SessionId146;
-  request_id?: RequestId63;
+  type?: EventType154;
+  timestamp?: Timestamp154;
+  session_id?: SessionId154;
+  request_id?: RequestId71;
   status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -28318,10 +31140,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType147;
-  timestamp?: Timestamp147;
-  session_id?: SessionId147;
-  request_id?: RequestId64;
+  type?: EventType155;
+  timestamp?: Timestamp155;
+  session_id?: SessionId155;
+  request_id?: RequestId72;
   user?: User3;
 }
 /**
@@ -28342,10 +31164,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType148;
-  timestamp?: Timestamp148;
-  session_id?: SessionId148;
-  request_id?: RequestId65;
+  type?: EventType156;
+  timestamp?: Timestamp156;
+  session_id?: SessionId156;
+  request_id?: RequestId73;
   status?: Status8;
   reloaded?: Reloaded;
   detail?: Detail5;
@@ -28391,10 +31213,10 @@ export interface SecretReloadResultEvent {
  *         copy the user made their own survives.  A removal requires it.
  */
 export interface WorkspaceAppWriteRequest {
-  type?: EventType149;
-  timestamp?: Timestamp149;
-  session_id?: SessionId149;
-  request_id?: RequestId66;
+  type?: EventType157;
+  timestamp?: Timestamp157;
+  session_id?: SessionId157;
+  request_id?: RequestId74;
   user?: User4;
   workspace?: Workspace4;
   env?: Env;
@@ -28422,10 +31244,10 @@ export interface Env {
  *     detail: Human-readable elaboration.
  */
 export interface WorkspaceAppWriteResultEvent {
-  type?: EventType150;
-  timestamp?: Timestamp150;
-  session_id?: SessionId150;
-  request_id?: RequestId67;
+  type?: EventType158;
+  timestamp?: Timestamp158;
+  session_id?: SessionId158;
+  request_id?: RequestId75;
   status?: Status9;
   env?: Env1;
   files?: Files4;
@@ -28566,6 +31388,14 @@ export const EventTypeValue = {
   WORKSPACE_FILES_CHANGED: "workspace.files_changed",
   WORKSPACE_FILES_SNAPSHOT: "workspace.files_snapshot",
   WORKSPACE_IGNORE_RESULT: "workspace.ignore.result",
+  REFERENCE_CURATION_RESULT: "reference.curation.result",
+  REFERENCE_CLAIMS: "reference.claims",
+  REFERENCE_CLAIMS_REQUEST: "reference.claims.request",
+  REFERENCE_CURATION_REQUEST: "reference.curation.request",
+  REFERENCE_CATALOG: "reference.catalog",
+  REFERENCE_CATALOG_REQUEST: "reference.catalog.request",
+  REFERENCE_LINKS_UPDATE_REQUEST: "reference.links.request",
+  REFERENCE_LINKS_UPDATE_RESULT: "reference.links.result",
   SCAFFOLD_EXPLAIN_RESULT: "scaffold.explain.result",
   SESSION_MESSAGE_RESULT: "session.message.result",
   SCAFFOLD_INTEGRATION_RESULT: "scaffold.integration.result",

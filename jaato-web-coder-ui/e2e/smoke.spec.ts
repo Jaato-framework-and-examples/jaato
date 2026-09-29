@@ -1597,6 +1597,93 @@ test("the jaato-sdk skill is bootstrapped into the workspace on session start (#
   await expect(page.getByText(/claude-code skill installed \(jaato-server mock-0\.0\.1\)/)).toBeVisible();
 });
 
+test("proposals rail lists reference claims, explains a blocked one, promotes and dismisses", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Open Proposals" }).click();
+  const panel = page.getByRole("region", { name: "Proposals" });
+
+  // Two seeded claims: one a person approved at the prompt, one whose id
+  // is already in the catalog.
+  await expect(panel.getByTestId("proposal-row")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Close Proposals" })).toContainText("2");
+  const runbook = panel.locator('[data-claim-id="20260929T100000Z-aaaa1111"]');
+  const blocked = panel.locator('[data-claim-id="20260929T100001Z-bbbb2222"]');
+  await expect(runbook).toContainText("unreviewed");
+  await runbook.getByRole("button", { name: /^Show proposal/ }).click();
+  await expect(runbook).toContainText("approved at the prompt by mock:tester");
+  // Its typed link, the rerouting marked, and a dangling-edge warning that
+  // does not block Promote.
+  await expect(runbook.getByTestId("proposal-links")).toContainText("supersedes old-deploy — rewritten for the new pipeline");
+  await expect(runbook).toContainText("not in this workspace's catalog");
+  await expect(runbook.getByRole("button", { name: /^Promote proposal/ })).toBeEnabled();
+
+  // The daemon's reason is shown before Promote, which is disabled.
+  await expect(blocked).toContainText("already in the catalog");
+  await expect(blocked.getByRole("button", { name: /^Promote proposal/ })).toBeDisabled();
+
+  // Nothing is printed into the transcript: the verbs are quiet.
+  await expect(page.getByText("mock: executed reference")).toHaveCount(0);
+
+  // Promote into the indexed "ops" bundle.  The mock's session has no
+  // embedding provider, so the daemon places the reference and says its
+  // index was not updated -- a warning, not a failure.
+  await runbook.getByRole("combobox", { name: /^Promote proposal .* into$/ }).selectOption("ops");
+  await runbook.getByRole("button", { name: /^Promote proposal/ }).click();
+  await expect(panel.getByRole("status")).toContainText("Promoted into bundle ops as deploy-runbook.");
+  await expect(panel.getByRole("status")).toContainText("vector index was not updated (no embedding provider is available in this session)");
+  await expect(panel.getByTestId("proposal-row")).toHaveCount(1);
+
+  // Dismiss is two steps.
+  await blocked.getByRole("button", { name: /^Dismiss proposal/ }).click();
+  await blocked.getByRole("button", { name: /^Confirm dismiss proposal/ }).click();
+  await expect(panel.getByText("Nothing proposed.")).toBeVisible();
+});
+
+test("references rail lists the catalog, promoted proposals appear, and the owner edits a reference's links", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Open References" }).click();
+  const panel = page.getByRole("region", { name: "References" });
+
+  // The seeded catalog: two ADRs (adr-2 supersedes adr-1) and a runbook in
+  // the "ops" bundle whose edge names nothing the catalog holds.
+  await expect(panel.getByTestId("reference-row")).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "Close References" })).toContainText("!");
+  const adr2 = panel.locator('[data-reference-id="adr-2"]');
+  const runbook = panel.locator('[data-reference-id="ops-runbook"]');
+  await expect(adr2.getByTestId("reference-links")).toContainText("supersedes adr-1 (requests for it get this one)");
+  await expect(runbook).toContainText("bundle ops");
+  await expect(runbook.getByTestId("reference-links")).toContainText("elaborates old-pager (not in this catalog)");
+  const adr1 = panel.locator('[data-reference-id="adr-1"]');
+  await adr1.getByRole("button", { name: /^Show reference/ }).click();
+  await expect(adr1).toContainText("linked from adr-2 (supersedes)");
+
+  // Fix the dangling edge: point it at adr-2 and relabel it depends-on.
+  await runbook.getByRole("button", { name: /^Edit links of/ }).click();
+  await runbook.getByLabel("Target of link 1").fill("adr-2");
+  await runbook.getByLabel("Relation of link 1").selectOption("depends-on");
+  await runbook.getByRole("button", { name: /^Save links of/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Saved.");
+  await expect(runbook.getByTestId("reference-links")).toHaveText("depends on adr-2");
+  await expect(page.getByRole("button", { name: "Close References" })).toContainText("3");
+
+  // A refused save keeps the draft and says why.
+  await adr2.getByRole("button", { name: /^Edit links of/ }).click();
+  await adr2.getByLabel("Target of link 1").fill("adr-2");
+  await adr2.getByRole("button", { name: /^Save links of/ }).click();
+  await expect(panel.getByRole("status")).toContainText("A reference cannot link to itself.");
+  await adr2.getByRole("button", { name: /^Cancel editing/ }).click();
+  await expect(adr2.getByTestId("reference-links")).toContainText("supersedes adr-1");
+
+  // A promotion lands in the catalog without a manual refresh.
+  await page.getByRole("button", { name: "Open Proposals" }).click();
+  const proposals = page.getByRole("region", { name: "Proposals" });
+  await proposals.locator('[data-claim-id="20260929T100000Z-aaaa1111"]').getByRole("button", { name: /^Promote proposal/ }).click();
+  await expect(proposals.getByRole("status")).toContainText("Promoted into the catalog as deploy-runbook.");
+  await page.getByRole("button", { name: "Open References" }).click();
+  await expect(panel.locator('[data-reference-id="deploy-runbook"]')).toContainText("supersedes old-deploy");
+  await expect(page.getByText("mock: executed reference")).toHaveCount(0);
+});
+
 test("memories rail lists the store, re-lists on a store_memory, and approves and removes (#1232)", async ({ page }) => {
   await openSession(page);
   await page.getByRole("button", { name: "Open Memories" }).click();

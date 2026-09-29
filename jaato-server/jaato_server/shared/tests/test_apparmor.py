@@ -2238,8 +2238,11 @@ class TestReferencesPluginApparmorRules:
             workspace_path="/ws", session_id="s1",
             config_root=None, plugin_config={},
         )
-        # 4 cache rules (Phase 1) + 2 catalog rules (Phase 3) = 6
-        assert len(rules) == 6
+        # 4 cache rules (Phase 1) + 2 catalog rules (Phase 3)
+        # + 2 claims-directory rules (proposeReference) = 8
+        assert len(rules) == 8
+        assert '"/ws/.jaato/references-claims/"   rw,' in rules
+        assert '"/ws/.jaato/references-claims/**" rw,' in rules
 
     def test_template_no_longer_hardcodes_hf_torch(self, manager):
         """Phase 1 acceptance: rendered profile body (with no plugins)

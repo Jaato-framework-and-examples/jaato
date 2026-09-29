@@ -211,6 +211,100 @@ Lists all available reference sources.
 }
 ```
 
+**Proposed references.** Claims agents wrote with `proposeReference` (below)
+are returned under `proposed`, not `sources`: not selectable, their name and
+description fenced as untrusted content, each with its `claim_file`, `path`
+(for a file proposal) and `origin`. With `require_curation: true` only
+`proposed_withheld` (a count) is returned.
+
+### proposeReference
+
+Proposes a document the agent wrote as a reference. Writes a **claim** to
+`<workspace>/.jaato/references-claims/<claim_id>.json`, never the catalog
+(the confined runner is write-denied on `.jaato/references/**`).
+
+```json
+{
+  "id": "pool-notes",
+  "name": "Runner pool notes",
+  "description": "Read before changing slot reuse.",
+  "tags": ["pool", "runner"],
+  "path": "notes/pool.md"
+}
+```
+
+**Parameters:** `id` and `name` required; `description`, `tags` (single
+tokens); exactly one of `path` (a file inside the workspace) or `content`
+(inline, up to 32 KiB).
+
+The claim's `origin` (`kind: "agent"`, the model binding, the session's
+authenticated user) is stamped from the calling session; it cannot be passed
+in.
+
+### Promoting a claim
+
+A claim becomes a catalog entry only when a person promotes it, through the
+daemon (protocol 1.33): `reference.promote <claim_id>` writes
+`.jaato/references/<id>.json`, and `reference.dismiss <claim_id>` removes the
+claim. SDK: `IPCClient.promote_reference_claim` / `dismiss_reference_claim`
+(TypeScript: `promoteReferenceClaim` / `dismissReferenceClaim`). Only the
+workspace owner may, on an owned workspace. The daemon re-validates the
+claim, re-derives `created_by` from its own session record (never from the
+claim file), stamps `origin.curated_by` with the promoting person, and
+refuses to overwrite an existing entry.
+
+A curator sees the claims with `IPCClient.list_reference_claims()`
+(TypeScript: `listReferenceClaims()`), each with its recorded origin and the
+`problems` a promotion would raise; the web coder's Proposals rail uses it.
+
+### Who approved a proposal
+
+`proposeReference` is auto-approved. Set
+
+```yaml
+plugin_configs:
+  references:
+    witness_proposals: true
+```
+
+and it goes to the session's permission policy instead. When a person is
+asked at the prompt and approves, the claim's origin records
+`witnessed_by` (`{via: "permission-prompt", method, user?, approver?}`).
+Nothing is recorded when the policy decided without asking.
+
+### Typed links
+
+A reference may declare edges to others beside its tags:
+
+```json
+{
+  "id": "adr-7",
+  "links": [
+    {"to": "adr-4", "rel": "supersedes", "note": "reverses the storage decision"},
+    {"to": "glossary", "rel": "depends-on"}
+  ]
+}
+```
+
+| `rel` | effect on `selectReferences` |
+|---|---|
+| `depends-on` | the target is selected with the source |
+| `elaborates` | not selected; returned as a `related` hint |
+| `supersedes` | a request for the target gets this reference instead (`superseded` says so) |
+| `contradicts` | listed only |
+
+A declared edge overrides a mention of the same target in the body, and
+mentions are still followed otherwise. An edge to an id not in the catalog
+is kept and listed with `dangling: true`. `listReferences` returns each
+reference's `links` and the edges pointing at it (`linked_from`).
+`proposeReference` accepts `links` too; they take effect when the claim is
+promoted.
+
+Once a reference is in the catalog, the workspace owner changes its links
+through the daemon (`ReferenceLinksUpdateRequest`, protocol 1.33), which
+validates them and rewrites only the file's `links` key; the web coder's
+References rail section is the editor.
+
 ## Tags and Proactive Reference Access
 
 Each reference source can have tags describing its topic. The model is instructed to:
@@ -338,6 +432,14 @@ To disable transitive injection:
   }
 }
 ```
+
+To bound it, set `max_transitive_references` (unset or `0` = unbounded).
+When a depth has more candidates than the room left, they are ranked
+before the cut: declared `depends-on` edges first, then (when every
+candidate has a vector in the workspace's embedding index) similarity to
+the selection, then how many references at the previous depth reach the
+candidate, then id. `selectReferences` reports a cut as `truncated`, with
+`ranked_by` naming the ranking that decided it.
 
 ## Environment Variables
 

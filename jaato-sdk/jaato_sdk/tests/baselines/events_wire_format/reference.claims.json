@@ -1,0 +1,13 @@
+{
+  "type": "reference.claims",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "ok": true,
+  "category": "",
+  "error": "",
+  "claims": [],
+  "unreadable": [],
+  "may_curate": false,
+  "bundles": []
+}

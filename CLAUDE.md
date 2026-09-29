@@ -578,6 +578,8 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
+- `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.33, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-133)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
+- `ReferenceCatalogRequest` → `ReferenceCatalogEvent` / `ReferenceLinksUpdateRequest` → `ReferenceLinksUpdateResultEvent` — list the workspace reference catalog with its typed links both ways, and replace one reference's links (protocol 1.33, see [Typed Links Between References](#typed-links-between-references-wikillm-seam-3))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
@@ -4020,7 +4022,7 @@ beneath it (`_get_reference_content` rglobs and concatenates).
 | 3 | `max_transitive_references` + a truncation record | a bound that binds |
 
 **Sorting had to land before the bound, not with it.** `pending` and
-`new_mentions` are sets, so iteration order varies across processes
+`new_mentions` were sets, so iteration order varies across processes
 (string hash randomisation). Unbounded that only shuffled the manifest;
 with a cap it decides **which** references survive — measured on the same
 catalog capped at 25, **six of the 25 differed** between two
@@ -4065,14 +4067,294 @@ silently-cut neighbourhood reads absence as *"no such reference exists"*,
 which on a knowledge graph is exactly the wrong conclusion and is
 unfalsifiable from its side.
 
-**Deliberately not done.** Ranking the frontier — keep the *nearest* 25
-rather than the first 25. The machinery nearly exists (`score_sources`
-takes a vector and does not care where it came from), but it is reachable
-only where a vector index has been generated, and `initialize()` skips the
-embedding provider entirely otherwise. A bound has to work for everyone;
-ranking is a refinement for workspaces that have embeddings. Also not done:
-typed edges, which would let `rel` decide what counts as adjacency rather
-than "the string appeared".
+**What the cut keeps is decided by the links, not the spelling.** The
+first version admitted each depth parent by parent in id order, so under a
+cap the reference the selection most needed lost to one whose id sorted
+earlier. Each depth is now read WHOLE (`_reached_at_depth`) and ordered by
+`links.rank_frontier` before the cap applies:
+
+1. how many parents at the previous depth DECLARE `depends-on` to it,
+   counted by its current version (the routing `supersedes` applies);
+2. where the workspace has an embedding index, how close its vector is to
+   the selection's;
+3. how many parents reach it at all;
+4. the id, which keeps the order total, so determinism now comes from the
+   ranking rather than from sorting `pending`.
+
+Unbounded, the SET is unchanged and only the order within a depth moves.
+The truncation record carries `ranked_by`. Guard:
+`shared/tests/test_the_cap_keeps_what_the_links_rank_first.py`, five
+reversions.
+
+**The nearest, where there are vectors.** Tier 2 keeps the nearest 25
+rather than the best-linked 25. The selection is embedded once, from the
+fields every reference's vector is made from (`bundle.embedding_text`:
+name, description, tags, fetch hint, now the one definition `reconcile`
+and `metadata_hash` also read), and each candidate is scored against its
+own bundle's sidecar (`_semantic_score_sources`). Four rules:
+
+| Rule | Why |
+|---|---|
+| **asked only for a depth that is cut** | unbounded, or with room for every candidate, the order changes nothing about what is selected, so no embedding is paid for. A walk cuts at most one depth |
+| **a declared `depends-on` still comes first** | an author's statement outranks a vector's opinion |
+| **one unindexed candidate means links for the whole depth** | it cannot be compared, and ranking it below the indexed ones would prefer a reference for being in an indexed bundle rather than for being near |
+| **best effort, and said** | no matcher, a failed embedding or a matcher that raises ranks by links; `ranked_by` names which ranking cut the depth |
+
+No knob: it applies only under `max_transitive_references`, which is
+already opt-in, and only where an index exists. Guard:
+`shared/tests/test_the_cap_prefers_what_is_nearest.py`, six reversions.
+
+### A Reference Records Where It Arrived, Not Who Wrote It
+
+`Memory` carries four provenance fields — `source_agent`, `source_session`,
+and since #1123 `generated_by` / `curated_by`. `ReferenceSource` carried
+**none**, so the rule that provenance gates placement (the wikiLLM
+brainstorm, §8: locally reproducible evidence in the trusted region,
+third-party content fenced) was not merely unimplemented for references but
+**unrepresentable** — there was no field for a fence to read.
+
+`ReferenceOrigin` is that field, and it records only events the framework
+is **present for**: a copy from another workspace's bundle (`imported`) and
+a proposal through `proposeReference` (`agent`, below). A reference authored
+by a human or emitted by `gen-references` is neither, and carries no origin:
+a field naming an author with no stamper is the inert mechanism this
+repository has already had to review out once (`85c3bfd`, "three inert
+mechanisms"). For an import it records **arrival**:
+
+```json
+"origin": {"kind": "imported", "bundle": "teammate",
+           "source_id": "adr-004", "at": "2026-09-29T10:00:00+00:00"}
+```
+
+| Property | Why |
+|---|---|
+| **observed, never claimed** | the stamp is written **over** whatever the incoming file said. An `origin` already in a foreign JSON is an assertion by the party being judged, and a document claiming to have been authored locally would otherwise launder itself into the catalog as native. Any chain behind the arrival is hearsay and is not kept |
+| **absent means UNOBSERVED** | a hand-authored reference, one predating the field, and one installed by `bundle unpack` (which copies whole directories rather than rewriting each reference) all carry `None`, and none may be read as "authored here". Positive evidence only, the posture #1014 and #1023 take about confinement labels |
+| **per-REFERENCE, not per-bundle** | `merge_bundle` copies source references *into the target bundle's own directory*, so after a merge the source boundary is gone. Bundle-level provenance would be erased by exactly the operation that creates foreign references |
+| **`source_id` is kept** | `bundle merge --prefix` renames on collision, so the local id is not the one the other workspace knows it by — and that is the id an operator reconciling two catalogs needs |
+| **one instant per merge** | it was one operation; per-file clocks would imply an ordering the copy loop does not have |
+
+**It reaches a reader, because a field nothing renders is a field nobody can
+act on.** `to_instruction` names it where the MODEL reads the reference —
+not only in an operator listing — and `listReferences` carries it in the
+catalog entry. Both **annotate**; neither fences. Moving the trusted/fenced
+boundary is a change to what every session is told and is its own decision;
+what this closes is that the boundary was not expressible at all.
+
+`kind` is a string rather than a bool, and the same key `generated_by`
+uses (`ai_generated_by` mints `{"kind": "ai", ...}`), so a reader branches
+identically wherever provenance appears and the vocabulary can grow.
+
+Tests: `shared/tests/test_reference_origin_is_observed_not_claimed.py`,
+carrying two `REVERSIONS` — deferring to the foreign claim, and inventing a
+`kind` for a payload that states none.
+
+### An Agent Proposes a Reference; It Does Not Edit the Catalog
+
+Memory had an agent write path (`store_memory`) and references had none, so
+a document an agent produced (a runbook, an API map) could not be offered to
+the next agent. `proposeReference` is the first half of that path (wikiLLM
+brainstorm §6). It takes `id`, `name`, `description`, `tags` and either a
+workspace `path` or short inline `content`, and writes a **claim**, one JSON
+file per call under `<workspace>/.jaato/references-claims/`
+(`references/claims.py`). It never writes the catalog.
+
+| Rule | Why |
+|---|---|
+| **a claim, never a catalog entry** | the confined runner is `audit deny ... wlk` on `.jaato/references/**`; the claims directory is a SIBLING, never a carve-out beneath the deny. A catalog id cannot be reused, `mode` is always `selectable` (auto-injection is a curator's call), a `path` must resolve inside the workspace, inline content is capped at 32 KiB |
+| **stamped, never supplied** | `origin: {kind: "agent", generated_by, created_by, claim_id, at}` is read off the calling session: `generated_by` from `JaatoSession._model_provenance` (the one definition memory and media use), `created_by` from `_client_user_id` (the `get_client_user` chain, no env fallback). Nothing in the arguments can set it; no session means no author, never a guess |
+| **unreviewed is fenced** | `listReferences` returns claims under `proposed`, their name and description only inside `wrap_untrusted_content`. Id, claim id and tags are re-checked as single tokens on READ, because the claims directory is model-writable. `mode=auto` lists none |
+| **withheld is counted** | `plugin_configs.references.require_curation: true` hides claims and reports `proposed_withheld: N`; an unreadable claim file is named under `proposed_unreadable` |
+| **the plugin declares its write** | `ReferencesPlugin.get_apparmor_rules` grants `"<ws>/.jaato/references-claims/{,**}" rw` itself rather than leaning on the template's workspace-wide `rwkl` |
+
+**What a claim's origin is worth.** On a confined host only
+`proposeReference` can write a claim. The file tools refuse `.jaato/...`
+(`check_path_with_jaato_containment`), `cli` runs a bare `.jaato/...` token
+through the same rule (before, `path_like` skipped a token with no `/`,
+`./`, `~` or `..`, so `echo > .jaato/references-claims/c.json` and
+`cat .jaato/profiles/p.yaml` passed), and template **v43** write-denies
+the directory in `//child`, which covers what no string check sees
+(`python -c`, a script, a notebook cell). Base keeps the grant, because
+the tool runs in-process there. Two places a hand-written claim, and so a
+forged `witnessed_by`, is still possible: an **unconfined** host (no kernel
+boundary, and the runner has the daemon's uid, so no file the daemon writes
+is out of its reach either) and the flat **isolated sub-runner** profile,
+whose subprocesses share one body with its in-process tools. That is why a
+claim is still listed as unreviewed and fenced, and why `curated_by` is the
+stamp promotion makes itself. Guard:
+`shared/tests/test_a_claim_is_written_only_by_its_tool.py`, three
+reversions; `references-claims/` is in `gitignore.CONFINED_STATE`.
+
+Guard: `shared/tests/test_an_agent_proposes_a_reference.py`, six reversions,
+including two checked against the RENDERED profile with the #1348 rule
+matcher: claims writable, catalog still denied. No kernel.
+
+### A Person Promotes the Claim; the Daemon Writes the Catalog (protocol 1.33)
+
+`reference.promote <claim_id>` turns a claim into
+`<workspace>/.jaato/references/<id>.json`; `reference.dismiss <claim_id>`
+removes the claim. Both are daemon-level (`CommandRouter`, work in
+`server/reference_curation.py`), reachable as typable commands or as the
+correlated `ReferenceCurationRequest`, and answered with one
+`ReferenceCurationResultEvent` whatever happened, echoing the request's
+`request_id` (`category`: `invalid_request` / `no_workspace` / `not_owner`
+/ `not_found` / `invalid_claim` / `collision` / `unsafe_path` /
+`io_error`). The daemon writes because it is the one process that is not
+confined; the runner's AppArmor contribution is unchanged, since the
+runner still writes only claims.
+
+`ReferenceClaimsRequest` → `ReferenceClaimsEvent` is the curator's
+listing: the claims in the caller's workspace, read the way a promotion
+reads one (`list_claims`: the directory resolved inside the workspace, a
+symlinked claim file not followed, each record re-checked), each row with
+`problems` (what `build_proposed_reference` would refuse today, so the
+reason shows before Promote is pressed) and the recorded `origin`; files
+that are not a showable claim are named under `unreadable`, and
+`may_curate` is the promotion gate's answer. Looking is not gated.
+`IPCClient.list_reference_claims` / `promote_reference_claim` /
+`dismiss_reference_claim` and `listReferenceClaims` /
+`promoteReferenceClaim` / `dismissReferenceClaim` await the answer and
+refuse a daemon below 1.33 (the 1.7 missing-verb rule). The web coder's
+**Proposals** rail section is built on them.
+
+| Rule | Why |
+|---|---|
+| **the owner gate** | `memory_verbs.may_curate`, the #1232 rule: the owner may, anyone may on an unowned workspace, an identity-less connection may not on an owned one. The identity is the transport's (`get_client_user`) |
+| **the claim is re-validated** | the claims directory is model-writable, so the file is re-read (no link out of the workspace, a symlinked claim file refused, `is_claim`) and its entry run back through `build_proposed_reference`, the one door a proposal passed: a `path` edited to point out of the workspace is `invalid_claim` |
+| **`created_by` is re-derived** | never copied from the claim. `SessionManager.creator_in_workspace` answers from the loaded session or the index's membership row, and only for a session placed in THIS workspace; otherwise absent. `generated_by` is kept as recorded (what the curator saw), `curated_by` is `{kind: "human", via: "reference.promote", user}`, `at` is the arrival |
+| **nothing is overwritten** | an id in the catalog (sub-bundles included) or an existing `<id>.json` is `collision`; the write goes through `write_contained` (#1386), so a catalog directory linked out of the workspace is `unsafe_path` |
+| **a promoted local reference loads** | the claim's workspace-relative `path` is re-anchored to the catalog file (`../../docs/x.md`), because the loader resolves a relative path against the reference file's directory |
+
+**Who approved the proposal (wikiLLM step 2).** The permission gate knew
+whether a person was asked about a call and the tool body never did.
+`ToolExecutor` now binds the call's verdict for the duration of the body
+(`shared/call_witness.py`, a `ContextVar`, bound even when empty so a pool
+thread cannot leak a previous call's), from the permission plugin's `asked`
+flag, which it now returns on every decision. `proposeReference` stamps
+`origin.witnessed_by` (`{via: "permission-prompt", method, user?,
+approver?, edited?}`) only when a person was asked and approved; a policy
+approval, or an out-of-tree engine that reports no `asked`, is no witness.
+`proposeReference` is auto-approved, so this is opt-in:
+`plugin_configs.references.witness_proposals: true` takes it off the
+auto-approved list and the session's policy decides. Promotion carries it
+AS RECORDED: it is as trustworthy as the rule deciding who else may write
+the claims directory (above: only the tool on a confined host, anything on
+an unconfined one); `curated_by` is the stamp the daemon makes itself.
+
+**Into a named bundle, and its vector index.** `reference.promote
+<claim_id> --bundle <name>` (or `ReferenceCurationRequest.bundle`) writes
+the entry into a workspace-tier sub-bundle instead of the catalog root;
+`ReferenceClaimsEvent.bundles` lists the ones a promotion may name
+(`{name, indexed, model?}`), and the web Proposals panel offers them
+beside Promote. When the destination bundle (root included) has a vector
+index, the new entry has no row in it, so the promotion reconciles it and
+reports how (`ReferenceCurationResultEvent.reconcile`: `none`, `updated`,
+`clean`, `busy`, `unavailable`, `error`, with `reconcile_detail`). The
+reference is placed whatever that says.
+
+| Piece | Where, and why there |
+|---|---|
+| the write and `reconcile_bundle` | the **daemon** (`reference_curation.reconcile_destination`): on a confined host every runner body denies `.jaato/references/**`, the base profile included, and in-process tools run in base because `tool_hat` is never entered |
+| the vectors | the caller's **runner** (`session.embed_texts`, work lane, `ReferencesPlugin.embed_texts`), because the embedding model is loaded there; the daemon wraps it as `RunnerEmbeddingProvider`, so the code that writes an index is unchanged |
+| the model check | a probe with no texts first: a session embedding with a model other than the index's is `unavailable`, never written into it |
+
+Stated limits: with no session attached in the workspace, no embedding
+provider, or no numpy in the daemon's environment, the index is
+`unavailable` and similarity matching cannot find the entry until it is
+reconciled; and `references bundle reconcile` typed in a confined session
+still cannot write the index (the same base-profile deny). This split is a
+**stopgap**: #1422 makes `tool_hat` real, lets the runner write its own
+catalog, and lists what to remove from here. A running session sees the new
+entry at its next catalog reload.
+
+Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
+reversions (the numpy-backed reconcile tests skip without numpy).
+
+Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
+reversions), `server/tests/test_a_curator_lists_reference_claims.py`
+(five) and `shared/tests/test_a_proposal_names_who_approved_it.py`
+(seven).
+
+### Typed Links Between References (wikiLLM Seam 3)
+
+The only edge between references was a MENTION: an id or path that happens
+to appear in a body, walked by `selectReferences`' transitive expansion.
+Nobody authors it, and "mentioned" is the only relation. A reference may
+now also declare edges beside its tags,
+`links: [{to, rel, note?}]`, with a closed vocabulary
+(`references/links.py`) whose relation decides the traversal:
+
+| `rel` | what a selection does |
+|---|---|
+| `depends-on` | expanded, even with no mention and even from a URL / MCP reference with no readable body |
+| `elaborates` | not expanded; offered on the result as `related` |
+| `supersedes` | declared on the NEWER reference; a selection or expansion reaching the older one gets the newer instead and says so (`superseded`). Two successors, or a cycle, route nowhere |
+| `contradicts` | listed only; never expanded, never hinted |
+
+| Rule | Why |
+|---|---|
+| **a declared edge wins over the mention of the same pair** | that is what makes declaration cheaper as well as better: an `elaborates` target the body names is not pulled in |
+| **mentions are still walked** | declaration is added beside inference, not instead of it |
+| **a dangling edge is kept and marked** (`dangling: true`), never dropped | losing an edge silently is the defect declared edges exist to end |
+| **the reverse index is computed when asked** (`linked_from` on `listReferences`), never cached | the plugin reassigns its catalog in many places |
+| **loading is lenient, validation is not** | a malformed edge is dropped at load so it cannot cost the reference, and reported as an error by `validate_reference_file` and `jaato-scaffold validate` |
+
+The instruction the model reads carries a `**Links**` line
+(`supersedes `adr-1`; depends on `glossary``), inline references included.
+
+**Who declares an edge** (the brainstorm's open question 7): an agent may
+propose one, and none takes effect until a person promotes it.
+`proposeReference` takes `links`, refused at the call when a target is not
+in the agent's own catalog; the claim carries them, the curator's row shows
+them (`links`, notes as text) with a non-blocking `warnings` entry for a
+target the workspace catalog cannot place, and promotion writes them into
+the catalog file. `listReferences` shows a claim's edges to another model
+as `{to, rel}` with the target re-checked as one token and no note, since
+that listing is outside the untrusted fence. The web Proposals panel draws
+each edge and marks a `supersedes`, because promoting it reroutes requests
+for its target.
+
+`jaato-scaffold validate` reads the workspace catalog's edges:
+`reference_link_invalid` (**error**), `reference_link_dangling` (warn; a
+target in neither the workspace catalog nor `~/.jaato/references`),
+`reference_supersedes_ambiguous` and `reference_supersedes_cycle` (warn).
+
+Under `max_transitive_references` the links also decide what a cut keeps:
+declared `depends-on` first, then references more of the previous depth
+points to (see [A Guard That Only Binds When Nothing Needs
+Bounding](#a-guard-that-only-binds-when-nothing-needs-bounding)).
+
+**Changing an edge after it is in the catalog** takes the daemon, for the
+reason promotion does: a confined runner cannot write `.jaato/references/`.
+`ReferenceCatalogRequest` → `ReferenceCatalogEvent` lists every reference
+the loader reads (the root and each sub-bundle carrying `bundle.json`, no
+link followed) with its `links` (a dangling one marked), `linked_from` and
+`may_curate`; `ReferenceLinksUpdateRequest{reference_id, links}` →
+`ReferenceLinksUpdateResultEvent` replaces one reference's list
+(`server/reference_catalog.py`, protocol 1.33):
+
+| Rule | Why |
+|---|---|
+| the owner gate (`may_curate`, identity from the transport) | a `supersedes` reroutes every request for its target |
+| `link_errors` before anything is written (`invalid_links`) | the loader drops a malformed edge silently, so a bad one would be saved and not there |
+| a dangling target, and a second `supersedes` of one target, are `warnings` | neither is wrong to write; the person should know |
+| only the `links` key changes (`write_contained`), `[]` removes it | name, tags and origin are not this verb's |
+| an id declared in two files is `ambiguous` and not edited | which file the loader keeps is not this verb's to guess |
+| no reconcile | an embedding is made from the name, description, tags and fetch hint, never the links |
+
+`IPCClient.list_reference_catalog` / `update_reference_links` and
+`listReferenceCatalog` / `updateReferenceLinks` share the 1.33 floor. The
+web coder's **References** rail section lists the catalog (the badge is
+`!` while any reference holds a dangling edge) and gives the owner an
+editor per reference; a promotion from Proposals re-lists it. A running
+session sees an edit at its next catalog reload. Like promotion into a bundle, the
+write is daemon-side only because no runner profile may write the catalog;
+#1422 (a real `tool_hat`) moves it back to the runner, with the daemon
+keeping the owner gate.
+
+Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
+`server/tests/test_a_proposal_carries_typed_links.py` (five) and
+`server/tests/test_a_person_edits_a_references_links.py` (six).
 
 ### Plugin-Level Traits
 

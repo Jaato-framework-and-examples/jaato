@@ -7,13 +7,14 @@ The router owns no transport state — it receives events and emits
 responses through the ``EventSink`` protocol.
 """
 
+import functools
 import json
 import logging
 from dataclasses import dataclass
 import os
 import pathlib
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.events import Event
 from jaato_server.server.event_sink import EventSink, client_peer
@@ -40,10 +41,42 @@ _SESSION_MESSAGING_VERBS = {
 #: ``isinstance`` branch for the same reason as the verb table above, and so
 #: ``_handle_history_request`` keeps its no-silent-exit shape (every guard
 #: has an ``else``) rather than growing an early return for the page verb.
-_HISTORY_HANDLERS = {
+_ROUTED_REQUEST_HANDLERS = {
     "HistoryRequest": "_handle_history_request",
     "HistoryPageRequest": "_handle_history_page_request",
+    # Reference claims (1.33): the curator's listing and the correlated
+    # promote / dismiss.  Daemon-level, like the typable commands.
+    "ReferenceClaimsRequest": "_handle_reference_claims_request",
+    "ReferenceCurationRequest": "_handle_reference_curation_request",
+    # The curator's view of the catalog and its typed links (1.33).
+    "ReferenceCatalogRequest": "_handle_reference_catalog_request",
+    "ReferenceLinksUpdateRequest": "_handle_reference_links_request",
 }
+
+
+def _curation_args(args: List[str]) -> "tuple[str, str]":
+    """``(claim_id, bundle)`` from a typed ``reference.promote|dismiss``.
+
+    ``<claim_id> [--bundle <name> | --bundle=<name>]``.  Anything else makes
+    the claim id empty, which :func:`~.reference_curation.curate_claim`
+    answers with the usage line rather than acting on half a command.
+    """
+    if not args:
+        return "", ""
+    claim_id, rest, bundle = args[0], args[1:], ""
+    if len(rest) == 2 and rest[0] == "--bundle":
+        bundle = rest[1]
+    elif len(rest) == 1 and rest[0].startswith("--bundle="):
+        bundle = rest[0].split("=", 1)[1]
+    elif rest:
+        return "", ""
+    return claim_id, bundle
+
+
+def _describe_sources(sources: Dict[str, Optional[str]]) -> str:
+    """``attached_session=none, ...`` -- which workspace sources were empty."""
+    return ", ".join(f"{k}={'none' if v is None else repr(v)}"
+                     for k, v in sources.items())
 
 
 def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -566,11 +599,21 @@ class CommandRouter:
             self._handle_workspace_mismatch_response(client_id, event)
             return
 
-        # Handle HistoryRequest / HistoryPageRequest (1.28)
-        from jaato_sdk.events import HistoryRequest, HistoryPageRequest
-        if isinstance(event, (HistoryRequest, HistoryPageRequest)):
-            getattr(self, _HISTORY_HANDLERS[type(event).__name__])(
-                client_id, event)
+        # Correlated daemon-level requests: HistoryRequest /
+        # HistoryPageRequest (1.28), the reference-claim verbs (1.33).
+        from jaato_sdk.events import (
+            HistoryPageRequest,
+            HistoryRequest,
+            ReferenceCatalogRequest,
+            ReferenceClaimsRequest,
+            ReferenceCurationRequest,
+            ReferenceLinksUpdateRequest,
+        )
+        if isinstance(event, (HistoryRequest, HistoryPageRequest,
+                              ReferenceClaimsRequest, ReferenceCurationRequest,
+                              ReferenceCatalogRequest, ReferenceLinksUpdateRequest)):
+            getattr(self, _ROUTED_REQUEST_HANDLERS[type(event).__name__])(
+                client_id, event, session_id)
             return
 
         # Handle daemon-level plugin commands (session-independent plugins).
@@ -660,6 +703,10 @@ class CommandRouter:
         if cmd == "scaffold.integration":
             self._handle_scaffold_integration(
                 client_id, args, workspace_path, session_id=session_id)
+            return True
+        if cmd in ("reference.promote", "reference.dismiss"):
+            self._handle_reference_curation(
+                client_id, cmd, args, workspace_path, session_id=session_id)
             return True
         return False
 
@@ -776,6 +823,219 @@ class CommandRouter:
         logger.info("workspace.ignore: client=%s %s %r in %s", client_id,
                     "added" if ignored else "removed", pattern, gitignore_path)
         answer(ok=True, ignored=ignored, gitignore_path=gitignore_path)
+
+    def _handle_reference_curation(
+        self, client_id: str, cmd: str, args: list,
+        client_workspace: Optional[str], session_id: Optional[str] = None,
+    ) -> None:
+        """Handle the typable ``reference.promote|dismiss <claim_id>`` (1.33).
+
+        The command form of :meth:`_handle_reference_curation_request`; its
+        answer carries no ``request_id``.  ``reference.promote <claim_id>
+        --bundle <name>`` (or ``--bundle=<name>``) promotes into a
+        workspace-tier sub-bundle; anything else after the claim id is a
+        usage error, never ignored.
+        """
+        from .reference_curation import CURATION_COMMANDS
+
+        claim_id, bundle = _curation_args(list(args))
+        self._answer_reference_curation(
+            client_id, CURATION_COMMANDS[cmd], claim_id,
+            client_workspace, session_id, request_id="", label=cmd, bundle=bundle)
+
+    def _handle_reference_curation_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``ReferenceCurationRequest`` (1.33), echoing ``request_id``."""
+        self._answer_reference_curation(
+            client_id, event.action, event.claim_id,
+            self._event_sink.get_client_workspace(client_id), session_id,
+            request_id=event.request_id,
+            label=f"reference.{event.action or '?'}",
+            bundle=getattr(event, "bundle", "") or "")
+
+    def _answer_reference_curation(
+        self, client_id: str, action: str, claim_id: str,
+        client_workspace: Optional[str], session_id: Optional[str], *,
+        request_id: str, label: str, bundle: str = "",
+    ) -> None:
+        """Promote or dismiss one claim and send the one answer (1.33).
+
+        Daemon-level: the catalog is write-denied to a confined runner, so
+        the daemon, which is not confined, is where a claim becomes a catalog
+        entry.  The workspace is :meth:`resolve_caller_workspace`'s; the
+        owner gate reads the TRANSPORT's identity for this connection and
+        the workspace owner the session manager knows, never anything in the
+        request.  The work itself is
+        :func:`~.reference_curation.curate_claim`, which refuses an unknown
+        ``action``.  Every outcome, refusals included, answers with one
+        ``ReferenceCurationResultEvent``.  When the destination bundle has a
+        vector index, its vectors come from the caller's own session in this
+        workspace (:meth:`_workspace_embedder`).
+        """
+        from jaato_sdk.events import ReferenceCurationResultEvent
+
+        from .reference_curation import curate_claim
+
+        answer = functools.partial(
+            ReferenceCurationResultEvent, request_id=request_id,
+            action=action, claim_id=claim_id)
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, answer(
+                ok=False, category="no_workspace",
+                error=f"{label}: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        user_id = self._event_sink.get_client_user(client_id)
+        outcome = curate_claim(
+            workspace, action, claim_id,
+            owner=self._workspace_owner(workspace), user_id=user_id,
+            creator_in_workspace=self._session_manager.creator_in_workspace,
+            bundle=bundle,
+            embed=self._workspace_embedder(client_id, session_id, workspace))
+        logger.info("%s: client=%s user=%s claim=%s ok=%s category=%s ref=%s "
+                    "bundle=%s reconcile=%s", label, client_id, user_id or "-",
+                    claim_id, outcome.ok, outcome.category or "-",
+                    outcome.reference_id or "-", outcome.bundle or "-",
+                    outcome.reconcile or "-")
+        self._event_sink.send_event(client_id, answer(
+            ok=outcome.ok, category=outcome.category, error=outcome.error,
+            reference_id=outcome.reference_id,
+            reference_file=outcome.reference_file,
+            warnings=list(outcome.warnings), bundle=outcome.bundle,
+            reconcile=outcome.reconcile,
+            reconcile_detail=outcome.reconcile_detail))
+
+    def _workspace_embedder(
+        self, client_id: str, session_id: Optional[str], workspace: str,
+    ) -> Optional[Callable[[List[str]], Dict[str, Any]]]:
+        """``JaatoServer.embed_texts`` of the caller's session in ``workspace``.
+
+        The caller's attached session first, then the one the transport
+        names; only a session whose workspace IS the promotion's, so the
+        vectors come from the model configured for that workspace.  ``None``
+        when there is none, which the promotion reports as ``unavailable``.
+        """
+        candidates = [self._session_manager.get_client_session(client_id)]
+        if session_id and hasattr(self._session_manager, "get_session"):
+            candidates.append(self._session_manager.get_session(session_id))
+        target = os.path.realpath(workspace)
+        for session in candidates:
+            ws = getattr(session, "workspace_path", None) if session else None
+            server = getattr(session, "server", None) if session else None
+            if ws and os.path.realpath(ws) == target and hasattr(server, "embed_texts"):
+                return server.embed_texts
+        return None
+
+    def _handle_reference_claims_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Answer ``ReferenceClaimsRequest`` with one ``ReferenceClaimsEvent`` (1.33).
+
+        Lists the claims in :meth:`resolve_caller_workspace`'s workspace
+        (:func:`~.reference_curation.list_claims`), and says whether this
+        connection may curate them -- the same owner rule promotion
+        enforces.  Looking is not gated: any connection whose workspace it
+        is may list, as the memory rail's list is.
+        """
+        from jaato_sdk.events import ReferenceClaimsEvent
+
+        from .memory_verbs import may_curate
+        from .reference_curation import list_claims
+
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, self._event_sink.get_client_workspace(client_id),
+            session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, ReferenceClaimsEvent(
+                request_id=event.request_id, ok=False, category="no_workspace",
+                error="reference.claims: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        listing = list_claims(workspace)
+        user_id = self._event_sink.get_client_user(client_id)
+        self._event_sink.send_event(client_id, ReferenceClaimsEvent(
+            request_id=event.request_id, ok=listing.ok,
+            category=listing.category, error=listing.error,
+            claims=listing.claims, unreadable=listing.unreadable,
+            may_curate=may_curate(self._workspace_owner(workspace), user_id),
+            bundles=listing.bundles))
+
+    def _handle_reference_catalog_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Answer ``ReferenceCatalogRequest`` with one ``ReferenceCatalogEvent`` (1.33).
+
+        Lists :meth:`resolve_caller_workspace`'s catalog with its typed
+        links both ways (:func:`~.reference_catalog.list_catalog`), and says
+        whether this connection may edit them.  Looking is not gated.
+        """
+        from jaato_sdk.events import ReferenceCatalogEvent
+
+        from .memory_verbs import may_curate
+        from .reference_catalog import list_catalog
+
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, self._event_sink.get_client_workspace(client_id),
+            session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, ReferenceCatalogEvent(
+                request_id=event.request_id, ok=False, category="no_workspace",
+                error="reference.catalog: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        listing = list_catalog(workspace)
+        user_id = self._event_sink.get_client_user(client_id)
+        self._event_sink.send_event(client_id, ReferenceCatalogEvent(
+            request_id=event.request_id, ok=listing.ok,
+            category=listing.category, error=listing.error,
+            references=listing.references, unreadable=listing.unreadable,
+            may_curate=may_curate(self._workspace_owner(workspace), user_id)))
+
+    def _handle_reference_links_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Answer ``ReferenceLinksUpdateRequest`` with one result event (1.33).
+
+        Daemon-level for the reason promotion is: the catalog is
+        write-denied to a confined runner.  The owner gate reads the
+        transport's identity for this connection; the work and every
+        refusal are :func:`~.reference_catalog.update_links`'s.
+        """
+        from jaato_sdk.events import ReferenceLinksUpdateResultEvent
+
+        from .reference_catalog import update_links
+
+        answer = functools.partial(
+            ReferenceLinksUpdateResultEvent, request_id=event.request_id,
+            reference_id=event.reference_id)
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, self._event_sink.get_client_workspace(client_id),
+            session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, answer(
+                ok=False, category="no_workspace",
+                error="reference.links: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        user_id = self._event_sink.get_client_user(client_id)
+        outcome = update_links(
+            workspace, event.reference_id, event.links,
+            owner=self._workspace_owner(workspace), user_id=user_id)
+        logger.info("reference.links: client=%s user=%s ref=%s ok=%s category=%s "
+                    "links=%d", client_id, user_id or "-", event.reference_id,
+                    outcome.ok, outcome.category or "-", len(outcome.links))
+        self._event_sink.send_event(client_id, answer(
+            ok=outcome.ok, category=outcome.category, error=outcome.error,
+            reference_file=outcome.reference_file, links=list(outcome.links),
+            warnings=list(outcome.warnings)))
+
+    def _workspace_owner(self, workspace: str) -> Optional[str]:
+        """The workspace's qualified owner, ``None`` when unowned or unknown."""
+        owner_of = getattr(self._session_manager, "_workspace_owner_of", None)
+        return owner_of(workspace) if callable(owner_of) else None
 
     def _handle_scaffold_explain(
         self, client_id: str, args: list, client_workspace: Optional[str],
@@ -2462,7 +2722,9 @@ class CommandRouter:
     # History
     # ------------------------------------------------------------------
 
-    def _handle_history_page_request(self, client_id: str, event) -> None:
+    def _handle_history_page_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
         """Answer ``HistoryPageRequest`` with one ``HistoryPageEvent`` (1.28).
 
         Always answers, echoing ``request_id``: with the page, or with
@@ -2486,7 +2748,9 @@ class CommandRouter:
             )
         self._event_sink.send_event(client_id, answer)
 
-    def _handle_history_request(self, client_id: str, event) -> None:
+    def _handle_history_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
         """Handle ``HistoryRequest``."""
         from jaato_sdk.events import HistoryEvent
 

@@ -3,9 +3,27 @@
 Status: **brainstorm, not a spec.** Nothing here is scheduled, and §5 is
 deliberately the only section that says what the framework would owe.
 
-Tree claims verified at `afd067a` (2026-09-17). Re-verify file:line
-citations before relying on them — two of the three documents this one
-builds on record being overtaken by the tree while they were written.
+**What it is for:** giving an agent the capability to put knowledge *into*
+a shared store — as a memory (an event it observed) or as a reference (a
+document it wrote) — and giving the next agent a way to trust what it
+finds there. The read side already exists three times over (§6); the
+write side is the subject, and §6 is where it is designed.
+
+Tree claims verified at `afd067a` (2026-09-17), **re-verified at
+`781f0ef` (2026-09-29)**. Re-verify file:line citations before relying on
+them — two of the three documents this one builds on record being
+overtaken by the tree while they were written, and this one was too:
+three of its "not built" claims were closed by work that arrived for
+other reasons, and are corrected in place below rather than left
+standing. That is §4's own argument turned on this document — a claim
+true at one commit, read at another.
+
+| Since 2026-09-17 | Where |
+|---|---|
+| the transitive expansion gained a **cost** bound, and the diagnosis was measured | §5, Seam 3 |
+| memory gained **model and curator provenance** (EU AI Act Art. 15(4), #1123) | §5, Seam 4 |
+| the binding became **durably stamped** | §8 |
+| `ReferenceSource` gained **arrival** provenance (`origin`, stamped on bundle merge) — still no authorship, no links, and no agent write path | §5, Seams 3 and 4; §6 |
 
 Prior art in this repo, and the relationship to each:
 
@@ -290,13 +308,43 @@ both land on the same dataclass:
    | **effectively local-file only** | an edge needs `_get_reference_content` to return a body, so URL sources pay a network read and MCP sources largely do not participate |
 
    The one that bites in practice is none of those individually. It is
-   that **expansion is bounded in depth and not in cost**: depth 10, any
+   that **expansion was bounded in depth and not in cost**: depth 10, any
    fan-out, no edge weights, no relevance ranking, no token budget. In a
    densely cross-referencing catalog, *pull in the neighbourhood* is
    *pull in the catalog*. Depth 10 is a runaway guard, not a relevance
    bound — the same distinction §7 draws about the index, and the same
    one `CLAUDE.md` draws about `max_completion_nudges` being a per-turn
    and not a per-session budget.
+
+   **That half is closed, and was measured rather than argued** (#1131,
+   *A Guard That Only Binds When Nothing Needs Bounding*). On a 200-entry
+   catalog, varying only mentions per document: out-degree 1 resolves 4
+   references, 2 resolves 147, and **3 resolves all 200** — so the depth
+   guard binds only on the one shape that never needed bounding, because
+   depth is a logarithmic control over an exponential quantity. The fix
+   is `max_transitive_references` (**default unbounded**, plus a WARNING
+   once per session at 50+, because capping by default would silently cut
+   neighbourhoods every existing workspace relies on), a sorted frontier
+   (with a cap, set-iteration order decides WHICH references survive —
+   six of 25 differed across `PYTHONHASHSEED`), a 130x faster matcher,
+   and a `truncated` record carrying no fabricated "dropped" count.
+
+   **What remains open is the typed half**, and #1131 states this
+   section's finding back in its own words — *"an edge is a MENTION, not
+   a link: nobody authors it"* — while explicitly deferring the
+   refinement: *"deliberately not done: ranking the frontier."* A count
+   bound is blunt where an edge type is not: it cuts by arrival order
+   where `rel` would cut by meaning. So the ask below stands, now with
+   measurement behind it rather than argument.
+
+   **Both halves are now built.** The ask below shipped as typed links,
+   and the cut ranks by them: each depth is read whole and ordered by
+   declared `depends-on`, then by how many references at the previous
+   depth reach a candidate, then by id (`links.rank_frontier`), and the
+   truncation record says so (`ranked_by`). Where the workspace has an
+   embedding index, a cut depth is ranked by similarity to the selection
+   between the declared edges and the parent count, provided every
+   candidate at that depth has a vector.
 
    **The ask is a `links` field with a small closed `rel` vocabulary**,
    and inference is *kept* beside it: an inferred edge can never go
@@ -329,6 +377,34 @@ both land on the same dataclass:
    and why `supersedes` is the most valuable entry in the vocabulary: it
    is the one relation whose staleness is self-announcing.
 
+   **Decided, for the first increment.** Where this section left a choice,
+   the choice made:
+
+   | Question | Answer |
+   |---|---|
+   | where an edge lives | on the SOURCE reference: `links: [{"to": <id>, "rel": <rel>, "note"?: <text>}]`, beside `tags`. One file per reference is the catalog's unit; a separate `links.json` (§9) would be a second file to keep in step |
+   | the vocabulary | closed: `depends-on`, `elaborates`, `supersedes`, `contradicts`. An unknown `rel` is an error, never read as a mention |
+   | declared vs inferred, same pair | the declared edge WINS. A mention of B inside A that A declares `elaborates` does not expand B: that is how a declaration makes traversal cheaper, not only better |
+   | a declared edge on a source with no readable body | still an edge. Declared `depends-on` expands a URL or MCP reference, which inference never could |
+   | `supersedes` | declared on the NEWER reference. A selection or an expansion reaching the older one is routed to the newer, and the answer says so (`superseded`); two successors are ambiguous and a cycle names no current version, so both route nowhere (`validate`: `reference_supersedes_ambiguous` / `_cycle`) |
+   | `elaborates` | a hint on the selection result (`related`), never expanded |
+   | `contradicts` | never expanded and never hinted to a working agent; it is listed (`listReferences`, the curator's listing) |
+   | a dangling edge | kept, marked `dangling` wherever it is listed, and reported by `jaato-scaffold validate` (`reference_link_dangling`) -- dropping it would be the silent loss this section argues against |
+   | the reverse index | computed from the catalog when asked (`linked_from`), not cached: the plugin reassigns its catalog in a dozen places, and a stale cache would be the defect |
+
+   And open question 7, *who declares a `rel` edge*, answered by the write
+   path §6 now has: **an agent may propose one, and nobody's edge takes
+   effect until a person promotes the claim that carries it.** A claim
+   never enters the catalog, so its `links` steer nothing while it is a
+   claim. `proposeReference` refuses an edge to an id the agent's own
+   catalog does not hold (the agent can see its catalog, so that is a
+   typo); the curator reads the edges in the listing, with a non-blocking
+   `warnings` entry for one the workspace catalog cannot place (the
+   daemon's catalog is the workspace tier only), and promotion is the
+   review.
+   The asymmetry the question names -- a wrong `supersedes` suppresses the
+   article that should have been read -- is why that review is a human's.
+
 4. **A reference records nothing about who produced it.**
    `ReferenceSource` is `id`, `name`, `description`, `type`, `mode`, the
    access fields, `fetch_hint`, `tags`, `contents`, `embedding`,
@@ -345,9 +421,25 @@ both land on the same dataclass:
    answered by git. It stops being coherent the moment an agent writes
    one, which is the whole wikiLLM turn.
 
-   Memory is the contrast and the cautionary tale. It persists
-   `source_agent` and `source_session` (`memory/models.py:104-105`,
-   `storage.py:117` writes the whole dataclass with `asdict`) — and that
+   Memory is the contrast and the cautionary tale, and the contrast has
+   **widened since this was written**. It persists `source_agent` and
+   `source_session` (`storage.py` writes the whole dataclass with
+   `asdict`), and since #1123 also `generated_by` — `{kind, provider,
+   model, session_id, agent_id}`, minted by `ai_generated_by` and
+   resolved from `JaatoSession._model_provenance`, the one definition —
+   and `curated_by`, stamped on every promotion path and **cleared on
+   demotion**, because an approval that was withdrawn must not keep
+   reading as one. Four provenance fields against a reference's zero.
+
+   Its reasoning converged with §8 independently, which is the strongest
+   argument that the shape is right: *"a SECOND field rather than an
+   overwrite of `generated_by`: who wrote it and who approved it are two
+   facts, and collapsing them loses the one an auditor asks for"*, and
+   *"stamped by the PLUGIN, never by the model — provenance a subject
+   asserts about itself is not provenance"*. An AST guard fails any
+   future writer of `maturity` that does not stamp.
+
+   The cautionary half is unchanged, and that
    field was **null for every cascade session** after PR-196, because the
    registry-shared plugin read whichever sibling bootstrapped last, so
    one sibling's id leaked into another's memories and the runner-side
@@ -372,6 +464,29 @@ both land on the same dataclass:
    `binding`, `created_at`. §8 says which of those are free and which are
    not, and what it costs to write a human's name onto an artifact that
    is designed to be shared.
+
+   **Partly delivered, and the narrowing is the finding.** `ReferenceOrigin`
+   ships (`ReferenceSource.origin`, round-tripped, stamped by
+   `merge_bundle`, rendered by `to_instruction` and `listReferences`), and
+   it records **none of the six fields listed above**. That list assumed an
+   agent write path, and when `origin` shipped there was none: nothing
+   wrote a reference, so `source_agent`, `binding` and the rest would each have had
+   no stamper — the inert mechanism `85c3bfd` had to review out of a
+   neighbouring change. What the framework can *observe* about a reference
+   is exactly one event: that it was copied in from another workspace's
+   bundle. So the field records **arrival, not authorship**, with the stamp
+   written over whatever the incoming file claimed (a foreign document's
+   account of its own provenance is an assertion by the party being
+   judged), and absence meaning *unobserved* rather than *authored here*.
+
+   The remainder of the ask is not withdrawn, and it is not a separate
+   piece of work: it is **the write path's stamp**. An agent writing a
+   reference is exactly the event the six fields describe, and §6 designs
+   that write path with the stamper in it — the plugin records what it
+   observed about the writing session, and the daemon records who
+   approved the promotion. Shipping `origin` first was not a detour: it
+   fixed the field's shape (observed, never claimed; absent means
+   unobserved) that an agent-written `kind` now has to satisfy too.
 
 ### Fidelity — a pattern IS written and breaks, because a primitive misreports
 
@@ -444,6 +559,115 @@ For a long cascade that is a genuine loss. The mitigation is not to
 weaken the invariant but to note that within one session the claim is
 already in history, and across a cascade the parent can pass it down —
 both of which exist.
+
+### What an agent actually calls
+
+Two kinds of knowledge, and they are not the same act, so they are not
+the same tool:
+
+| An agent wants to record | It is a | Tool | Exists? |
+|---|---|---|---|
+| something it **observed** — a fact, a gotcha, a decision and its reason | memory (an event) | `store_memory` → `.jaato/memories/raw/` | **yes**, with `source_agent`, `source_session`, `generated_by`; `curated_by` on promotion |
+| a **document** it produced — a design note, a runbook, an API map — that others should be able to select | reference (a document) | `proposeReference` | **no** |
+
+**Shipped:** step 1 — `proposeReference`, the claims directory, the
+`agent` origin kind, the fenced `proposed` listing, `require_curation`,
+and the plugin's own AppArmor grant for the claims directory
+(`CLAUDE.md`, *An Agent Proposes a Reference*). Step 3 — promotion —
+too: `reference.promote` / `reference.dismiss` (protocol 1.33), a
+daemon-level verb gated by `may_curate` that re-validates the claim,
+re-derives `created_by` from the daemon's own session record, stamps
+`curated_by`, and writes through `contained_write` (`CLAUDE.md`, *A Person
+Promotes the Claim*). Step 2 too: `origin.witnessed_by`, stamped from the
+call's own permission verdict when a person was asked and approved, opt-in
+through `plugin_configs.references.witness_proposals` (proposals are
+auto-approved otherwise); the executor binds the verdict for the tool body
+(`shared/call_witness.py`). And the curator's listing a person needs to act
+at all: `ReferenceClaimsRequest` → `ReferenceClaimsEvent` (each claim's
+recorded origin and the `problems` a promotion would raise) with correlated
+promote / dismiss, and the web coder's Proposals rail on top. `links`
+(Seam 3) ride the claim into the catalog, and once there the owner edits
+them through the daemon (`ReferenceLinksUpdateRequest`, the web coder's
+References rail), which rewrites only the `links` key. Three departures from the table below: the promoted entry goes to
+the workspace catalog root unless the curator names a sub-bundle (the daemon
+then reconciles that bundle's vector index with vectors from the caller's
+runner, a stopgap until #1422 lets the runner write its own catalog);
+`created_by` is derived from the session the claim
+NAMES, never read from the claim; and `witnessed_by` is written by the
+runner into the claim, so promotion carries it as recorded rather than
+re-checking it. What makes that acceptable on a confined host is that only
+`proposeReference` can write the claims directory: the file tools and `cli`
+refuse `.jaato/...`, and template v43 write-denies it in `//child`. On an
+unconfined host a script can still write a claim, and no daemon-kept record
+fixes that fully: the runner has the daemon's uid, so anything the daemon
+writes to disk it can write too.
+
+`proposeReference` takes what a catalog entry carries — `id`, `name`,
+`description`, `tags`, `links` (Seam 3) — plus the document itself, as a
+path to a workspace file the agent already wrote or as inline content.
+Its result is a **claim**, never a catalog entry, and the tree already
+forces that answer rather than merely suggesting it:
+
+> The confined runner is **denied writes** to `.jaato/references/**`
+> (`audit deny ... wlk` in every AppArmor body, and `references/` is an
+> `AUTHORED` entry in `scaffold/gitignore.py`). An agent *cannot* edit the
+> catalog, and should not be given a way around that. "Append at the
+> edge, merge at the centre" is not a policy to be enforced here — it is
+> the existing boundary, and the design only has to use it.
+
+So the path has three steps, each owned by the process that can do it
+honestly:
+
+| Step | Who | Writes | Stamps |
+|---|---|---|---|
+| 1. propose | the **plugin**, in the runner | `.jaato/references-claims/<claim_id>.json` (runtime state, writable, never read as catalog) | `source_agent`, `source_session`, `generated_by` from `JaatoSession._model_provenance` — **never from the tool's arguments**, the rule `store_memory` already follows |
+| 2. witness | the **permission gate** | nothing new | `witnessed_by` = #859's `approver`/`user_id`, only when #951's `asked=True`; absent otherwise |
+| 3. promote | the **daemon**, on a curator's verb | the catalog entry, through `contained_write` (#1386), into the bundle it names | `created_by` from `Session.created_by` (the `get_client_user` chain — no env fallback), `curated_by` from the transport's identity, `at` |
+
+Step 3 is the #1232 memory-rail shape reused rather than a new one:
+`may_curate` (workspace owner, or unowned) decides who may promote, a
+refused promotion answers `not_owner` without touching disk, and the
+daemon — the one process holding both the authenticated identity and
+write access to authored assets — is the only writer. A curator agent
+promoting on a human's behalf is the same verb with `curated_by` naming
+the agent's session *and* the human it ran for, because those are two
+facts.
+
+The promoted entry's `origin` gains a second kind beside `imported`:
+
+```json
+"origin": {"kind": "agent",
+           "generated_by": {"kind": "ai", "provider": "...", "model": "...",
+                            "session_id": "...", "agent_id": "..."},
+           "source_agent": "documentalista",
+           "created_by": "acme:alice",
+           "witnessed_by": "acme:alice",
+           "curated_by": {"kind": "human", "user": "acme:bob"},
+           "claim_id": "...", "at": "..."}
+```
+
+Every field is one the framework **observed**, and every one may be
+absent — absence stays *unobserved*, never *nobody*. That is what makes
+`kind` a string rather than a bool: `imported` and `agent` are two
+arrivals the framework was present for, and a hand-authored reference
+still carries no `origin` at all.
+
+**Memory → reference is the same verb with a different source.** A
+curated memory about a topic that keeps being re-derived (§10) is a
+candidate article; promoting it builds the catalog entry from the memory
+and carries the memory's own provenance across unchanged. That is The
+School's escalation, expressed as one daemon verb with two inputs rather
+than as a second mechanism.
+
+**What a claim is before promotion.** Visible to the session that wrote
+it (it is in that session's history anyway), listed by `listReferences`
+as `status: proposed` for others, and — per §8 — fenced as untrusted
+content when read, because until a curator has looked at it, it is a
+model's assertion. A `plugin_configs.references.require_curation` knob
+mirroring memory's withholds proposed claims from the listing entirely.
+Neither choice is free: listed claims are how a sibling benefits *now*
+(the cost above), withheld claims are how a deployment keeps unreviewed
+text out of every prompt.
 
 ---
 
@@ -582,17 +806,35 @@ populated from `SessionInitEnvelope.created_by`
 
 **And exactly one thing must NOT be symmetric with its neighbour.**
 `get_session_env` falls back to `os.environ`, correctly — an env var has
-a legitimate ambient source. **A user identity has none.** Giving
-`get_session_user()` any env fallback would relocate the
-`_resolve_telemetry_user_id` hole (`jaato_session.py:1603`, whose
-precedence drops to `JAATO_TELEMETRY_USER_ID` from the per-session env)
-into the SDK, where it would look sanctioned — a workspace `.env` forging
-authorship on a shared knowledge artifact. So: no fallback, `None`
-outside session context, and absence means *the transport authenticated
-nobody*, never *guess*. Positive evidence only, the posture #1014 and
-#1023 take about confinement labels. Telemetry keeps its env fallback,
-which is legitimate there and is the whole reason the two accessors must
-not be the same function.
+a legitimate ambient source. **A user identity has none.** So:
+no fallback, `None` outside session context, and absence means *the
+transport authenticated nobody*, never *guess*. Positive evidence only,
+the posture #1014 and #1023 take about confinement labels.
+
+**Two corrections to an earlier draft of this paragraph**, kept rather
+than edited away because each was wrong in a way worth not repeating.
+
+It said an env fallback would let a workspace `.env` **forge
+authorship** through `_resolve_telemetry_user_id`. Overstated: that
+method's precedence is `self._client_user_id` FIRST and
+`JAATO_TELEMETRY_USER_ID` only after it, so the env can fill a vacancy
+and can never override an authenticated identity — and filling it is the
+intended behaviour for a keyless deployment that still wants attributable
+spend. What is true, and narrower, is that a provenance accessor must be
+able to say WHICH source answered: *a person the transport authenticated*
+and *a string the workspace chose about itself* carry different weight on
+a durable, shareable artifact, even though neither is a forgery.
+
+And it treated that env fallback as a hazard **of the attribution path**.
+It is not on that path at all. `EventSink.get_client_user` →
+`created_by` → `SessionInitEnvelope` → `set_client_user_id` →
+`_client_user_id` reads no environment anywhere: IPC derives it from
+`SO_PEERCRED`, WS from a bound ticket, and `set_client_user` on IPC is a
+deliberate no-op so a client cannot claim to be somebody else on the one
+transport where the claim is checkable. `_resolve_telemetry_user_id` is a
+*reader* that adds a fallback of its own — and not a telemetry-only one,
+since it also feeds the ledger's `response` record (#859). The
+conclusion survives both corrections; only its justification changes.
 
 **One ContextVar, one definition.** `jaato_server/shared/session_context.py` imports
 the trio rather than declaring its own (`:82-86`), because — its
@@ -609,9 +851,12 @@ approve this tool call* — and comes from the permission decision, where
 answering both would re-perform exactly the collapse this section exists
 to prevent.
 
-The binding is the one that is genuinely new: `_observe_binding_usage`
-has `(provider, model, tier)` but only as per-response spend, stamped on
-nothing durable.
+**The binding is no longer the missing one.** When this was written
+`_observe_binding_usage` had `(provider, model, tier)` only as
+per-response spend, stamped on nothing durable. #1123 closed that:
+`JaatoSession._model_provenance` is the one definition of the stamp, and
+`Memory.generated_by` persists it. So §8's binding axis exists and has a
+reader — on memory. On a reference it still has neither, which is Seam 4.
 
 **What it buys** is a promotion rule the current model cannot express at
 all: a **human-witnessed** claim clears a lower notability bar. One
@@ -767,7 +1012,9 @@ by running the same task corpus with the wiki injected and withheld.
    *actively suppresses* the article that should have been read. The
    asymmetry says declared edges want a narrower writer than declared
    articles do, which may mean the curator and nobody else.
-6. **Does the wiki version with the code?** A git-tracked wiki answers
+   **Answered (§5, Seam 3):** an agent may propose an edge on a claim;
+   none takes effect until a person promotes the claim.
+8. **Does the wiki version with the code?** A git-tracked wiki answers
    *"what did we believe at commit X"* for free, and makes every branch a
    fork of the knowledge base — which may be an excellent property or a
    merge nightmare, and the difference is not obvious from here.
@@ -779,6 +1026,9 @@ by running the same task corpus with the wiki injected and withheld.
 - **A new plugin.** §5 argues the ask is a write path on an existing
   store, and a wiki plugin would be a third copy of the matcher, the
   reconcile pass and the enrichment wiring.
+  `proposeReference` (§6) is a tool on the references plugin, and the
+  promotion is a daemon verb beside the memory rail's — the write
+  capability lands in the two stores that already own the read.
 - **Replacing memory or references.** The wiki is the *join* between
   them: references' read path and bundles, memory's write path and
   provenance, and a merge policy that makes the unit a topic.

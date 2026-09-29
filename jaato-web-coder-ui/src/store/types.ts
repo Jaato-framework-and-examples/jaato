@@ -516,6 +516,132 @@ export interface MemoriesState {
 }
 
 /**
+ * One reference CLAIM as the daemon's ``reference.claims`` answer lists it
+ * (protocol 1.33): a catalog entry an agent PROPOSED with
+ * ``proposeReference`` and nobody has promoted.  ``name``, ``description``
+ * and ``content`` were written by a model and reviewed by nobody -- the
+ * panel renders them as text, never as markup.  ``problems`` is why the
+ * daemon would refuse a promotion right now (empty when it would pass);
+ * ``origin`` is what the claim recorded (``generated_by``, ``created_by``,
+ * ``witnessed_by``, ``at``).
+ */
+export interface ReferenceClaimRow {
+  claim_id: string;
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  /** ``local`` (a workspace file at ``path``) or ``inline`` (``content``). */
+  type: string;
+  path?: string;
+  content?: string;
+  origin?: Record<string, unknown> | null;
+  problems: string[];
+  /**
+   * The typed edges the claim declares (``depends-on`` / ``elaborates`` /
+   * ``supersedes`` / ``contradicts``), taking effect only once promoted.
+   */
+  links?: ReferenceClaimLink[];
+  /** What the curator should know that does NOT block Promote (a dangling edge). */
+  warnings?: string[];
+}
+
+/**
+ * A workspace-tier sub-bundle a promotion may name (the listing's
+ * ``bundles``).  ``indexed`` bundles have a vector index the daemon
+ * reconciles after the promotion; ``model`` is the index's embedding model.
+ */
+export interface ReferenceBundleOption {
+  name: string;
+  indexed: boolean;
+  model?: string;
+}
+
+/** One declared edge on a reference claim; ``note`` is model-written text. */
+export interface ReferenceClaimLink {
+  to: string;
+  rel: string;
+  note?: string;
+}
+
+/**
+ * The rail's Proposals section (``app/referenceClaims.ts``): the reference
+ * claims in the session's workspace, and -- for the workspace owner --
+ * Promote / Dismiss.  ``status`` follows {@link MemoriesState}: an ``error``
+ * keeps the rows it had, because an empty list is how "nothing proposed"
+ * looks, and ``unsupported`` is a daemon below protocol 1.33.
+ */
+export interface ReferenceClaimsState {
+  rows: ReferenceClaimRow[];
+  status: "idle" | "loading" | "loaded" | "error" | "unsupported";
+  error: string | null;
+  /** Claim files the daemon could not show (a link, bad JSON, not a claim). */
+  unreadable: string[];
+  /** Whether THIS connection may promote / dismiss -- the daemon's owner gate. */
+  mayCurate: boolean | null;
+  /** The claim whose details are showing. */
+  expanded: string | null;
+  /** Claim id -> the action in flight on it, so its buttons disable. */
+  busy: Record<string, string>;
+  /**
+   * One-line outcome of the last action.  ``warning``: it succeeded with a
+   * caveat (promoted, but the bundle's vector index was not updated).
+   */
+  notice: { text: string; error?: boolean; warning?: boolean } | null;
+  /** The sub-bundles a promotion may name; empty when the workspace has none. */
+  bundles: ReferenceBundleOption[];
+}
+
+/** One declared edge on a catalog reference; ``dangling`` when its target is not in the catalog. */
+export interface ReferenceCatalogLink {
+  to: string;
+  rel: string;
+  note?: string;
+  dangling?: boolean;
+}
+
+/**
+ * One reference in the workspace catalog, in the daemon's row shape
+ * (``reference_catalog._row``).  ``name`` / ``description`` / a link's
+ * ``note`` are catalog text, rendered as text.  ``duplicate_id``: another
+ * file declares the same id, so the daemon will not edit it.
+ */
+export interface ReferenceCatalogRow {
+  id: string;
+  name: string;
+  description: string;
+  bundle: string;
+  file: string;
+  links: ReferenceCatalogLink[];
+  linked_from: { from: string; rel: string }[];
+  duplicate_id?: boolean;
+}
+
+/**
+ * The rail's References section (``app/referenceCatalog.ts``): the
+ * workspace catalog with its typed links both ways, and -- for the owner --
+ * editing one reference's links.  ``status`` follows
+ * {@link ReferenceClaimsState}.
+ */
+export interface ReferenceCatalogState {
+  rows: ReferenceCatalogRow[];
+  status: "idle" | "loading" | "loaded" | "error" | "unsupported";
+  error: string | null;
+  /** Catalog files the daemon could not show. */
+  unreadable: string[];
+  /** Whether THIS connection may edit links -- the daemon's owner gate. */
+  mayCurate: boolean | null;
+  /** The reference whose details are showing. */
+  expanded: string | null;
+  /** The reference whose links are being edited, and the draft. */
+  editing: { id: string; links: ReferenceClaimLink[] } | null;
+  /** Reference id -> a save in flight. */
+  busy: Record<string, boolean>;
+  /** One-line outcome of the last save (``warning``: saved with warnings). */
+  notice: { text: string; error?: boolean; warning?: boolean } | null;
+}
+
+/**
  * One thread the runner's live re-probe scanned (#1294): ``label`` is the
  * AppArmor profile that thread's kernel task reported, or ``(unreadable)``
  * when the scan could not read it.

@@ -91,6 +91,10 @@ export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, 
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [picked, setPicked] = useState<Partial<Record<ToolId, string>>>({});
+  // A command keeps re-reading the manifest after it returns; once the panel
+  // is gone those reads (and the state they set) must stop.
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const loadStatus = useCallback(async () => {
     try { setStatus(await api.status(workspace)); setError(null); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
@@ -98,7 +102,10 @@ export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, 
 
   const loadManifest = useCallback(async () => {
     if (!live) return;
-    try { setManifest(await readManifest()); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    try {
+      const next = await readManifest();
+      if (mounted.current) setManifest(next);
+    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
   }, [live]);
 
   useEffect(() => { void loadStatus(); }, [loadStatus]);
@@ -119,13 +126,16 @@ export function EnvironmentPanel({ url, workspace, hint, onHintDone, fetchImpl, 
 
   const act = async (fn: () => Promise<void>) => {
     setBusy(true);
-    try { await fn(); setError(null); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
+    try { await fn(); if (mounted.current) setError(null); } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+    finally { if (mounted.current) setBusy(false); }
   };
   /** Send a command, then re-read until the manifest reflects it (or a few polls pass). */
   const command = (...args: string[]) => act(async () => {
     await toolchainCommand(...args);
-    for (let i = 0; i < 4; i++) { await new Promise((r) => setTimeout(r, pollMs / 2)); await loadManifest(); }
+    for (let i = 0; i < 4 && mounted.current; i++) {
+      await new Promise((r) => setTimeout(r, pollMs / 2));
+      if (mounted.current) await loadManifest();
+    }
   });
   const bind = (tool: ToolId, version: string) => {
     if (hint && hint.tool === tool) onHintDone?.();

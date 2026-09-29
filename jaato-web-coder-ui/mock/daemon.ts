@@ -235,6 +235,129 @@ function answerMemoryRequest(c: Client, ev: Record<string, unknown>): void {
   }
 }
 /**
+ * The reference claims the 1.33 verbs answer from, in the daemon's row
+ * shape (``reference_curation.claim_row``).  Keyed by session like the
+ * memories; seeded with one promotable claim a person approved at the
+ * prompt, and one whose id is already in the catalog (``problems``).
+ */
+const CLAIMS = new Map<string, Record<string, unknown>[]>();
+function claimsFor(c: Client): Record<string, unknown>[] {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let list = CLAIMS.get(key);
+  if (!list) {
+    list = [
+      { claim_id: "20260929T100000Z-aaaa1111", id: "deploy-runbook", name: "Deploy runbook", description: "How to ship the service", tags: ["ops"], type: "local", path: "docs/deploy.md", problems: [],
+        links: [{ to: "old-deploy", rel: "supersedes", note: "rewritten for the new pipeline" }],
+        warnings: ["links to 'old-deploy' (supersedes), which is not in this workspace's catalog"],
+        origin: { kind: "agent", at: ts(), claim_id: "20260929T100000Z-aaaa1111", created_by: "mock:tester", generated_by: { kind: "ai", provider: "mock", model: "mock-1", agent_id: "main" }, witnessed_by: { via: "permission-prompt", method: "user_approved", user: "mock:tester" } } },
+      { claim_id: "20260929T100001Z-bbbb2222", id: "adr-1", name: "ADR 1 again", description: "", tags: [], type: "inline", content: "Use pnpm.", problems: ["'adr-1' is already in the catalog; propose a different id, or ask a curator to revise the existing reference."],
+        origin: { kind: "agent", at: ts(), claim_id: "20260929T100001Z-bbbb2222", generated_by: { kind: "ai", provider: "mock", model: "mock-1", agent_id: "main" } } },
+    ];
+    CLAIMS.set(key, list);
+  }
+  return list;
+}
+/** Answer ``reference.claims.request`` / ``reference.curation.request`` as ``CommandRouter`` does. */
+function answerReferenceClaims(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  const list = claimsFor(c);
+  if (ev.type === "reference.claims.request") {
+    send(c, { type: "reference.claims", request_id: requestId, ok: true, category: "", error: "", claims: list, unreadable: [], may_curate: true,
+      bundles: [{ name: "ops", indexed: true, model: "mock-embed" }, { name: "notes", indexed: false }] });
+    return;
+  }
+  const action = String(ev.action ?? "");
+  const claimId = String(ev.claim_id ?? "");
+  const bundle = action === "promote" ? String(ev.bundle ?? "") : "";
+  const answer = { type: "reference.curation.result", request_id: requestId, action, claim_id: claimId, warnings: [] as string[], bundle, reconcile: "", reconcile_detail: "" };
+  if (bundle && bundle !== "ops" && bundle !== "notes") {
+    send(c, { ...answer, ok: false, category: "unknown_bundle", error: `no bundle '${bundle}' in .jaato/references`, reference_id: "", reference_file: "" });
+    return;
+  }
+  const index = list.findIndex((x) => x.claim_id === claimId);
+  if (index < 0) {
+    send(c, { ...answer, ok: false, category: "not_found", error: `no claim '${claimId}'`, reference_id: "", reference_file: "" });
+    return;
+  }
+  const claim = list[index]!;
+  if (action === "promote" && (claim.problems as string[]).length) {
+    send(c, { ...answer, ok: false, category: "collision", error: (claim.problems as string[])[0], reference_id: "", reference_file: "" });
+    return;
+  }
+  list.splice(index, 1);
+  const promoted = action === "promote";
+  if (promoted) {
+    catalogFor(c).push({ id: String(claim.id), name: String(claim.name ?? claim.id), description: String(claim.description ?? ""), bundle,
+      links: ((claim.links ?? []) as { to: string; rel: string; note?: string }[]).map((l) => ({ ...l })) });
+  }
+  // The daemon reconciles an INDEXED destination; in the mock, "ops" is
+  // indexed and the session "has no provider", so its index is reported
+  // not updated -- the caveat the panel must show.
+  const reconcile = !promoted ? "" : bundle === "ops" ? "unavailable" : "none";
+  const dir = bundle ? `.jaato/references/${bundle}` : ".jaato/references";
+  send(c, { ...answer, ok: true, category: "", error: "", reference_id: promoted ? String(claim.id) : "", reference_file: promoted ? `${dir}/${String(claim.id)}.json` : "",
+    reconcile, reconcile_detail: reconcile === "unavailable" ? "no embedding provider is available in this session" : "" });
+}
+/**
+ * The workspace catalog the ``reference.catalog`` / ``reference.links``
+ * verbs answer from, keyed by session like the claims.  Seeded with two
+ * ADRs where ``adr-2`` supersedes ``adr-1``, and a runbook in the ``ops``
+ * bundle with a dangling edge.  A promotion adds its entry here.
+ */
+type MockRef = { id: string; name: string; description: string; bundle: string; links: { to: string; rel: string; note?: string }[] };
+const CATALOG = new Map<string, MockRef[]>();
+function catalogFor(c: Client): MockRef[] {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let list = CATALOG.get(key);
+  if (!list) {
+    list = [
+      { id: "adr-1", name: "ADR 1: package manager", description: "Use npm.", bundle: "", links: [] },
+      { id: "adr-2", name: "ADR 2: package manager", description: "Use pnpm.", bundle: "", links: [{ to: "adr-1", rel: "supersedes" }] },
+      { id: "ops-runbook", name: "Ops runbook", description: "Paging and rollback.", bundle: "ops", links: [{ to: "old-pager", rel: "elaborates" }] },
+    ];
+    CATALOG.set(key, list);
+  }
+  return list;
+}
+/** A catalog entry in the daemon's row shape (``reference_catalog._row``). */
+function catalogRow(list: MockRef[], ref: MockRef): Record<string, unknown> {
+  const ids = new Set(list.map((r) => r.id));
+  return {
+    id: ref.id, name: ref.name, description: ref.description, bundle: ref.bundle,
+    file: `.jaato/references/${ref.bundle ? `${ref.bundle}/` : ""}${ref.id}.json`,
+    links: ref.links.map((l) => (ids.has(l.to) ? { ...l } : { ...l, dangling: true })),
+    linked_from: list.flatMap((r) => r.links.filter((l) => l.to === ref.id).map((l) => ({ from: r.id, rel: l.rel }))),
+  };
+}
+const LINK_RELS = new Set(["depends-on", "elaborates", "supersedes", "contradicts"]);
+/** Answer ``reference.catalog.request`` / ``reference.links.request`` as ``CommandRouter`` does. */
+function answerReferenceCatalog(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  const list = catalogFor(c);
+  if (ev.type === "reference.catalog.request") {
+    send(c, { type: "reference.catalog", request_id: requestId, ok: true, category: "", error: "",
+      references: [...list].sort((a, b) => a.id.localeCompare(b.id)).map((r) => catalogRow(list, r)), unreadable: [], may_curate: true });
+    return;
+  }
+  const refId = String(ev.reference_id ?? "");
+  const links = (Array.isArray(ev.links) ? ev.links : []) as { to: string; rel: string; note?: string }[];
+  const answer = { type: "reference.links.result", request_id: requestId, reference_id: refId, reference_file: "", links: [] as unknown[], warnings: [] as string[] };
+  const ref = list.find((r) => r.id === refId);
+  if (!ref) {
+    send(c, { ...answer, ok: false, category: "not_found", error: `no reference '${refId}' in .jaato/references` });
+    return;
+  }
+  const bad = links.find((l) => !LINK_RELS.has(l.rel) || !l.to || l.to === refId);
+  if (bad) {
+    send(c, { ...answer, ok: false, category: "invalid_links", error: `links[${links.indexOf(bad)}]: '${bad.rel} ${bad.to}' is not a valid link` });
+    return;
+  }
+  ref.links = links.map((l) => (l.note ? { to: l.to, rel: l.rel, note: l.note } : { to: l.to, rel: l.rel }));
+  const ids = new Set(list.map((r) => r.id));
+  const warnings = ref.links.filter((l) => !ids.has(l.to)).map((l) => `links to '${l.to}' (${l.rel}), which is not in this workspace's catalog`);
+  send(c, { ...answer, ok: true, category: "", error: "", reference_file: String(catalogRow(list, ref).file), links: ref.links, warnings });
+}
+/**
  * Answer ``session.diagnostics.request`` (#1294) the way
  * ``diagnostics_verbs.answer_diagnostics_request`` does: cached record
  * fields the daemon already tracked, plus a live re-probe measured on
@@ -911,7 +1034,7 @@ wss.on("connection", (ws, req) => {
     installedIntegrations: new Set(),
     deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.32", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.33", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -959,6 +1082,14 @@ wss.on("connection", (ws, req) => {
         break;
       case "session.diagnostics.request":
         answerDiagnosticsRequest(c, ev);
+        break;
+      case "reference.claims.request":
+      case "reference.curation.request":
+        answerReferenceClaims(c, ev);
+        break;
+      case "reference.catalog.request":
+      case "reference.links.request":
+        answerReferenceCatalog(c, ev);
         break;
       case "tools.register_client":
         for (const t of (ev.tools as { name?: string }[] | undefined) ?? []) if (t.name) c.clientTools.add(t.name);

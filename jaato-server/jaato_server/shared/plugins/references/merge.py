@@ -48,6 +48,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -61,7 +62,12 @@ from .bundle import (
     write_manifest,
 )
 from .embedding_types import EmbeddingProviderProtocol
-from .models import EmbeddingMetadata, ReferenceSource
+from .models import (
+    ORIGIN_IMPORTED,
+    EmbeddingMetadata,
+    ReferenceOrigin,
+    ReferenceSource,
+)
 from .reconcile import _embed_text_for, _try_acquire_lock, _release_lock, _write_sidecar_atomic
 
 logger = logging.getLogger(__name__)
@@ -395,18 +401,47 @@ def _resolve_conflicts(
     return rename_map, skipped, hard_conflicts
 
 
+def _import_origin(
+    source_bundle: ReferenceBundle,
+    source_id: str,
+    at: str,
+) -> ReferenceOrigin:
+    """The arrival stamp for one reference this merge is copying.
+
+    A function rather than an expression at the call site so ``merge_bundle``
+    does not grow: ``source_bundle.name or None`` is a decision point under
+    radon, and that function sits on the complexity ratchet.
+    """
+    return ReferenceOrigin(
+        kind=ORIGIN_IMPORTED,
+        bundle=source_bundle.name or None,
+        source_id=source_id,
+        at=at,
+    )
+
+
 def _copy_reference_json(
     source_dir: Path,
     target_dir: Path,
     source_id: str,
     new_id: str,
     new_hash: Optional[str],
+    origin: Optional[ReferenceOrigin] = None,
 ) -> bool:
     """Copy a single reference JSON into the target directory.
 
     Optionally rewrites the JSON's ``id`` field (for prefix mode) and
     stamps a fresh ``source_hash`` (for --re-embed). Returns True on
     success, False when the source JSON was missing or malformed.
+
+    ``origin`` records that this copy HAPPENED, and is written
+    **unconditionally, over whatever the source file claimed**.  That is
+    the load-bearing half: the incoming JSON is another workspace's
+    document, so an ``origin`` already in it is an assertion by the party
+    being judged -- a file claiming to have been authored locally would
+    otherwise launder itself into this catalog as native.  What this
+    workspace observed is one thing only: the reference arrived here, from
+    that bundle, now.  Any chain behind it is hearsay and is not kept.
     """
     src_path = source_dir / f"{source_id}.json"
     tgt_path = target_dir / f"{new_id}.json"
@@ -422,6 +457,8 @@ def _copy_reference_json(
         raw["id"] = new_id
     if new_hash is not None:
         raw["embedding"] = {"source_hash": new_hash}
+    if origin is not None:
+        raw["origin"] = origin.to_dict()
     tmp = tgt_path.with_suffix(tgt_path.suffix + ".tmp")
     tmp.write_text(
         json.dumps(raw, indent=2, ensure_ascii=False) + "\n",
@@ -460,6 +497,11 @@ def merge_bundle(
     Returns:
         A populated :class:`MergeResult`.
     """
+    # ONE instant for every reference this merge copies: it was one
+    # operation, and per-file clocks would imply an ordering the copy
+    # loop does not have.
+    stamped_at = datetime.now(timezone.utc).isoformat()
+
     preflight = _merge_preflight(target, source_bundle, options)
     if preflight is not None:
         return preflight
@@ -706,6 +748,7 @@ def merge_bundle(
                 sid,
                 new_id,
                 new_hash,
+                _import_origin(source_bundle, sid, stamped_at),
             )
 
         return MergeResult(

@@ -17,13 +17,14 @@ const PROPOSAL = { tool: "node", label: "Node.js", version: "22", pin: "22", pin
 
 let manifest: Record<string, unknown> | null = null;
 const commands: string[][] = [];
+let reads = 0;
 let onCommand: (args: string[]) => void = () => undefined;
 
 vi.mock("@/sdk/connection", () => ({
   isConnected: () => true,
   getClient: () => ({
     serverProtocolVersion: "1.31",
-    fetchWorkspaceFile: async () => manifest === null
+    fetchWorkspaceFile: async () => (reads++, manifest === null)
       ? { event: { ok: false, category: "not_found" }, data: null }
       : { event: { ok: true }, data: new TextEncoder().encode(JSON.stringify(manifest)) },
     executeCommand: async (_c: string, args: string[]) => { commands.push(args); onCommand(args); },
@@ -165,6 +166,20 @@ describe("EnvironmentPanel in a session", () => {
     fireEvent.click(screen.getByRole("button", { name: "Bind Node.js" }));
     await waitFor(() => expect(done).toHaveBeenCalled());
     await waitFor(() => expect(commands).toEqual([["bind", "node", "22"]]));
+  });
+});
+
+describe("EnvironmentPanel after it is gone", () => {
+  it("stops re-reading the manifest once unmounted mid-command", async () => {
+    inSession(true);
+    manifest = { toolchains: [], proposals: [PROPOSAL], guidance: [], job: null };
+    const view = render(<EnvironmentPanel url="./api/environment" workspace={WS} fetchImpl={fakeFetch().fetchImpl} pollMs={40} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Bind Node.js" }));
+    await waitFor(() => expect(commands).toEqual([["bind", "node", "22"]]));
+    view.unmount();
+    const atUnmount = reads;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(reads - atUnmount).toBeLessThanOrEqual(1);
   });
 });
 

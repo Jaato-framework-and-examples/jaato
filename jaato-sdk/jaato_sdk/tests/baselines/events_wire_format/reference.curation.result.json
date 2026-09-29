@@ -1,0 +1,17 @@
+{
+  "type": "reference.curation.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "action": "",
+  "claim_id": "",
+  "ok": true,
+  "category": "",
+  "error": "",
+  "reference_id": "",
+  "reference_file": "",
+  "warnings": [],
+  "bundle": "",
+  "reconcile": "",
+  "reconcile_detail": ""
+}

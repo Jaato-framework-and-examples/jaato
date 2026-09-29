@@ -42,6 +42,7 @@ from .bundle import (
     DriftReport,
     ReferenceBundle,
     detect_drift,
+    embedding_text,
     metadata_hash,
     require_index_paths,
     write_manifest,
@@ -200,15 +201,11 @@ def _update_source_hash_on_disk(
 def _embed_text_for(source: ReferenceSource) -> str:
     """The canonical text fed to ``embed_batch`` for a reference.
 
-    Mirrors :func:`metadata_hash` — we embed the same fields we fingerprint,
-    so a stable hash implies a stable vector.
+    Delegates to :func:`embedding_text`, which :func:`metadata_hash` also
+    reads -- we embed the same fields we fingerprint, so a stable hash
+    implies a stable vector.
     """
-    return "\n".join([
-        source.name,
-        source.description,
-        ",".join(sorted(source.tags)),
-        source.fetch_hint or "",
-    ])
+    return embedding_text(source)
 
 
 def reconcile_bundle(
