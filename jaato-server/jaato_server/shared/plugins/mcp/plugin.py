@@ -266,6 +266,8 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._manager: Any = None
+        # The stderr capture handed to MCPClientManager; closed by shutdown().
+        self._errlog: Optional[LogCapture] = None
         self._request_queue: Optional[queue.Queue] = None
         self._response_queue: Optional[queue.Queue] = None
         self._initialized = False
@@ -465,6 +467,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
             self._request_queue.put((None, None))  # Signal shutdown
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
+        if self._errlog is not None:
+            self._errlog.close()
+            self._errlog = None
         self._tool_cache = {}
         self._loop = None
         self._thread = None
@@ -1955,6 +1960,10 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
             # Create stderr capture that routes to internal log buffer
             errlog = LogCapture(self._log_event)
+            # Held on the plugin so shutdown() can close it: the capture's
+            # reader thread keeps both pipe ends open until the write end is
+            # closed, and nothing else closes it.
+            self._errlog = errlog
             manager = MCPClientManager(
                 errlog=errlog, scrub_secret_env=self._scrub_secret_env,
             )

@@ -1076,8 +1076,37 @@ def plugins() -> Dict[str, PluginInfo]:
     try:
         reg.discover()  # tool (+ auto enrichment)
     except Exception:
+        _release(reg)
         return {}
+    try:
+        return _describe_plugins(reg)
+    finally:
+        _release(reg)
 
+
+def _release(reg: Any) -> None:
+    """Shut down whatever discovery initialized.
+
+    ``lsp`` and ``mcp`` initialize themselves inside ``get_tool_schemas()``,
+    outside the registry, and start a background thread with its own event
+    loop there, so ``shutdown_all`` (which covers only what the registry
+    initialized) does not see them.  A walk that only reads schemas must not
+    leave them running: every ``validate`` run used to leak two event loops
+    (~10 descriptors), and a process that validated a few dozen workspaces
+    ran out of ``select()``-able fds.
+    """
+    for name in list(reg.list_available()):
+        plugin = reg.get_plugin(name)
+        if not getattr(plugin, "_initialized", False):
+            continue
+        try:
+            plugin.shutdown()
+        except Exception:
+            pass
+
+
+def _describe_plugins(reg: Any) -> Dict[str, PluginInfo]:
+    """One :class:`PluginInfo` per plugin the registry discovered."""
     out: Dict[str, PluginInfo] = {}
     for name in sorted(reg.list_available()):
         info = PluginInfo(name=name)
@@ -1114,31 +1143,36 @@ def plugins() -> Dict[str, PluginInfo]:
         #     (permission, cli, interactive_shell, notebook).  Previously the
         #     dict form yielded NO knobs (iterating a dict gives key strings,
         #     which have no ``.name``), so those plugins' knobs were invisible.
-        try:
-            schema = reg.get_plugin_config_schema(name) or []
-            settings: List[ConfigSetting] = []
-            if isinstance(schema, dict):
-                settings.extend(_settings_from_properties(
-                    schema.get("properties")))
-            else:
-                for s in schema:
-                    if hasattr(s, "name"):
-                        settings.append(ConfigSetting(
-                            name=s.name,
-                            type=_schema_type(getattr(s, "type", None)),
-                            default=getattr(s, "default", None),
-                            description=getattr(s, "description", "") or "",
-                            # The object form spells the closed set
-                            # ``choices``; JSON Schema spells it ``enum``.
-                            # Both land on ConfigSetting.enum.
-                            enum=_schema_enum(getattr(s, "choices", None)),
-                        ))
-            info.config_keys = [s.name for s in settings]
-            info.config_settings = settings
-        except Exception:
-            pass
+        _stamp_config_settings(info, reg, name)
         out[name] = info
     return out
+
+
+def _stamp_config_settings(info: "PluginInfo", reg: Any, name: str) -> None:
+    """Normalize a plugin's config schema onto ``info`` (best-effort)."""
+    try:
+        schema = reg.get_plugin_config_schema(name) or []
+        settings: List[ConfigSetting] = []
+        if isinstance(schema, dict):
+            settings.extend(_settings_from_properties(
+                schema.get("properties")))
+        else:
+            for s in schema:
+                if hasattr(s, "name"):
+                    settings.append(ConfigSetting(
+                        name=s.name,
+                        type=_schema_type(getattr(s, "type", None)),
+                        default=getattr(s, "default", None),
+                        description=getattr(s, "description", "") or "",
+                        # The object form spells the closed set
+                        # ``choices``; JSON Schema spells it ``enum``.
+                        # Both land on ConfigSetting.enum.
+                        enum=_schema_enum(getattr(s, "choices", None)),
+                    ))
+        info.config_keys = [s.name for s in settings]
+        info.config_settings = settings
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------- env vars
