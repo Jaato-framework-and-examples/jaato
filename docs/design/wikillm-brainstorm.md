@@ -422,6 +422,25 @@ both land on the same dataclass:
    not, and what it costs to write a human's name onto an artifact that
    is designed to be shared.
 
+   **Partly delivered, and the narrowing is the finding.** `ReferenceOrigin`
+   ships (`ReferenceSource.origin`, round-tripped, stamped by
+   `merge_bundle`, rendered by `to_instruction` and `listReferences`), and
+   it records **none of the six fields listed above**. That list assumed an
+   agent write path, and there is none: nothing in this tree writes a
+   reference, so `source_agent`, `binding` and the rest would each have had
+   no stamper — the inert mechanism `85c3bfd` had to review out of a
+   neighbouring change. What the framework can *observe* about a reference
+   is exactly one event: that it was copied in from another workspace's
+   bundle. So the field records **arrival, not authorship**, with the stamp
+   written over whatever the incoming file claimed (a foreign document's
+   account of its own provenance is an assertion by the party being
+   judged), and absence meaning *unobserved* rather than *authored here*.
+
+   The remainder of the ask is not withdrawn — it is **blocked on §6**. The
+   six fields become stampable the moment something writes an article, and
+   not before. That is the honest ordering: provenance about a write path
+   cannot precede the write path.
+
 ### Fidelity — a pattern IS written and breaks, because a primitive misreports
 
 - **Curated-only enrichment.** The memory index is built from

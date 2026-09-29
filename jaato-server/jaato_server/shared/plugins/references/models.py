@@ -70,6 +70,102 @@ class ReferenceContents:
         )
 
 
+#: The one ``kind`` the framework can OBSERVE today: this reference was
+#: copied into a bundle it did not start in, by ``references bundle merge``.
+#: A string rather than a bool, and the same key ``generated_by`` uses
+#: (``jaato_sdk.events.ai_generated_by`` mints ``{"kind": "ai", ...}``), so a
+#: reader branches on ``kind`` identically wherever provenance appears and the
+#: vocabulary can grow without the field changing shape.
+ORIGIN_IMPORTED = "imported"
+
+
+@dataclass
+class ReferenceOrigin:
+    """Where a reference came from, as the framework OBSERVED it arrive.
+
+    Deliberately narrower than the provenance a *memory* carries, and the
+    difference is not an omission.  ``Memory.generated_by`` names the model
+    that wrote it because a model writes memories; **nothing in this tree
+    writes a reference**.  A reference is authored by a human, emitted by
+    ``gen-references``, or copied in from somebody else's bundle -- and only
+    the last of those is a fact the framework is present for.  So this
+    records ARRIVAL, not authorship, and a field naming an author would have
+    no stamper: an inert mechanism, which is worse than an absent one.
+
+    Absent means **origin unobserved**, never "authored here".  A reference
+    that predates this field, one hand-written into the catalog and one
+    installed by ``bundle unpack`` (which copies whole directories rather
+    than rewriting each reference) all carry ``None``, and none of the three
+    may be read as a claim.
+
+    Why per-REFERENCE rather than per-bundle, which is where the federation
+    unit otherwise lives: ``merge_bundle`` copies source references *into the
+    target bundle's own directory*, so after a merge the source bundle
+    boundary is gone.  Bundle-level provenance would be erased by exactly the
+    operation that creates foreign references, and is the one shape that
+    cannot survive it.
+
+    Attributes:
+        kind: What was observed.  :data:`ORIGIN_IMPORTED` today.
+        bundle: The name of the bundle it was copied FROM.
+        source_id: The id it carried in that bundle.  ``bundle merge
+            --prefix`` renames on collision, so the local id is not
+            necessarily the one the other workspace knows it by, and an
+            operator reconciling two catalogs needs the one that is.
+        at: ISO-8601 UTC instant of the copy.
+    """
+
+    kind: str
+    bundle: Optional[str] = None
+    source_id: Optional[str] = None
+    at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize, omitting keys whose value was never established.
+
+        Absent rather than ``null``, the rule ``ai_generated_by`` follows:
+        a key that is not there is "not measured", and one rendered ``null``
+        invites a reader to treat the absence as a measured negative.
+        """
+        payload: Dict[str, Any] = {"kind": self.kind}
+        for key, value in (("bundle", self.bundle),
+                           ("source_id", self.source_id),
+                           ("at", self.at)):
+            if value:
+                payload[key] = value
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional['ReferenceOrigin']:
+        """Create from a dict, or ``None`` when there is nothing to read.
+
+        A payload with no ``kind`` answers ``None`` rather than inventing
+        one: this field exists to say what was observed, so a record that
+        does not say must not be made to.
+        """
+        if not isinstance(data, dict):
+            return None
+        kind = data.get("kind")
+        if not isinstance(kind, str) or not kind:
+            return None
+        return cls(
+            kind=kind,
+            bundle=data.get("bundle") or None,
+            source_id=data.get("source_id") or None,
+            at=data.get("at") or None,
+        )
+
+    def describe(self) -> str:
+        """One human/model-readable clause naming the arrival."""
+        if self.kind != ORIGIN_IMPORTED:
+            return self.kind
+        where = f" from bundle '{self.bundle}'" if self.bundle else ""
+        when = f" on {self.at}" if self.at else ""
+        alias = (f" (known there as '{self.source_id}')"
+                 if self.source_id else "")
+        return f"imported{where}{when}{alias}"
+
+
 class SourceType(Enum):
     """How the reference content can be accessed by the model."""
     LOCAL = "local"      # Local file - model uses CLI tool to read
@@ -173,6 +269,28 @@ class ReferenceSource:
     # directory the JSON file lives in. See ``bundle.Bundle``.
     bundle_name: str = ""
 
+    # Where this reference came from, when the framework observed it arrive
+    # (a ``bundle merge`` copy).  ``None`` = origin unobserved, which covers
+    # a hand-authored reference and one predating the field alike -- see
+    # ``ReferenceOrigin``.
+    origin: Optional[ReferenceOrigin] = None
+
+    def _origin_lines(self) -> List[str]:
+        """The ``**Origin**`` line, or nothing when arrival was unobserved.
+
+        Named where the MODEL reads the reference, not only in an operator
+        listing: content copied in from another workspace is third-party, and
+        a model weighing it should know that at the point of use.  Stated,
+        never enforced -- this annotates, it does not fence (the wikiLLM
+        brainstorm, §8, is where the fence is argued for).
+
+        A method rather than a branch inside :meth:`to_instruction` because
+        that function sits on the complexity ratchet.
+        """
+        if self.origin is None:
+            return []
+        return [f"**Origin**: {self.origin.describe()}"]
+
     def to_instruction(self) -> str:
         """Generate instruction text for the model describing how to access this reference."""
         if self.type == SourceType.INLINE:
@@ -184,6 +302,8 @@ class ReferenceSource:
 
         if self.tags:
             parts.append(f"**Tags**: {', '.join(self.tags)}")
+
+        parts.extend(self._origin_lines())
 
         if self.type == SourceType.LOCAL:
             # Use resolved path if available, otherwise original path
@@ -288,6 +408,9 @@ class ReferenceSource:
         if self.embedding is not None:
             result["embedding"] = self.embedding.to_dict()
 
+        if self.origin is not None:
+            result["origin"] = self.origin.to_dict()
+
         return result
 
     @classmethod
@@ -322,6 +445,7 @@ class ReferenceSource:
             tags=data.get("tags", []),
             contents=ReferenceContents.from_dict(data.get("contents")),
             embedding=EmbeddingMetadata.from_dict(data.get("embedding")),
+            origin=ReferenceOrigin.from_dict(data.get("origin")),
         )
 
 

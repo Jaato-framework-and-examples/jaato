@@ -109,6 +109,21 @@ from jaato_server.shared.trace import trace as _trace_write
 # link structure; this one stays as a cheap cycle/runaway guard.
 MAX_TRANSITIVE_DEPTH = 10
 
+
+def _origin_fields(source: ReferenceSource) -> Dict[str, Any]:
+    """The ``origin`` entry for a catalog listing, or nothing.
+
+    Absent means arrival was **unobserved** -- a hand-authored reference, one
+    predating the field, one installed by ``bundle unpack`` -- and must never
+    be read as "authored here".
+
+    A function rather than a branch at the call site because
+    ``_execute_select`` sits on the complexity ratchet.
+    """
+    if source.origin is None:
+        return {}
+    return {"origin": source.origin.to_dict()}
+
 # Characters that delimit a reference id from its surroundings.  ONE
 # definition, because two spellings of "what bounds an id" is how the fast
 # path and the regex fallback drift apart.
@@ -2220,6 +2235,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "type": source.type.value,
                 "tags": source.tags,
             }
+            entry.update(_origin_fields(source))
             # Mark transitively included sources with their parent references
             if source.id in transitive_ids_set:
                 entry["transitive"] = True

@@ -4000,6 +4000,53 @@ ranking is a refinement for workspaces that have embeddings. Also not done:
 typed edges, which would let `rel` decide what counts as adjacency rather
 than "the string appeared".
 
+### A Reference Records Where It Arrived, Not Who Wrote It
+
+`Memory` carries four provenance fields — `source_agent`, `source_session`,
+and since #1123 `generated_by` / `curated_by`. `ReferenceSource` carried
+**none**, so the rule that provenance gates placement (the wikiLLM
+brainstorm, §8: locally reproducible evidence in the trusted region,
+third-party content fenced) was not merely unimplemented for references but
+**unrepresentable** — there was no field for a fence to read.
+
+`ReferenceOrigin` is that field, and it is **deliberately narrower than
+memory's**. `generated_by` names the model that wrote a memory because a
+model writes memories; **nothing in this tree writes a reference**. One is
+authored by a human, emitted by `gen-references`, or copied in from another
+workspace's bundle — and only the last is an event the framework is present
+for. A field naming an *author* would have no stamper, which is the inert
+mechanism this repository has already had to review out once (`85c3bfd`,
+"three inert mechanisms"). So it records **arrival**:
+
+```json
+"origin": {"kind": "imported", "bundle": "teammate",
+           "source_id": "adr-004", "at": "2026-09-29T10:00:00+00:00"}
+```
+
+| Property | Why |
+|---|---|
+| **observed, never claimed** | the stamp is written **over** whatever the incoming file said. An `origin` already in a foreign JSON is an assertion by the party being judged, and a document claiming to have been authored locally would otherwise launder itself into the catalog as native. Any chain behind the arrival is hearsay and is not kept |
+| **absent means UNOBSERVED** | a hand-authored reference, one predating the field, and one installed by `bundle unpack` (which copies whole directories rather than rewriting each reference) all carry `None`, and none may be read as "authored here". Positive evidence only, the posture #1014 and #1023 take about confinement labels |
+| **per-REFERENCE, not per-bundle** | `merge_bundle` copies source references *into the target bundle's own directory*, so after a merge the source boundary is gone. Bundle-level provenance would be erased by exactly the operation that creates foreign references |
+| **`source_id` is kept** | `bundle merge --prefix` renames on collision, so the local id is not the one the other workspace knows it by — and that is the id an operator reconciling two catalogs needs |
+| **one instant per merge** | it was one operation; per-file clocks would imply an ordering the copy loop does not have |
+
+**It reaches a reader, because a field nothing renders is a field nobody can
+act on.** `to_instruction` names it where the MODEL reads the reference —
+not only in an operator listing — and `listReferences` carries it in the
+catalog entry. Both **annotate**; neither fences. Moving the trusted/fenced
+boundary is a change to what every session is told and is its own decision;
+what this closes is that the boundary was not expressible at all.
+
+`kind` is a string rather than a bool, and the same key `generated_by`
+uses (`ai_generated_by` mints `{"kind": "ai", ...}`), so a reader branches
+identically wherever provenance appears and the vocabulary can grow — an
+agent write path would add its own kind without the field changing shape.
+
+Tests: `shared/tests/test_reference_origin_is_observed_not_claimed.py`,
+carrying two `REVERSIONS` — deferring to the foreign claim, and inventing a
+`kind` for a payload that states none.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
