@@ -360,12 +360,15 @@ def _add_new(sub) -> None:
     pn.add_argument("--provider", help="provider name")
     pn.add_argument("--model", help="model name")
     pn.add_argument("--profile", metavar="NAME",
-                    help="bind the generated client to an EXISTING profile "
-                         "instead of an inline {model, provider} spec. A "
-                         "profile carries plugins, persona, GC, ceilings and "
-                         "the completion schema, which a spec cannot; "
-                         "mutually exclusive with --provider/--model, and "
-                         "refused if NAME does not resolve in --workspace.")
+                    help="bind the generated client to a profile instead "
+                         "of an inline {model, provider} spec. A profile "
+                         "carries plugins, persona, GC, ceilings and the "
+                         "completion schema, which a spec cannot; mutually "
+                         "exclusive with --provider/--model. NAME is written "
+                         "as given and need not exist yet; with jaato-server "
+                         "installed, a NAME --workspace does not resolve "
+                         "gets a note (the client fails at create_session "
+                         "until it exists).")
     pn.add_argument("--set", help="profile-set name (provider_model)")
     pn.add_argument("--agents", help="comma-separated agent names for a set")
     pn.add_argument("--name", help="processor name for `new processor` — the "

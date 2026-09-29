@@ -1,4 +1,4 @@
-"""The provider and env-var facts ``jaato-scaffold new`` needs, live or from a snapshot.
+"""The facts ``jaato-scaffold new`` needs, live or from a snapshot.
 
 ``new`` asks two questions about the framework:
 
@@ -9,6 +9,13 @@
   a profile carries.
 - **which env vars the daemon reads**, with their categories and defaults.
   This fills the commented knob catalogue in every generated ``.env``.
+- **what a profile file may say, and where it is found** (#1267, tier 2):
+  the keys the loader reads, the keys it derives or withdrew, the field
+  types, the closed vocabularies, and the discovery layout (tiers, set
+  directories, extensions).  ``new profile-set`` checks what it emitted
+  against these when the framework validator is not installed.  Live, they
+  come from ``jaato_server.shared.plugins.subagent.config`` (and the three
+  modules owning a vocabulary); the snapshot carries the same projection.
 
 jaato-server's ``introspect`` answers both by reading the INSTALLED
 jaato-server source with ``ast``: the 27 provider ``__init__.py`` files and
@@ -53,8 +60,9 @@ from the live projection, naming that command.  A snapshot nobody checks is a
 second source of truth that drifts silently; the guard is what keeps this one
 from being that.
 
-Imports only the stdlib at module level.  jaato-server's ``introspect`` is
-imported inside :func:`_live`, and only there.
+Imports only the stdlib at module level.  jaato-server is imported inside
+:func:`_live`, :func:`_live_profile_config` and :func:`project_profiles`, and
+only there.
 """
 
 from __future__ import annotations
@@ -69,8 +77,8 @@ from typing import Any, Dict, FrozenSet, Optional, Tuple
 SNAPSHOT_FILE = Path(__file__).with_name("authoring_snapshot.json")
 
 #: Bumped when the snapshot's SHAPE changes, so a reader never half-parses a
-#: file written for another shape.
-SNAPSHOT_VERSION = 1
+#: file written for another shape.  2: the ``profiles`` section (#1267, tier 2).
+SNAPSHOT_VERSION = 2
 
 #: Tests set this to exercise the snapshot branch on a tree where the live
 #: one is available.  Deliberately not an env var: an env read would be one
@@ -183,6 +191,131 @@ def project_env_vars(evs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class ProfileFacts:
+    """What a profile FILE may say, and where discovery looks for one.
+
+    Built from :func:`project_profiles`'s JSON form on both paths, so the
+    live answer and the snapshot answer are the same object for the same
+    tree.  Facts only: whether a given profile is VALID is the framework
+    validator's question (``inherits`` merging, block construction, plugin
+    schemas), and that stays with jaato-server.
+
+    Attributes:
+        file_keys: Every top-level key the loader reads
+            (``PROFILE_FILE_KEYS``).
+        derived_keys: Dataclass fields a file may not set, with what supplies
+            them (``PROFILE_DERIVED_FIELDS``).
+        removed_keys: Keys the loader withdrew, with the successor
+            (``PROFILE_REMOVED_FIELDS``).
+        reserved_names: Profile names a file may not claim.
+        field_types: The declared type of each file key that is a
+            ``SubagentProfile`` field, as ``explain profile`` renders it.
+        enums: Closed VALUE vocabularies by dotted path
+            (``completion_processors[].phase``).
+        key_vocabularies: Closed KEY sets of nested blocks by path
+            (``regulatory``, ``budget_control.limits``).
+        layout: The discovery layout: ``extensions``, ``yaml_extensions``,
+            ``profiles_subdir``, ``profile_set_env_var`` and ``tiers``
+            (``[{tier, location, rule}]``, highest precedence first).
+    """
+
+    file_keys: FrozenSet[str]
+    derived_keys: Dict[str, str]
+    removed_keys: Dict[str, str]
+    reserved_names: FrozenSet[str]
+    field_types: Dict[str, str]
+    enums: Dict[str, Tuple[str, ...]]
+    key_vocabularies: Dict[str, FrozenSet[str]]
+    layout: Dict[str, Any]
+
+    @classmethod
+    def from_json(cls, rec: Dict[str, Any]) -> "ProfileFacts":
+        """The view of one ``profiles`` section (live projection or snapshot)."""
+        return cls(
+            file_keys=frozenset(rec["file_keys"]),
+            derived_keys=dict(rec["derived_keys"]),
+            removed_keys=dict(rec["removed_keys"]),
+            reserved_names=frozenset(rec["reserved_names"]),
+            field_types=dict(rec["field_types"]),
+            enums={k: tuple(v) for k, v in rec["enums"].items()},
+            key_vocabularies={k: frozenset(v)
+                              for k, v in rec["key_vocabularies"].items()},
+            layout=dict(rec["layout"]),
+        )
+
+
+def _type_name(t: Any) -> str:
+    """A field annotation as ``explain profile`` shows it (``Optional[GCProfileConfig]``).
+
+    The rendering of ``introspect._type_name`` (plain types by name,
+    ``typing.`` and module qualifiers dropped, ``NoneType`` as ``None``),
+    plus ``ForwardRef('X')`` shown as ``X``.
+    """
+    import re
+
+    if isinstance(t, type):
+        return t.__name__
+    text = (t if isinstance(t, str) else str(t)).replace(
+        "typing.", "").replace("NoneType", "None")
+    # A quoted annotation resolves to ``ForwardRef('X')``; show the ``X``.
+    text = re.sub(r"ForwardRef\('([\w.]+)'\)", r"\1", text)
+    return re.sub(r"\b\w+(?:\.\w+)+\.(\w+)", r"\1", text)
+
+
+def project_profiles(cfg: Any) -> Dict[str, Any]:
+    """The JSON form of the profile facts, read from the live modules.
+
+    *cfg* is ``jaato_server.shared.plugins.subagent.config``.  The
+    vocabularies owned elsewhere (``budget_control``,
+    ``instruction_suppression``) are imported beside it; all three are
+    stdlib + jaato_sdk at module level.
+    Every list is sorted, so a regeneration that changes nothing writes the
+    same bytes.
+    """
+    import dataclasses
+
+    from jaato_server.shared import budget_control as bc
+    from jaato_server.shared import instruction_suppression as sup
+
+    fields = {f.name: f for f in dataclasses.fields(cfg.SubagentProfile)}
+    enums = {
+        "budget_control.degrade[].action": bc.VALID_ACTIONS,
+        "budget_control.on_unmetered": bc.UNMETERED_POLICIES,
+        "cache.ttl": cfg.VALID_CACHE_TTLS,
+        "completion_processors[].on_error": cfg.PROCESSOR_ON_ERROR,
+        "completion_processors[].on_exhausted": cfg.PROCESSOR_ON_EXHAUSTED,
+        "completion_processors[].phase": cfg.PROCESSOR_PHASES,
+        "record_keeping.integrity": cfg.INTEGRITY_MODES,
+        "regulatory.risk_class": cfg.RISK_CLASSES,
+    }
+    vocabularies = {
+        "budget_control.limits": bc.VALID_DIMENSIONS,
+        "record_keeping": cfg.RECORD_KEEPING_KEYS,
+        "regulatory": cfg.REGULATORY_KEYS,
+        "suppress_base_instructions": sup.SUPPRESSION_PIECES,
+    }
+    return {
+        "file_keys": sorted(cfg.PROFILE_FILE_KEYS),
+        "derived_keys": dict(sorted(cfg.PROFILE_DERIVED_FIELDS.items())),
+        "removed_keys": dict(sorted(cfg.PROFILE_REMOVED_FIELDS.items())),
+        "reserved_names": sorted(cfg.RESERVED_PROFILE_NAMES),
+        "field_types": {k: _type_name(fields[k].type)
+                        for k in sorted(cfg.PROFILE_FILE_KEYS) if k in fields},
+        "enums": {k: sorted(v) for k, v in sorted(enums.items())},
+        "key_vocabularies": {k: sorted(v)
+                             for k, v in sorted(vocabularies.items())},
+        "layout": {
+            "extensions": list(cfg.PROFILE_FILE_EXTENSIONS),
+            "yaml_extensions": list(cfg.PROFILE_YAML_EXTENSIONS),
+            "profiles_subdir": cfg.PROFILES_SUBDIR,
+            "profile_set_env_var": cfg.PROFILE_SET_ENV_VAR,
+            "tiers": [{"tier": t, "location": loc, "rule": rule}
+                      for t, loc, rule in cfg.PROFILE_DISCOVERY_TIERS],
+        },
+    }
+
+
 # -------------------------------------------------------------- live / snapshot
 
 
@@ -202,6 +335,22 @@ def _live():
     if not introspect._PROVIDER_DIR.is_dir():
         return None
     return introspect
+
+
+def _live_profile_config():
+    """``subagent.config`` when jaato-server imports, else ``None``.
+
+    Separate from :func:`_live` because it reads a different part of the
+    tree: the profile schema is an import, not a source scan, so it is live
+    whenever jaato-server is importable, whatever the provider directory.
+    """
+    if _FORCE_SNAPSHOT:
+        return None
+    try:
+        from jaato_server.shared.plugins.subagent import config
+    except ImportError:
+        return None
+    return config
 
 
 def source() -> str:
@@ -266,8 +415,9 @@ def _warn_on_version_skew(data: Dict[str, Any]) -> None:
     if not recorded or not installed or recorded == installed:
         return
     _SKEW_WARNED = True
-    print(f"jaato-scaffold: warning: provider and env-var facts come from the "
-          f"snapshot of jaato-server {recorded} shipped with jaato-sdk, but "
+    print(f"jaato-scaffold: warning: provider, env-var and profile facts "
+          f"come from the snapshot of jaato-server {recorded} shipped with "
+          f"jaato-sdk, but "
           f"jaato-server {installed} is installed here and its source tree "
           f"could not be read; generated files may name providers or knobs "
           f"that differ from the installed server's.  Upgrading jaato-sdk to "
@@ -324,6 +474,19 @@ def env_vars() -> Dict[str, Any]:
             for name, rec in _snapshot()["env_vars"].items()}
 
 
+def profile_facts() -> ProfileFacts:
+    """The profile facts, live when jaato-server imports, else the snapshot's.
+
+    Resolution order, as for the provider facts: the installed jaato-server,
+    then the bundled snapshot.  A reachable daemon is not asked (#1267 lists
+    it second, optionally): no daemon verb serves these facts yet.
+    """
+    cfg = _live_profile_config()
+    if cfg is not None:
+        return ProfileFacts.from_json(project_profiles(cfg))
+    return ProfileFacts.from_json(_snapshot()["profiles"])
+
+
 # ------------------------------------------------------------- regeneration
 
 
@@ -335,7 +498,8 @@ def build_snapshot() -> Dict[str, Any]:
             project.  A snapshot is never regenerated from itself.
     """
     live = _live()
-    if live is None:
+    cfg = _live_profile_config()
+    if live is None or cfg is None:
         raise RuntimeError("the jaato-server source tree is not available; "
                            "the snapshot can only be generated from it")
     return {
@@ -343,6 +507,7 @@ def build_snapshot() -> Dict[str, Any]:
         "jaato_server_version": _live_server_version(live),
         "providers": project_providers(live.providers()),
         "env_vars": project_env_vars(live.env_vars()),
+        "profiles": project_profiles(cfg),
     }
 
 

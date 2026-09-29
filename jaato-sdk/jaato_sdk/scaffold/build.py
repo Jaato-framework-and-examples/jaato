@@ -1,10 +1,13 @@
 """The ``new`` verb — scaffold profile-sets (and SDK clients), then re-validate.
 
-The defining property: whatever ``new`` emits, it runs straight back through
-:mod:`validate` (the SAME validator the ``validate`` verb uses).  So scaffolded
-output is valid **by construction** — there is no separate "is the generated
-profile ok" path, and a generator bug that emits an unknown knob fails loudly
-at scaffold time instead of being silently dropped at runtime.
+The defining property: whatever ``new profile-set`` emits, it runs straight
+back through jaato-server's :mod:`validate` (the SAME validator the ``validate``
+verb uses) when that verb is installed.  So scaffolded output is valid **by
+construction** — there is no separate "is the generated profile ok" path, and
+a generator bug that emits an unknown knob fails loudly at scaffold time
+instead of being silently dropped at runtime.  With the SDK alone the emitted
+keys are checked against the profile facts in the snapshot, and one line says
+the set was not validated (#1267, tier 2).
 
 ``new`` also consults the providers' declared contracts while emitting — it
 only writes knobs the target provider actually declares (e.g. ``api_key`` is
@@ -17,12 +20,12 @@ authoring modules are imported here: :mod:`archetypes`,
 :mod:`authoring_facts` and :mod:`authoring_contracts`.  Provider and env-var
 facts go through :mod:`authoring_contracts`, which reads the live tree through
 jaato-server's ``introspect`` when it is installed and a checked-in snapshot
-when it is not.  jaato-server's ``validate`` (the profile-set re-check),
-``dossier``, profile resolver and processor loader are imported inside the
-functions that use them, and the invocations that need them are refused by
-name before anything is written when jaato-server is absent (see
-:func:`_server_need`).  So the archetypes that need no introspection (inline
-clients, ``gitignore``) run with the SDK alone.
+when it is not; so do the profile facts.  jaato-server's ``validate`` (the
+profile-set re-check), ``dossier``, profile resolver and processor loader are
+imported inside the functions that use them.  Without jaato-server, each of
+those steps is skipped with one line saying so, except ``new dossier``, which
+is refused by name before anything is written (see the "what still needs
+jaato-server" table and :func:`_server_need`).
 
 Fail-loud, no hardcoded fallbacks: required inputs (workspace / set / provider
 / model / agents) must be supplied; an unknown provider is a hard error, not a
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -388,22 +392,26 @@ def _dry_run_footer(doc, skipped: str) -> None:
 
 # ------------------------------------------------ what still needs jaato-server
 #
-# This module ships in jaato-sdk (#1267, tier 1), so it imports nothing from
-# jaato-server at module level.  Four invocations still reach into it, because
-# what they need has not moved (tier 2 of #1267 is the open decision about
-# moving ``subagent.config`` and friends, and pulling pyyaml into the SDK):
+# This module ships in jaato-sdk (#1267), so it imports nothing from
+# jaato-server at module level.  Tier 2 of #1267 decided what each server
+# reach does when jaato-server is absent, and moved NO server module to do it:
 #
-#   new profile-set          re-validates what it wrote with ``validate``
-#   new client --profile     resolves the name with ``discover_profiles``
-#   new processor / sweep    drive the emitted gate through the framework's
-#                            own processor loader (``--no-gate`` sweeps do not)
-#   new dossier              renders explain/introspect pages
+#   new profile-set          emits from the snapshot's facts; the framework
+#                            validator re-checks the set only when
+#                            jaato-server's verbs are installed, else ONE
+#                            line says it was not validated and how to
+#   new client --profile     never refuses: the name is written as given.
+#                            With jaato-server installed, a name the
+#                            workspace does not resolve gets one note
+#   new processor / sweep    emit, then drive the gate through the
+#                            framework's own loader when it is installed;
+#                            otherwise skip that probe with one notice (a
+#                            loader re-implemented here would test itself)
+#   new dossier              renders explain/introspect pages: refused
+#                            without jaato-server, before anything is written
 #
-# Each imports jaato-server inside the function that needs it.  Without
-# jaato-server those imports would fail half-way through a write, or -- for
-# ``--profile`` -- be swallowed as "cannot enumerate profiles" and ACCEPT any
-# name.  So the need is decided here, before anything is written, and refused
-# by name.
+# Each server import sits inside the function that needs it, behind one of
+# the predicates below.
 
 #: What an SDK-only install is told to do about a server-only archetype.
 SERVER_REMEDY = ("install jaato-server in this environment "
@@ -415,8 +423,8 @@ def _server_available() -> bool:
     """Whether ``jaato_server`` can be imported here, without importing it.
 
     A finder that refuses the name (a meta-path blocker, a broken install)
-    counts as absent rather than raising: this is asked in order to print a
-    refusal, and a refusal that crashes is worse than none.
+    counts as absent rather than raising: this is asked in order to decide
+    what to skip, and a check that crashes is worse than none.
     """
     import importlib.util
 
@@ -426,25 +434,42 @@ def _server_available() -> bool:
         return False
 
 
+def _server_validator_installed() -> bool:
+    """Whether jaato-server's ``validate`` verb is installed here.
+
+    The profile-set re-check is that verb's validator, so it runs exactly
+    when ``jaato-scaffold validate`` would: jaato-server importable AND its
+    ``validate`` registered in the ``jaato.scaffold_verbs`` group from code
+    under ``jaato_server`` (the shell's own rule for who may answer it).
+    Metadata only; nothing is imported to answer.
+    """
+    if not _server_available():
+        return False
+    try:
+        from importlib.metadata import entry_points
+
+        from .cli import SERVER_PACKAGE, VERB_ENTRY_POINT_GROUP
+
+        for ep in entry_points(group=VERB_ENTRY_POINT_GROUP):
+            module = str(getattr(ep, "value", "") or "").split(":", 1)[0]
+            if ep.name == "validate" and (
+                    module == SERVER_PACKAGE
+                    or module.startswith(SERVER_PACKAGE + ".")):
+                return True
+    except Exception:           # noqa: BLE001 - broken metadata says "absent"
+        return False
+    return False
+
+
 def _server_need(args, archetype: Optional[str]) -> Optional[str]:
-    """Why this invocation needs jaato-server, or ``None`` if it does not."""
-    if archetype is None or archetype in _archetypes.PROFILE_SET_ALIASES:
-        return ("new profile-set", "it re-validates the set it wrote with "
-                "the framework validator")
-    if archetype == _archetypes.PROCESSOR:
-        return ("new processor", "it drives the emitted processor through the "
-                "framework's own loader before reporting success")
+    """Why this invocation cannot run at all without jaato-server, or ``None``.
+
+    Only ``new dossier``: every other archetype emits without it and says
+    what it skipped (see the table above).
+    """
     if archetype == _archetypes.DOSSIER:
         return ("new dossier", "it renders the framework's own "
                 "introspection pages")
-    if archetype in _archetypes.CLIENT_ARCHETYPES:
-        if getattr(args, "profile", None):
-            return (f"new {archetype} --profile", "it resolves the profile "
-                    "name with the framework's own profile resolver")
-        if _gate_wanted(args, archetype):
-            return (f"new {archetype}", "it drives the emitted completion gate "
-                    "through the framework's own loader (--no-gate skips the "
-                    "gate)")
     return None
 
 
@@ -455,10 +480,18 @@ def _refuse_without_server(need) -> Optional[int]:
     command, why = need
     print(f"`jaato-scaffold {command}` needs jaato-server: {why}, and "
           f"jaato-server is not installed in this environment.  To fix: "
-          f"{SERVER_REMEDY}.  What runs with the SDK alone: `new gitignore`, "
-          f"the inline client archetypes (--provider/--model) and "
-          f"`integration`.")
+          f"{SERVER_REMEDY}.  Every other `new` archetype and `integration` "
+          f"run with the SDK alone.")
     return 2
+
+
+#: The notice a gate/processor probe prints when it is skipped.  One line,
+#: naming what did not run and why a stand-in would not do.
+PROBE_SKIPPED = ("probe skipped: jaato-server is not installed here, and the "
+                 "probe runs the generated {what} through the framework's own "
+                 "processor loader.  The files are written; to check them, "
+                 "install jaato-server (pip install jaato-server) and re-run "
+                 "with --force, or run the session.")
 
 
 def run(args) -> int:
@@ -531,9 +564,9 @@ def _dossier_document(args, ws: Path):
             return None, 1
 
     profile = args.profile
-    # The same resolver, and the same refusal wording, `new client --profile`
-    # uses: a profile that exists only under an unselected set is reported as
-    # that, never as missing.
+    # The daemon's own resolver: a profile that exists only under an
+    # unselected set is reported as that, never as missing.  (`new client
+    # --profile` reads the same resolver and only notes, never refuses.)
     refusal = _check_named_profile(args, _archetypes.DOSSIER, profile)
     if refusal is not None:
         return None, refusal
@@ -980,8 +1013,43 @@ def _profile_sets(ws: Path) -> List[str]:
     return sorted(d.name for d in root.iterdir() if d.is_dir())
 
 
+def _note_named_profile(args, archetype: str, name: str) -> None:
+    """Print one note when *name* does not resolve in the workspace; never refuse.
+
+    ``--profile X`` writes ``X`` into the client as given (#1267, tier 2).  The
+    profile does not have to exist when the client is scaffolded: it is read
+    by the daemon at ``create_session``, and writing it afterwards is a
+    normal order of work.  So a name the workspace does not resolve is not an
+    error here.  A typo surfaces on the client's first run, as the daemon's
+    named "profile not found"; ``validate`` would not catch it, because it
+    does not read client code.
+
+    Asked only when jaato-server is installed (the resolver is the daemon's
+    own, and the SDK carries none).  Silent when the profiles cannot be
+    enumerated at all -- see :func:`workspace_profile_names` on why ``None``
+    must not be read as "no profiles".
+    """
+    if not _server_available():
+        return
+    ws_arg = getattr(args, "workspace", None)
+    names = workspace_profile_names(ws_arg, getattr(args, "set", None))
+    if names is None or name in names:
+        return
+    elsewhere = _sets_declaring(Path(ws_arg).resolve(), name) if ws_arg else []
+    where = (f"exists only in profile-set {' / '.join(elsewhere)}, which "
+             f"this workspace does not select (pass --set {elsewhere[0]}, or "
+             f"set JAATO_PROFILE_SET in the workspace .env)" if elsewhere
+             else f"doesn't exist yet in {ws_arg}")
+    print(f"note: new {archetype}: profile '{name}' {where}; the client "
+          f"fails at create_session until it does.")
+
+
 def _check_named_profile(args, archetype: str, name: str):
     """``None`` if *name* resolves in the workspace, else an exit code.
+
+    ``new dossier --profile`` only.  A dossier documents a profile, so one
+    that does not resolve has nothing to document; a CLIENT naming it is
+    fine, and gets :func:`_note_named_profile` instead (#1267, tier 2).
 
     Refusing here is the point of the flag: a generated client naming a
     profile that does not exist fails at ``session.new``, in a daemon, with a
@@ -1209,8 +1277,8 @@ def _resolve_profile_binding(args, archetype: str, transport: str,
               f"carry their own profile names, which you edit in the "
               f"generated file.  Drop --profile")
         return 2, None, None
-    code = _check_named_profile(args, archetype, profile_name)
-    return (code, None, None) if code else (None, None, None)
+    _note_named_profile(args, archetype, profile_name)
+    return None, None, None
 
 
 def _binding_substitutions(archetype: str, provider, model,
@@ -1461,9 +1529,13 @@ def _check_generated_gate(ws: Path, gate_name: str, gated: bool,
 
     Skipped entirely when files were kept: what is on disk is then the
     author's, and vouching for it would be vouching for something this
-    generator did not write.
+    generator did not write.  Skipped with one notice when jaato-server is
+    not installed: the probe IS the framework's loader (#1267, tier 2).
     """
     if not gated or skipped:
+        return None
+    if not _server_available():
+        print("\n" + PROBE_SKIPPED.format(what="completion gate"))
         return None
     print("\ndriving the generated completion gate …")
     reason = _probe_generated_gate(ws, gate_name)
@@ -1868,12 +1940,19 @@ def _new_processor(args) -> int:
         print(f"  + {w}")
 
     # emit-then-check: load it the way the daemon will, and prove it gates.
-    print("\nloading the generated processor through the framework …")
-    reason = _probe_generated_processor(target)
-    if reason:
-        print(f"✘ generated processor is not usable — generator bug: {reason}")
-        return 1
-    print("✓ it loads, refuses a dishonest payload, and passes an honest one.")
+    # Without jaato-server there is no framework loader to load it with, and
+    # an SDK-side stand-in would test itself (#1267, tier 2), so say so.
+    if not _server_available():
+        print("\n" + PROBE_SKIPPED.format(what="processor"))
+    else:
+        print("\nloading the generated processor through the framework …")
+        reason = _probe_generated_processor(target)
+        if reason:
+            print(f"✘ generated processor is not usable — generator bug: "
+                  f"{reason}")
+            return 1
+        print("✓ it loads, refuses a dishonest payload, and passes an honest "
+              "one.")
 
     print("\nnext:\n  wire it into the profile it should gate —\n")
     for line in _tpl.wiring_for(name).splitlines():
@@ -2114,6 +2193,50 @@ def _report_revalidation(diags) -> int:
     return 0
 
 
+#: A top-level mapping key in emitted YAML: column 0, not a comment.  The
+#: generator's own templates are the only input, and they carry no flow
+#: mappings or quoted keys, so this is exact for them and needs no pyyaml.
+_TOP_LEVEL_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:", re.MULTILINE)
+
+
+def _unread_emitted_keys(emitted: Dict[Path, str]) -> List[str]:
+    """``<file>: <key>`` for every emitted top-level key the loader does not read.
+
+    Checked against the profile facts (live when jaato-server imports, else
+    the snapshot): a key outside ``file_keys`` would load and be read by
+    nobody, which is the generator bug the framework validator reports as
+    ``unknown_profile_key``.  Only that one fact is checked here, because it
+    is a fact; what needs the loader's behaviour is the validator's.
+    """
+    known = _contracts.profile_facts().file_keys
+    bad: List[str] = []
+    for path, text in emitted.items():
+        for key in _TOP_LEVEL_KEY.findall(text):
+            if key not in known:
+                bad.append(f"{path.name}: {key}")
+    return bad
+
+
+def _report_unvalidated(ws: Path, set_name: str,
+                        emitted: Dict[Path, str]) -> int:
+    """The SDK-only close of ``new profile-set``: one line, or a generator bug.
+
+    Returns:
+        ``1`` when an emitted key is one the loader does not read, else ``0``
+        after printing the one line that says the set was not validated.
+    """
+    bad = _unread_emitted_keys(emitted)
+    if bad:
+        print(f"\n✘ scaffold emitted key(s) the profile loader does not read "
+              f"({', '.join(bad)}) — this is a generator bug; please report.")
+        return 1
+    print(f"\nnot validated: jaato-server is not installed here, so the "
+          f"framework validator did not re-check the set; to validate it, "
+          f"pip install jaato-server and run `jaato-scaffold validate {ws} "
+          f"--set {set_name}` (or run that where jaato-server is installed).")
+    return 0
+
+
 def _emit_set_env(ws: Path, plan: "_Plan", provider: str, active: List[str],
                   set_name: str, kind: str, key_env_var: str) -> None:
     """Write or extend the workspace ``.env`` for a scaffolded profile-set.
@@ -2190,16 +2313,18 @@ def _new_profile_set(args) -> int:
                                        provider)
 
     plan = _Plan(ws, doc, dry_run=dry_run)
+    emitted: Dict[Path, str] = {}
     for agent in agents:
         base = pdir / f"_base_{agent}.yaml"
         if not base.exists() or args.force:
-            plan.write(base, _base_profile_yaml(agent),
+            emitted[base] = _base_profile_yaml(agent)
+            plan.write(base, emitted[base],
                        action="update" if base.exists() else "create")
         setf = setdir / f"{agent}.yaml"
         if not setf.exists() or args.force:
-            plan.write(setf,
-                       _set_profile_yaml(agent, provider, args.model,
-                                         kind, scheme, secret_path),
+            emitted[setf] = _set_profile_yaml(agent, provider, args.model,
+                                              kind, scheme, secret_path)
+            plan.write(setf, emitted[setf],
                        action="update" if setf.exists() else "create")
 
     # emit/merge the workspace .env so the set is SELECTED at runtime
@@ -2239,11 +2364,25 @@ def _new_profile_set(args) -> int:
     for w in plan.labels:
         print(f"  + {w}")
 
-    # --- emit-then-validate: the same validator the `validate` verb runs -
+    return _close_profile_set(ws, args.set, emitted)
+
+
+def _close_profile_set(ws: Path, set_name: str,
+                       emitted: Dict[Path, str]) -> int:
+    """Emit-then-validate: the same validator the ``validate`` verb runs.
+
+    ...when that verb is installed.  Without it (#1267, tier 2) the emitted
+    keys are checked against the snapshot's profile facts, and one line says
+    the set was not validated and how to validate it
+    (:func:`_report_unvalidated`).  Split out of :func:`_new_profile_set` to
+    keep it under its complexity baseline.
+    """
+    if not _server_validator_installed():
+        return _report_unvalidated(ws, set_name, emitted)
     print("\nre-validating scaffolded set …")
     # Imported here, not at module level: the re-check is introspection
     # (plugin discovery, provider imports), and the archetypes that need none
     # of it must not load it (#1267).
     from jaato_server.shared.scaffold import validate as _validate
     return _report_revalidation(
-        _validate.validate_workspace(str(ws), profile_set=args.set))
+        _validate.validate_workspace(str(ws), profile_set=set_name))

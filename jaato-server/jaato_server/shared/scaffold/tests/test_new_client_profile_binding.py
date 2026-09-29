@@ -72,7 +72,7 @@ def test_the_selector_comes_from_the_workspace_env(ws):
 
 
 def test_could_not_look_is_not_declares_none():
-    # `[]` is a measured absence and can refuse a --profile; `None` is "I
+    # `[]` is a measured absence and earns a --profile note; `None` is "I
     # could not look" and must not be read as one.
     assert build.workspace_profile_names(None) is None
     assert build.workspace_profile_names("/nonexistent/workspace") == []
