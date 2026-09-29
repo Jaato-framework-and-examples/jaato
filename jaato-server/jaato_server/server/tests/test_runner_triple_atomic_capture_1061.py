@@ -103,9 +103,37 @@ _CORE_PY = (
 )
 
 #: The reversion strips the lock from the capture-and-null in
-#: ``JaatoServer.shutdown``.  This is the defect in its smallest
+#: ``_take_runner_triple``.  This is the defect in its smallest
 #: form: the three reads and four writes are no longer serialised
 #: against a concurrent caller.
+#
+#: The v3 source uses ``_lock = getattr(...); with ... nullcontext():``
+#: rather than the v1 ``with _ctx:`` form, so the reversion strings
+#: target the v3 helper body.  The v1 strings are gone.
+_FIXED_HELPER = """        _lock = getattr(self, "_runner_lock", None)
+        with _lock if _lock is not None else contextlib.nullcontext():
+            rpc = self._runner_rpc
+            spawned = self._spawned_runner
+            pool_manager = self._pool_manager_ref
+            if rpc is not None:
+                self._runner_released = True
+            self._runner_rpc = None
+            self._runner_ready.clear()  # runner torn down — send path must await respawn
+            self._spawned_runner = None
+            self._pool_manager_ref = None"""
+
+_BROKEN_HELPER = """        rpc = self._runner_rpc
+        spawned = self._spawned_runner
+        pool_manager = self._pool_manager_ref
+        if rpc is not None:
+            self._runner_released = True
+        self._runner_rpc = None
+        self._runner_ready.clear()  # runner torn down — send path must await respawn
+        self._spawned_runner = None
+        self._pool_manager_ref = None"""
+
+# Old v1 strings kept as deprecated aliases for the meta-guard harness
+# (which may still probe for them); they no longer match the v3 source.
 _FIXED_SHUTDOWN = """        with _ctx:
             rpc = self._runner_rpc
             spawned = self._spawned_runner
@@ -126,21 +154,22 @@ _BROKEN_SHUTDOWN = """        rpc = self._runner_rpc
 REVERSIONS = [
     Reversion(
         target=_CORE,
-        find=_FIXED_SHUTDOWN,
-        replace=_BROKEN_SHUTDOWN,
+        find=_FIXED_HELPER,
+        replace=_BROKEN_HELPER,
         test="test_set_runner_rpc_and_shutdown_share_the_lock",
         because=(
-            "the lock is removed from the capture-and-null, so "
-            "shutdown no longer acquires _runner_lock"
+            "the lock is removed from _take_runner_triple's critical "
+            "section, so shutdown no longer acquires _runner_lock"
         ),
     ),
     Reversion(
         target=_CORE,
-        find=_FIXED_SHUTDOWN,
-        replace=_BROKEN_SHUTDOWN,
+        find=_FIXED_HELPER,
+        replace=_BROKEN_HELPER,
         test="test_lock_is_serialised_under_contention",
         because=(
-            "the lock is removed from the capture-and-null, so the "
+            "the lock is removed from _take_runner_triple's critical "
+            "section, so the "
             "lock acquire count drops to zero across N contending "
             "shutdowns"
         ),
