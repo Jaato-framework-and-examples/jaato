@@ -32,17 +32,22 @@ red build + a follow-up "regenerate events.ts" commit.
 
 ### `authoring_snapshot.json`
 
-When a commit touches any non-test `.py` under
-`jaato-server/jaato_server/{server,shared}/`, it reruns
+When a staged path is a non-test `.py` file under
+`jaato-server/jaato_server/server/` or `jaato-server/jaato_server/shared/`, or
+is `jaato-server/pyproject.toml`, the hook runs
 `python -m jaato_server.shared.scaffold.authoring_contracts --write` and
-stages `jaato-server/jaato_server/shared/scaffold/authoring_snapshot.json`.
-That file is what `jaato-scaffold new` reads about providers and env vars
-when the jaato-server source tree is absent (#1267); any env-var read or
-provider contract can change it.
+stages `jaato-sdk/jaato_sdk/scaffold/authoring_snapshot.json`.
+That file ships in the jaato-sdk wheel and is what `jaato-scaffold new` reads
+about providers and env vars when jaato-server is not installed beside it
+(#1267).  It records the jaato-server version it was projected from, which is
+why a version bump in `jaato-server/pyproject.toml` regenerates it too.
+`test_authoring_does_not_load_introspection_1267.py` fails in CI when it is
+stale.
 
+- Needs both packages importable (`pip install -e jaato-sdk/ -e jaato-server/`).
 - The scan takes a few seconds, so commits that touch server source pay it.
-- `PYTHONPATH` is pointed at this checkout's `jaato-server/`, so a git
-  worktree regenerates its own snapshot, not the main clone's.
+- Puts this checkout's `jaato-server/` and `jaato-sdk/` first on `PYTHONPATH`,
+  so a git worktree regenerates its own snapshot, not the main clone's.
 - It regenerates from the working tree, not the staged index (as the
   `events.ts` step does), so unstaged edits to source files are reflected.
 - The guard `test_authoring_does_not_load_introspection_1267.py` (in the

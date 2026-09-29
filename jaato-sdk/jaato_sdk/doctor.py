@@ -529,9 +529,10 @@ def check_mcp_sdk() -> List[Check]:
 def check_integrations() -> List[Check]:
     """Are this build's integrations applied, and do they match it?
 
-    The skill ships as package data of `jaato-server` so a copy cannot describe
-    a different framework than the one running — but only if the copy on disk
-    came from THIS build.  Hand-copied skills drift silently: a survey of one
+    The skill ships as package data of `jaato-sdk` (since #1267, with the
+    `jaato-scaffold` authoring verbs) so a copy cannot describe a different
+    build than the one installed — but only if the copy on disk came from
+    THIS build.  Hand-copied skills drift silently: a survey of one
     org found the same skill in four repos at four lengths, and user-global
     installs 2.5 months behind the originals, with nothing detecting it.
 
@@ -541,11 +542,11 @@ def check_integrations() -> List[Check]:
     that stop work.
     """
     try:
-        from jaato_server.shared.scaffold import integrations as _install
-    except Exception:      # noqa: BLE001 — sdk installed without the server
+        from jaato_sdk.scaffold import integrations as _install
+    except Exception as exc:      # noqa: BLE001 — a broken install
         return [Check("integrations", WARN,
-                      "cannot check: `shared.scaffold` is not importable "
-                      "(jaato-server not installed in this env)")]
+                      f"cannot check: `jaato_sdk.scaffold` is not importable "
+                      f"({exc})")]
 
     names = _install.available()
     if not names:
@@ -579,7 +580,7 @@ def check_integrations() -> List[Check]:
             continue
         if state == "current":
             out.append(Check(f"integration ({name})", PASS,
-                             f"{user} — from jaato-server {detail}"))
+                             f"{user} — from {_install.PAYLOAD_DIST} {detail}"))
         elif state == "absent":
             out.append(Check(f"integration ({name})", WARN,
                              f"not applied — `jaato-scaffold integration {name}` "

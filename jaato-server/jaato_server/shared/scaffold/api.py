@@ -1,7 +1,9 @@
 """Stable extension API for third-party (e.g. premium) ``jaato-scaffold`` verbs.
 
-``jaato-scaffold`` ships three built-in verbs (``explain`` / ``validate`` /
-``new``).  External packages can contribute additional verbs — the canonical
+``jaato-scaffold`` ships in jaato-sdk with two built-in verbs (``new`` /
+``integration``); jaato-server contributes four more (``explain`` /
+``validate`` / ``dependencies`` / ``releases``) through the same seam this
+module describes (#1267).  External packages can contribute additional verbs — the canonical
 case being the premium ``compile`` verb (the Daruma invariant compiler) — by
 registering a :class:`ScaffoldVerb` under the ``jaato.scaffold_verbs`` entry-point
 group.  The public CLI discovers and mounts them at startup; a verb whose package
@@ -66,8 +68,10 @@ from .validate import Diagnostic, validate_workspace  # noqa: F401  (re-export)
 #: and :data:`Rendered`.  Additive — every 1.0 verb is unchanged.
 SCAFFOLD_EXTENSION_API = "1.1"
 
-#: The entry-point group the CLI scans for external verbs.
-VERB_ENTRY_POINT_GROUP = "jaato.scaffold_verbs"
+#: The entry-point group the CLI scans for external verbs.  Defined by the
+#: shell that scans it, in jaato-sdk (#1267); re-exported here because this
+#: facade is where external verbs have always imported it from.
+from jaato_sdk.scaffold.cli import VERB_ENTRY_POINT_GROUP  # noqa: E402,F401
 
 #: The entry-point group the CLI scans for external ``explain`` topics.
 #:

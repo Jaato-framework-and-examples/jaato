@@ -46,8 +46,11 @@ from jaato_server.shared.scaffold.__main__ import render_topic
 from jaato_server.shared.tests.reversion import Reversion
 
 _ROUTER = "jaato-server/jaato_server/server/command_router.py"
-_REMOTE = "jaato-server/jaato_server/shared/scaffold/remote.py"
-_MAIN = "jaato-server/jaato_server/shared/scaffold/__main__.py"
+# Since #1267 the fallback lives with the SDK shell (both jaato-server's
+# `explain` and the SDK-only refusal call it), and the explain dispatch in
+# introspection_verbs, which `shared/scaffold/__main__` is an alias of.
+_REMOTE = "jaato-sdk/jaato_sdk/scaffold/remote.py"
+_MAIN = "jaato-server/jaato_server/shared/scaffold/introspection_verbs.py"
 
 REVERSIONS = [
     Reversion(
@@ -63,15 +66,15 @@ REVERSIONS = [
     Reversion(
         target=_MAIN,
         find='''        if _scope_renderer(scope) is None:
-            rc, note = _render_from_daemon(''',
+            rc, note = _remote.render_from_daemon(''',
         replace='''        if True:
-            rc, note = _render_from_daemon(''',
+            rc, note = _remote.render_from_daemon(''',
         test="test_only_a_topic_this_venv_lacks_is_worth_a_socket",
         because="a usage error about the caller's own command line is taken to "
                 "a daemon, which answers a question nobody posed",
     ),
     Reversion(
-        target=_MAIN,
+        target=_REMOTE,
         find='''        # On the FALLBACK, the daemon's refusal must not replace the local
         # one: its list is the DAEMON's topics, and a reader shown that list
         # concludes a topic their own install has does not exist.  The local
@@ -107,12 +110,13 @@ def _router_source() -> str:
 
 def _main_source() -> str:
     return (Path(__file__).resolve().parents[1]
-            / "scaffold" / "__main__.py").read_text()
+            / "scaffold" / "introspection_verbs.py").read_text()
 
 
 def _remote_source() -> str:
-    return (Path(__file__).resolve().parents[1]
-            / "scaffold" / "remote.py").read_text()
+    # Located from the module, so the meta-guard's sandboxed copy is the one
+    # read (the SDK is on the sandbox's PYTHONPATH like the server is).
+    return Path(_remote.__file__).resolve().read_text()
 
 
 # --------------------------------------------------------------- one dispatch
@@ -193,10 +197,8 @@ def test_only_a_topic_this_venv_lacks_is_worth_a_socket():
     caller's own command line, and taking it to a daemon answers a question
     nobody posed while paying a connect for it.
     """
-    src = (Path(__file__).resolve().parents[1]
-           / "scaffold" / "__main__.py").read_text()
-    body = src.split("def _cmd_explain(", 1)[1]
-    fallback = body.split("_render_from_daemon(None", 1)[0]
+    body = _main_source().split("def _cmd_explain(", 1)[1]
+    fallback = body.split("required=False", 1)[0]
     assert "_scope_renderer(scope) is None" in fallback, (
         "the daemon fallback must be gated on this venv not having the topic")
 
@@ -214,7 +216,7 @@ def test_a_daemon_refusal_never_replaces_the_local_topic_list():
     ``--connect`` is the deliberate exception and is not covered here: there
     the reader named that daemon, so its list is the one they asked about.
     """
-    body = _main_source().split("def _render_from_daemon(", 1)[1]
+    body = _remote_source().split("def render_from_daemon(", 1)[1]
     body = body.split("\ndef ", 1)[0]
     fallback = body.split("if not answer.ok:", 1)[1]
     fallback = fallback.split("if required:", 1)[1]
@@ -233,7 +235,7 @@ def test_the_fallback_still_says_the_daemon_was_asked():
     ``reached`` keeps that distinction inside :mod:`remote`; dropping the note
     would lose it again at the one surface a person reads.
     """
-    assert "also asked the daemon at" in _main_source()
+    assert "also asked the daemon at" in _remote_source()
 
 
 def test_a_locally_answerable_topic_is_rendered_locally():

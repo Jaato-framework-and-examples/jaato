@@ -244,7 +244,7 @@ from jaato_server.shared.tests.reversion import (  # noqa: E402
 
 REVERSIONS = [
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/integrations.py",
+        target="jaato-sdk/jaato_sdk/scaffold/integrations.py",
         find='        missing = [k for k in ("user", "workspace") if not target.get(k)]\n',
         replace='        missing = []\n',
         because=(
@@ -255,7 +255,7 @@ REVERSIONS = [
         test="test_a_half_declared_object_target_is_refused_not_guessed",
     ),
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/integrations.py",
+        target="jaato-sdk/jaato_sdk/scaffold/integrations.py",
         find='    detect = manifest(name).get("detect")\n'
              "    if not isinstance(detect, dict):\n"
              "        return None\n",

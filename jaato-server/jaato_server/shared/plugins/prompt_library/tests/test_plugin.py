@@ -1387,7 +1387,7 @@ class TestJaatoSdkPayloadLoadsAsReference:
     """
 
     def _payload_dir(self) -> Path:
-        import jaato_server.shared.scaffold as scaffold
+        import jaato_sdk.scaffold as scaffold   # SDK package data since #1267
         return (
             Path(scaffold.__file__).parent
             / "integrations" / "claude-code" / "payload"

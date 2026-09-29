@@ -4,7 +4,8 @@
 # 1. jaato-sdk/jaato_sdk/events.py -> jaato-sdk-ts/src/events.ts
 #    (scripts/codegen_ts_events.py), so the "Codegen: jaato-sdk-ts events.ts
 #    staleness" CI check stays green.
-# 2. jaato-server source -> jaato-server/.../scaffold/authoring_snapshot.json
+# 2. jaato-server source (and its pyproject.toml, whose version the snapshot
+#    records) -> jaato-sdk/jaato_sdk/scaffold/authoring_snapshot.json
 #    (python -m jaato_server.shared.scaffold.authoring_contracts --write), so
 #    test_authoring_does_not_load_introspection_1267 stays green (#1267).
 #
@@ -43,22 +44,25 @@ fi
 # --- 2. authoring_snapshot.json ---------------------------------------------
 # The snapshot projects env-var reads from any non-test module under
 # jaato_server/{server,shared} and the provider contracts under
-# model_provider/, so any such .py file can change it.  Tests cannot.
-snapshot="jaato-server/jaato_server/shared/scaffold/authoring_snapshot.json"
+# model_provider/, so any such .py file can change it, and it records
+# jaato-server's version, so a bump in its pyproject.toml does too.  Tests
+# cannot.  It ships in the SDK wheel (#1267), so it lives under jaato-sdk/.
+snapshot="jaato-sdk/jaato_sdk/scaffold/authoring_snapshot.json"
 # (No `grep -q` here: under pipefail, -q exiting early can SIGPIPE the first
 # grep and turn a match into a non-zero pipeline.)
-sources="$(grep -E '^jaato-server/jaato_server/(server|shared)/.*\.py$' <<<"$staged" \
+sources="$(grep -E '^jaato-server/(jaato_server/(server|shared)/.*\.py|pyproject\.toml)$' <<<"$staged" \
            | grep -vE '/tests/' || true)"
 if [ -n "$sources" ]; then
     echo "pre-commit: jaato-server source changed — regenerating $(basename "$snapshot") ..."
     # PYTHONPATH first, so the scan reads -- and the snapshot is written into --
     # THIS checkout, not whichever one an editable install points at (a git
-    # worktree shares the venv of the main clone).
-    if ! PYTHONPATH="$repo_root/jaato-server${PYTHONPATH:+:$PYTHONPATH}" \
+    # worktree shares the venv of the main clone).  Both packages: the scan is
+    # jaato-server's, the writer and the file are jaato-sdk's.
+    if ! PYTHONPATH="$repo_root/jaato-server:$repo_root/jaato-sdk${PYTHONPATH:+:$PYTHONPATH}" \
             "$py" -m jaato_server.shared.scaffold.authoring_contracts --write >/dev/null; then
         {
             echo "pre-commit: FAILED to regenerate $snapshot."
-            echo "  Run it with jaato-server installed (pip install -e jaato-server/):"
+            echo "  Run it with both packages installed (pip install -e jaato-sdk/ -e jaato-server/):"
             echo "      python -m jaato_server.shared.scaffold.authoring_contracts --write"
             echo "  or point the hook at your venv: PYTHON=.venv/bin/python git commit ..."
             echo "  To bypass this hook: git commit --no-verify"

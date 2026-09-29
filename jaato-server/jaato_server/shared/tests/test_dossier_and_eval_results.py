@@ -61,7 +61,7 @@ REVERSIONS = [
                 "written to catch, wearing the fix as a disguise",
     ),
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/build.py",
+        target="jaato-sdk/jaato_sdk/scaffold/build.py",
         find="    missing = _dossier.missing_sections(text) if not component else ()",
         replace="    missing = ()",
         test="test_new_dossier_refuses_its_own_broken_render",

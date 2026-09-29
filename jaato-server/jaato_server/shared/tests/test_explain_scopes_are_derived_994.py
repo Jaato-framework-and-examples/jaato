@@ -45,8 +45,8 @@ from jaato_server.shared.scaffold.__main__ import (
 )
 from jaato_server.shared.tests.reversion import Reversion
 
-_MAIN = "jaato-server/jaato_server/shared/scaffold/__main__.py"
-_MAIN_PY = Path(__file__).resolve().parents[1] / "scaffold" / "__main__.py"
+_MAIN = "jaato-server/jaato_server/shared/scaffold/introspection_verbs.py"
+_MAIN_PY = Path(__file__).resolve().parents[1] / "scaffold" / "introspection_verbs.py"
 
 _HAND_TYPED_HELP = (
     '_SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc '
@@ -90,7 +90,10 @@ def _help_entries():
 
 
 def _function_ast(name):
-    """The AST of one top-level function of ``shared/scaffold/__main__.py``.
+    """The AST of one top-level function of ``shared/scaffold/introspection_verbs.py``.
+
+    That module IS ``shared/scaffold/__main__`` (an alias since #1267, when the
+    CLI shell moved to jaato-sdk and the explain dispatch stayed here).
 
     A MISSING function is an assertion failure rather than a skip: this guard
     reads a dispatch, and a dispatch that moved without the guard moving with
@@ -101,7 +104,7 @@ def _function_ast(name):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     raise AssertionError(
-        f"{name} is gone from shared/scaffold/__main__.py -- this guard reads "
+        f"{name} is gone from shared/scaffold/introspection_verbs.py -- this guard reads "
         f"its dispatch and can no longer say anything about it."
     )
 

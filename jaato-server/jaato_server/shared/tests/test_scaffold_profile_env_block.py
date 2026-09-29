@@ -116,7 +116,7 @@ REVERSIONS = [
                 "recommending a value that pools every session's trace",
     ),
     Reversion(
-        target="jaato-server/jaato_server/shared/scaffold/build.py",
+        target="jaato-sdk/jaato_sdk/scaffold/build.py",
         find='''        "# Optional per-SESSION env vars.  This block:",
     ]
     lines += [f"#   - {fact}" for fact in _facts.PROFILE_ENV_FACTS]

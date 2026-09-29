@@ -147,15 +147,18 @@ def test_the_turn_method_rule_has_exactly_one_definition():
     distinctive opening may appear exactly once in the package source — in
     the constant both surfaces render.
     """
+    # Both halves of the scaffold package: the authoring modules moved to
+    # jaato-sdk in #1267 (a thin alias is left here), explain stayed.
+    sdk_scaffold = Path(A.__file__).resolve().parent
     hits = [
-        p for p in _SCAFFOLD.rglob("*.py")
+        p for root in (_SCAFFOLD, sdk_scaffold) for p in root.rglob("*.py")
         if "WHICH turn method" in p.read_text(encoding="utf-8")
     ]
     assert [p.name for p in hits] == ["archetypes.py"], (
         f"the rule is spelled in {[p.name for p in hits]}; it must have one "
         f"definition (archetypes.TURN_METHOD_RULE) that every surface renders"
     )
-    body = (_SCAFFOLD / "archetypes.py").read_text(encoding="utf-8")
+    body = Path(A.__file__).read_text(encoding="utf-8")
     assert body.count("WHICH turn method") == 1
 
 

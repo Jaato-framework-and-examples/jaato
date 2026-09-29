@@ -30,9 +30,15 @@ Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 
 [project.scripts]
 # Client-side preflight doctor — diagnoses an SDK client's env / socket /
-# daemon / auth before it ever calls connect().  Mirrors jaato-server's
-# jaato-scaffold console script (see jaato-server/pyproject.toml).
+# daemon / auth before it ever calls connect().
 jaato-doctor = "jaato_sdk.doctor:main"
+# The ONE declaration of jaato-scaffold (#1267).  The shell and the authoring
+# verbs (`new`, `integration`) ship here, because application developers
+# install only the SDK.  jaato-server contributes `explain` / `validate` /
+# `dependencies` / `releases` through the `jaato.scaffold_verbs` entry-point
+# group in its own pyproject; it must never declare this script too, or two
+# distributions would fight over one file in bin/.
+jaato-scaffold = "jaato_sdk.scaffold.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -48,6 +54,18 @@ ws = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["jaato_sdk*", "jaato*"]
+
+# Integrations ship WITH the scaffold that applies them, so an applied copy
+# cannot describe a different version than the one installed.
+# `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares the
+# stamp it leaves against this distribution's version.
+# `authoring_snapshot.json` is what `jaato-scaffold new` reads about providers
+# and env vars when jaato-server's source tree is not installed beside it
+# (#1267).
+[tool.setuptools.package-data]
+"jaato_sdk.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
+                        "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md",
+                        "authoring_snapshot.json"]
 
 [tool.pytest.ini_options]
 markers = [

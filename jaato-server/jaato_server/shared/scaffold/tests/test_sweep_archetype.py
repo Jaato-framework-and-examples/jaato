@@ -238,7 +238,7 @@ def test_no_unsubstituted_placeholder_survives(rendered):
     import pathlib
 
     build_src = pathlib.Path(
-        "jaato-server/jaato_server/shared/scaffold/build.py").read_text(encoding="utf-8")
+        "jaato-sdk/jaato_sdk/scaffold/build.py").read_text(encoding="utf-8")
     known = set(re.findall(r"__[A-Z_]+__", build_src))
 
     left = set(re.findall(r"__[A-Z_]+__", rendered))

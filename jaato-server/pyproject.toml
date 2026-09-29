@@ -128,7 +128,17 @@ all = [
 
 [project.scripts]
 jaato-server = "jaato_server.server.__main__:main"
-jaato-scaffold = "jaato_server.shared.scaffold.__main__:main"
+# jaato-scaffold is declared by jaato-sdk ONLY (#1267); this distribution
+# contributes its introspection verbs to it below.
+
+# The introspection half of jaato-scaffold.  The shell (jaato-sdk) reserves
+# these four names for code under jaato_server, and answers them with a
+# refusal naming the fix when this distribution is not installed.
+[project.entry-points."jaato.scaffold_verbs"]
+explain = "jaato_server.shared.scaffold.introspection_verbs:ExplainVerb"
+validate = "jaato_server.shared.scaffold.introspection_verbs:ValidateVerb"
+dependencies = "jaato_server.shared.scaffold.introspection_verbs:DependenciesVerb"
+releases = "jaato_server.shared.scaffold.introspection_verbs:ReleasesVerb"
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
@@ -184,17 +194,6 @@ cache_google_genai = "jaato_server.shared.plugins.cache_google_genai:create_plug
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["jaato_server*", "jaato_embedded*"]
-
-# Integrations ship WITH the framework they wire into another tool, so an
-# applied copy cannot describe a different version than the one running.
-# `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares
-# the stamp it leaves against this distribution's version.
-# `authoring_snapshot.json` is what `jaato-scaffold new` reads about providers
-# and env vars when the source tree it normally parses is absent (#1267).
-[tool.setuptools.package-data]
-"jaato_server.shared.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
-                     "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md",
-                     "authoring_snapshot.json"]
 
 [tool.pytest.ini_options]
 # Register custom marks so pytest doesn't warn on use.  ``apparmor``

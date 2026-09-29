@@ -19,6 +19,13 @@ E. ``subagent.config`` (the ``SubagentProfile`` schema) pulled in the whole
    for premium profiles, the whole runtime.  Both are cut: the ``__init__``
    is lazy, and the premium-path helper lives in ``premium_content``.
 
+Tier 1 of #1267 then moved the authoring modules and the CLI shell into
+jaato-sdk (``jaato_sdk.scaffold``), so A is now stronger: importing the shell
+or ``build`` loads NO ``jaato_server`` module at all.  What the move itself
+must keep true (the SDK-only run, the module-level import scan, one owner for
+the console script, snapshot provenance) is guarded in
+``test_scaffold_ships_with_the_sdk_1267.py``.
+
 Import footprints are measured in a fresh interpreter, because a module this
 process already imported says nothing about what a cold import loads.  The
 child inherits ``PYTHONPATH``, so under the reversion meta-guard it imports
@@ -33,12 +40,12 @@ import sys
 
 import pytest
 
-from jaato_server.shared.scaffold import authoring_contracts as contracts
-from jaato_server.shared.scaffold import build
+from jaato_sdk.scaffold import authoring_contracts as contracts
+from jaato_sdk.scaffold import build
 from jaato_server.shared.tests.reversion import Reversion
 
-_BUILD = "jaato-server/jaato_server/shared/scaffold/build.py"
-_CONTRACTS = "jaato-server/jaato_server/shared/scaffold/authoring_contracts.py"
+_BUILD = "jaato-sdk/jaato_sdk/scaffold/build.py"
+_CONTRACTS = "jaato-sdk/jaato_sdk/scaffold/authoring_contracts.py"
 _SUBAGENT_INIT = "jaato-server/jaato_server/shared/plugins/subagent/__init__.py"
 _CONFIG = "jaato-server/jaato_server/shared/plugins/subagent/config.py"
 
@@ -46,8 +53,10 @@ REVERSIONS = [
     Reversion(
         target=_BUILD,
         find="from . import authoring_facts as _facts\n",
-        replace="from . import authoring_facts as _facts\nfrom . import introspect\n",
-        because="a module-level introspection import puts it back on every archetype",
+        replace=("from . import authoring_facts as _facts\n"
+                 "from jaato_server.shared.scaffold import introspect\n"),
+        because="a module-level introspection import puts it back on every "
+                "archetype, and makes `new` unimportable without jaato-server",
         test="test_build_loads_no_introspection",
     ),
     Reversion(
@@ -110,12 +119,13 @@ def snapshot_mode(monkeypatch):
 
 
 def test_build_loads_no_introspection():
-    loaded = _cold_modules("import jaato_server.shared.scaffold.build")
-    leaked = {m for m in loaded if m.rsplit(".", 1)[-1]
-              in ("introspect", "explain", "validate", "dossier")}
-    assert not leaked, (
-        f"importing the `new` verb loaded {sorted(leaked)}; the authoring "
-        "commands must stand without the introspection modules (#1267)")
+    """The shell and ``new`` import nothing of jaato-server, not only no introspection."""
+    loaded = _cold_modules("import jaato_sdk.scaffold.cli\n"
+                           "import jaato_sdk.scaffold.build")
+    assert not loaded, (
+        f"importing the jaato-scaffold shell and the `new` verb loaded "
+        f"{sorted(loaded)}; they ship in jaato-sdk and must stand without "
+        "jaato-server (#1267)")
 
 
 def test_subagent_config_loads_neither_the_plugin_nor_the_runtime():
