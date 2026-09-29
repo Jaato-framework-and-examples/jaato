@@ -268,3 +268,207 @@ def render_from_daemon(
         print()
         print(attribution(answer))
     return 0, ""
+
+
+# ------------------------------------------------------------------ validate
+
+#: How long to wait for a daemon's ``validate``.  It runs plugin discovery and
+#: resolves every profile, which takes several seconds on a warm daemon.
+VALIDATE_TIMEOUT = 90.0
+
+
+@dataclass
+class RemoteValidation:
+    """What a daemon's validator said, or why it could not be asked.
+
+    ``reached`` is separate from ``ok`` for the reason :class:`RemoteAnswer`
+    gives, and ``ok`` is separate from the findings: ``ok`` says the
+    validator ran, never that the workspace is valid.
+    """
+
+    reached: bool = False
+    ok: bool = False
+    workspace: str = ""
+    scope: str = ""
+    profile_set: str = ""
+    findings: List[Dict[str, Any]] = field(default_factory=list)
+    errors: int = 0
+    warnings: int = 0
+    error: str = ""
+    server_version: str = ""
+    socket_path: str = ""
+    #: Why the daemon could not be asked — set only when ``reached`` is False.
+    unreachable: str = ""
+
+
+async def _ask_validate(socket_path: str, workspace: str,
+                        profile_set: Optional[str], profile: Optional[str],
+                        timeout: float) -> RemoteValidation:
+    from jaato_sdk.client.ipc import IPCClient
+    from jaato_sdk.events import ClientType, EventType
+
+    # The workspace is declared at the handshake, where the daemon refuses a
+    # path the connecting account cannot reach.  `auto_start=False` for the
+    # reason `_ask` gives: a validator must not start the daemon it reports on.
+    client = IPCClient(socket_path, client_type=ClientType.API,
+                       auto_start=False, workspace_path=workspace)
+    answer = RemoteValidation(socket_path=socket_path, workspace=workspace)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=timeout)
+    except Exception as exc:
+        answer.unreachable = f"could not connect to {socket_path}: {exc}"
+        return answer
+
+    try:
+        try:
+            await client.validate_workspace(profile_set, profile)
+        except ValueError as exc:
+            answer.unreachable = str(exc)
+            return answer
+
+        async def _first_answer() -> None:
+            async for event in client.events():
+                if event.type == EventType.SCAFFOLD_VALIDATE_RESULT:
+                    answer.reached = True
+                    answer.ok = bool(getattr(event, "ok", False))
+                    answer.workspace = (getattr(event, "workspace", "")
+                                        or workspace)
+                    answer.scope = getattr(event, "scope", "") or ""
+                    answer.profile_set = getattr(event, "profile_set", "") or ""
+                    answer.findings = list(getattr(event, "findings", []) or [])
+                    answer.errors = int(getattr(event, "errors", 0) or 0)
+                    answer.warnings = int(getattr(event, "warnings", 0) or 0)
+                    answer.error = getattr(event, "error", "") or ""
+                    answer.server_version = (getattr(event, "server_version",
+                                                     "") or "")
+                    return
+                if event.type == EventType.ERROR:
+                    # A refused handshake path arrives as an error event,
+                    # not a validate answer: nobody validated anything.
+                    answer.unreachable = (getattr(event, "error", "") or
+                                          "the daemon refused the request")
+                    return
+            answer.unreachable = (f"the daemon at {socket_path} closed the "
+                                  f"connection before answering")
+
+        # A bound on the WAIT, not only on the events: a daemon that sends
+        # nothing at all must not hang the command.
+        try:
+            await asyncio.wait_for(_first_answer(), timeout=timeout)
+        except asyncio.TimeoutError:
+            answer.unreachable = (
+                f"the daemon at {socket_path} did not answer "
+                f"scaffold.validate within {timeout:g}s")
+        return answer
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+def ask_daemon_validate(
+    socket_path: Optional[str],
+    workspace: str,
+    profile_set: Optional[str] = None,
+    profile: Optional[str] = None,
+    timeout: float = VALIDATE_TIMEOUT,
+) -> RemoteValidation:
+    """Validate *workspace* with the daemon at *socket_path*; never raise."""
+    path = socket_path or default_socket_path()
+    try:
+        return asyncio.run(_ask_validate(path, workspace, profile_set,
+                                         profile, timeout))
+    except Exception as exc:                        # pragma: no cover - defensive
+        return RemoteValidation(socket_path=path, workspace=workspace,
+                                unreachable=f"could not ask {path}: {exc}")
+
+
+def validation_attribution(answer: RemoteValidation) -> str:
+    """The line that says WHOSE validator produced the findings."""
+    version = answer.server_version or "unknown version"
+    return (f"[validated by the daemon at {answer.socket_path} "
+            f"(jaato-server {version}) — not this venv]")
+
+
+def validate_from_daemon(
+    asked: Optional[str],
+    target: str,
+    profile_set: Optional[str],
+    profile: Optional[str],
+    *,
+    json_out: bool,
+    required: bool,
+) -> Optional[int]:
+    """Run ``validate`` on a daemon and print the findings as a local run would.
+
+    The route an SDK-only install takes (#1267, tier 3), and the one
+    ``--connect`` takes anywhere.  The daemon's own validator checks the
+    workspace this connection declares; there is no second implementation.
+
+    Args:
+        asked: The socket named with ``--connect``, or ``None``.
+        target: A workspace directory, or a profile file inside one.
+        profile_set: ``--set``, overriding one the target implies.
+        profile: ``--profile``, overriding one the target implies.
+        json_out: Print the findings as JSON, as ``--json`` does locally.
+        required: ``True`` when the reader asked for the daemon, so an
+            unreachable one is reported here.  ``False`` when the caller
+            has a refusal of its own to print instead.
+
+    Returns:
+        An exit code (1 when any finding is an error), or ``None`` when no
+        daemon was reached and ``required`` is ``False``.  Findings are never
+        reported unless a validator actually ran.
+    """
+    from pathlib import Path
+
+    from . import findings as _findings
+
+    p = Path(target)
+    if p.is_file() and not _findings.is_canonical_profile_layout(p.resolve()):
+        print(f"jaato-scaffold validate: {target} is a standalone profile "
+              f"file, which is validated in-process; a daemon validates a "
+              f"workspace.  Install jaato-server here, or put the file under "
+              f"<workspace>/.jaato/profiles/ and validate the workspace.",
+              file=sys.stderr)
+        return 2
+    workspace, derived_set, derived_name = _findings.resolve_target(target)
+    profile_set = profile_set or derived_set
+    profile = profile or derived_name
+
+    if not required and not daemon_is_listening(default_socket_path()):
+        return None
+    answer = ask_daemon_validate(asked if isinstance(asked, str) else None,
+                                 workspace, profile_set, profile)
+    if not answer.reached:
+        if not required:
+            return None
+        print(answer.unreachable, file=sys.stderr)
+        return 2
+    if not answer.ok:
+        print(answer.error or "the daemon's validator did not run",
+              file=sys.stderr)
+        print(validation_attribution(answer), file=sys.stderr)
+        return 2
+
+    return _print_validation(answer, profile, profile_set, json_out)
+
+
+def _print_validation(answer: RemoteValidation, profile: Optional[str],
+                      profile_set: Optional[str], json_out: bool) -> int:
+    """Print a daemon's findings as a local run prints its own; the exit code."""
+    from . import findings as _findings
+
+    if json_out:
+        print(json.dumps(answer.findings, indent=2))
+    else:
+        if not answer.findings:
+            print(_findings.clean_line(answer.scope or
+                                       _findings.scope_label(profile),
+                                       profile_set))
+        for d in answer.findings:
+            print(_findings.format_finding(d))
+        print()
+        print(validation_attribution(answer))
+    return 1 if answer.errors else 0

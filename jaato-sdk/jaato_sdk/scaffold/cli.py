@@ -33,11 +33,14 @@ each of the four naming the fix — never an ``ImportError``.
 * any other name is an ordinary extension verb (the premium ``compile``);
   first discovered wins.
 
-**The refusal.**  ``explain`` still asks a running daemon before refusing (the
-protocol 1.18 ``scaffold.explain`` fallback, :func:`remote.render_from_daemon`),
-because a daemon's install is exactly the one that can answer.  The other
-three have no daemon verb yet (a ``scaffold.validate`` verb must read the
-caller's workspace, which the daemon may not be able to), so they refuse.
+**The refusal.**  ``explain`` and ``validate`` ask a running daemon before
+refusing, because a daemon's install is exactly the one that can answer:
+``explain`` through the protocol 1.18 ``scaffold.explain`` fallback
+(:func:`remote.render_from_daemon`), ``validate`` through the 1.34
+``scaffold.validate`` verb (:func:`remote.validate_from_daemon`), which runs
+the daemon's full validator on the workspace the connection declares.
+``dependencies`` and ``releases`` describe THIS environment, which only this
+environment can, so they refuse.
 """
 
 from __future__ import annotations
@@ -270,8 +273,8 @@ _SERVER_VERB_NEEDS = {
 _SERVER_VERB_ELSEWHERE = {
     "explain": "or ask the daemon: jaato-scaffold explain <topic> --connect "
                "[SOCKET]",
-    "validate": "or run it where the daemon's jaato-server is installed (no "
-                "daemon verb serves validate yet)",
+    "validate": "or start a daemon: a daemon on the default socket is asked "
+                "automatically, or name one with --connect SOCKET",
     "dependencies": "or run it where the daemon's jaato-server is installed",
     "releases": "or run `jaato-doctor`, whose `package releases` check needs "
                 "only the SDK",
@@ -293,6 +296,10 @@ def _refuse_server_verb(args) -> int:
     note = ""
     if name == "explain":
         rc, note = _explain_from_daemon(args)
+        if rc is not None:
+            return rc
+    if name == "validate":
+        rc = _validate_from_daemon(args)
         if rc is not None:
             return rc
     print(server_verb_refusal(name), file=sys.stderr)
@@ -324,6 +331,22 @@ def _explain_from_daemon(args) -> "Tuple[Optional[int], str]":
         args.connect, words[0], words[1], args, required=bool(args.connect))
 
 
+def _validate_from_daemon(args) -> Optional[int]:
+    """The ``scaffold.validate`` route for a venv with no jaato-server (1.34).
+
+    The daemon's own validator checks the workspace this connection declares;
+    the findings print as a local run's would, followed by the line naming
+    whose install produced them.  With no daemon to ask (and no
+    ``--connect``) it returns ``None`` and the refusal prints: a validator
+    that did not run never reports a pass.
+    """
+    from . import remote as _remote
+
+    return _remote.validate_from_daemon(
+        args.connect, args.target, args.set, args.profile,
+        json_out=args.json, required=bool(args.connect))
+
+
 def _add_server_refusal(sub, name: str) -> None:
     """Mount *name* as a refusal: nothing contributed it here."""
     p = sub.add_parser(name, help=f"(needs jaato-server) {name}",
@@ -335,6 +358,16 @@ def _add_server_refusal(sub, name: str) -> None:
         p.add_argument("extra", nargs="?")
         p.add_argument("--workspace")
         p.add_argument("--connect", nargs="?", const=True, metavar="SOCKET")
+        p.add_argument("--json", action="store_true")
+    elif name == "validate":
+        # The real verb's surface, so the same command line reaches a daemon.
+        p.add_argument("target", nargs="?", default=".",
+                       help="a workspace dir, or a profile file inside one")
+        p.add_argument("--set", help="JAATO_PROFILE_SET name to overlay")
+        p.add_argument("--profile", help="validate only this profile name")
+        p.add_argument("--connect", nargs="?", const=True, metavar="SOCKET",
+                       help="validate with this daemon (default socket when "
+                            "no path is given)")
         p.add_argument("--json", action="store_true")
     else:
         p.add_argument("rest", nargs=argparse.REMAINDER)

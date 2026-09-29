@@ -19,6 +19,7 @@ import {
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_REFERENCE_CURATION_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
+  MIN_SCAFFOLD_VALIDATE_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
   MIN_WORKSPACE_PICKER_PROTOCOL,
   MIN_MEMORY_VERBS_PROTOCOL,
@@ -770,6 +771,27 @@ describe("JaatoClient session management", () => {
     await assert.rejects(
       () => client.runScaffoldIntegration("claude-code"),
       /scaffold\.integration/,
+    );
+    assert.equal(getSent().length, 0);
+  });
+
+  test("validateScaffoldWorkspace sends scaffold.validate with both positions", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SCAFFOLD_VALIDATE_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.validateScaffoldWorkspace(undefined, "worker");
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "scaffold.validate");
+    // An absent set is "" so the profile stays in the second position.
+    assert.deepEqual((ev as { args?: string[] }).args, ["", "worker"]);
+  });
+
+  test("validateScaffoldWorkspace is refused below protocol 1.34 with nothing sent", async () => {
+    await assert.rejects(
+      () => client.validateScaffoldWorkspace(),
+      /scaffold\.validate/,
     );
     assert.equal(getSent().length, 0);
   });

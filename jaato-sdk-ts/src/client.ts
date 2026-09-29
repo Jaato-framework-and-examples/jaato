@@ -192,6 +192,14 @@ export const MIN_REFERENCE_CURATION_PROTOCOL = "1.33";
 export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
 
 /**
+ * Protocol floor for {@link JaatoClient.validateScaffoldWorkspace}.  Same
+ * rule as {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``scaffold.validate`` silently, and a caller waiting on findings would
+ * read the silence as "no findings".
+ */
+export const MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34";
+
+/**
  * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
  * friends, #1232).  A missing VERB: an older daemon answers ``ErrorEvent(
  * "Unknown request type")`` with no ``request_id`` and never the result the
@@ -1518,6 +1526,52 @@ export class JaatoClient {
       type: EventTypeValue.COMMAND,
       command: "scaffold.integration",
       args: [name],
+    } as CommandRequest);
+  }
+
+  /**
+   * Run ``jaato-scaffold validate`` on the daemon (protocol 1.34): the
+   * daemon's full validator checks the workspace this connection selected,
+   * as it stands on the server.  Mirror of Python
+   * ``IPCClient.validate_workspace``.
+   *
+   * ``validate`` needs jaato-server's loader (a profile is checked once it
+   * is parsed, merged with its ``inherits:`` and set overlay, and
+   * constructed), so a client asks the daemon rather than carrying a second
+   * validator.  The daemon answers with one ``scaffold.validate.result``
+   * event: ``ok`` with the ``findings`` and their ``errors`` / ``warnings``
+   * counts, or ``ok: false`` when the validator could not run.  ``ok`` never
+   * means "valid".  There is no directory parameter: the workspace is the
+   * one this connection selected.
+   *
+   * @param profileSet A ``JAATO_PROFILE_SET`` name to overlay.
+   * @param profile Validate only this profile.
+   * @throws Error against a daemon below
+   *   {@link MIN_SCAFFOLD_VALIDATE_PROTOCOL}.
+   */
+  async validateScaffoldWorkspace(
+    profileSet?: string,
+    profile?: string,
+  ): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SCAFFOLD_VALIDATE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `validateScaffoldWorkspace: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `scaffold.validate (needs >= ${MIN_SCAFFOLD_VALIDATE_PROTOCOL}).  ` +
+          `It would ignore the command silently, which a caller would read ` +
+          `as no findings.  Upgrade the daemon.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "scaffold.validate",
+      args: [profileSet ?? "", profile ?? ""],
     } as CommandRequest);
   }
 

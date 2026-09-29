@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from jaato_sdk.scaffold import findings as _findings
 from jaato_sdk.scaffold import remote as _remote
 
 from . import explain as _explain
@@ -509,36 +510,11 @@ def _cmd_explain(args) -> int:
 
 # -------------------------------------------------------------- validate
 
-def _resolve_target(target: str) -> tuple[str, str | None, str | None]:
-    """Map a workspace dir OR a profile file to (workspace, set, profile_name).
-
-    A profile file at ``<ws>/.jaato/profiles/<set>/<name>.yaml`` yields the
-    set + profile name; a tier-1 file at ``.../profiles/<name>.yaml`` yields
-    no set; a directory is taken as the workspace itself.
-    """
-    p = Path(target).resolve()
-    if p.is_dir():
-        return str(p), None, None
-    name = p.stem
-    parent = p.parent
-    if parent.name == "profiles":
-        return str(parent.parent.parent), None, name
-    return str(parent.parent.parent.parent), parent.name, name
-
-
-def _is_canonical_profile_layout(p: Path) -> bool:
-    """True if ``p`` lives under a real ``<ws>/.jaato/profiles[/<set>]/`` tree.
-
-    Only such files can be resolved via ``validate_workspace`` (inherits + set
-    overlay).  A file outside this layout (a docs example, an ad-hoc path) must
-    be validated directly, or it silently resolves to a bogus workspace where
-    ``discover_profiles`` finds nothing and reports a false "valid".
-    """
-    par = p.parent
-    if par.name == "profiles" and par.parent.name == ".jaato":
-        return True  # <ws>/.jaato/profiles/<name>.yaml
-    # <ws>/.jaato/profiles/<set>/<name>.yaml
-    return par.parent.name == "profiles" and par.parent.parent.name == ".jaato"
+# Target resolution and the finding line live in the SDK (#1267, tier 3), so
+# this local ``validate`` and the SDK shell's daemon route read a target and
+# print a finding the same way.
+_resolve_target = _findings.resolve_target
+_is_canonical_profile_layout = _findings.is_canonical_profile_layout
 
 
 def _cmd_validate(args) -> int:
@@ -557,14 +533,13 @@ def _cmd_validate(args) -> int:
         only = args.profile or derived_name
         diags = _validate.validate_workspace(
             workspace, profile_set=profile_set, only=only)
-        scope = f"profile '{only}'" if only else "all profiles"
+        scope = _findings.scope_label(only)
 
     if args.json:
         print(json.dumps([d.as_dict() for d in diags], indent=2))
     else:
         if not diags:
-            sset = f" (set {profile_set})" if profile_set else ""
-            print(f"✓ {scope}{sset} valid — no findings")
+            print(_findings.clean_line(scope, profile_set))
         for d in diags:
             print(_format_diagnostic(d))
     return 1 if any(d.severity == "error" for d in diags) else 0
@@ -573,16 +548,10 @@ def _cmd_validate(args) -> int:
 def _format_diagnostic(d) -> str:
     """One finding as the text line ``validate`` prints.
 
-    A contributed finding (#1306) ends ``(from <distribution>:<name>)``, so a
-    reader knows which package to read or uninstall; the framework's own
-    findings print exactly as they always have.
+    The rendering is :func:`jaato_sdk.scaffold.findings.format_finding`, the
+    one the SDK shell's daemon route prints with too.
     """
-    loc = f" @ {d.where}" if d.where else ""
-    who = f"{d.profile}: " if d.profile else ""
-    tier = f"[{d.tier}] " if d.tier else ""
-    source = getattr(d, "source", None)
-    src = f"  (from {source})" if source else ""
-    return f"[{d.severity}] {tier}{who}{d.code}: {d.message}{loc}{src}"
+    return _findings.format_finding(d.as_dict())
 
 
 # ------------------------------------------------- external topics (plugins)
@@ -812,9 +781,18 @@ class ValidateVerb:
         pv.add_argument("target", help="a workspace dir or a profile .yaml file")
         pv.add_argument("--set", help="JAATO_PROFILE_SET name to overlay")
         pv.add_argument("--profile", help="validate only this profile name")
+        pv.add_argument("--connect", nargs="?", const=True, metavar="SOCKET",
+                        help="validate with a running daemon's install instead "
+                             "of this virtualenv's (default socket when no "
+                             "path is given): its plugins, its contributed "
+                             "validators, and its user-tier profiles")
         pv.add_argument("--json", action="store_true")
 
     def run(self, args: argparse.Namespace) -> int:
+        if getattr(args, "connect", None):
+            return _remote.validate_from_daemon(
+                args.connect, args.target, args.set, args.profile,
+                json_out=args.json, required=True)
         return _cmd_validate(args)
 
 
