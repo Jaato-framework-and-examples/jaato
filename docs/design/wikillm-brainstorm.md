@@ -541,11 +541,20 @@ too: `reference.promote` / `reference.dismiss` (protocol 1.32), a
 daemon-level verb gated by `may_curate` that re-validates the claim,
 re-derives `created_by` from the daemon's own session record, stamps
 `curated_by`, and writes through `contained_write` (`CLAUDE.md`, *A Person
-Promotes the Claim*). Step 2 (witness) is not built; `links` waits on
-Seam 3. Two departures from the table below: the promoted entry goes to
+Promotes the Claim*). Step 2 too: `origin.witnessed_by`, stamped from the
+call's own permission verdict when a person was asked and approved, opt-in
+through `plugin_configs.references.witness_proposals` (proposals are
+auto-approved otherwise); the executor binds the verdict for the tool body
+(`shared/call_witness.py`). And the curator's listing a person needs to act
+at all: `ReferenceClaimsRequest` → `ReferenceClaimsEvent` (each claim's
+recorded origin and the `problems` a promotion would raise) with correlated
+promote / dismiss, and the web coder's Proposals rail on top. `links` waits
+on Seam 3. Three departures from the table below: the promoted entry goes to
 the workspace catalog root, not a named bundle (a bundle would need its
-manifest updated), and `created_by` is derived from the session the claim
-NAMES, never read from the claim.
+manifest updated); `created_by` is derived from the session the claim
+NAMES, never read from the claim; and `witnessed_by` is written by the
+runner into the claim, so promotion carries it as recorded rather than
+re-checking it.
 
 `proposeReference` takes what a catalog entry carries — `id`, `name`,
 `description`, `tags`, `links` (Seam 3) — plus the document itself, as a

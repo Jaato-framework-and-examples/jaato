@@ -253,6 +253,25 @@ claim, re-derives `created_by` from its own session record (never from the
 claim file), stamps `origin.curated_by` with the promoting person, and
 refuses to overwrite an existing entry.
 
+A curator sees the claims with `IPCClient.list_reference_claims()`
+(TypeScript: `listReferenceClaims()`), each with its recorded origin and the
+`problems` a promotion would raise; the web coder's Proposals rail uses it.
+
+### Who approved a proposal
+
+`proposeReference` is auto-approved. Set
+
+```yaml
+plugin_configs:
+  references:
+    witness_proposals: true
+```
+
+and it goes to the session's permission policy instead. When a person is
+asked at the prompt and approves, the claim's origin records
+`witnessed_by` (`{via: "permission-prompt", method, user?, approver?}`).
+Nothing is recorded when the policy decided without asking.
+
 ## Tags and Proactive Reference Access
 
 Each reference source can have tags describing its topic. The model is instructed to:

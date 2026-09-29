@@ -578,7 +578,7 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
-- `reference.promote <claim_id>` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry, or drop it (→ `ReferenceCurationResultEvent`; protocol 1.32, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-132))
+- `reference.promote <claim_id>` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry, or drop it (→ `ReferenceCurationResultEvent`; protocol 1.32, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-132)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
@@ -4152,17 +4152,29 @@ matcher: claims writable, catalog still denied. No kernel.
 
 `reference.promote <claim_id>` turns a claim into
 `<workspace>/.jaato/references/<id>.json`; `reference.dismiss <claim_id>`
-removes the claim. Both are daemon-level commands
-(`CommandRouter._handle_reference_curation`, work in
-`server/reference_curation.py`), answered with one
-`ReferenceCurationResultEvent` whatever happened
-(`category`: `invalid_request` / `no_workspace` / `not_owner` / `not_found`
-/ `invalid_claim` / `collision` / `unsafe_path` / `io_error`). The daemon
-writes because it is the one process that is not confined; the runner's
-AppArmor contribution is unchanged, since the runner still writes only
-claims. `IPCClient.promote_reference_claim` / `dismiss_reference_claim` and
-`promoteReferenceClaim` / `dismissReferenceClaim` refuse a daemon below 1.32
-(the 1.7 missing-verb rule).
+removes the claim. Both are daemon-level (`CommandRouter`, work in
+`server/reference_curation.py`), reachable as typable commands or as the
+correlated `ReferenceCurationRequest`, and answered with one
+`ReferenceCurationResultEvent` whatever happened, echoing the request's
+`request_id` (`category`: `invalid_request` / `no_workspace` / `not_owner`
+/ `not_found` / `invalid_claim` / `collision` / `unsafe_path` /
+`io_error`). The daemon writes because it is the one process that is not
+confined; the runner's AppArmor contribution is unchanged, since the
+runner still writes only claims.
+
+`ReferenceClaimsRequest` → `ReferenceClaimsEvent` is the curator's
+listing: the claims in the caller's workspace, read the way a promotion
+reads one (`list_claims`: the directory resolved inside the workspace, a
+symlinked claim file not followed, each record re-checked), each row with
+`problems` (what `build_proposed_reference` would refuse today, so the
+reason shows before Promote is pressed) and the recorded `origin`; files
+that are not a showable claim are named under `unreadable`, and
+`may_curate` is the promotion gate's answer. Looking is not gated.
+`IPCClient.list_reference_claims` / `promote_reference_claim` /
+`dismiss_reference_claim` and `listReferenceClaims` /
+`promoteReferenceClaim` / `dismissReferenceClaim` await the answer and
+refuse a daemon below 1.32 (the 1.7 missing-verb rule). The web coder's
+**Proposals** rail section is built on them.
 
 | Rule | Why |
 |---|---|
@@ -4172,13 +4184,30 @@ claims. `IPCClient.promote_reference_claim` / `dismiss_reference_claim` and
 | **nothing is overwritten** | an id in the catalog (sub-bundles included) or an existing `<id>.json` is `collision`; the write goes through `write_contained` (#1386), so a catalog directory linked out of the workspace is `unsafe_path` |
 | **a promoted local reference loads** | the claim's workspace-relative `path` is re-anchored to the catalog file (`../../docs/x.md`), because the loader resolves a relative path against the reference file's directory |
 
-Not done: promotion into a named sub-bundle (it would need the bundle
-manifest updated), a claims listing verb for a client (a client reads
-`listReferences` through a session today), and a web-client control. A
-running session sees the new entry at its next catalog reload.
+**Who approved the proposal (wikiLLM step 2).** The permission gate knew
+whether a person was asked about a call and the tool body never did.
+`ToolExecutor` now binds the call's verdict for the duration of the body
+(`shared/call_witness.py`, a `ContextVar`, bound even when empty so a pool
+thread cannot leak a previous call's), from the permission plugin's `asked`
+flag, which it now returns on every decision. `proposeReference` stamps
+`origin.witnessed_by` (`{via: "permission-prompt", method, user?,
+approver?, edited?}`) only when a person was asked and approved; a policy
+approval, or an out-of-tree engine that reports no `asked`, is no witness.
+`proposeReference` is auto-approved, so this is opt-in:
+`plugin_configs.references.witness_proposals: true` takes it off the
+auto-approved list and the session's policy decides. Like every field of a
+claim it is written into a model-writable file, so promotion carries it AS
+RECORDED; `curated_by` is the stamp the daemon makes itself.
 
-Guard: `server/tests/test_a_person_promotes_a_reference_claim.py`, eight
-reversions.
+Not done: promotion into a named sub-bundle (it would need the bundle
+manifest updated), and a daemon-side check of `witnessed_by` against the
+prompt it names. A running session sees the new entry at its next catalog
+reload.
+
+Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
+reversions), `server/tests/test_a_curator_lists_reference_claims.py`
+(five) and `shared/tests/test_a_proposal_names_who_approved_it.py`
+(seven).
 
 ### Plugin-Level Traits
 
