@@ -222,7 +222,7 @@ def test_the_session_new_budget_says_where_it_is_settable():
     """
     from jaato_sdk.client.convenience import open_session
 
-    forwards = "create_timeout" in inspect.signature(open_session).parameters
+    forwards = "session_timeout" in inspect.signature(open_session).parameters
     row = next(t for t in introspect.client_timeouts()
                if t.where == "IPCClient.create_session(timeout=)")
     assert row.settable_via == ("both" if forwards else "bare client only")

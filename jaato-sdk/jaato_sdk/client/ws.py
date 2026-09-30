@@ -118,6 +118,7 @@ class WSClient(IPCClient):
         config_root: Optional[str] = None,
         env_file: str = ".env",
         connect_timeout: float = 120.0,
+        session_timeout: Optional[float] = None,
         min_protocol_version: Optional[str] = None,
         ssl: Any = None,
         ca: Optional[str] = None,
@@ -137,8 +138,12 @@ class WSClient(IPCClient):
                                         ca="~/.jaato/certs/ca.crt",
                                         profile="researcher") as s:
                 print(await s.ask("Research X"))
+
+        ``session_timeout`` bounds the wait for the ``session.new``
+        confirmation (unset = ``create_session``'s own 60s); it is distinct
+        from ``connect_timeout``.  See :func:`~.convenience.open_session`.
         """
-        from .convenience import _SessionContext
+        from .convenience import _SessionContext, facade_create_kwargs
 
         client = cls(
             url,
@@ -152,11 +157,14 @@ class WSClient(IPCClient):
             ca=ca,
             presentation=presentation,
         )
-        create_kwargs = dict(
+        # The shared builder, so a knob forwarded over IPC is forwarded here
+        # too -- ``**_ignored`` above would otherwise swallow it silently.
+        create_kwargs = facade_create_kwargs(
             profile=profile,
             agent=agent,
             agent_params=agent_params,
             cascade_driver_id=cascade_driver_id,
+            session_timeout=session_timeout,
         )
         return _SessionContext(
             client,
@@ -333,6 +341,7 @@ class WSRecoveryClient(IPCRecoveryClient):
         config_root: Optional[str] = None,
         env_file: str = ".env",
         connect_timeout: float = 120.0,
+        session_timeout: Optional[float] = None,
         on_status_change: Optional[StatusCallback] = None,
         min_protocol_version: Optional[str] = None,
         ssl: Any = None,
@@ -351,8 +360,10 @@ class WSRecoveryClient(IPCRecoveryClient):
                                                 profile="researcher",
                                                 on_status_change=print) as s:
                 print(await s.ask("Long task…"))
+
+        ``session_timeout`` is forwarded exactly as in :meth:`WSClient.session`.
         """
-        from .convenience import _SessionContext
+        from .convenience import _SessionContext, facade_create_kwargs
 
         client = cls(
             url,
@@ -367,11 +378,14 @@ class WSRecoveryClient(IPCRecoveryClient):
             ca=ca,
             presentation=presentation,
         )
-        create_kwargs = dict(
+        # Same shared builder as WSClient.session -- ``**_ignored`` would
+        # otherwise swallow a forwarded knob here too.
+        create_kwargs = facade_create_kwargs(
             profile=profile,
             agent=agent,
             agent_params=agent_params,
             cascade_driver_id=cascade_driver_id,
+            session_timeout=session_timeout,
         )
         return _SessionContext(
             client,

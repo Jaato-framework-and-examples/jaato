@@ -442,9 +442,9 @@ def client_timeouts() -> List[ClientTimeout]:
 
     # Can a facade caller set the session.new budget?  Asked of the
     # signature, never assumed.
-    create_via = ("both" if _accepts(open_session, "create_timeout")
-                  else "bare client only")
-    return [
+    facade_create = _accepts(open_session, "session_timeout")
+    create_via = "both" if facade_create else "bare client only"
+    rows = [
         ClientTimeout(
             name="connect_timeout",
             # Every ``where`` SPELLS its parameter, because that spelling is
@@ -481,6 +481,21 @@ def client_timeouts() -> List[ClientTimeout]:
             settable_via=create_via,
             on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
         ),
+    ]
+    if facade_create:
+        # The facade's spelling of the same clock (#1450).  Its own row,
+        # because ``session_timeout`` is what a facade author greps for;
+        # the default shown is create_session's, since unset forwards
+        # nothing and that default is what applies.
+        rows.append(ClientTimeout(
+            name="session_timeout",
+            where="jaato.session(session_timeout=)",
+            default=_num(_sig_default(IPCClient.create_session, "timeout")),
+            bounds="the same `session.new` confirmation, from the facade",
+            settable_via="facade",
+            on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
+        ))
+    rows += [
         ClientTimeout(
             name="timeout",
             where="Session.ask / .complete / .stream(timeout=)",
@@ -490,6 +505,7 @@ def client_timeouts() -> List[ClientTimeout]:
             on_expiry="TurnTimeout — stops WAITING, not the session",
         ),
     ]
+    return rows
 
 
 # ------------------------------------------------------ session-level tools

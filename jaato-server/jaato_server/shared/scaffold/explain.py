@@ -352,7 +352,8 @@ def _timeouts_block() -> List[str]:
         "    A hand-rolled client that autostarts must pass its own.",
         "    A `session.new` that times out is the one failure that may have",
         "    LEFT A SESSION RUNNING — it has no idempotency key, so retrying",
-        "    makes a second one.  Raise it (bare client) or list_sessions().",
+        "    makes a second one.  Raise it (session_timeout= on the facade,",
+        "    timeout= on create_session) before retrying; list_sessions().",
     ]
     return lines
 

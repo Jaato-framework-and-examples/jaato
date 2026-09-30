@@ -10401,6 +10401,19 @@ fail on the parent commit) and
 verb decides a terminus outside `_TurnWatch`, and that the watch still wires
 all four settle events — dropping `ERROR` restores the hang exactly).
 
+**The facade can set the `session.new` budget (#1450, #899).** Every
+facade entry point (`IPCClient.session`, `IPCRecoveryClient.session`, both
+WS `session` overrides) takes `session_timeout`, forwarded as
+`create_session(timeout=)` through one builder,
+`convenience.facade_create_kwargs`. Unset forwards nothing, so the 60 s
+default is `create_session`'s own. It bounds the daemon's confirmation
+(provider init included), not `connect_timeout`'s connect/autostart;
+non-positive or non-finite values are refused before connecting. `explain
+clients` lists it and `new cascade` emits it beside `connect_timeout`.
+Guard: `jaato_server/shared/tests/test_facade_forwards_session_timeout_1450.py`,
+five reversions. Still open (#1129): recovering a session that was created
+after `SessionNotConfirmed` fired.
+
 ### A Request the Daemon Wrote and the Runner Does Not Have (#856)
 
 #988 is a cancel that lost a race inside the runner. This is the turn

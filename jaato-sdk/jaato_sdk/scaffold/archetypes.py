@@ -295,6 +295,10 @@ _CLIENT_GENERATED_CORRECT = (
     "signal_completion for API clients and strips it for TERMINAL/WEB/CHAT",
     "connect_timeout=120.0 — a cold daemon autostart takes ~30-60s; the SDK "
     "default of 5s is too short",
+    "session_timeout=60.0 beside it — the session.new confirmation budget, a "
+    "different clock from connect_timeout; raise it when several sessions open "
+    "close together on one daemon (one measured 19.4s under cascade load), "
+    "because on expiry a session MAY exist and a retry makes a second one",
     "env_file is always a real path — env_file=None crashes the IPC handshake "
     "with an opaque os.PathLike TypeError",
     TURN_METHOD_RULE,
