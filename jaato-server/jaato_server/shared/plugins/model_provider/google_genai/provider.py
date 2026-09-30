@@ -836,6 +836,17 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
             # Fallback: rough estimate (4 chars per token)
             return len(content) // 4
 
+    def get_max_output_tokens(self) -> Optional[int]:
+        """Always ``None``: Gemini does not count output against the window.
+
+        A request may carry ``max_output_tokens`` (``api_params``), but
+        Gemini documents an input token limit and an output token limit
+        as two separate budgets, and :meth:`get_context_limit` reports the
+        input one.  Reserving the output cap would shrink the input limit
+        for nothing (#1444).
+        """
+        return None
+
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 

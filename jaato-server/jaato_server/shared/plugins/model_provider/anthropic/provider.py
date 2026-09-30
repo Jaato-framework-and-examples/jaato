@@ -975,6 +975,23 @@ class AnthropicProvider(ModalityCapabilityMixin):
             # Fallback to estimate on error
             return len(content) // 4
 
+    def get_max_output_tokens(self) -> int:
+        """The ``max_tokens`` every request carries: the profile's
+        ``api_params.max_tokens``, else ``EXTENDED_MAX_TOKENS`` when
+        thinking is on for a thinking-capable model, else
+        ``DEFAULT_MAX_TOKENS``.
+
+        ``complete()`` sends exactly this value.  Anthropic refuses a
+        request whose prompt plus ``max_tokens`` exceeds the window, so
+        ``JaatoSession`` reserves it (#1444).  Ollama and Zhipu AI inherit
+        it with their own ``_max_tokens_override`` and thinking off.
+        """
+        if self._max_tokens_override is not None:
+            return self._max_tokens_override
+        if self._enable_thinking and self._is_thinking_capable():
+            return EXTENDED_MAX_TOKENS
+        return DEFAULT_MAX_TOKENS
+
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
@@ -1215,12 +1232,7 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # otherwise pick the framework default based on whether thinking
         # is enabled (extended needs more output room for the trace +
         # the answer).
-        if self._max_tokens_override is not None:
-            kwargs["max_tokens"] = self._max_tokens_override
-        elif self._enable_thinking and self._is_thinking_capable():
-            kwargs["max_tokens"] = EXTENDED_MAX_TOKENS
-        else:
-            kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
+        kwargs["max_tokens"] = self.get_max_output_tokens()
 
         # Sampling parameters (api_params.{temperature, top_p, top_k}).
         # Only sent when the profile set them — omitting them lets

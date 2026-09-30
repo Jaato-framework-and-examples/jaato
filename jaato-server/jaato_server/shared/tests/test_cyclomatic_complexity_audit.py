@@ -325,7 +325,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/converters.py::validate_tool_use_pairing": 19,
     "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._handle_api_error": 22,
     "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._stream_response": 51,
-    "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.complete": 38,  # +1 (#687): an interrupted stream is re-raised BEFORE _handle_api_error, which matches on message text
+    "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.complete": 35,  # -3 (#1444): the max_tokens choice moved to get_max_output_tokens; +1 (#687): an interrupted stream is re-raised BEFORE _handle_api_error, which matches on message text
     "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.initialize": 25,
     "jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.verify_auth": 16,
     "jaato-server/jaato_server/shared/plugins/model_provider/antigravity/provider.py::AntigravityProvider._make_request": 17,

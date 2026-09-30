@@ -261,6 +261,13 @@ export interface ContextState {
   contextLimit?: number | null;
   percentUsed?: number | null;
   tokensRemaining?: number | null;
+  /**
+   * Output cap every request reserves (``ContextUpdatedEvent.reserved_output_tokens``,
+   * #1444).  ``percentUsed`` / ``tokensRemaining`` are measured against
+   * ``contextLimit - reservedOutput``; absent or 0 means no reservation
+   * (or a daemon that does not report one).
+   */
+  reservedOutput?: number | null;
   turns?: number | null;
   lastTurn?: {
     turnNumber?: number | null;
