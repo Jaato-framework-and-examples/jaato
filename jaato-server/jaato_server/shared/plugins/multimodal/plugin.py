@@ -34,7 +34,11 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     DISCOVERABILITY_DEFERRED,
 )
-from jaato_sdk.plugins.base import PromptEnrichmentResult, UserCommand
+from jaato_sdk.plugins.base import (
+    RESOLVED_MENTIONS_METADATA_KEY,
+    PromptEnrichmentResult,
+    UserCommand,
+)
 from jaato_sdk.framework_note import framework_note
 
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
@@ -172,7 +176,10 @@ class MultimodalPlugin(RunnerForwardingMixin):
         Finds @file.ext references where the extension indicates an image,
         and adds instructions about the viewImage tool.
 
-        IMPORTANT: Does NOT remove @references - that's the framework's job.
+        Does NOT remove the ``@`` itself: it reports each image mention it
+        resolved under ``RESOLVED_MENTIONS_METADATA_KEY`` and the session
+        removes the ``@`` from exactly those (#1429). A mention that is not an
+        existing image file is not reported and keeps its ``@``.
 
         Args:
             prompt: The user's prompt text.
@@ -212,7 +219,8 @@ class MultimodalPlugin(RunnerForwardingMixin):
             prompt=enriched_prompt,
             metadata={
                 "detected_images": detected_images,
-                "image_count": len(detected_images)
+                "image_count": len(detected_images),
+                RESOLVED_MENTIONS_METADATA_KEY: list(detected_images),
             }
         )
 

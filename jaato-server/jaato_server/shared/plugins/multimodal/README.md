@@ -30,7 +30,7 @@ Plugin enriches prompt:
   "What's in @photo.jpg?
    [System: Image files referenced: photo.jpg. Use viewImage(path) if needed.]"
          ↓
-Framework strips @references:
+Plugin reports resolved_mentions=["photo.jpg"]; framework strips that @ only:
   "What's in photo.jpg? [System: ...]"
          ↓
 Model reasons: "User wants contents → I need to see it → call viewImage"
