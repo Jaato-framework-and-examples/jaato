@@ -547,7 +547,8 @@ export interface MemoriesState {
  * panel renders them as text, never as markup.  ``problems`` is why the
  * daemon would refuse a promotion right now (empty when it would pass);
  * ``origin`` is what the claim recorded (``generated_by``, ``created_by``,
- * ``witnessed_by``, ``at``).
+ * ``witnessed_by``, ``at``, and ``rendered_from`` when the page was
+ * rendered from a catalog template, re-checked by the daemon).
  */
 export interface ReferenceClaimRow {
   claim_id: string;

@@ -63,8 +63,8 @@ import os
 import re
 import tempfile
 import threading
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from dataclasses import dataclass, field, asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -104,6 +104,7 @@ from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, 
 from jaato_sdk.framework_note import framework_note
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.tool_id_map import name_to_id, id_to_name
+from jaato_server.shared.session_context import session_plugin_setting
 from jaato_server.shared.trace import trace as _trace_write
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,10 @@ PATH_ROUTING_FILENAME = "template_routing.yaml"
 # the reason for it live in ``_routing_from_profile``.
 PATH_ROUTING_CONFIG_KEY = "file_conventions"
 PATH_ROUTING_RULES_KEY = "output_path_routing"
+
+# ``plugin_configs.template.allow_inline_template``: ``false`` limits
+# ``renderTemplateToFile`` to catalog templates.  Default ``true``.
+INLINE_TEMPLATE_CONFIG_KEY = "allow_inline_template"
 
 
 @dataclass
@@ -470,6 +475,23 @@ class TemplatePlugin(RunnerForwardingMixin):
         # arrives with the session, not with a directory.
         self._profile_routing_rules: Optional[List[Tuple[str, str]]] = None
 
+        # ``allow_inline_template`` as the instance was last initialized
+        # with.  Read through ``_inline_template_allowed``, which prefers
+        # the calling session's own block: the instance is shared with
+        # in-process subagents, and a gate must hold for the session that
+        # declared it.
+        self._allow_inline_template: bool = True
+
+        # What each file the plugin rendered came from: resolved output
+        # path -> {template, template_id, digest, at}.  Only catalog
+        # renders are recorded; an inline render, or a later render of the
+        # same path, replaces or removes the entry.  In memory on purpose:
+        # a record on disk under ``template_extracts`` would be writable by
+        # the model's own tools, and this is what ``proposeReference``
+        # stamps as ``origin.rendered_from``.
+        self._render_records: Dict[str, Dict[str, Any]] = {}
+        self._render_records_lock = threading.Lock()
+
         # Thread-local storage for ``//``-stripped-line numbers from the
         # most recent ``_parse_mustache_structure`` call on THIS thread.
         # Read by ``_execute_list_template_variables`` to surface a
@@ -515,6 +537,7 @@ class TemplatePlugin(RunnerForwardingMixin):
         # workspace / config_root dependency to invalidate against.
         self._profile_routing_rules = self._routing_from_profile(config)
         self._path_routing_rules = None  # invalidate; lazy reload on next render
+        self._allow_inline_template = config.get(INLINE_TEMPLATE_CONFIG_KEY) is not False
 
         # Allow custom base path
         if "base_path" in config:
@@ -1073,6 +1096,98 @@ class TemplatePlugin(RunnerForwardingMixin):
         self._surfaced_template_names.clear()
         self._trace("on_history_cleared: cleared surfaced template tracking")
 
+    def _inline_template_allowed(self) -> bool:
+        """Whether the calling session may render an inline ``template``.
+
+        The session's own ``plugin_configs.template.allow_inline_template``
+        when it declared one, else the instance's value.  ``False`` makes
+        catalog templates the only source a render may use: with no
+        free-form write tool on the profile, that makes a template the
+        only way to create a file.
+        """
+        return session_plugin_setting(
+            "template", INLINE_TEMPLATE_CONFIG_KEY, self._allow_inline_template,
+        ) is not False
+
+    def _template_source_error(self, template: Any, template_id: Any) -> Optional[str]:
+        """Why this ``template`` / ``template_id`` pair cannot be rendered,
+        or ``None``: exactly one must be given, and an inline ``template``
+        only where the session allows it."""
+        if not template and not template_id:
+            return "Exactly one of 'template' or 'template_id' must be provided"
+        if template and template_id:
+            return "Provide either 'template' or 'template_id', not both"
+        if template and not self._inline_template_allowed():
+            return (
+                "Inline templates are turned off for this session "
+                "(plugin_configs.template.allow_inline_template: false). "
+                "Render a catalog template: pick one with "
+                "listAvailableTemplates and pass its 'template_id'."
+            )
+        return None
+
+    def _note_render(self, out_path: Path, template_name: Optional[str]) -> None:
+        """Record what ``out_path`` was rendered from (see ``_render_records``).
+
+        ``template_name`` is ``None`` for an inline render, which removes
+        any earlier record: the file no longer came from a catalog
+        template.
+        """
+        key = os.path.realpath(str(out_path))
+        digest = None
+        if template_name:
+            # The bytes on disk, not ``rendered``: text mode may translate
+            # line endings, and a reader compares against the file.
+            try:
+                digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
+            except OSError:
+                digest = None
+        with self._render_records_lock:
+            if not digest:
+                self._render_records.pop(key, None)
+                return
+            self._render_records[key] = {
+                "template": template_name,
+                "template_id": _template_id(template_name),
+                "digest": digest,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    def render_record(self, path: str) -> Optional[Dict[str, Any]]:
+        """What catalog template this plugin rendered ``path`` from, or
+        ``None``: ``{template, template_id, digest, at}``, where ``digest``
+        is the SHA-256 of the file's bytes right after the render.  Compare it with
+        the file now to tell whether it was edited since."""
+        with self._render_records_lock:
+            record = self._render_records.get(os.path.realpath(path))
+            return dict(record) if record else None
+
+    def narrow_tool_schema(self, schema: ToolSchema) -> ToolSchema:
+        """``renderTemplateToFile`` without its inline ``template`` parameter
+        when the calling session turns inline templates off, so the model is
+        not offered what the executor would refuse.  Every other schema is
+        returned unchanged (see ``tool_visibility``)."""
+        if schema.name != "renderTemplateToFile" or self._inline_template_allowed():
+            return schema
+        params = dict(schema.parameters or {})
+        props = {k: v for k, v in (params.get("properties") or {}).items() if k != "template"}
+        params["properties"] = props
+        editable = schema.editable
+        if editable is not None:
+            editable = replace(editable, parameters=[p for p in editable.parameters if p != "template"])
+        return replace(
+            schema,
+            description=(
+                "Render a catalog template with variable substitution and "
+                "write the result to a file. Pick the template with "
+                "listAvailableTemplates and pass its 'template_id'; "
+                "listTemplateVariables says which variables it needs. "
+                "Inline templates are turned off for this session."
+            ),
+            parameters=params,
+            editable=editable,
+        )
+
     def get_config_schema(self) -> List[PluginSetting]:
         """Declare the plugin's profile-settable configuration.
 
@@ -1084,6 +1199,21 @@ class TemplatePlugin(RunnerForwardingMixin):
         land outside the declared source root.
         """
         return [
+            PluginSetting(
+                name=INLINE_TEMPLATE_CONFIG_KEY,
+                type="bool",
+                default=True,
+                description=(
+                    "Whether renderTemplateToFile accepts an inline "
+                    "'template' string.  false: only catalog templates "
+                    "(template_id) render, and the parameter is removed "
+                    "from the tool's schema.  With no free-form write tool "
+                    "on the profile (no writeNewFile/updateFile, cli, "
+                    "notebook, interactive_shell), a catalog template is "
+                    "then the only way to create a file.  Read per "
+                    "session: a subagent's own block governs it."
+                ),
+            ),
             PluginSetting(
                 name=PATH_ROUTING_CONFIG_KEY,
                 type="dict",
@@ -4289,17 +4419,11 @@ Template rendering writes files to the workspace."""
         variables = self._coerce_variables(args.get("variables"))
         overwrite = args.get("overwrite", False)
 
-        # Mutual-exclusion checks on template / template_id come first
-        # because they're cheaper than path resolution.
-        if not template and not template_id_arg:
-            return {
-                "error": "Exactly one of 'template' or 'template_id' must be provided"
-            }
-
-        if template and template_id_arg:
-            return {
-                "error": "Provide either 'template' or 'template_id', not both"
-            }
+        # Mutual-exclusion and inline-gate checks come first because
+        # they're cheaper than path resolution.
+        source_error = self._template_source_error(template, template_id_arg)
+        if source_error:
+            return {"error": source_error}
 
         # Determine template source
         template_source = "inline" if template else "file"
@@ -4502,6 +4626,7 @@ Template rendering writes files to the workspace."""
             }
 
         self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
+        self._note_render(out_path, template_name_arg)  # None for an inline render
 
         return {
             "success": True,

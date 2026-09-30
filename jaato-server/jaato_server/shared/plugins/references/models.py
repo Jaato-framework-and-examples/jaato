@@ -4,6 +4,7 @@ Defines core data structures for reference sources and their metadata.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -151,6 +152,15 @@ class ReferenceOrigin:
             every other field on a claim it is written by the runner into a
             model-writable file, so it is carried to the catalog AS
             RECORDED; ``curated_by`` is the stamp the daemon makes itself.
+        rendered_from: The catalog template the proposed page (a ``path``)
+            was rendered from, when this session's template plugin rendered
+            it: ``{template, template_id, digest, at}``, plus
+            ``edited_after_render: true`` when the file no longer matched
+            the render at proposal time.  The record lives in the template
+            plugin's memory, not on disk, so the model's file tools cannot
+            forge it; on the claim it is carried AS RECORDED, and the
+            daemon compares ``digest`` with the file again when it lists
+            or promotes the claim (``claims.rendered_file_changed``).
     """
 
     kind: str
@@ -162,6 +172,7 @@ class ReferenceOrigin:
     claim_id: Optional[str] = None
     curated_by: Optional[Dict[str, Any]] = None
     witnessed_by: Optional[Dict[str, Any]] = None
+    rendered_from: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize, omitting keys whose value was never established.
@@ -178,7 +189,8 @@ class ReferenceOrigin:
                            ("created_by", self.created_by),
                            ("claim_id", self.claim_id),
                            ("curated_by", self.curated_by),
-                           ("witnessed_by", self.witnessed_by)):
+                           ("witnessed_by", self.witnessed_by),
+                           ("rendered_from", self.rendered_from)):
             if value:
                 payload[key] = value
         return payload
@@ -206,6 +218,7 @@ class ReferenceOrigin:
             claim_id=data.get("claim_id") or None,
             curated_by=_dict_or_none(data.get("curated_by")),
             witnessed_by=_dict_or_none(data.get("witnessed_by")),
+            rendered_from=_dict_or_none(data.get("rendered_from")),
         )
 
     def describe(self) -> str:
@@ -233,6 +246,7 @@ class ReferenceOrigin:
         when = f" on {self.at}" if self.at else ""
         return (f"proposed by{agent}{model}{session}{user}{when}"
                 f"{_witness_clause(self.witnessed_by)}"
+                f"{_rendered_clause(self.rendered_from)}"
                 f"{_curator_clause(self.curated_by)}")
 
 
@@ -242,6 +256,22 @@ def _witness_clause(witnessed_by: Optional[Dict[str, Any]]) -> str:
         return ""
     who = witnessed_by.get("user") or witnessed_by.get("approver")
     return f", approved at the prompt by {who}" if who else ", approved at the prompt"
+
+
+_TEMPLATE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+
+
+def _rendered_clause(rendered_from: Optional[Dict[str, Any]]) -> str:
+    """``, rendered from template X`` (``, then edited``) -- or ``""``.
+
+    The name is shown only when it is a plain path-like token: the stamp
+    travels in a claim file, and this clause reaches the model."""
+    if not rendered_from:
+        return ""
+    name = rendered_from.get("template")
+    shown = f" '{name}'" if isinstance(name, str) and _TEMPLATE_NAME.match(name) else ""
+    edited = ", then edited" if rendered_from.get("edited_after_render") else ""
+    return f", rendered from template{shown}{edited}"
 
 
 def _curator_clause(curated_by: Optional[Dict[str, Any]]) -> str:

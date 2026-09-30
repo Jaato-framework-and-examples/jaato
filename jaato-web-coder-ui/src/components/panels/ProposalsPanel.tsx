@@ -32,6 +32,7 @@ import type { ReferenceBundleOption, ReferenceClaimRow } from "@/store/types";
 import {
   describeClaimLink,
   describeClaimOrigin,
+  describeRenderedFrom,
   isRoutingLink,
   dismissReferenceClaim,
   promoteReferenceClaim,
@@ -55,6 +56,7 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
   const title = row.name || row.id;
   const blocked = row.problems.length > 0;
   const witnessed = !!row.origin?.witnessed_by;
+  const rendered = describeRenderedFrom(row.origin);
   return (
     <div className="border-t hairline" data-testid="proposal-row" data-claim-id={row.claim_id}>
       <div className="flex gap-2 py-2 items-start">
@@ -67,6 +69,9 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
             {row.tags.map((t) => `#${t}`).join(" ")}
           </span>
           <span className="block font-mono text-[11px] text-text-muted truncate">{row.type === "local" && row.path ? row.path : "inline"}</span>
+          {rendered && (
+            <span className={`block font-mono text-[11px] truncate ${rendered.edited ? "text-warning" : "text-text-muted"}`} data-testid="proposal-template">{rendered.text}</span>
+          )}
         </div>
         <button
           type="button"

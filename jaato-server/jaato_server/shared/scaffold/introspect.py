@@ -107,6 +107,9 @@ class ToolInfo:
     #: ``None`` when the plugin's schema omitted it, which is distinct from
     #: ``{}`` -- a tool that genuinely takes no arguments.
     parameters: "Optional[Dict[str, Any]]" = None
+    #: The tool's declared traits (``TRAIT_FILE_WRITER``, ...), sorted.  A
+    #: list rather than a set so the record stays JSON-serializable.
+    traits: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1125,6 +1128,7 @@ def _describe_plugins(reg: Any) -> Dict[str, PluginInfo]:
                     # handed must not reshape the live plugin's schema.
                     parameters=(dict(_params) if isinstance(_params, dict)
                                 else None),
+                    traits=sorted(getattr(schema, "traits", None) or ()),
                 ))
         except Exception:
             info.dynamic = True

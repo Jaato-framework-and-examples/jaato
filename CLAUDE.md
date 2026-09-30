@@ -4538,6 +4538,47 @@ Guard:
 `shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,
 five reversions.
 
+### Pages Only From Catalog Templates
+
+A profile gates tools (`plugins:`, `tools:[...]` scopes), and that is the
+enforcement point for "reference pages are written from templates": give a
+page-writing profile `template` and `references` and no free-form write
+tool. Two PARAMETERS of allowed tools got around it, and tool gating cannot
+reach a parameter, so each gained a setting (both default `true`):
+
+| Setting | When `false` |
+|---|---|
+| `plugin_configs.template.allow_inline_template` | `renderTemplateToFile` refuses an inline `template`; only a catalog `template_id` renders |
+| `plugin_configs.references.allow_inline_content` | `proposeReference` refuses `content`; a proposal names a workspace file (`path`) |
+
+```yaml
+plugins:
+  - references
+  - template(tools:[listAvailableTemplates, listTemplateVariables, renderTemplateToFile])
+  - file_edit(tools:[readFile])
+plugin_configs:
+  template:   {allow_inline_template: false}
+  references: {allow_inline_content: false}
+```
+
+| Rule | Why |
+|---|---|
+| **the refused parameter is removed from the schema**, not only refused | a plugin may implement `narrow_tool_schema(schema)`, asked by `tool_visibility.filter_visible_tool_schemas`, which serves both the wire and the deferred-tool catalog, so the model is never offered what the executor refuses |
+| **read per session** (`session_context.session_plugin_setting`) | the plugin instance is shared with in-process subagents and re-initialized by whichever session configured it last; the calling session's own block (`JaatoSession.declared_plugin_config`) wins, else the instance's value |
+| **the claim says which template** | `renderTemplateToFile` records each catalog render in memory (path, template, digest); `proposeReference` stamps it as `origin.rendered_from`, with `edited_after_render: true` when the file no longer matches. The daemon re-compares the file when it lists or promotes the claim, and the Proposals panel shows `from template X` (warning tone when edited). In memory on purpose: a record under `template_extracts` would be writable by the model's own tools |
+| **`validate` says when the gate leaks** | `template_only_gate_leaks` (warn): either setting is `false` and the profile can still write a file another way: `cli`, `interactive_shell`, `notebook`, any enabled `TRAIT_FILE_WRITER` tool other than `renderTemplateToFile` (a `tools:[...]` scope that leaves it out closes it), or the other half of the gate still open |
+
+Stated limits: an MCP server that writes files is not visible offline and
+is not reported; a render record does not survive a runner restart, so a
+page rendered in one session and proposed after a restart carries no
+`rendered_from`. No page templates ship with the framework; a workspace
+authors its own in the template catalog (`<config_root>/templates/`). No
+AppArmor change: the catalog is read-only as before, the render record is
+in memory, and claims are written where they always were.
+
+Guard: `shared/tests/test_pages_come_from_catalog_templates.py`, seven
+reversions.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.

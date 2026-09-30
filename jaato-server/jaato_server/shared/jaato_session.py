@@ -1040,6 +1040,11 @@ class JaatoSession:
         # ``initial_plan_name``; ``_initial_plan_loaded`` records that
         # ``_apply_initial_plan`` installed it.
         self._plugin_scope: str = uuid.uuid4().hex[:12]
+        # This session's own ``plugin_configs``, as ``configure()`` received
+        # them.  Read through :meth:`declared_plugin_config` by a shared
+        # plugin that needs THIS session's value of a setting rather than
+        # whichever session last re-initialized the instance.
+        self._declared_plugin_configs: Dict[str, Dict[str, Any]] = {}
         self._initial_plan_config: Optional[Dict[str, Any]] = None
         self._initial_plan_loaded: bool = False
         self._telemetry_spans_started: bool = False
@@ -1491,6 +1496,21 @@ class JaatoSession:
         """
         return self._plugin_scope
 
+    def declared_plugin_config(self, plugin_name: str) -> Optional[Dict[str, Any]]:
+        """The ``plugin_configs.<plugin_name>`` block THIS session was
+        configured with, or ``None`` when it declared none.
+
+        A plugin instance is shared by a parent and its in-process
+        subagents, and ``configure()`` re-initializes it with whichever
+        session's block arrived last, so the instance's own copy of a
+        setting says what the LAST configured session asked for.  A
+        setting that must hold for the session that declared it (a gate
+        such as ``template.allow_inline_template``) is read here instead,
+        via :func:`~jaato_server.shared.session_context.session_plugin_setting`.
+        """
+        block = self._declared_plugin_configs.get(plugin_name)
+        return block if isinstance(block, dict) else None
+
     @property
     def instruction_budget(self) -> Optional[InstructionBudget]:
         """Get the instruction budget for this session.
@@ -1545,12 +1565,14 @@ class JaatoSession:
     def _apply_plugin_configs(
         self, plugin_configs: Optional[Dict[str, Dict[str, Any]]]
     ) -> None:
-        """Apply this session's ``plugin_configs`` to the plugins the
+        """Record this session's ``plugin_configs`` (read back through
+        :meth:`declared_plugin_config`) and apply them to the plugins the
         registry knows (#950) — all but ``permission``, whose block is
         stashed for :meth:`_apply_scoped_permission_policy` (#957).
         The rationale for both is in the comment block at the call
         site in :meth:`configure`.
         """
+        self._declared_plugin_configs = dict(plugin_configs or {})
         if not plugin_configs or not self._runtime.registry:
             return
         registry = self._runtime.registry
