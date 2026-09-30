@@ -2356,7 +2356,9 @@ class SubagentPlugin:
             # Create usage callback for real-time context updates during streaming
             def usage_callback(usage) -> None:
                 if self._ui_hooks and usage.total_tokens > 0:
-                    context_limit = session.get_context_limit()
+                    # Of the effective input limit (window minus the
+                    # output each request reserves, #1444), as GC reads it.
+                    context_limit = session.get_effective_input_limit()
                     percent_used = (usage.total_tokens / context_limit * 100) if context_limit > 0 else 0
                     turn_accounting = session.get_turn_accounting()
                     self._ui_hooks.on_agent_context_updated(
@@ -4218,7 +4220,9 @@ class SubagentPlugin:
             # This ensures the status bar reflects actual token usage from the provider
             def subagent_usage_callback(usage) -> None:
                 if self._ui_hooks and usage.total_tokens > 0:
-                    context_limit = session.get_context_limit()
+                    # Of the effective input limit (window minus the
+                    # output each request reserves, #1444), as GC reads it.
+                    context_limit = session.get_effective_input_limit()
                     percent_used = (usage.total_tokens / context_limit * 100) if context_limit > 0 else 0
                     turn_accounting = session.get_turn_accounting()
                     self._ui_hooks.on_agent_context_updated(

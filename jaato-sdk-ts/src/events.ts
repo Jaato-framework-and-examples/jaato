@@ -6249,6 +6249,7 @@ export type SpendCacheCreationTokens = number | null;
 export type ContextLimit = number;
 export type PercentUsed = number;
 export type TokensRemaining = number;
+export type ReservedOutputTokens = number;
 export type Turns = number;
 export type Source1 = string | null;
 /**
@@ -28545,6 +28546,14 @@ export interface PlanClearedEvent {
  *
  * GC configuration moved to ``GCConfigEvent`` in v1.0 — query that
  * event (or read it from session init) for status-bar display.
+ *
+ * ``reserved_output_tokens`` is the output cap every request carries
+ * (the provider's ``get_max_output_tokens()``; 0 when none is sent or
+ * the vendor does not count it).  A vendor that counts it refuses a
+ * prompt over ``context_limit - reserved_output_tokens``, so
+ * ``percent_used`` and ``tokens_remaining`` are measured against that
+ * effective input limit (#1444).  Additive: an older daemon omits it
+ * and a client reads 0, which is what every figure meant before.
  */
 export interface ContextUpdatedEvent {
   type?: EventType34;
@@ -28555,6 +28564,7 @@ export interface ContextUpdatedEvent {
   context_limit?: ContextLimit;
   percent_used?: PercentUsed;
   tokens_remaining?: TokensRemaining;
+  reserved_output_tokens?: ReservedOutputTokens;
   turns?: Turns;
   source?: Source1;
 }

@@ -101,6 +101,7 @@ from .history_invariant import repair_history
 from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from .instruction_budget import (
     InstructionBudget,
+    effective_input_limit,
     InstructionSource,
     estimate_tokens,
     SystemChildType,
@@ -170,8 +171,9 @@ from jaato_sdk.framework_note import (
     strip_framework_note_marker,
 )
 
-# Pattern to match @references in prompts
-AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
+# The @ of a prompt mention is removed only when an enricher reports it
+# resolved it (#1429); there is deliberately no session-wide @ pattern.
+from .prompt_mentions import resolved_mentions, strip_resolved_mentions
 
 # Rewind-with-hint budget.  How many consecutive rewinds we allow
 # per logical operation before giving up and surfacing the failure
@@ -4171,6 +4173,7 @@ class JaatoSession:
             agent_type=self._agent_type,
             context_limit=context_limit,
         )
+        self._instruction_budget.reserved_output = self._reserved_output_tokens()
 
         # --- Collect phase: gather all texts that need counting ---
         # Pass the override and suppress-base flag so the budget
@@ -4639,12 +4642,14 @@ class JaatoSession:
         - ``budget.context_limit`` is ``0`` (honest-unknown limit — the
           framework does not invent a window it wasn't told)
 
-        The gate uses ``budget.total_tokens()`` (post-GC) compared
-        against ``budget.context_limit``.  When the provider exposes a
-        ``get_max_output_tokens()`` method (vllm, openrouter,
-        tensorrt_llm at time of writing), the comparison includes that
-        cap; otherwise it fires only when the prompt ALONE exceeds the
-        limit.
+        The gate compares ``budget.total_tokens()`` (post-GC) against
+        ``budget.effective_input_limit()``: the window minus the output
+        cap the provider reports through ``get_max_output_tokens()``
+        (re-read here, so it is the cap this request carries).  A
+        provider that reports none leaves the whole window, so the gate
+        fires only when the prompt ALONE exceeds it.  Every provider that
+        puts a cap on the request reports it (#1444; MiniMax-M3 reserves
+        131k of its 1M window).
 
         Rationale: vLLM 0.22 rejects any request where ``prompt +
         max_tokens > max_model_len`` with the misleading template
@@ -4664,43 +4669,24 @@ class JaatoSession:
 
         total = self._instruction_budget.total_tokens()
 
-        # Provider-side per-request output cap, if exposed.  Three
-        # providers expose this today (vllm / openrouter /
-        # tensorrt_llm); others inherit no method and the gate
-        # degrades to prompt-only.
-        max_tokens: Optional[int] = None
-        get_max = getattr(self._provider, 'get_max_output_tokens', None)
-        if callable(get_max):
-            try:
-                value = get_max()
-            except Exception:
-                value = None
-            if isinstance(value, int) and value > 0:
-                max_tokens = value
-
-        if max_tokens is not None:
-            projected = total + max_tokens
-            if projected > limit:
-                self._trace(
-                    f"REFUSE_SEND: total={total} + max_tokens={max_tokens} "
-                    f"= {projected} > context_limit={limit}"
-                )
-                raise PayloadExceedsContextError(
-                    total_tokens=total,
-                    max_output_tokens=max_tokens,
-                    context_limit=limit,
-                )
-        else:
-            if total > limit:
-                self._trace(
-                    f"REFUSE_SEND: total={total} > context_limit={limit} "
-                    f"(provider exposes no max_tokens; gate on prompt alone)"
-                )
-                raise PayloadExceedsContextError(
-                    total_tokens=total,
-                    max_output_tokens=None,
-                    context_limit=limit,
-                )
+        # Re-read the reservation: the guard compares against the cap the
+        # request is about to carry, not the one stamped at the last
+        # tier connect.  ``effective_input_limit`` is the one definition
+        # GC and the readout also use (#1444).
+        reserved = self._reserved_output_tokens()
+        self._instruction_budget.reserved_output = reserved
+        effective = effective_input_limit(limit, reserved)
+        if total <= effective:
+            return
+        self._trace(
+            f"REFUSE_SEND: total={total} > effective_input_limit={effective} "
+            f"(context_limit={limit} - reserved_output={reserved})"
+        )
+        raise PayloadExceedsContextError(
+            total_tokens=total,
+            max_output_tokens=reserved or None,
+            context_limit=limit,
+        )
 
     def _update_thinking_budget(self, thinking_tokens: int) -> None:
         """Update THINKING entry in instruction budget with cumulative thinking tokens."""
@@ -5551,7 +5537,9 @@ NOTES
                     pass
             # Check if threshold crossed
             if not self._gc_threshold_crossed and usage.total_tokens > 0:
-                context_limit = self.get_context_limit()
+                # Against the effective input limit, not the raw window:
+                # the output a request reserves is not room (#1444).
+                context_limit = self.get_effective_input_limit()
                 if context_limit > 0:
                     percent_used = (usage.total_tokens / context_limit) * 100
                     threshold = self._gc_config.threshold_percent if self._gc_config else 80.0
@@ -5905,7 +5893,12 @@ NOTES
         )
 
     def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
-        """Run prompt through enrichment pipeline and strip @references.
+        """Run prompt through enrichment pipeline and strip resolved @mentions.
+
+        Only the mentions a prompt enricher reported resolving (under
+        ``RESOLVED_MENTIONS_METADATA_KEY``) lose their ``@``; every other
+        ``@`` — an npm scope, an email, a decorator — reaches the model
+        byte-for-byte (#1429).  See ``shared/prompt_mentions.py``.
 
         Args:
             prompt: The user prompt to enrich.
@@ -5914,11 +5907,13 @@ NOTES
                 enrichment metadata are forwarded as span events.
         """
         enriched_prompt = prompt
+        resolved: List[str] = []
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
+            resolved = resolved_mentions(result.metadata)
 
             # Forward enrichment telemetry as span events on the turn span
             if turn_span and result.metadata:
@@ -5931,8 +5926,8 @@ NOTES
                                 telem,
                             )
 
-        # Strip @references
-        return AT_REFERENCE_PATTERN.sub(r'\1', enriched_prompt)
+        # Strip the @ from the mentions an enricher resolved, and only those
+        return strip_resolved_mentions(enriched_prompt, resolved)
 
     # -- TurnResult helpers -----------------------------------------------
     #
@@ -13288,6 +13283,20 @@ NOTES
             return 0
         return self._provider.get_context_limit()
 
+    def get_effective_input_limit(self) -> int:
+        """``get_context_limit()`` minus the output each request reserves.
+
+        :func:`~jaato_server.shared.instruction_budget.effective_input_limit`
+        is the definition; this answers it for callers that measure a
+        provider-reported total without going through the budget (the
+        proactive streaming GC check, the subagent plugin's per-chunk
+        readout).  ``0`` = unknown window.
+        """
+        if self._instruction_budget is not None:
+            return self._instruction_budget.effective_input_limit()
+        return effective_input_limit(
+            self.get_context_limit(), self._reserved_output_tokens())
+
     def get_context_usage(self) -> Dict[str, Any]:
         """Get context window usage statistics.
 
@@ -13316,6 +13325,8 @@ NOTES
             # the GC threshold is judged on, so it is what is reported.
             total_tokens = budget.effective_total_tokens()
             context_limit = budget.context_limit
+            reserved_output = budget.reserved_output
+            effective_limit = budget.effective_input_limit()
             percent_used = budget.utilization_percent()
             tokens_remaining = budget.available_tokens()
             tokens_source = "calibrated" if budget.is_calibrated() else "estimate"
@@ -13325,8 +13336,10 @@ NOTES
             # Fallback if budget not initialized
             total_tokens = 0
             context_limit = self.get_context_limit()
+            reserved_output = self._reserved_output_tokens()
+            effective_limit = self.get_effective_input_limit()
             percent_used = 0.0
-            tokens_remaining = context_limit
+            tokens_remaining = effective_limit
             tokens_source = None
             estimate_tokens = 0
             provider_prompt = None
@@ -13341,8 +13354,13 @@ NOTES
             'prompt_tokens': total_tokens,  # InstructionBudget tracks total, not split
             'output_tokens': 0,  # Output tokens are included in conversation total
             'turns': len(turn_accounting),
+            # ``percent_used`` / ``tokens_remaining`` are measured against
+            # ``context_limit - reserved_output_tokens`` (#1444): the output
+            # cap every request carries is not room for input.
             'percent_used': percent_used,
             'tokens_remaining': tokens_remaining,
+            'reserved_output_tokens': reserved_output,
+            'effective_input_limit': effective_limit,
             # The second denominator, reported in BYTES (#850).  Every other
             # figure here is a token count against a token budget, and that
             # is exactly why media went unseen: the payload that dominates a
@@ -15078,6 +15096,31 @@ NOTES
         self._instruction_budget.context_limit = (
             self._provider.get_context_limit()
         )
+        # The output cap is part of the (provider, model) binding too: a
+        # tier that enters MiniMax-M3 reserves 131k of the window (#1444).
+        self._instruction_budget.reserved_output = self._reserved_output_tokens()
+
+    def _reserved_output_tokens(self) -> int:
+        """The output cap the active provider puts on every request.
+
+        Reads ``provider.get_max_output_tokens()``, which each provider
+        that sends a cap implements to return exactly the value it sends
+        (#1444).  ``0`` when there is no provider, the provider has no
+        such method, returns ``None`` (sends no cap, or its vendor does
+        not count output against the window), or raises: an unreadable
+        reservation must not take the session down, and ``0`` is what
+        every figure measured before this existed.
+        """
+        get_max = getattr(self._provider, 'get_max_output_tokens', None)
+        if not callable(get_max):
+            return 0
+        try:
+            value = get_max()
+        except Exception:
+            return 0
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 0
 
     def _retarget_reliability_model(self, model: str) -> None:
         """Tell the reliability plugin which model is now running.

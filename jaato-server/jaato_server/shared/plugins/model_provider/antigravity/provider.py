@@ -418,6 +418,28 @@ class AntigravityProvider(ModalityCapabilityMixin):
         # Rough approximation: ~4 characters per token
         return len(content) // 4
 
+    def _output_limit(self) -> int:
+        """The ``maxOutputTokens`` every request carries: the model's
+        ``output_limit`` from the model tables, else ``DEFAULT_OUTPUT_LIMIT``."""
+        for table in (ANTIGRAVITY_MODELS, GEMINI_CLI_MODELS):
+            if self._model_name and self._model_name in table:
+                return table[self._model_name].get("output_limit", DEFAULT_OUTPUT_LIMIT)
+        return DEFAULT_OUTPUT_LIMIT
+
+    def get_max_output_tokens(self) -> Optional[int]:
+        """The output cap to reserve against the window, or ``None``.
+
+        Every request carries ``maxOutputTokens`` (:meth:`_output_limit`).
+        A Claude model counts it against the window (Anthropic refuses
+        prompt plus cap over the window), so it is reported (#1444).  A
+        Gemini model does not: Gemini documents input and output limits
+        as separate budgets, and the table's ``context_limit`` is the
+        input one, so it answers ``None``.
+        """
+        if "claude" in (self._model_name or "").lower():
+            return self._output_limit()
+        return None
+
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model.
 
@@ -640,13 +662,7 @@ class AntigravityProvider(ModalityCapabilityMixin):
         response_schema: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build generation configuration for the request."""
-        # Get output limit for current model
-        output_limit = DEFAULT_OUTPUT_LIMIT
-        if self._model_name:
-            if self._model_name in ANTIGRAVITY_MODELS:
-                output_limit = ANTIGRAVITY_MODELS[self._model_name].get("output_limit", DEFAULT_OUTPUT_LIMIT)
-            elif self._model_name in GEMINI_CLI_MODELS:
-                output_limit = GEMINI_CLI_MODELS[self._model_name].get("output_limit", DEFAULT_OUTPUT_LIMIT)
+        output_limit = self._output_limit()
 
         # Build thinking config
         thinking_config = None

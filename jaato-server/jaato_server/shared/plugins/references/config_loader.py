@@ -591,6 +591,34 @@ def _load_embedding_config(config: ReferencesConfig, workspace_path: str) -> Non
     )
 
 
+def config_path_candidates(
+    path: Optional[str],
+    workspace_path: Optional[str],
+    env_var: str = "REFERENCES_CONFIG_PATH",
+) -> Tuple[str, ...]:
+    """The ``references.json`` files :func:`load_config` may read, in order.
+
+    The explicit ``path`` alone when one is given, else the file ``env_var``
+    names when it is set, else the workspace defaults (when a workspace is
+    known) and the user default.  :func:`load_config` walks this list, and
+    the references plugin watches every entry so a config file that appears
+    later reaches a running session (#1145).  One definition, so the two
+    cannot disagree about which files matter.  ``env_var=""`` skips the
+    environment.
+    """
+    if path:
+        return (str(path),)
+    env = os.environ.get(env_var) if env_var else None
+    if env:
+        return (env,)
+    out = []
+    if workspace_path:
+        ws = Path(workspace_path)
+        out += [str(ws / "references.json"), str(ws / ".references.json")]
+    out.append(str(Path.home() / ".config" / "jaato" / "references.json"))
+    return tuple(out)
+
+
 def load_config(
     path: Optional[str] = None,
     env_var: str = "REFERENCES_CONFIG_PATH",
@@ -623,13 +651,7 @@ def load_config(
 
     if path is None:
         # Try default locations — workspace-relative paths only if workspace is set
-        default_paths = []
-        if workspace_path:
-            ws = Path(workspace_path)
-            default_paths.append(ws / "references.json")
-            default_paths.append(ws / ".references.json")
-        default_paths.append(Path.home() / ".config" / "jaato" / "references.json")
-        for default_path in default_paths:
+        for default_path in map(Path, config_path_candidates(None, workspace_path, env_var="")):
             try:
                 if default_path.exists():
                     path = str(default_path)

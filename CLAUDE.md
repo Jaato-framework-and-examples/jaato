@@ -1693,6 +1693,47 @@ Guard: `jaato_server/shared/tests/test_the_budget_counts_what_is_sent_1440.py`,
 five reversions. It drives the real `message_to_openai` for the wire size
 and the real `gc_budget` plugin.
 
+### The Output a Request Reserves Is Not Room (#1444)
+
+A MiniMax-M3 session died on `context window exceeds limit (2013)` while
+the readout said 91.9% used and 80.9k remaining. MiniMax counts input PLUS
+the output a request reserves against the window, and every M3 request
+reserves `max_completion_tokens: 131072`, so a 1M window takes about 869k
+of input. The pre-send guard added a cap only for the three providers
+that exposed one, and GC and the readout ignored it entirely.
+
+`instruction_budget.effective_input_limit(context_limit, reserved_output)`
+is the one definition, `context_limit - reserved_output`, and everything
+that asks "how full is this" reads it:
+
+| Reader | Where |
+|---|---|
+| the pre-send guard | `JaatoSession._assert_payload_fits_context` (re-reads the reservation before each send) |
+| the GC threshold | `InstructionBudget.utilization_percent`, so `get_context_usage()['percent_used']` and every `should_collect`; the proactive streaming check via `get_effective_input_limit()` |
+| the budget GC target | `gc_budget` collects down to `target_percent` of the effective limit |
+| the readout | `get_context_usage` (`tokens_remaining`, plus `reserved_output_tokens` / `effective_input_limit`), `ContextUpdatedEvent.reserved_output_tokens` (additive, no protocol bump: absent reads as 0), the web Context block's "reserved for output" row |
+
+The reservation comes from `provider.get_max_output_tokens()`, which every
+provider that puts a cap on the request implements and which returns
+exactly the value sent: the `_openai_compat` base (`api_params.max_tokens`
+under `_MAX_TOKENS_WIRE_NAME`, or the Responses wire's `max_output_tokens`),
+MiniMax (profile value, else its recommended cap, which `_apply_api_params`
+now reads from the same method), Anthropic and its Ollama / Zhipu
+inheritors (override, else extended or default, and `complete()` sends
+this value), Bedrock, GitHub Models, Antigravity for Claude models, vLLM,
+OpenRouter, TensorRT-LLM. Google GenAI and Antigravity's Gemini models
+answer `None`: Gemini documents input and output limits as separate
+budgets. `None` means reserve nothing. It is stamped where the window is
+(`_refresh_context_limit_from_provider`, so a tier switch re-reads it).
+
+Not covered: the per-chunk `on_agent_context_updated` hook for subagents
+carries a net percentage but its `tokens_remaining` is still the raw
+window, because the hook's signature is a public protocol.
+
+Guard: `jaato_server/shared/tests/test_context_checks_reserve_output_1444.py`,
+three reversions, plus an AST scan that fails any provider package writing
+an output cap into a request without implementing `get_max_output_tokens()`.
+
 ### A Strategy Resolved, Carried, Rendered — and Installed on Nobody (#1133)
 
 `JaatoSession._gc_plugin` has two writers, both inside `set_gc_plugin` /
@@ -4014,6 +4055,39 @@ built without it unless an allow-list names it with a reason; the enrichment
 producers may not contain `MANDATORY`, `MUST`, `ACTION REQUIRED`, `CRITICAL`,
 `you must` or `IMPORTANT:`; the marker inside untrusted content is defanged.
 
+### An @ Is Removed Only Where an Enricher Used It (#1429)
+
+`_enrich_and_clean_prompt` used to end every prompt with a blanket
+`re.sub(r'@([\w./\-]+...)', r'\1', ...)`. It was meant for the
+`@photo.png` / `@ref-id` mentions the multimodal and references plugins
+resolve, and it removed the `@` from every word: `@jaato/sdk` reached the
+model as `jaato/sdk`, `dani@example.com` as `daniexample.com`,
+`@dataclass` as `dataclass`. A completion-gated release judge spent its
+budget because its processor required a package name the model was never
+shown.
+
+**The rule: a mention loses its `@` only when a prompt enricher reports it
+resolved it.** An enricher lists the tokens (without `@`) under
+`metadata[RESOLVED_MENTIONS_METADATA_KEY]` (`"resolved_mentions"`,
+`jaato_sdk/plugins/base.py`); the session collects them and removes the `@`
+from exactly those (`shared/prompt_mentions.py`). Every other `@` reaches
+the model byte-for-byte.
+
+| Reporter | Reports |
+|---|---|
+| `multimodal` | each `@<file>.<image ext>` that resolved to an existing file |
+| `references` | each `@<id>` naming a known source, whether or not its instruction block is re-injected |
+
+A token is stripped only where its `@` does not follow a word character (so
+the `@` of an email is never a mention) and the token is not continued by
+further mention characters (resolving `ref` leaves `@ref-id` alone). An
+enricher that resolves a mention and does not report it leaves the `@`,
+the safe direction. No other in-tree prompt enricher reads `@` mentions.
+
+Guard: `jaato_server/shared/tests/test_a_prompt_keeps_its_at_signs_1429.py`,
+four reversions (the blanket strip restored, either reporter silenced, and
+the token boundary dropped).
+
 ### What an Enrichment Plugin Found, Told to the Client (protocol 1.31)
 
 Enrichment rewrites the result the MODEL reads. A client saw none of it
@@ -4327,7 +4401,8 @@ reconciled; and `references bundle reconcile` typed in a confined session
 still cannot write the index (the same base-profile deny). This split is a
 **stopgap**: #1422 makes `tool_hat` real, lets the runner write its own
 catalog, and lists what to remove from here. A running session sees the new
-entry at its next catalog reload.
+entry on its next references call (see [A Catalog Written After the Session
+Loaded It](#a-catalog-written-after-the-session-loaded-it-1145)).
 
 Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
 reversions (the numpy-backed reconcile tests skip without numpy).
@@ -4366,11 +4441,17 @@ The instruction the model reads carries a `**Links**` line
 
 **Who declares an edge** (the brainstorm's open question 7): an agent may
 propose one, and none takes effect until a person promotes it.
-`proposeReference` takes `links`, refused at the call when a target is not
-in the agent's own catalog; the claim carries them, the curator's row shows
-them (`links`, notes as text) with a non-blocking `warnings` entry for a
-target the workspace catalog cannot place, and promotion writes them into
-the catalog file. `listReferences` shows a claim's edges to another model
+`proposeReference` takes `links` and refuses only a malformed one. A
+target not in the catalog is kept, because pages proposed together (often
+in parallel) link to each other before any is promoted; a demo's three
+runbook pages could not link at all while such targets were refused. The
+call's result names those targets (`forward_links`, with the `claim_id`
+when the target is already proposed), so a typo still reaches the agent
+that made it. The claim carries the links, the curator's row shows them
+(`links`, notes as text) with a non-blocking `warnings` entry for a target
+the workspace catalog cannot place (naming the pending claim when it is
+one), and promotion writes them into the catalog file, dangling until the
+target is promoted too. `listReferences` shows a claim's edges to another model
 as `{to, rel}` with the target re-checked as one token and no note, since
 that listing is outside the untrusted fence. The web Proposals panel draws
 each edge and marks a `supersedes`, because promoting it reroutes requests
@@ -4409,14 +4490,53 @@ link followed) with its `links` (a dangling one marked), `linked_from` and
 web coder's **References** rail section lists the catalog (the badge is
 `!` while any reference holds a dangling edge) and gives the owner an
 editor per reference; a promotion from Proposals re-lists it. A running
-session sees an edit at its next catalog reload. Like promotion into a bundle, the
+session sees an edit on its next references call. Like promotion into a bundle, the
 write is daemon-side only because no runner profile may write the catalog;
 #1422 (a real `tool_hat`) moves it back to the runner, with the daemon
 keeping the owner gate.
 
 Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
-`server/tests/test_a_proposal_carries_typed_links.py` (five) and
+`server/tests/test_a_proposal_carries_typed_links.py` (seven) and
 `server/tests/test_a_person_edits_a_references_links.py` (six).
+
+### A Catalog Written After the Session Loaded It (#1145)
+
+A session loaded its references catalog once, at `initialize()`. A
+promotion, a link edit, a bundle merge or a `git pull` landing after that
+reached no running session until `references reload` was typed or a new
+session started. After #1420 a promoted page went further than stale: the
+running session listed it under `proposed` until promotion deleted the
+claim, and then had it nowhere.
+
+Every read path the model reaches now refreshes first:
+`listReferences`, `selectReferences`, `proposeReference` (its collision
+check) and `enrich_prompt` (the turn boundary). The check is one `stat` per
+watched path, and a reload runs only when one moved
+(`references/catalog_watch.py`, stdlib only).
+
+| Watched | Why it is enough |
+|---|---|
+| each bundle directory, each tier root, `<ws>/.jaato/references` | creating, deleting or renaming a file moves its directory's mtime, and every framework writer (`write_contained`, `reconcile`, `merge`) replaces a file by rename, so an edit is a rename; a new sub-bundle is a new directory in a tier root |
+| each `references.json` candidate, individually | the workspace root's own mtime moves with every file created there |
+
+| Rule | Why |
+|---|---|
+| **one reload path** (`_reload_from_disk`, shared with `references reload`) | it now includes the bundle half: `references reload` used to reload the workspace root alone, dropping every sub-bundle and user-tier reference, and did not re-attach similarity matchers |
+| **a write racing the load is not lost** | `settle` stores a path as `UNSETTLED` (equal to no stamp, so the next check reloads) when it moved between the snapshots taken before and after the load, or its mtime is within 2 s of the snapshot. The second is git's "racily clean" rule: a kernel stamps mtimes from a coarse clock, so a write in the same tick leaves the mtime unchanged |
+| **a dropped selection is said, not hidden** | a selected reference that left the catalog is deauthorized and reported once, as `catalog_changed: {added, removed, dropped_selected, note}` on the next references result, and at the turn boundary as a `⟦JAATO⟧` note naming it |
+| **inline `sources` are never refreshed** | a reload reads disk, which would replace them |
+| **opt-out** | `plugin_configs.references.refresh_catalog: false` keeps the load-once snapshot |
+
+No daemon push: every read path checks, so no write can be missed by a
+session that did not hear about it. Stated limit: an in-place edit by
+another tool (an editor saving over the file without a rename) moves no
+directory mtime and is seen only when something else in that directory
+changes, or on `references reload`. The refresh reads only paths the plugin
+already reads, so its AppArmor contribution is unchanged.
+
+Guard:
+`shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,
+five reversions.
 
 ### Plugin-Level Traits
 
@@ -9267,6 +9387,24 @@ neither.
 
 Both argument displays use it: the tool row and the permission card's
 argument grid.
+
+### A Call to a Tool That Does Not Exist, Shown Quietly
+
+A model sometimes names a tool the session never offered (a hallucinated
+`t_<hex>` id, a misspelt name). The daemon refuses it without running
+anything, with `No executor registered for <name>` on every path, and the
+model nearly always reads that and calls the right tool next. The web
+client drew it as a red row, opened by default, with the refusal in a red
+plate: noise for most readers.
+
+`protocol/toolMisfire.ts` recognises that refusal, and the transcript
+(`store/transcript.ts`, mode `"misfire"`) folds such a call into one small
+muted `↷` line, *called a tool that does not exist: <name>*, collapsed; a
+click opens the ordinary row with the refusal. It takes no part in the
+recovery pairing or the housekeeping fold. A real tool's failure keeps its
+red row. The TUI is unchanged. Guards: `toolMisfire.test.ts`,
+`transcript.test.ts`, and an e2e case against the mock's `misfire`
+scenario.
 
 ### When GC Last Ran, What It Freed, and Which Policy (#1190)
 

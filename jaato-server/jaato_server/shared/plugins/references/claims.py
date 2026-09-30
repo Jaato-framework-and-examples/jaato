@@ -36,7 +36,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
 
@@ -155,52 +155,98 @@ def _resolve_document(
 
 
 def _proposed_links(
-    value: Any, *, ref_id: str, link_targets: Optional[Iterable[str]],
+    value: Any, *, ref_id: str,
 ) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
     """A proposal's declared edges, normalised, or why they are refused.
 
-    Shape is checked by ``links.link_errors``, the rule a catalog file
-    obeys.  With ``link_targets`` (the proposing agent's own catalog), an
-    edge to an id not in it is refused too: the agent can see its catalog,
-    so an unknown target is a typo, not a reference it cannot know about.
-    The daemon passes ``None`` when it re-validates a claim, because its
-    catalog is the workspace tier only; an edge it cannot place is shown to
-    the curator as a warning (``link_warnings``) and kept dangling.
+    Only SHAPE is refused (``links.link_errors``, the rule a catalog file
+    obeys): an unknown ``rel``, a target that is not one id, a self-edge.
+    A well-formed edge to an id the catalog does not hold is KEPT.  An
+    agent writing several related pages proposes them one call at a time,
+    often in parallel, so each page's siblings are not in the catalog, and
+    may not even be claims yet, when its edges are checked.  Refusing them
+    made cross-links between pages proposed together impossible.  What an
+    unknown target might be (a sibling, a typo) is reported instead: to the
+    agent by :func:`forward_links`, to the curator by :func:`link_warnings`,
+    and the loader marks the edge dangling until its target arrives.
     """
     errors = link_errors(value, source_id=ref_id)
     if errors:
         return None, errors
-    links = [link.to_dict() for link in parse_links(value)]
-    if link_targets is not None:
-        known = set(link_targets)
-        unknown = sorted({l["to"] for l in links if l["to"] not in known})
-        if unknown:
-            return None, [f"'links' name references not in the catalog: {', '.join(unknown)}"]
-    return links, []
+    return [link.to_dict() for link in parse_links(value)], []
 
 
-def link_warnings(entry_links: Any, ids: Iterable[str]) -> List[str]:
+def pending_claim_ids(claims: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """``{reference id: claim id}`` for the claims in ``claims``, oldest first wins.
+
+    What a link target not in the catalog may still be: a page proposed
+    and not yet promoted.  ``claims`` are already checked (``is_claim``).
+    """
+    pending: Dict[str, str] = {}
+    for claim in claims:
+        pending.setdefault(claim["reference"]["id"], claim["claim_id"])
+    return pending
+
+
+def forward_links(
+    entry_links: Any, ids: Iterable[str], pending: Mapping[str, str],
+) -> List[Dict[str, str]]:
+    """The edges of a proposal whose target is not in the catalog yet.
+
+    Each is ``{to, rel}`` plus ``claim_id`` when the target is another
+    pending claim.  An edge with neither is a page not proposed yet, or a
+    typo; the agent is told which ones so it can tell the two apart.
+    """
+    known = set(ids)
+    out: List[Dict[str, str]] = []
+    for link in parse_links(entry_links):
+        if link.to in known:
+            continue
+        item = {"to": link.to, "rel": link.rel}
+        if link.to in pending:
+            item["claim_id"] = pending[link.to]
+        out.append(item)
+    return out
+
+
+def link_warnings(
+    entry_links: Any, ids: Iterable[str],
+    pending: Optional[Mapping[str, str]] = None,
+) -> List[str]:
     """What a curator should know about a claim's edges before promoting it.
 
-    Today one thing: an edge whose target is not in ``ids``.  It is kept
-    and marked dangling in the catalog, so this is a warning, never a
+    One thing: an edge whose target is not in ``ids``.  When the target is
+    another pending claim (``pending``) the warning names it, so the
+    curator knows promoting both resolves the edge.  Either way the edge is
+    kept and marked dangling in the catalog, so this is a warning, never a
     reason Promote is refused.
     """
     known = set(ids)
-    return [f"links to '{link.to}' ({link.rel}), which is not in this workspace's catalog"
-            for link in parse_links(entry_links) if link.to not in known]
+    pending = pending or {}
+    out: List[str] = []
+    for link in parse_links(entry_links):
+        if link.to in known:
+            continue
+        if link.to in pending:
+            out.append(f"links to '{link.to}' ({link.rel}), proposed in claim "
+                       f"{pending[link.to]} and not promoted yet; the edge "
+                       "resolves when that claim is promoted")
+        else:
+            out.append(f"links to '{link.to}' ({link.rel}), which is not in this "
+                       "workspace's catalog")
+    return out
 
 
 def build_proposed_reference(
     args: Dict[str, Any], *, workspace: str, catalog_ids: Iterable[str],
-    link_targets: Optional[Iterable[str]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """The catalog entry a claim proposes, or the reasons it cannot be one.
 
     Returns ``(entry, [])`` on success and ``(None, errors)`` otherwise.  The
     entry passes ``validate_reference_file``, so promotion copies it as is.
-    ``links`` (typed edges, ``links.py``) are carried when valid; see
-    :func:`_proposed_links` for what ``link_targets`` adds.
+    ``links`` (typed edges, ``links.py``) are carried when well-formed,
+    whether or not their targets are in the catalog yet (see
+    :func:`_proposed_links`).
     """
     ref_id = args.get("id")
     if not isinstance(ref_id, str) or not _ID_RE.match(ref_id):
@@ -219,8 +265,7 @@ def build_proposed_reference(
     document, error = _resolve_document(args, workspace)
     if document is None:
         return None, [error or "invalid document"]
-    links, link_problems = _proposed_links(args.get("links"), ref_id=ref_id,
-                                           link_targets=link_targets)
+    links, link_problems = _proposed_links(args.get("links"), ref_id=ref_id)
     if links is None:
         return None, link_problems
     entry = {"id": ref_id, "name": name.strip(), "description": description,

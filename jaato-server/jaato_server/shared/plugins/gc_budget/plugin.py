@@ -297,9 +297,11 @@ class BudgetGCPlugin:
         # reported a larger prompt.  Entries are sized in estimate units, so
         # the amount to free is converted back into those units -- freeing
         # ``current - target`` estimate tokens from a scaled total would
-        # collect ``factor`` times too much.
+        # collect ``factor`` times too much.  The target is of the effective
+        # input limit, not the raw window: the output a request reserves is
+        # not room the history can use (#1444).
         current_tokens = budget.effective_total_tokens()
-        target_tokens = int(budget.context_limit * config.target_percent / 100)
+        target_tokens = int(budget.effective_input_limit() * config.target_percent / 100)
         tokens_to_free = _in_estimate_units(
             current_tokens - target_tokens, budget.calibration_factor)
 

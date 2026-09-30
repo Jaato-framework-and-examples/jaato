@@ -271,6 +271,22 @@ class SourceEntry:
         return result
 
 
+def effective_input_limit(context_limit: int, reserved_output: int) -> int:
+    """The prompt size a request can carry: ``context_limit - reserved_output``.
+
+    The ONE definition (#1444).  A vendor that counts input plus the
+    output a request reserves against the window (MiniMax, Anthropic,
+    vLLM, ...) refuses a prompt larger than this, so the pre-send guard,
+    the GC threshold and target, and every context readout measure
+    against it rather than the raw window.  ``0`` when the window is
+    unknown (``context_limit <= 0``) and when the reservation fills the
+    whole window.
+    """
+    if context_limit <= 0:
+        return 0
+    return max(0, context_limit - max(0, reserved_output))
+
+
 @dataclass
 class InstructionBudget:
     """Tracks token usage by instruction source for an agent.
@@ -282,6 +298,14 @@ class InstructionBudget:
         agent_type: Type of agent ("main", "explore", "plan", etc.) for display purposes.
         entries: Token usage broken down by instruction source.
         context_limit: Model's context window size.
+        reserved_output: The output cap the provider puts on every request
+            (``provider.get_max_output_tokens()``; 0 when it sends none).
+            A vendor that counts input plus reserved output against the
+            window refuses a prompt larger than
+            :meth:`effective_input_limit`, so every "how full is this"
+            figure here is measured against that, not the raw window
+            (#1444).  Stamped by ``JaatoSession`` wherever
+            ``context_limit`` is, and before every send.
     """
     session_id: str = ""
     agent_id: str = "main"
@@ -296,6 +320,7 @@ class InstructionBudget:
     #: The provider's own prompt size (uncached + cache read + cache write)
     #: on the last response that reported usage; ``None`` until one did.
     provider_prompt_tokens: Optional[int] = None
+    reserved_output: int = 0  # Output cap each request reserves (#1444)
 
     # Sources excluded from context window calculations (output-only tokens)
     _NON_CONTEXT_SOURCES = frozenset({InstructionSource.THINKING})
@@ -392,24 +417,45 @@ class InstructionBudget:
             ratio if ratio > 1.0 + self.CALIBRATION_MARGIN else 1.0)
         return ratio
 
+    def effective_input_limit(self) -> int:
+        """The prompt size a request can carry: ``context_limit`` minus
+        ``reserved_output``.
+
+        The one definition the pre-send guard, the GC threshold and
+        target, and the context readout all read (#1444).  ``0`` when the
+        window is unknown (``context_limit == 0``), and also when the
+        reservation fills the whole window, which no prompt fits.
+        """
+        return effective_input_limit(self.context_limit, self.reserved_output)
+
     def utilization_percent(self) -> float:
-        """Context window utilization as percentage, of the effective total."""
+        """Utilization of the effective input limit, as a percentage.
+
+        The numerator is the effective total (#1440), the denominator the
+        effective input limit (#1444).  ``0.0`` for an unknown window;
+        ``100.0`` when the reservation leaves no room for input at all.
+        """
         if self.context_limit == 0:
             return 0.0
-        return (self.effective_total_tokens() / self.context_limit) * 100
+        limit = self.effective_input_limit()
+        if limit == 0:
+            return 100.0
+        return (self.effective_total_tokens() / limit) * 100
 
     def available_tokens(self) -> int:
-        """Tokens still available in the context window (effective total)."""
-        return max(0, self.context_limit - self.effective_total_tokens())
+        """Input tokens still available under the effective input limit,
+        judged on the effective total (#1440)."""
+        return max(0, self.effective_input_limit() - self.effective_total_tokens())
 
     def gc_headroom_percent(self) -> float:
         """
         Percentage of context that could be freed by GC.
         Higher = more room to reclaim if needed.
         """
-        if self.context_limit == 0:
+        limit = self.effective_input_limit()
+        if limit == 0:
             return 0.0
-        return (self.gc_eligible_tokens() / self.context_limit) * 100
+        return (self.gc_eligible_tokens() / limit) * 100
 
     # --- Entry Management ---
 
@@ -499,6 +545,8 @@ class InstructionBudget:
             "agent_id": self.agent_id,
             "agent_type": self.agent_type,
             "context_limit": self.context_limit,
+            "reserved_output_tokens": self.reserved_output,
+            "effective_input_limit": self.effective_input_limit(),
             "total_tokens": self.total_tokens(),
             # #1440: what the threshold is judged on, and where it came
             # from.  ``total_tokens`` stays the budget's own estimate (the

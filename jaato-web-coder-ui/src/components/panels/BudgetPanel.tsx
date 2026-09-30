@@ -240,6 +240,9 @@ export function BudgetPanel({ agentId }: { agentId: string }) {
     ["remaining", fmt(ctx?.tokensRemaining)],
     ["turns", fmt(ctx?.turns)],
   ];
+  // The output each request reserves is not room for input (#1444):
+  // "remaining" and the percentage are already net of it, so say why.
+  if (ctx?.reservedOutput) rows.splice(6, 0, ["reserved for output", fmt(ctx.reservedOutput)]);
   if (u.cost_usd != null) rows.push(["cost", `$${Number(u.cost_usd).toFixed(4)}`]);
   return (
     <div className="px-3.5 py-3 text-[13px]">

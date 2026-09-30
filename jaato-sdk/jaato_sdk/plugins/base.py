@@ -244,6 +244,19 @@ class PluginSetting:
     env_var: Optional[str] = None
 
 
+RESOLVED_MENTIONS_METADATA_KEY = "resolved_mentions"
+"""Metadata key an enricher uses to report the ``@mentions`` it resolved.
+
+The value is a list of mention tokens WITHOUT the leading ``@`` (for
+``@photo.png`` report ``"photo.png"``).  After every prompt enricher has
+run, the session removes the ``@`` from exactly those mentions and leaves
+every other ``@`` in the prompt byte-for-byte intact (#1429): an npm scope
+(``@jaato/sdk``), an email address or a decorator is the user's text, not a
+reference.  An enricher that resolves a mention and does not report it
+leaves the ``@`` in place, which is the safe direction.
+"""
+
+
 @dataclass
 class PromptEnrichmentResult:
     """Result of prompt enrichment by a plugin.
@@ -253,7 +266,10 @@ class PromptEnrichmentResult:
 
     Attributes:
         prompt: The (possibly modified) prompt text.
-        metadata: Optional metadata about the enrichment (e.g., detected references).
+        metadata: Optional metadata about the enrichment (e.g., detected
+            references).  A plugin that resolved ``@mentions`` lists them
+            under ``RESOLVED_MENTIONS_METADATA_KEY``; those, and only those,
+            lose their ``@`` before the prompt reaches the model.
     """
     prompt: str
     metadata: Dict[str, Any] = field(default_factory=dict)

@@ -474,6 +474,16 @@ class BedrockProvider(ModalityCapabilityMixin):
         """
         return max(1, len(content) // 4)
 
+    def get_max_output_tokens(self) -> int:
+        """The ``inferenceConfig.maxTokens`` every Converse request
+        carries (``api_params.max_tokens``, else ``DEFAULT_MAX_TOKENS``).
+
+        Reported so ``JaatoSession`` reserves it against the window
+        (#1444): the Anthropic family on Bedrock refuses a request whose
+        prompt plus ``maxTokens`` exceeds it.
+        """
+        return self._max_tokens
+
     def get_context_limit(self) -> int:
         """The configured context window.
 

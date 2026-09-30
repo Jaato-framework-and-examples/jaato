@@ -1133,6 +1133,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           contextLimit: (ev.context_limit as number | null | undefined) ?? prev?.contextLimit ?? null,
           percentUsed: (ev.percent_used as number | null | undefined) ?? prev?.percentUsed ?? null,
           tokensRemaining: (ev.tokens_remaining as number | null | undefined) ?? prev?.tokensRemaining ?? null,
+          reservedOutput: (ev.reserved_output_tokens as number | null | undefined) ?? prev?.reservedOutput ?? null,
           turns: (ev.turns as number | null | undefined) ?? prev?.turns ?? null,
           // Per event, never carried over: a figure from one source must not
           // be labelled with the previous event's source.

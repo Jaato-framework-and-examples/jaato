@@ -57,6 +57,7 @@ from jaato_server.shared import (
 )
 from jaato_server.shared.dynamic_instructions import DynamicInstructionsError
 from jaato_server.shared.instruction_suppression import normalize_suppression
+from jaato_server.shared.instruction_budget import effective_input_limit
 from jaato_server.shared.instruction_token_cache import InstructionTokenCache
 from jaato_server.shared.message_queue import SourceType
 from jaato_server.shared.subagent_report import (
@@ -2727,7 +2728,8 @@ class JaatoServer:
                     ),
                     context_limit=context_limit,
                     percent_used=usage.get('percent_used', 0.0),
-                    tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
+                    tokens_remaining=usage.get('tokens_remaining', 0),
+                    reserved_output_tokens=usage.get('reserved_output_tokens', 0),
                     turns=usage.get('turns', 0),
                 ))
 
@@ -3805,6 +3807,7 @@ class JaatoServer:
                 context_limit=context_limit,
                 percent_used=usage.get('percent_used', 0.0),
                 tokens_remaining=usage.get('tokens_remaining', context_limit),
+                reserved_output_tokens=usage.get('reserved_output_tokens', 0),
                 turns=usage.get('turns', 0),
             ))
             # GC config is emitted as its own event in v1.0+; see GCConfigEvent.
@@ -6460,9 +6463,13 @@ class JaatoServer:
                         payload_limit
                         or (getattr(server, "_cached_context_limit", None) or 0)
                     )
+                    # Against the effective input limit (#1444): the runner
+                    # reports the output cap each request reserves.
+                    reserved = int(payload.get("reserved_output_tokens", 0))
+                    effective = effective_input_limit(context_limit, reserved)
                     percent_used = (
-                        (total_tokens / context_limit * 100)
-                        if context_limit > 0 else 0
+                        (total_tokens / effective * 100)
+                        if effective > 0 else 0
                     )
                     turns = int(payload.get("turns", 0) or 0)
                     server.emit(ContextUpdatedEvent(
@@ -6482,7 +6489,8 @@ class JaatoServer:
                         ),
                         context_limit=context_limit,
                         percent_used=percent_used,
-                        tokens_remaining=max(0, context_limit - total_tokens),
+                        tokens_remaining=max(0, effective - total_tokens),
+                        reserved_output_tokens=reserved,
                         turns=turns,
                     ))
                     return
@@ -7187,6 +7195,7 @@ class JaatoServer:
                             context_limit=context_limit,
                             percent_used=usage.get('percent_used', 0),
                             tokens_remaining=usage.get('tokens_remaining', 0),
+                            reserved_output_tokens=usage.get('reserved_output_tokens', 0),
                             turns=usage.get('turns', 0),
                         ))
 
@@ -8700,6 +8709,7 @@ class JaatoServer:
                         context_limit=context_limit,
                         percent_used=usage.get('percent_used', 0.0),
                         tokens_remaining=usage.get('tokens_remaining', context_limit),
+                        reserved_output_tokens=usage.get('reserved_output_tokens', 0),
                         turns=usage.get('turns', 0),
                     ))
                     self.emit(GCConfigEvent(

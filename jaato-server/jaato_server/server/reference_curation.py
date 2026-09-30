@@ -91,6 +91,7 @@ from jaato_server.shared.plugins.references.claims import (
     claim_tags,
     is_claim,
     link_warnings,
+    pending_claim_ids,
     valid_id,
 )
 from jaato_server.shared.plugins.references.config_loader import discover_references
@@ -471,7 +472,10 @@ class ClaimsListing:
     bundles: List[Dict[str, Any]] = field(default_factory=list)
 
 
-def claim_row(claim: Dict[str, Any], *, root: str, ids: Set[str]) -> Dict[str, Any]:
+def claim_row(
+    claim: Dict[str, Any], *, root: str, ids: Set[str],
+    pending: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """One claim as the listing shows it to a PERSON.
 
     Name, description and inline content are passed as they are -- they are
@@ -480,7 +484,9 @@ def claim_row(claim: Dict[str, Any], *, root: str, ids: Set[str]) -> Dict[str, A
     curator sees why Promote would fail before pressing it.  ``links`` are
     the claim's declared edges (notes included, as text) and ``warnings``
     what the curator should know that does not block Promote -- today, an
-    edge whose target this workspace's catalog does not hold.
+    edge whose target this workspace's catalog does not hold, naming the
+    pending claim (``pending``: reference id -> claim id) when the target is
+    one, so promoting both is visibly what resolves it.
     """
     ref = claim["reference"]
     row: Dict[str, Any] = {
@@ -503,7 +509,7 @@ def claim_row(claim: Dict[str, Any], *, root: str, ids: Set[str]) -> Dict[str, A
     row["problems"] = problems
     if entry is not None and entry.get("links"):
         row["links"] = entry["links"]
-        row["warnings"] = link_warnings(entry["links"], ids)
+        row["warnings"] = link_warnings(entry["links"], ids, pending)
     return row
 
 
@@ -537,14 +543,17 @@ def list_claims(workspace: str) -> ClaimsListing:
     if not directory:
         return listing
     ids = catalog_ids(root)
+    claims: List[Dict[str, Any]] = []
     for name in sorted(os.listdir(directory)):
         if not name.endswith(".json"):
             continue
         data = _load_claim_file(os.path.join(directory, name))
         if is_claim(data) and name == f"{data['claim_id']}.json":
-            listing.claims.append(claim_row(data, root=root, ids=ids))
+            claims.append(data)
         else:
             listing.unreadable.append(name)
+    pending = pending_claim_ids(claims)
+    listing.claims = [claim_row(c, root=root, ids=ids, pending=pending) for c in claims]
     return listing
 
 

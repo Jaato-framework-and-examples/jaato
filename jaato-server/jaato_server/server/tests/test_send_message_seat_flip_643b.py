@@ -232,6 +232,7 @@ def test_usage_update_shim_emits_notification_frame() -> None:
             "thinking_tokens": 10,
             "cost_usd": 0.0123,
             "context_limit": 0,
+            "reserved_output_tokens": 0,
             "turns": 0,
         }
     finally:

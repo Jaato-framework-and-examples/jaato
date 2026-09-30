@@ -396,12 +396,18 @@ both land on the same dataclass:
    path §6 now has: **an agent may propose one, and nobody's edge takes
    effect until a person promotes the claim that carries it.** A claim
    never enters the catalog, so its `links` steer nothing while it is a
-   claim. `proposeReference` refuses an edge to an id the agent's own
-   catalog does not hold (the agent can see its catalog, so that is a
-   typo); the curator reads the edges in the listing, with a non-blocking
-   `warnings` entry for one the workspace catalog cannot place (the
-   daemon's catalog is the workspace tier only), and promotion is the
-   review.
+   claim. `proposeReference` refuses only a malformed edge. It first also
+   refused an edge to an id the agent's catalog did not hold, reasoning
+   that the agent can see its catalog, so an unknown target is a typo. A
+   demo disproved that: an agent writing three related pages proposes them
+   one at a time, so each page's siblings are never in the catalog when its
+   edges are checked, and the pages could not link to each other at all.
+   A wiki needs forward links (Wikipedia's red links). So the edge is kept, the
+   call's result names every target not in the catalog (`forward_links`,
+   with the sibling's `claim_id` when it is already proposed) so a real
+   typo still reaches the agent, the curator reads the edges in the
+   listing with a non-blocking `warnings` entry naming the pending claim
+   where there is one, and promotion is the review.
    The asymmetry the question names -- a wrong `supersedes` suppresses the
    article that should have been read -- is why that review is a human's.
 
