@@ -9240,6 +9240,24 @@ neither.
 Both argument displays use it: the tool row and the permission card's
 argument grid.
 
+### A Call to a Tool That Does Not Exist, Shown Quietly
+
+A model sometimes names a tool the session never offered (a hallucinated
+`t_<hex>` id, a misspelt name). The daemon refuses it without running
+anything, with `No executor registered for <name>` on every path, and the
+model nearly always reads that and calls the right tool next. The web
+client drew it as a red row, opened by default, with the refusal in a red
+plate: noise for most readers.
+
+`protocol/toolMisfire.ts` recognises that refusal, and the transcript
+(`store/transcript.ts`, mode `"misfire"`) folds such a call into one small
+muted `↷` line, *called a tool that does not exist: <name>*, collapsed; a
+click opens the ordinary row with the refusal. It takes no part in the
+recovery pairing or the housekeeping fold. A real tool's failure keeps its
+red row. The TUI is unchanged. Guards: `toolMisfire.test.ts`,
+`transcript.test.ts`, and an e2e case against the mock's `misfire`
+scenario.
+
 ### When GC Last Ran, What It Freed, and Which Policy (#1190)
 
 The Instructions panel showed what each layer held and each layer's GC

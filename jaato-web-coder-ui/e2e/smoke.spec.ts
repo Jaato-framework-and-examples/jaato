@@ -2082,3 +2082,20 @@ test("minimap rail: draws the transcript, tap and drag scrub with a turn label, 
   }).toPass({ timeout: 20_000 });
   await expect(page.getByTestId("minimap-more")).toHaveCount(0);
 });
+
+test("a call to a tool that does not exist is one muted line, and opens to the refusal", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please misfire");
+  await composer(page).press("Enter");
+  await expect(page.getByText("That tool is not in my list; using the right one.")).toBeVisible();
+  const line = page.getByRole("button", { name: /called a tool that does not exist: t_7ab511ea/ });
+  await expect(line).toBeVisible();
+  await expect(line).toHaveAttribute("aria-expanded", "false");
+  // No red row and no refusal text until asked for; the real call that
+  // followed (plan housekeeping) folds as it always does.
+  await expect(page.getByLabel("failed")).toHaveCount(0);
+  await expect(page.getByText(/No executor registered/)).toHaveCount(0);
+  await expect(page.getByText("1 internal call · setStepStatus")).toBeVisible();
+  await line.click();
+  await expect(page.getByText(/No executor registered for t_7ab511ea/)).toBeVisible();
+});

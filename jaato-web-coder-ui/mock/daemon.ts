@@ -29,6 +29,10 @@
  *   "ask long"  → the same, but the first question's choices are ~300 chars
  *                 each, so the card must wrap them inside the plate (#1245)
  *   "fail"      → a failing tool call
+ *   "…misfire"  → a call to a tool that does not exist (a hallucinated
+ *                 ``t_<hex>`` id), refused as the daemon refuses one
+ *                 (``No executor registered for …``), then text and a
+ *                 call to a real tool that succeeds
  *   "…notebook…" → a notebook_execute call whose output is one cell as the
  *                 daemon sends it: input / stdout / error <nb-row>s
  *   "…early…notebook…" → the early-exit error cell (no execution count);
@@ -980,6 +984,15 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     }
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "notebook_execute", call_id: callId, success: true, duration_seconds: 0.4, show_output: true });
     await stream(c, agentId, "The cell raised a ZeroDivisionError.");
+  } else if (lower.includes("misfire")) {
+    const bogus = "t_7ab511ea-c3ce-453b-b207-9831549a93f7";
+    const missId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: bogus, tool_args: { setStepStatus: "skipped" }, call_id: missId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: bogus, call_id: missId, success: false, error_message: `No executor registered for ${bogus}`, duration_seconds: 0.0 });
+    await stream(c, agentId, "That tool is not in my list; using the right one.");
+    const okId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "setStepStatus", tool_args: { status: "skipped" }, call_id: okId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "setStepStatus", call_id: okId, success: true, duration_seconds: 0.01 });
   } else if (lower.includes("fail")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "false" }, call_id: callId });
