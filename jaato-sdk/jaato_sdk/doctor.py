@@ -49,7 +49,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Import the SDK's own path constants so the doctor diagnoses exactly the
 # files the real client uses — never a re-declared copy that could drift.
@@ -380,6 +380,28 @@ def _unknown_reasons(report) -> List[str]:
     return sorted({s.error for _, s in report.unknown if s.error})
 
 
+def _install_lines(channel, packages) -> List[str]:
+    """How to install *packages* from *channel*, with every installer.
+
+    Every installer the channel documents, not just pip: a uv user told only
+    the pip form has to translate it, and the candidate channel's
+    translation is not a rename (see `release_channels`).  The commands name
+    the real packages and, on the candidate channel, the exact version found
+    — a package whose version cannot be pinned is named instead of being
+    given an unpinned command (#1455).
+    """
+    lines: List[str] = []
+    commands = channel.install_commands(packages)
+    if commands:
+        lines.append("    install with either:")
+        lines += [f"      {command}" for _, command in commands]
+    skipped = channel.unpinnable(packages)
+    if skipped:
+        lines.append("    no install command for " + ", ".join(skipped)
+                     + ": its version could not be pinned")
+    return lines
+
+
 def _updates_detail(report) -> str:
     """The notification itself: what is newer, where, and how to get it.
 
@@ -387,22 +409,17 @@ def _updates_detail(report) -> str:
     a property of the channel — a reader upgrading three packages from
     TestPyPI should see that command once, not three times.
     """
-    by_channel: Dict[str, List[str]] = {}
+    by_channel: Dict[str, List[Tuple[Any, Any]]] = {}
     for dist, status in report.updates:
-        by_channel.setdefault(status.channel.name, []).append(
-            _release_line(dist, status))
+        by_channel.setdefault(status.channel.name, []).append((dist, status))
     lines = ["a newer build is published:"]
     for channel in _releases.CHANNELS:
-        rows = by_channel.get(channel.name)
-        if not rows:
+        pairs = by_channel.get(channel.name)
+        if not pairs:
             continue
-        lines += [f"  {row}" for row in rows]
-        # Every installer the channel documents, not just pip: a uv user told
-        # only the pip form has to translate it, and the candidate channel's
-        # translation is three flags rather than one (see `release_channels`).
-        lines.append("    install with either:")
-        lines += [f"      {command}" for _, command
-                  in channel.install_commands("<package>")]
+        lines += [f"  {_release_line(d, s)}" for d, s in pairs]
+        lines += _install_lines(channel,
+                                [(d.name, s.latest) for d, s in pairs])
     reasons = _unknown_reasons(report)
     if reasons:
         # A partial answer presented as a whole one is the other way this

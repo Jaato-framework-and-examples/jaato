@@ -341,10 +341,20 @@ class Channel:
         allow_prereleases: Whether a pre-release may be this channel's
             answer.  See :func:`newest`.
         install_hint: The ``pip`` command that installs from this channel,
-            rendered with the distribution name.  A notification that does
-            not say how to act on it is half a notification.
+            with ``{requirements}`` where the requirement list goes.  A
+            notification that does not say how to act on it is half a
+            notification.
         uv_install_hint: The same thing for ``uv``.  Carried rather than
             derived — see :meth:`install_commands`.
+        pin_version: Whether each requirement must name the exact version
+            the report found (``"dist==version"``).  True for the candidate
+            channel: a specifier naming a pre-release admits pre-releases for
+            THAT requirement only (PEP 440), which is what lets its commands
+            carry no global pre-release flag.  A global flag (``--pre``,
+            ``--prerelease allow``) admits a pre-release of EVERY dependency
+            and installed pydantic 2.14.0b2 (#1455).  A package on a pinning
+            channel whose version is unknown or unparseable gets NO command
+            — never an unpinned one — see :meth:`unpinnable`.
     """
 
     name: str
@@ -353,81 +363,140 @@ class Channel:
     allow_prereleases: bool
     install_hint: str
     uv_install_hint: str
+    pin_version: bool = False
 
     def metadata_url(self, dist: str) -> str:
         """The JSON metadata endpoint for *dist* on this index."""
         return f"{self.base_url.rstrip('/')}/pypi/{dist}/json"
 
-    def install_command(self, dist: str) -> str:
-        """How to install *dist* from this channel with ``pip``."""
-        return self.install_hint.format(dist=dist)
+    def requirement(self, dist: str,
+                    version: Optional[str] = None) -> Optional[str]:
+        """The requirement string for *dist* on this channel, or ``None``.
 
-    def uv_install_command(self, dist: str) -> str:
-        """How to install *dist* from this channel with ``uv``."""
-        return self.uv_install_hint.format(dist=dist)
+        An unpinned channel names the bare distribution.  A pinning channel
+        names ``"dist==version"`` (quoted for the shell) and answers ``None``
+        when *version* is missing or not PEP 440: an unpinned requirement
+        there would need the global pre-release flag this exists to avoid.
+        """
+        if not self.pin_version:
+            return dist
+        if not version or parse_version(version) is None:
+            return None
+        return f'"{dist}=={version}"'
 
-    def install_commands(self, dist: str) -> Tuple[Tuple[str, str], ...]:
-        """``((installer, command), ...)`` for every installer we document.
+    def unpinnable(self, packages: Iterable[Tuple[str, Optional[str]]]
+                   ) -> List[str]:
+        """The distributions in *packages* this channel cannot render.
+
+        Renderers name them rather than dropping them silently.
+        """
+        return [dist for dist, version in packages
+                if self.requirement(dist, version) is None]
+
+    def install_commands(self, packages: Iterable[Tuple[str, Optional[str]]]
+                         ) -> Tuple[Tuple[str, str], ...]:
+        """``((installer, command), ...)`` installing *packages* from here.
+
+        Args:
+            packages: ``(distribution, version)`` pairs — the version the
+                report found on this channel (``ChannelStatus.latest``).
+                One command installs them all, so two candidates of one
+                release resolve together.
+
+        Returns:
+            One entry per installer we document, or ``()`` when no package
+            could be rendered (see :meth:`unpinnable`).
 
         Renderers loop over this rather than naming ``pip`` and ``uv``
         themselves, so a third installer is one field here and no edit in
         ``jaato-doctor`` or ``explain releases`` — which is what stops the
         two surfaces documenting different sets.
         """
-        return (("pip", self.install_command(dist)),
-                ("uv", self.uv_install_command(dist)))
+        reqs = [r for r in (self.requirement(d, v) for d, v in packages)
+                if r is not None]
+        if not reqs:
+            return ()
+        joined = " ".join(reqs)
+        return (("pip", self.install_hint.format(requirements=joined)),
+                ("uv", self.uv_install_hint.format(requirements=joined)))
 
 
 #: The channels, in the order a reader should consider them: what has shipped
 #: first, what is staged second.
 #:
-#: THE ``uv`` FORM OF THE CANDIDATE COMMAND IS NOT A FLAG RENAME, and getting
-#: that wrong is silent rather than loud — the naive translation runs cleanly
-#: and installs the wrong package.  Measured 2026-09-18 against the real
-#: indexes, with ``jaato-sdk`` 0.22.0 on PyPI and 0.23.0rc4 on TestPyPI:
+#: THE CANDIDATE COMMAND PINS THE CANDIDATE AND CARRIES NO GLOBAL PRE-RELEASE
+#: FLAG (#1455).  ``--pre`` (pip) and ``--prerelease allow`` (uv) admit a
+#: pre-release of every package, not only jaato's, and jaato-sdk's
+#: ``pydantic>=2.0,<3`` admits ``2.14.0b2``.  A specifier naming a
+#: pre-release admits pre-releases for that requirement only (PEP 440), so
+#: pinning ``"dist==version"`` lets pip drop ``--pre`` and uv use
+#: ``--prerelease if-necessary-or-explicit``.  Measured 2026-09-30 against
+#: the real indexes (pip 24.0 and uv 0.8.17 on Python 3.12, fresh venv;
+#: jaato-sdk 0.29.0 / jaato-server 1.2.0 on PyPI, 0.30.0rc1 / 1.3.0rc1 on
+#: TestPyPI; pydantic 2.13.5 stable, 2.14.0b2 newest):
+#:
+#:   pip install --dry-run -U --pre <indexes> jaato-sdk
+#:   -> jaato-sdk 0.30.0rc1, pydantic 2.14.0b2          (the old form)
+#:   uv pip install --dry-run -U --prerelease allow \
+#:       --index-strategy unsafe-best-match <indexes> jaato-sdk
+#:   -> jaato-sdk 0.30.0rc1, pydantic 2.14.0b2          (the old form)
+#:   pip install --dry-run -U <indexes> \
+#:       "jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"
+#:   uv pip install --dry-run -U --prerelease if-necessary-or-explicit \
+#:       --index-strategy unsafe-best-match <indexes> \
+#:       "jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"
+#:   -> both: the two candidates, pydantic 2.13.5, and the same 60 packages
+#:      with no other pre-release among them
+#:
+#: where ``<indexes>`` is ``--index-url https://test.pypi.org/simple/
+#: --extra-index-url https://pypi.org/simple/``.
+#:
+#: THE ``uv`` FORM IS STILL NOT A FLAG RENAME.  Measured 2026-09-18, with
+#: ``jaato-sdk`` 0.22.0 on PyPI and 0.23.0rc4 on TestPyPI, the unpinned naive
+#: translation ran cleanly and installed the wrong package:
 #:
 #:   uv pip install -U --prerelease allow \
 #:       --index-url https://test.pypi.org/simple/ \
 #:       --extra-index-url https://pypi.org/simple/ jaato-sdk
 #:   -> jaato-sdk==0.22.0            the PyPI STABLE, not the candidate
 #:
-#: Two differences produce that, and each needs its own flag:
+#: uv gives ``--extra-index-url`` priority OVER ``--index-url`` (pip's
+#: precedence is the reverse) and defaults to ``--index-strategy
+#: first-index``, so the first index holding the name wins outright.
+#: ``--index-strategy unsafe-best-match`` restores pip's rule — consider
+#: every index, take the best version.  With the pin it is still needed:
+#: measured 2026-09-30, the pinned uv command without it fails to resolve
+#: (``jaato-sdk==0.30.0rc1`` is not on PyPI, the first index holding the
+#: name) — loud now rather than silent, but a documented command that does
+#: not work.  Its name is uv's own and it is accurate: reaching across
+#: indexes for a best version is how a dependency-confusion substitution
+#: gets in, which is a property of ``--extra-index-url`` in BOTH tools
+#: rather than something uv adds.
 #:
-#:   * ``--pre`` is ``--prerelease allow``; uv has no ``--pre``.
-#:   * uv gives ``--extra-index-url`` priority OVER ``--index-url`` (pip's
-#:     precedence is the reverse) and defaults to ``--index-strategy
-#:     first-index``, so the first index holding the name wins outright.
-#:     ``--index-strategy unsafe-best-match`` restores pip's rule — consider
-#:     every index, take the best version — and is what makes the two
-#:     commands resolve the same thing.  Its name is uv's own and it is
-#:     accurate: reaching across indexes for a best version is how a
-#:     dependency-confusion substitution gets in, which is a property of
-#:     ``--extra-index-url`` in BOTH tools rather than something uv adds.
-#:
-#: Verified equal: both commands resolve ``jaato-sdk==0.23.0rc4`` and the
-#: same seven packages.  Spelling the flags out here rather than deriving
-#: them from the pip string is deliberate — they are not a transformation of
-#: it, and a helper that pretended otherwise would re-introduce exactly the
-#: wrong-package failure above.
+#: Spelling the flags out here rather than deriving them from the pip string
+#: is deliberate — they are not a transformation of it.
 CHANNELS: Tuple[Channel, ...] = (
     Channel(name="pypi",
             label="production release",
             base_url="https://pypi.org",
             allow_prereleases=False,
-            install_hint="pip install -U {dist}",
-            uv_install_hint="uv pip install -U {dist}"),
+            install_hint="pip install -U {requirements}",
+            uv_install_hint="uv pip install -U {requirements}"),
     Channel(name="testpypi",
             label="release candidate",
             base_url="https://test.pypi.org",
             allow_prereleases=True,
-            install_hint=("pip install -U --pre --index-url "
+            install_hint=("pip install -U --index-url "
                           "https://test.pypi.org/simple/ "
-                          "--extra-index-url https://pypi.org/simple/ {dist}"),
-            uv_install_hint=("uv pip install -U --prerelease allow "
+                          "--extra-index-url https://pypi.org/simple/ "
+                          "{requirements}"),
+            uv_install_hint=("uv pip install -U "
+                             "--prerelease if-necessary-or-explicit "
                              "--index-strategy unsafe-best-match "
                              "--index-url https://test.pypi.org/simple/ "
                              "--extra-index-url https://pypi.org/simple/ "
-                             "{dist}")),
+                             "{requirements}"),
+            pin_version=True),
 )
 
 #: Seconds a fetched answer stays good.  An index does not publish often and
