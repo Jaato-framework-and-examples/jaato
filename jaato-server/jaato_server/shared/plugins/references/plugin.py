@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ from .links import (
 )
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import (
+    config_path_candidates,
     load_config,
     ReferencesConfig,
     discover_references,
@@ -87,6 +89,7 @@ from .merge import (
     parse_merge_args,
 )
 from .reconcile import ReconcileResult, ReconcileStatus, reconcile_bundle
+from . import catalog_watch
 from .claims import (
     CLAIMS_DIRNAME,
     build_proposed_reference,
@@ -204,6 +207,15 @@ _UNBOUNDED_EXPANSION_WARN_AT = 50
 # in the catalog yet.  Kept, not refused: pages proposed together link to
 # each other before any of them is promoted.  A target with no claim_id is
 # either a page still to be proposed or a typo, and only the agent knows.
+#: Said beside ``catalog_changed``: the catalog was reloaded from disk mid-session.
+_CATALOG_CHANGED_NOTE = (
+    "The reference catalog changed on disk since your last look (another "
+    "session promoted or edited references) and was reloaded. 'added' are "
+    "new ids you can select; a selection under 'dropped_selected' is no "
+    "longer in the catalog, so its content you already read may be stale and "
+    "its files are no longer authorized."
+)
+
 _FORWARD_LINKS_NOTE = (
     "These edges point at references not in the catalog yet. They are kept "
     "and take effect once the target is promoted. One with a 'claim_id' is "
@@ -327,6 +339,33 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._surfaced_mention_ids: Set[str] = set()
         self._surfaced_tag_matched_ids: Set[str] = set()
         self._surfaced_semantic_ids: Set[str] = set()
+        # Catalog refresh (#1145).  A session loads its catalog once, and
+        # other sessions (a promotion, a link edit) or other tools write
+        # the files afterwards.  ``_catalog_watch`` holds the stamps of the
+        # directories and config files this session loaded from
+        # (``catalog_watch``); every read path asks whether one moved and
+        # reloads through ``_reload_from_disk`` when it did.  Off when the
+        # catalog did not come from disk alone (inline ``sources``) or when
+        # ``plugin_configs.references.refresh_catalog`` is false.
+        self._refresh_catalog: bool = True
+        self._catalog_watch: Dict[str, Any] = {}
+        # Stamps taken as a load BEGAN, settled against the ones taken as
+        # it ended (``catalog_watch.settle``), so a write that raced the
+        # load forces the next check to reload.
+        self._catalog_watch_pre: Dict[str, Any] = {}
+        self._catalog_lock = threading.RLock()
+        # What the refreshes since the model last called listReferences /
+        # selectReferences changed: added / removed ids and the selections
+        # a removal dropped.  Reported once on the next of those results.
+        self._pending_catalog_change: Dict[str, Set[str]] = {}
+        # ``initialize(config)``'s ``config_path`` and the config the bundle
+        # matchers were built from, so a reload reads the same file and
+        # re-attaches the same matchers.
+        self._config_path: Optional[str] = None
+        self._matcher_config: Dict[str, Any] = {}
+        # The tier roots the last bundle discovery walked; watched with
+        # every bundle directory it found.
+        self._catalog_roots: List[str] = []
 
     @property
     def name(self) -> str:
@@ -472,8 +511,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         Args:
             workspace_path: The workspace root path to scan for references.
         """
+        self._begin_catalog_load(workspace_path)
         try:
-            self._config = load_config(None, workspace_path=workspace_path)
+            self._config = load_config(self._config_path, workspace_path=workspace_path)
         except FileNotFoundError:
             self._config = ReferencesConfig()
 
@@ -485,6 +525,124 @@ class ReferencesPlugin(RunnerForwardingMixin):
             f"_reload_catalog: reloaded {len(self._sources)} sources "
             f"from workspace={workspace_path}"
         )
+
+    # ----- Catalog refresh (#1145) -----
+
+    @staticmethod
+    def _refresh_allowed(config: Dict[str, Any]) -> bool:
+        """Whether this session refreshes its catalog from disk (#1145).
+
+        Off when the profile says ``refresh_catalog: false``, and off for a
+        config carrying inline ``sources``: a refresh reloads from disk,
+        which would replace that list with the disk catalog.
+        """
+        return config.get("refresh_catalog") is not False and "sources" not in config
+
+    def _remember_catalog_roots(self, roots) -> None:
+        """Record the bundle tier roots, so a new sub-bundle is a change (#1145)."""
+        self._catalog_roots = [str(path) for path, _tier in roots]
+
+    def _reattach_matchers(self) -> None:
+        """Rebuild the bundles' similarity matchers after a reload.
+
+        A reload replaces ``self._bundles``, so matchers attached at
+        ``initialize()`` are gone.  Only when an embedding provider exists
+        and the strategy uses one; with ``tags_only`` there is nothing to
+        attach.
+        """
+        if (
+            self._embedding_provider is not None
+            and self._lookup_strategy in ("hybrid", "semantic_only")
+        ):
+            self._init_bundle_matchers(self._matcher_config)
+
+    def _catalog_watch_paths(self, workspace: Optional[str] = None) -> List[str]:
+        """Every path whose change means the loaded catalog may be stale.
+
+        The directory ``load_config`` auto-discovers from, the tier roots
+        and every bundle directory the last discovery walked (a new
+        sub-bundle is a new directory in a root, so the root covers it),
+        and each ``references.json`` the loader could pick. Directory
+        stamps catch a created, deleted or replaced reference file; see
+        ``catalog_watch`` for what they do not catch.
+        """
+        workspace = workspace or self._workspace_path or self._project_root
+        paths: Set[str] = set(self._catalog_roots)
+        paths.update(str(b.directory) for b in self._bundles)
+        refs_dir = Path(
+            self._config.references_dir if self._config else ".jaato/references"
+        )
+        if not refs_dir.is_absolute() and workspace:
+            refs_dir = Path(workspace) / refs_dir
+        if refs_dir.is_absolute():
+            paths.add(str(refs_dir))
+        paths.update(config_path_candidates(self._config_path, workspace))
+        return sorted(paths)
+
+    def _begin_catalog_load(self, workspace: Optional[str] = None) -> None:
+        """Stamp the watched paths as a load begins (see ``catalog_watch.settle``)."""
+        self._catalog_watch_pre = catalog_watch.stat_paths(
+            self._catalog_watch_paths(workspace)
+        )
+
+    def _end_catalog_load(self) -> None:
+        """Record what the load that just ended read from."""
+        post = catalog_watch.stat_paths(self._catalog_watch_paths())
+        self._catalog_watch = catalog_watch.settle(self._catalog_watch_pre, post)
+        self._catalog_watch_pre = {}
+
+    def _refresh_catalog_if_changed(self) -> Optional[Dict[str, Any]]:
+        """Reload the catalog when a file it came from changed on disk.
+
+        Called at the top of every read path the model reaches
+        (``listReferences``, ``selectReferences``, ``proposeReference``,
+        prompt enrichment), so a reference another session promoted, or a
+        link a person edited, is in this session's catalog before the
+        lookup that needs it. Not on a miss: the model finds references by
+        tag and similarity, so it cannot ask for an id it does not know.
+
+        The check is one ``stat`` per watched path. A reload goes through
+        :meth:`_reload_from_disk`, the path ``references reload`` takes,
+        so authorizations and selections are handled the same way. What
+        changed is added to ``_pending_catalog_change`` for the next
+        listReferences / selectReferences result.
+
+        Returns:
+            The reload's result when one ran, else ``None``.
+        """
+        if not self._refresh_catalog or not self._catalog_watch:
+            return None
+        if not (self._workspace_path or self._project_root):
+            return None
+        with self._catalog_lock:
+            if not catalog_watch.has_changed(self._catalog_watch):
+                return None
+            result = self._reload_from_disk()
+            if "error" in result:
+                return None
+            for key in ("added", "removed", "dropped_selected"):
+                if result.get(key):
+                    self._pending_catalog_change.setdefault(key, set()).update(result[key])
+            self._trace(
+                "catalog refresh: files changed on disk; "
+                f"added={result.get('added', [])} removed={result.get('removed', [])} "
+                f"dropped_selected={result.get('dropped_selected', [])}"
+            )
+            return result
+
+    def _take_catalog_change(self) -> Dict[str, Any]:
+        """The ``catalog_changed`` block for one result, then forget it.
+
+        Empty when nothing changed since the last report.
+        """
+        if not self._pending_catalog_change:
+            return {}
+        change = {k: sorted(v) for k, v in self._pending_catalog_change.items() if v}
+        self._pending_catalog_change = {}
+        if not change:
+            return {}
+        change["note"] = _CATALOG_CHANGED_NOTE
+        return {"catalog_changed": change}
 
     def _authorize_source_path(self, source: ReferenceSource) -> bool:
         """Authorize a source's path for readonly access at every layer.
@@ -1474,6 +1632,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # workspace-tier catalog is loaded by set_workspace_path() ->
         # _reload_catalog().
         config_path = config.get("config_path")
+        self._config_path = config_path
+        self._begin_catalog_load(inline_base_path)
         try:
             self._config = load_config(config_path, workspace_path=inline_base_path)
         except FileNotFoundError:
@@ -1566,6 +1726,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             config.get("max_transitive_references")
         )
         self._require_curation = config.get("require_curation") is True
+        self._refresh_catalog = self._refresh_allowed(config)
+        self._matcher_config = config
         self._witness_proposals = config.get("witness_proposals") is True
         if self._transitive_enabled and self._selected_source_ids:
             # Build complete catalog including inline sources
@@ -1744,6 +1906,18 @@ class ReferencesPlugin(RunnerForwardingMixin):
             self._semantic_matcher = matcher
 
     def _discover_and_load_bundles(self) -> None:
+        """Populate ``self._bundles``, merge bundle refs, and stamp the load.
+
+        Every load of the catalog ends here, so this is where the session
+        records what it loaded from (:meth:`_end_catalog_load`): the stamps
+        a later :meth:`_refresh_catalog_if_changed` compares against.
+        """
+        try:
+            self._load_bundles()
+        finally:
+            self._end_catalog_load()
+
+    def _load_bundles(self) -> None:
         """Populate ``self._bundles`` and merge bundle refs into the catalog.
 
         Walks both tier roots (workspace then user) via
@@ -1813,6 +1987,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 roots.append((path, tier))
                 break
 
+        self._remember_catalog_roots(roots)
         self._bundles = discover_bundles(roots)
 
         if not self._bundles:
@@ -2137,6 +2312,19 @@ class ReferencesPlugin(RunnerForwardingMixin):
                         "from any starting point."
                     ),
                 },
+                "refresh_catalog": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Reload the catalog when its files change on disk "
+                        "(another session promoted or edited a reference), "
+                        "checked with one stat per catalog directory before "
+                        "each listReferences / selectReferences / "
+                        "proposeReference call and each prompt. Off: the "
+                        "catalog is loaded once, until 'references reload'. "
+                        "Always off when the config lists inline sources."
+                    ),
+                },
                 "require_curation": {
                     "type": "boolean",
                     "default": False,
@@ -2375,13 +2563,29 @@ class ReferencesPlugin(RunnerForwardingMixin):
         callers see the same ``(success, message)`` tuple shape.
         """
         return self.wrap_executors_for_runner_forwarding({
-            "selectReferences": self._execute_select,   # model tool
-            "listReferences": self._execute_list,        # model tool
+            "selectReferences": self._refreshing(self._execute_select),   # model tool
+            "listReferences": self._refreshing(self._execute_list),        # model tool
             "validateReference": self._execute_validate_reference,  # model tool
             "compute_embedding": self._execute_compute_embedding,  # model tool (gen-references agent)
             "proposeReference": self._execute_propose,   # model tool (agent write path)
             "references": self._execute_references_cmd,  # user command (refs + nested bundle ops)
         })
+
+    def _refreshing(self, execute: Callable[[Dict[str, Any]], Any]) -> Callable[[Dict[str, Any]], Any]:
+        """``execute`` behind a catalog refresh, reporting what changed (#1145).
+
+        The catalog is refreshed first (:meth:`_refresh_catalog_if_changed`),
+        so the call reads the catalog as it is on disk now. A result dict
+        gains ``catalog_changed`` when a refresh since the last report
+        added or removed references; it is reported once.
+        """
+        def run(args: Dict[str, Any]) -> Any:
+            self._refresh_catalog_if_changed()
+            result = execute(args)
+            if isinstance(result, dict):
+                result.update(self._take_catalog_change())
+            return result
+        return run
 
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute model-driven reference selection by ID or tags.
@@ -2772,6 +2976,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         workspace = self._workspace_path or self._project_root
         if not workspace:
             return False, {"error": "No workspace is bound; a claim has nowhere to go."}
+        # A target promoted since this session loaded is not a forward link.
+        self._refresh_catalog_if_changed()
         entry, errors = build_proposed_reference(
             args, workspace=workspace,
             catalog_ids=[s.id for s in self._sources],
@@ -4873,16 +5079,36 @@ class ReferencesPlugin(RunnerForwardingMixin):
         }
 
     def _cmd_references_reload(self) -> Dict[str, Any]:
-        """Execute 'references reload'.
+        """Execute 'references reload': :meth:`_reload_from_disk`, and say so."""
+        with self._catalog_lock:
+            return self._reload_from_disk()
 
-        Reloads the reference catalog from disk (config files and
-        .jaato/references/ directory).  Previously selected sources are
-        preserved when they still exist in the reloaded catalog; selections
-        whose IDs are no longer present are dropped and their sandbox
-        authorizations revoked.
+    def _reload_from_disk(self) -> Dict[str, Any]:
+        """Reload the whole catalog from disk, keeping what still exists.
 
-        After reloading, transitive resolution is re-applied for any
-        surviving selections.
+        The one reload path: ``references reload``, the refresh a changed
+        file triggers (:meth:`_refresh_catalog_if_changed`) and the bundle
+        subsystem's ``reload_catalog`` all come here.
+
+        1. Every selected reference's path is deauthorized, and the
+           plugin's authorized paths cleared.
+        2. The catalog is reloaded: the workspace root through
+           ``load_config``, then every bundle and the user tier
+           (:meth:`_discover_and_load_bundles`). The bundle half used to
+           be skipped, so ``references reload`` dropped every sub-bundle
+           and user-tier reference.
+        3. Selections still in the catalog are re-authorized; those that
+           are gone are dropped (``dropped_selected``). Their files are no
+           longer readable through the sandbox, and nothing else is done
+           about content the model already read.
+        4. Transitive resolution is re-applied to the surviving selections.
+        5. Bundle matchers are re-attached: the reload built new bundle
+           objects, and a matcher on the old ones would search a stale
+           sidecar or none. Nothing is reconciled here; a bundle whose
+           index lacks a new reference is matched by tags until the next
+           ``reconcile``.
+
+        The caller holds ``_catalog_lock``.
         """
         workspace = self._workspace_path or self._project_root
         if not workspace:
@@ -4902,8 +5128,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if self._plugin_registry:
             self._plugin_registry.clear_authorized_paths(self._name)
 
-        # Reload catalog from disk
+        # Reload catalog from disk: the workspace root, then bundles and
+        # the user tier.
         self._reload_catalog(workspace)
+        self._discover_and_load_bundles()
 
         new_ids = set(s.id for s in self._sources)
         added = new_ids - prev_ids
@@ -4945,6 +5173,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 src = next((s for s in self._sources if s.id == ref_id), None)
                 if src and ref_id not in surviving_selected:
                     self._authorize_source_path(src)
+
+        self._reattach_matchers()
 
         self._trace(
             f"references reload: sources={len(self._sources)}, "
@@ -5546,7 +5776,17 @@ class ReferencesPlugin(RunnerForwardingMixin):
         Returns:
             PromptEnrichmentResult with expanded/hinted references.
         """
-        return self._enrich_content(prompt, "prompt")
+        refresh = self._refresh_catalog_if_changed()
+        result = self._enrich_content(prompt, "prompt")
+        dropped = (refresh or {}).get("dropped_selected")
+        if dropped:
+            # The turn boundary: say it before the model relies on a
+            # selection that is gone, not only in the next references call.
+            result.prompt += "\n\n" + framework_note(
+                "References you selected were removed from the catalog on "
+                f"disk and are no longer authorized: {', '.join(dropped)}."
+            )
+        return result
 
     # ==================== Tool Result Enrichment ====================
 
