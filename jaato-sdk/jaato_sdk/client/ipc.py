@@ -733,7 +733,10 @@ class IPCClient:
         — both declarative and programmatic styles are preserved.  Connection
         knobs (``socket_path``, ``env_file``, ``workspace_path``, ``auto_start``,
         ``client_type``, ``connect_timeout``) and ``on_permission`` have sensible
-        defaults.  See ``docs/design/sdk-convenience-layer.md``.
+        defaults.  ``session_timeout`` (unset = 60s) is forwarded as
+        :meth:`create_session`'s ``timeout`` -- the ``session.new``
+        confirmation budget, distinct from ``connect_timeout``; raise it on a
+        busy or shared daemon.  See ``docs/design/sdk-convenience-layer.md``.
         """
         from .convenience import open_session
         return open_session(cls, **kwargs)

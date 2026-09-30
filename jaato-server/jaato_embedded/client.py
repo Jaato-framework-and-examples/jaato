@@ -1041,6 +1041,12 @@ class _InProcessSessionContext:
         # registered after connect but BEFORE create_session, so the schema
         # reaches the session's initial wire (exactly like IPC's _SessionContext).
         client_tools = self._kwargs.pop("client_tools", None)
+        # ``session_timeout`` bounds a DAEMON's session.new confirmation
+        # (#1450).  An embedded session is created in this process with no
+        # confirmation to wait for, so the knob is accepted and has nothing to
+        # bound -- the "ignored by the other transports" rule jaato.session()
+        # states, which keeps one spec runnable under every mode.
+        self._kwargs.pop("session_timeout", None)
         # Resolve the session spec into connection kwargs so both clients take
         # an identical spec (the transport-agnostic entry forwards ``profile``
         # unchanged):
