@@ -1183,6 +1183,27 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
     # ==================== Token Management ====================
 
+    def get_max_output_tokens(self) -> Optional[int]:
+        """The output cap this provider puts on every request, or ``None``.
+
+        The value is read from the same ``self._api_params`` that
+        :meth:`_apply_api_params` (chat wire, where it is sent under
+        ``_MAX_TOKENS_WIRE_NAME``) and the Responses transport
+        (``max_output_tokens``) forward verbatim, so it is exactly the
+        number on the request.  Only one of the two keys can be present:
+        each wire filters ``api_params`` to its own allow-list.
+
+        ``None`` means no cap is sent and the vendor applies its own.
+        ``JaatoSession`` reads this to size the effective input limit
+        (``context_limit - reserved_output``, #1444).  A subclass that
+        adds a cap of its own (MiniMax's recommended default) overrides it.
+        """
+        for key in ("max_tokens", "max_output_tokens"):
+            value = self._api_params.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+        return None
+
     def count_tokens(self, content: str) -> int:
         """Estimate tokens (~4 chars/token); OpenAI-compat APIs expose no
         token-count endpoint."""

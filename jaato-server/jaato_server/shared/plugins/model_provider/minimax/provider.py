@@ -280,11 +280,26 @@ class MiniMaxProvider(OpenAICompatProvider):
 
     def _apply_api_params(self, kwargs: Dict[str, Any], tool_choice: Optional[Any]) -> None:
         """The base's forwarding, then the recommended output cap when the
-        profile set none (the vendor's own default truncates tool JSON)."""
+        profile set none (the vendor's own default truncates tool JSON).
+
+        The value comes from :meth:`get_max_output_tokens`, so what the
+        context checks reserve is what is sent."""
         super()._apply_api_params(kwargs, tool_choice)
-        recommended = _longest_prefix(RECOMMENDED_MAX_OUTPUT, self._model_name or "")
-        if recommended:
-            kwargs.setdefault("max_completion_tokens", recommended)
+        reserved = self.get_max_output_tokens()
+        if reserved:
+            kwargs.setdefault("max_completion_tokens", reserved)
+
+    def get_max_output_tokens(self) -> Optional[int]:
+        """The profile's ``api_params.max_tokens``, else the model's
+        recommended cap (M3 131072, M2.x 65536).
+
+        MiniMax counts input PLUS this reservation against the window,
+        so a 1M M3 window takes about 869k of input (#1444).
+        """
+        explicit = super().get_max_output_tokens()
+        if explicit:
+            return explicit
+        return _longest_prefix(RECOMMENDED_MAX_OUTPUT, self._model_name or "") or None
 
     def complete(self, messages, system_instruction=None, tools=None, **kwargs) -> TurnResult:
         """The base's completion, then any ``<think>`` block that leaked

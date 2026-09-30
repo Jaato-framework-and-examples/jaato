@@ -1632,6 +1632,47 @@ from `.jaato/gc.json`; both layers pass a key only when it is present, so
 omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
 charge rather than silently overriding it.
 
+### The Output a Request Reserves Is Not Room (#1444)
+
+A MiniMax-M3 session died on `context window exceeds limit (2013)` while
+the readout said 91.9% used and 80.9k remaining. MiniMax counts input PLUS
+the output a request reserves against the window, and every M3 request
+reserves `max_completion_tokens: 131072`, so a 1M window takes about 869k
+of input. The pre-send guard added a cap only for the three providers
+that exposed one, and GC and the readout ignored it entirely.
+
+`instruction_budget.effective_input_limit(context_limit, reserved_output)`
+is the one definition, `context_limit - reserved_output`, and everything
+that asks "how full is this" reads it:
+
+| Reader | Where |
+|---|---|
+| the pre-send guard | `JaatoSession._assert_payload_fits_context` (re-reads the reservation before each send) |
+| the GC threshold | `InstructionBudget.utilization_percent`, so `get_context_usage()['percent_used']` and every `should_collect`; the proactive streaming check via `get_effective_input_limit()` |
+| the budget GC target | `gc_budget` collects down to `target_percent` of the effective limit |
+| the readout | `get_context_usage` (`tokens_remaining`, plus `reserved_output_tokens` / `effective_input_limit`), `ContextUpdatedEvent.reserved_output_tokens` (additive, no protocol bump: absent reads as 0), the web Context block's "reserved for output" row |
+
+The reservation comes from `provider.get_max_output_tokens()`, which every
+provider that puts a cap on the request implements and which returns
+exactly the value sent: the `_openai_compat` base (`api_params.max_tokens`
+under `_MAX_TOKENS_WIRE_NAME`, or the Responses wire's `max_output_tokens`),
+MiniMax (profile value, else its recommended cap, which `_apply_api_params`
+now reads from the same method), Anthropic and its Ollama / Zhipu
+inheritors (override, else extended or default, and `complete()` sends
+this value), Bedrock, GitHub Models, Antigravity for Claude models, vLLM,
+OpenRouter, TensorRT-LLM. Google GenAI and Antigravity's Gemini models
+answer `None`: Gemini documents input and output limits as separate
+budgets. `None` means reserve nothing. It is stamped where the window is
+(`_refresh_context_limit_from_provider`, so a tier switch re-reads it).
+
+Not covered: the per-chunk `on_agent_context_updated` hook for subagents
+carries a net percentage but its `tokens_remaining` is still the raw
+window, because the hook's signature is a public protocol.
+
+Guard: `jaato_server/shared/tests/test_context_checks_reserve_output_1444.py`,
+three reversions, plus an AST scan that fails any provider package writing
+an output cap into a request without implementing `get_max_output_tokens()`.
+
 ### A Strategy Resolved, Carried, Rendered — and Installed on Nobody (#1133)
 
 `JaatoSession._gc_plugin` has two writers, both inside `set_gc_plugin` /

@@ -12562,6 +12562,7 @@ class SessionManager:
                         context_limit=usage.get('context_limit', 0),
                         percent_used=usage.get('percent_used', 0.0),
                         tokens_remaining=usage.get('tokens_remaining', 0),
+                        reserved_output_tokens=usage.get('reserved_output_tokens', 0),
                         turns=usage.get('turns', 0),
                     ))
                     logger.debug(f"Emitted ContextUpdatedEvent: {usage.get('percent_used', 0.0):.1f}% used")
@@ -12846,7 +12847,8 @@ class SessionManager:
                     ),
                     context_limit=context_limit,
                     percent_used=usage.get('percent_used', 0.0),
-                    tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
+                    tokens_remaining=usage.get('tokens_remaining', 0),
+                    reserved_output_tokens=usage.get('reserved_output_tokens', 0),
                     turns=usage.get('turns', 0),
                 ))
 

@@ -121,6 +121,25 @@ describe("the panel", () => {
     expect(screen.getByText("remaining")).toBeTruthy();
   });
 
+  it("names the output each request reserves, and only when there is one (#1444)", () => {
+    useJaato.getState().dispatch([
+      budgetEvent(),
+      ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 750_000 },
+           context_limit: 1_000_000, percent_used: 86.3, tokens_remaining: 118_928,
+           reserved_output_tokens: 131_072 }),
+    ]);
+    const { unmount } = render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByText("reserved for output")).toBeTruthy();
+    unmount();
+
+    useJaato.getState().dispatch([
+      ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 10 },
+           context_limit: 1000, percent_used: 1, reserved_output_tokens: 0 }),
+    ]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.queryByText("reserved for output")).toBeNull();
+  });
+
   it("says WHICH readout is missing when the daemon has reported no budget", () => {
     useJaato.getState().dispatch([
       ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 10 }, context_limit: 1000, percent_used: 1 }),

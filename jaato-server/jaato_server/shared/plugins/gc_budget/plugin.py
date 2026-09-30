@@ -293,7 +293,9 @@ class BudgetGCPlugin:
 
         # Calculate target tokens
         current_tokens = budget.total_tokens()
-        target_tokens = int(budget.context_limit * config.target_percent / 100)
+        # Of the effective input limit, not the raw window: the output a
+        # request reserves is not room the history can use (#1444).
+        target_tokens = int(budget.effective_input_limit() * config.target_percent / 100)
         tokens_to_free = current_tokens - target_tokens
 
         if tokens_to_free <= 0:
