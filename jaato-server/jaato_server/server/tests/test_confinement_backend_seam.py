@@ -38,6 +38,16 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SELINUX,
+        find='    if kernel.allowed(target, exe, "file", "entrypoint") is not True:\n',
+        replace="    if False:\n",
+        test="test_readiness_names_the_first_failing_check",
+        because="on the targeted policy unconfined_t may transition to every "
+                "domain, so without the entrypoint check a host whose "
+                "interpreter the module does not cover reads as ready "
+                "(phase 0, experiment 5.8)",
+    ),
+    Reversion(
+        target=_SELINUX,
         find='        """``False`` until provisioning exists, whatever the host says."""\n'
              "        return False\n",
         replace='        """``False`` until provisioning exists, whatever the host says."""\n'
@@ -132,13 +142,21 @@ def test_a_probe_that_raises_is_an_unavailable_backend():
 # ---------------------------------------------------------------- SELinux
 
 
+_OWN = "system_u:system_r:unconfined_service_t:s0"
+_EXE = "system_u:object_r:bin_t:s0"
+
+
 class _FakeKernel:
-    def __init__(self, contexts=(), mls=True, own="system_u:system_r:unconfined_service_t:s0",
-                 transition=True):
+    """A policy in which only what the fields grant is allowed."""
+
+    def __init__(self, contexts=(), mls=True, own=_OWN, transition=True,
+                 entrypoint=True, exe=_EXE):
         self.contexts = set(contexts)
         self.mls = mls
         self.own = own
         self.transition = transition
+        self.entrypoint = entrypoint
+        self.exe = exe
 
     def context_valid(self, context):
         return context in self.contexts
@@ -149,11 +167,22 @@ class _FakeKernel:
     def current_context(self):
         return self.own
 
-    def may_transition(self, source, target):
-        return self.transition
+    def file_context(self, path):
+        return self.exe
+
+    def allowed(self, source, target, tclass, perm):
+        if (tclass, perm) == ("process", "transition"):
+            return self.transition
+        if (tclass, perm) == ("file", "entrypoint"):
+            return self.entrypoint if target == self.exe else False
+        return False
 
 
-_POLICY = (RUNNER_PROBE_CONTEXT, policy_marker_context(1))
+# The module loaded, with the runner domain authorized for the daemon's role.
+_POLICY = (
+    RUNNER_PROBE_CONTEXT, policy_marker_context(1),
+    "system_u:system_r:jaato_runner_t:s0",
+)
 
 
 def _selinux(kernel=None, enforcing=True, system="Linux", mounted=True):
@@ -162,6 +191,7 @@ def _selinux(kernel=None, enforcing=True, system="Linux", mounted=True):
         host_enforcing=lambda: enforcing,
         system=lambda: system,
         mount_present=lambda: mounted,
+        interpreter=lambda: "/usr/bin/python3.12",
     )
 
 
@@ -174,7 +204,12 @@ def _selinux(kernel=None, enforcing=True, system="Linux", mounted=True):
     (_selinux(_FakeKernel([RUNNER_PROBE_CONTEXT])), "older than version 1"),
     (_selinux(_FakeKernel(_POLICY, mls=False)), "MLS/MCS"),
     (_selinux(_FakeKernel(_POLICY, own=None)), "own context"),
+    (_selinux(_FakeKernel(_POLICY, own="garbage")), "could not be parsed"),
+    (_selinux(_FakeKernel(_POLICY, own="unconfined_u:unconfined_r:unconfined_t:s0")),
+     "unconfined_u:unconfined_r are not authorized"),
     (_selinux(_FakeKernel(_POLICY, transition=None)), "may not transition"),
+    (_selinux(_FakeKernel(_POLICY, exe=None)), "label could not be read"),
+    (_selinux(_FakeKernel(_POLICY, entrypoint=False)), "as an entrypoint"),
 ])
 def test_readiness_names_the_first_failing_check(backend, reason):
     readiness = backend.host_readiness()

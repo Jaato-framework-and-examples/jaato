@@ -207,6 +207,15 @@ The daemon itself stays in whatever domain systemd gives it
 The module grants `unconfined_service_t` (and `unconfined_t`, for a daemon
 started from a login shell) `process transition` into `jaato_runner_t` and
 `jaato_isolated_t`, plus `entrypoint` on the interpreter's file type.
+The runner keeps the daemon's SELinux user and role (`setexeccon` sets
+type and level), so the module authorizes both `system_r` and
+`unconfined_r` for the jaato domains.
+
+The module must also grant each jaato domain `fd use` on the daemon's
+domains and read/write on their pipes and sockets. A runner exec'd without
+it loses the inherited stdio silently: the kernel closes descriptors the
+new domain may not use, the denial is `dontaudit`-ed, and the symptom is
+empty output with exit status 0 (phase 0).
 
 ### 4.2 File types
 
@@ -324,9 +333,9 @@ Later sessions check the root's label and the stamp; a match skips the
 walk. A mismatch (policy version changed, level re-allocated, someone ran
 `restorecon -F`) re-runs it.
 
-Measured costs to verify in phase 0: `lsetfilecon` is one syscall per
-inode; a clone with a large `node_modules` (~100k files) is expected in the
-low seconds. It runs off the event loop, once.
+Measured in phase 0 on ext4: relabelling 101k entries took 0.50 s with a
+Python `setxattr` walk and 0.64 s with `chcon -R`. It runs off the event
+loop, once.
 
 **Surviving `restorecon`.** `restorecon` without `-F` resets the type and
 keeps the level; with `-F` it resets both. So the install step registers
@@ -343,7 +352,8 @@ levels, which the stamp check detects at the next provisioning.
 
 **Files created by the runner.** A new file gets the type of its parent
 directory (default type inheritance) and the level of the creating process
-(MCS default for files is the process's low level). Both are right without
+(MCS default for files is the process's low level), and the SELinux user
+of the creating process. All are right without
 a `type_transition` rule, except in `/tmp`, where
 `type_transition jaato_runner_t tmp_t:{file dir} jaato_tmp_t` applies.
 
@@ -375,8 +385,13 @@ transition.
 
 `private_tmp` (#1381) keeps its order: the child unshares and binds before
 the exec, because `jaato_runner_t` has no `mount`. The tmpfs mounted on
-`/dev/shm` gets `context=system_u:object_r:jaato_tmp_t:<level>` as a mount
-option.
+`/dev/shm` gets `context="<runner user>:object_r:jaato_tmp_t:<level>"` as a
+mount option. The SELinux user is the runner's, not a fixed `system_u`:
+a file takes its creator's user, and the policy's object-identity
+constraint refused an `unconfined_u` runner creating a file in a
+`system_u` mount at its own level (phase 0, 5.6). The value is quoted,
+because a category list contains commas that `mount` would otherwise split
+into options.
 
 ### 7.2 Pool slots: dynamic transition
 
@@ -471,10 +486,15 @@ becomes `unavailable_reason`, as today:
 3. The policy knows `jaato_runner_t` (`security_check_context` on
    `system_u:system_r:jaato_runner_t:s0`), and the module version is at
    least the one this build needs.
-4. The daemon's own domain may transition to `jaato_runner_t`
-   (`security_compute_av` for `process transition`) and relabel to
-   `jaato_workspace_t` (`relabelto`).
-5. MCS is enabled (the policy is `targeted`/`mls` with categories).
+4. MCS is enabled (the policy is `targeted`/`mls` with categories).
+5. The daemon may start a runner: its user and role are authorized for
+   `jaato_runner_t` (`security_check_context` on
+   `<own user>:<own role>:jaato_runner_t:s0`), it has `process transition`
+   there, and `jaato_runner_t` has `file entrypoint` on the interpreter's
+   label. The transition permission alone is not a check: on targeted,
+   `unconfined_t` holds it for every domain, and phase 0 found the check
+   passing with the module's own rule removed. Phase 2 adds `relabelto`
+   on `jaato_workspace_t`.
 
 Permissive host-wide (`getenforce` = 0) is **available but not enforced**:
 sessions run with `sandbox_mode: selinux-permissive`, a WARNING, and
@@ -500,7 +520,7 @@ policy line whose removal must fail it.
 
 | Phase | Content | Behaviour change |
 |---|---|---|
-| 0 | Verify on a Fedora/Rocky VM: exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost on a large tree, `/dev/shm` `context=` mount ([runbook](selinux-phase0-handoff.md)) | none |
+| 0 | **done** on Fedora 44 under WSL2 ([runbook](selinux-phase0-handoff.md), findings below): exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost, `/dev/shm` `context=` mount, threaded `setcon` | none |
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | call sites move onto the seam (the WS pre-init hook, IPC provisioning, runner self-confinement, the `//child` callback, thread verification); envelope field | none (refactor) |
 | 2 | Policy module + `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
@@ -525,6 +545,49 @@ policy line whose removal must fail it.
   SELinux context.
 * **SELinux "confined" means one of jaato's domains.** Every task on an
   SELinux host has a domain; `unconfined_t` is not a jaato boundary.
+
+### What phase 0 found
+
+Run on Fedora 44 (`selinux-policy-targeted` 44.10, RHEL's upstream) under
+WSL2, kernel 6.18.40.1-microsoft-standard-WSL2, with a throwaway module.
+
+| Question | Answer |
+|---|---|
+| exec transition into `jaato_runner_t:s0:c1,c2` via `setexeccon` | works from `unconfined_t` and from `unconfined_service_t` (a `systemd-run` unit), including `s0` to a category pair |
+| MCS on workspace files | cross-level read, write and directory search denied; same level works; a created file takes the creator's level |
+| MCS on `/proc` | the whole `/proc/<pid>` directory is closed across levels (`search` on the directory), so `environ`, `status`, `cmdline`, `cwd` all fail at once |
+| `restorecon` | plain keeps the level; `-F` resets level **and** user |
+| relabel cost | 0.50–0.64 s per 101k entries |
+| labelled `/dev/shm` tmpfs | works with the runner's own SELinux user; not with a fixed `system_u` (§7.1) |
+| `setcon` in a threaded process | refused with `EPERM`; single-threaded succeeds (§7.2 holds) |
+| readiness check 5 as first written | vacuous on targeted; rewritten (§10) |
+| permissive domain | read as `selinux-permissive` by `lsm_label` |
+
+Findings about WSL, which matter to anyone testing there and to AppArmor
+users on WSL:
+
+* **The stock WSL2 kernel runs SELinux, not AppArmor.** It boots with
+  `lsm=capability,landlock,yama,safesetid,selinux,ima`; AppArmor is built in
+  and skipped. So jaato's AppArmor backend is never available on a stock
+  WSL2 host, whatever the distro, and Ubuntu under WSL has no MAC at all
+  (SELinux with no policy allows everything). Enabling AppArmor needs an
+  `lsm=` override in `.wslconfig`, which applies to every distro.
+* **The policy is never loaded at boot.** systemd is not PID 1 in the
+  kernel's sense and skips its SELinux setup. `securityfs` and `selinuxfs`
+  must be mounted and `load_policy -i` run by hand after every boot,
+  followed by a relabel, because files created before the load are
+  `unlabeled_t`.
+* **One kernel, one policy.** A policy loaded from one distro applies to
+  every WSL distro, Docker Desktop included, until `wsl --shutdown`.
+* **Enforcing breaks WSL itself.** Fedora's targeted policy confines
+  `kernel_t`, which WSL's `/init` and session plumbing run in; the first
+  enforcing load killed the session. Making `kernel_t` and
+  `kernel_generic_helper_t` permissive was needed. WSL is a test bed for
+  the policy, not a supported deployment.
+* `sestatus` prints the policy name from `/etc/selinux/config` even when no
+  policy is loaded; contexts reading `kernel` are the reliable sign.
+  `/sys/fs/selinux` exists as an empty directory before `selinuxfs` is
+  mounted, which is why check 1 looks for the `enforce` file.
 
 ## 13. Open questions
 

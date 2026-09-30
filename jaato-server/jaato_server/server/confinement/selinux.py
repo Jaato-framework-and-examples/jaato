@@ -18,13 +18,22 @@ The checks follow design §10, first failing precondition wins:
    the module declares (``jaato_policy_v<N>_t``): asking the kernel whether
    a context is valid needs no privilege, where ``semodule -l`` needs root.
 4. MCS is enabled (per-workspace isolation is by category).
-5. This process may transition into the runner domain.
+5. This process may start a runner: its SELinux user and role are
+   authorized for the runner domain, it may transition there, and the
+   runner domain may use the interpreter as an entrypoint.
+
+The transition permission alone proves nothing on the targeted policy:
+``unconfined_t`` holds ``process transition`` to every domain, so phase 0
+found it passing with the module's own rule removed.  The role and
+entrypoint checks are the halves only jaato's module grants.
 """
 
 from __future__ import annotations
 
 import ctypes
+import os
 import platform
+import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -33,6 +42,7 @@ from jaato_server.shared.lsm_label import (
     BACKEND_SELINUX,
     AvDecision,
     load_libselinux,
+    parse_selinux_context,
     selinux_host_enforcing,
 )
 
@@ -41,6 +51,8 @@ REQUIRED_POLICY_VERSION = 1
 
 #: jaato's runner domain, as a context the kernel can validate.
 RUNNER_PROBE_CONTEXT = "system_u:system_r:jaato_runner_t:s0"
+
+RUNNER_DOMAIN = "jaato_runner_t"
 
 SELINUX_MOUNT = "/sys/fs/selinux"
 
@@ -91,7 +103,19 @@ class _Kernel:
             return None
         return out.value.decode("utf-8", "replace")
 
-    def may_transition(self, source: str, target: str) -> Optional[bool]:
+    def file_context(self, path: str) -> Optional[str]:
+        fn = self._lib.getfilecon
+        fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
+        fn.restype = ctypes.c_int
+        out = ctypes.c_char_p()
+        if fn(path.encode("utf-8"), ctypes.byref(out)) < 0 or not out.value:
+            return None
+        return out.value.decode("utf-8", "replace")
+
+    def allowed(
+        self, source: str, target: str, tclass: str, perm: str,
+    ) -> Optional[bool]:
+        """Does the policy allow *perm*?  ``None`` when it cannot be asked."""
         lib = self._lib
         lib.string_to_security_class.argtypes = [ctypes.c_char_p]
         lib.string_to_security_class.restype = ctypes.c_uint16
@@ -102,17 +126,17 @@ class _Kernel:
             ctypes.c_uint32, ctypes.POINTER(AvDecision),
         ]
         lib.security_compute_av_flags.restype = ctypes.c_int
-        tclass = lib.string_to_security_class(b"process")
-        perm = lib.string_to_av_perm(tclass, b"transition") if tclass else 0
-        if not perm:
+        cls = lib.string_to_security_class(tclass.encode("ascii"))
+        bit = lib.string_to_av_perm(cls, perm.encode("ascii")) if cls else 0
+        if not bit:
             return None
         avd = AvDecision()
         if lib.security_compute_av_flags(
             source.encode("utf-8"), target.encode("utf-8"),
-            tclass, perm, ctypes.byref(avd),
+            cls, bit, ctypes.byref(avd),
         ) != 0:
             return None
-        return bool(avd.allowed & perm)
+        return bool(avd.allowed & bit)
 
 
 def _default_kernel() -> Optional[_Kernel]:
@@ -132,11 +156,13 @@ class SELinuxBackend:
         host_enforcing: Callable[[], Optional[bool]] = selinux_host_enforcing,
         system: Callable[[], str] = platform.system,
         mount_present: Optional[Callable[[], bool]] = None,
+        interpreter: Callable[[], str] = lambda: os.path.realpath(sys.executable),
     ) -> None:
         self._kernel_factory = kernel_factory
         self._host_enforcing = host_enforcing
         self._system = system
         self._mount_present = mount_present or _selinux_mounted
+        self._interpreter = interpreter
         self._readiness: Optional[Readiness] = None
 
     def host_readiness(self) -> Readiness:
@@ -158,7 +184,9 @@ class SELinuxBackend:
         enforcing = self._host_enforcing()
         if enforcing is None:
             return Readiness(False, "SELinux mode could not be read (disabled?)", None)
-        reason = _policy_problem(kernel) or _transition_problem(kernel)
+        reason = _policy_problem(kernel) or _transition_problem(
+            kernel, self._interpreter(),
+        )
         return Readiness(reason is None, reason, enforcing)
 
     def is_available(self) -> bool:
@@ -201,13 +229,37 @@ def _policy_problem(kernel: _Kernel) -> Optional[str]:
     return None
 
 
-def _transition_problem(kernel: _Kernel) -> Optional[str]:
-    """Check 5: this process may enter the runner domain."""
+def _transition_problem(kernel: _Kernel, interpreter: str) -> Optional[str]:
+    """Check 5: this process may start a runner in jaato's domain.
+
+    The runner keeps the daemon's SELinux user and role (``setexeccon``
+    changes the type and level only), so the role must be authorized for
+    the runner domain.  Phase 0 showed why that matters: a daemon from a
+    login shell is ``unconfined_u:unconfined_r``, one under systemd is
+    ``system_u:system_r``.
+    """
     own = kernel.current_context()
     if own is None:
         return "this process's own context could not be read"
-    if kernel.may_transition(own, RUNNER_PROBE_CONTEXT) is not True:
-        return f"this process ({own}) may not transition into jaato_runner_t"
+    parsed = parse_selinux_context(own)
+    if parsed is None:
+        return f"this process's own context ({own}) could not be parsed"
+    target = f"{parsed.user}:{parsed.role}:{RUNNER_DOMAIN}:s0"
+    if not kernel.context_valid(target):
+        return (
+            f"SELinux user and role {parsed.user}:{parsed.role} are not "
+            f"authorized for {RUNNER_DOMAIN}"
+        )
+    if kernel.allowed(own, target, "process", "transition") is not True:
+        return f"this process ({own}) may not transition into {RUNNER_DOMAIN}"
+    exe = kernel.file_context(interpreter)
+    if exe is None:
+        return f"the interpreter's label could not be read ({interpreter})"
+    if kernel.allowed(target, exe, "file", "entrypoint") is not True:
+        return (
+            f"{RUNNER_DOMAIN} may not use the interpreter {interpreter} "
+            f"({exe}) as an entrypoint"
+        )
     return None
 
 
