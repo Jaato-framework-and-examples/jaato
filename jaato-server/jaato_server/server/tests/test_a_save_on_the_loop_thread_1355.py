@@ -299,7 +299,8 @@ _BLOCKING_ENTRY_POINTS = {
     "get_command_list", "list_sessions", "_sessions_loaded_in",
     "_session_rows", "execute_command", "history_page", "get_history",
     "get_available_commands", "_on_command_list_request", "save_session",
-    "save_all", "stop_session",
+    "save_all", "stop_session", "emit_current_state",
+    "_build_session_info_event",
 }
 #: Names too common to judge alone: flagged only on these receivers.
 _RECEIVER_SCOPED = {

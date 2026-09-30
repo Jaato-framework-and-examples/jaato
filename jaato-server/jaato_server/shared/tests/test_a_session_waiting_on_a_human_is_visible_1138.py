@@ -207,10 +207,10 @@ REVERSIONS = [
     ),
     Reversion(
         target=_MANAGER,
-        find="""                    awaiting=awaiting,
-                    awaiting_since=awaiting_since,""",
-        replace="""                    awaiting=None,
-                    awaiting_since=None,""",
+        find="""                awaiting=awaiting,
+                awaiting_since=awaiting_since,""",
+        replace="""                awaiting=None,
+                awaiting_since=None,""",
         test="test_the_listing_reports_a_blocked_session",
         because=(
             "list_sessions computes the fact and drops it, so every row "

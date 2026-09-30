@@ -105,6 +105,7 @@ from jaato_sdk.events import (
     ToolOutputEvent,
 )
 from .memory_verbs import MEMORY_REQUEST_TYPES
+from . import session_new_timing
 
 #: Requests routed even when the client is attached to no session: the
 #: daemon-level verbs, and the memory verbs (#1232), whose answer to a
@@ -832,6 +833,10 @@ class JaatoIPCServer:
             await self._send_error(client_id, str(e))
             return
 
+        # #1452: start the phase clock of a session.new here, where it was
+        # read, so the executor queueing before the handler is measured.
+        session_new_timing.note_request(event)
+
         # Handle CommandListRequest directly - no session needed
         if isinstance(event, CommandListRequest):
             commands = []
@@ -954,6 +959,9 @@ class JaatoIPCServer:
             await self._write_message(client.writer, serialize_event(event))
         except Exception as e:
             logger.error(f"Send error to {client_id}: {e}")
+            return
+        # #1452: a session.new answer is timed to the socket, not the queue.
+        session_new_timing.note_written(event, "ipc")
 
     async def _send_error(self, client_id: str, error: str) -> None:
         """Send an error event to a client."""

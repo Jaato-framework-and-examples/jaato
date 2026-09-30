@@ -59,6 +59,8 @@ from jaato_server.shared.runtime_limits import RuntimeLimits, apply_isolated_def
 from jaato_server.shared.session_envelope import BootstrapEnvelope
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from .awaiting import awaiting_of
+from .lock_profile import ProfiledRLock
+from . import session_new_timing
 from .session_finished import note_lifecycle as note_session_lifecycle
 from .diagnostics_verbs import DIAGNOSTICS_REQUEST_TYPES
 from .memory_verbs import MEMORY_REQUEST_TYPES
@@ -1527,8 +1529,13 @@ class SessionManager:
         # session being torn down and await+reload instead of attaching to a
         # session whose runner is mid-disposal (the attach-vs-unload race).
         self._unloading: Dict[str, threading.Event] = {}
-        # Use RLock (reentrant) because initialize() may emit events during session load
-        self._lock = threading.RLock()
+        # Use RLock (reentrant) because initialize() may emit events during session load.
+        # Profiled (#1452): it records its owner, logs holds past
+        # JAATO_LOCK_HOLD_WARN_MS, and the loop watchdog names its holder in
+        # every LOOP_STALL dump.  Never hold it across a ``*_threadsafe``
+        # runner call: those wait on the daemon loop, and the loop takes this
+        # lock to route every streamed event (``_emit_to_session``).
+        self._lock = ProfiledRLock("SessionManager._lock")
 
         # Wake primitive (session.wake): daemon-owned session_id → workspace
         # index so a cold session can be revived by id alone WITHOUT the caller
@@ -8000,6 +8007,7 @@ class SessionManager:
             client_id=kwargs.get("client_id", args[0] if args else None),
         )
         self._session_new_answer.record = record
+        session_new_timing.begin(record.request_id)
         try:
             if kwargs.get("provider_override") and not kwargs.get("model_override"):
                 # A provider with no model names nothing to run: refuse it as
@@ -8019,6 +8027,7 @@ class SessionManager:
         finally:
             self._answer_session_new_last_resort(record, None)
             self._session_new_answer.record = None
+            session_new_timing.end()
 
     def _answer_session_new_last_resort(
         self, record: "_SessionNewAnswer", exc: Optional[BaseException],
@@ -8161,6 +8170,9 @@ class SessionManager:
             event.details = details
         if client_id is None:
             return
+        session_new_timing.mark(
+            "answer_queued", session_id=created_session_id,
+            detail=f"event={type(event).__name__} client={client_id}")
         self._emit_to_client(client_id, event)
 
     def _allocate_session_id(self, workspace_path: Optional[str]) -> str:
@@ -10050,6 +10062,7 @@ class SessionManager:
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
+        session_new_timing.mark("server_initialized", session_id=session_id)
         session.model_override_env = override_env
 
         # ---------------------------------------------------------------
@@ -10211,6 +10224,7 @@ class SessionManager:
         self._save_session(session)
 
         logger.info(f"Session created: {session_id} ({name})")
+        session_new_timing.mark("session_created", session_id=session_id)
 
         # Note: We don't call emit_current_state() here because the client
         # already received all events during initialize() via direct emission.
@@ -14635,6 +14649,7 @@ class SessionManager:
         logger.debug(f"get_or_create_default called for client {client_id}, workspace={workspace_path}")
 
         # Check in-memory sessions first - find one matching the workspace
+        attached: Optional[Session] = None
         with self._lock:
             if self._sessions and workspace_path:
                 # Find sessions matching this workspace
@@ -14648,16 +14663,21 @@ class SessionManager:
                     logger.debug(f"  found in-memory session for workspace: {session.session_id}")
                     session.attached_clients.add(client_id)
                     self._client_to_session[client_id] = session.session_id
-                    # Emit current agent state to the newly attached client
-                    session.server.emit_current_state(
-                        lambda e: self._emit_to_client(client_id, e),
-                        skip_session_info=True
-                    )
-                    # Send complete SessionInfoEvent with state snapshot
-                    self._emit_to_client(
-                        client_id,
-                        self._build_session_info_event(session, client_id=client_id))
-                    return session.session_id
+                    attached = session
+        if attached is not None:
+            # #1452: emitted AFTER the lock is released, as attach_session
+            # does.  Both calls ask the runner (``emit_current_state`` for
+            # the permission status, the info event for every loaded
+            # session's history) through the daemon loop, which needs this
+            # lock to route streamed output.
+            attached.server.emit_current_state(
+                lambda e: self._emit_to_client(client_id, e),
+                skip_session_info=True
+            )
+            self._emit_to_client(
+                client_id,
+                self._build_session_info_event(attached, client_id=client_id))
+            return attached.session_id
 
         # Check persisted sessions (already sorted by updated_at descending)
         logger.debug(f"  checking persisted sessions...")
@@ -14783,6 +14803,13 @@ class SessionManager:
         Returns merged view with runtime status for loaded sessions.
         Collects persisted sessions from all known workspaces (in-memory
         sessions + client configs).
+
+        Asks every loaded session's runner for its history (``turn_count``)
+        through ``*_threadsafe`` round-trips, so it must run off the daemon
+        loop (#1355) and must not hold ``self._lock`` while it asks (#1452):
+        the loop takes that lock to route streamed events, so a listing
+        holding it deadlocked against the loop until each fetch timed out.
+        The lock is held only to snapshot the loaded set.
         """
         result: Dict[str, RuntimeSessionInfo] = {}
 
@@ -14838,47 +14865,56 @@ class SessionManager:
                     end_reason=getattr(info, "end_reason", None),
                 )
 
-        # Overlay in-memory sessions (have more current info)
+        # Overlay in-memory sessions (have more current info).
+        #
+        # #1452: the lock is held only to SNAPSHOT the loaded set.  Each row
+        # asks the session's runner for its history (``turn_count``), which
+        # is a ``*_threadsafe`` round-trip through the daemon loop -- and the
+        # loop takes this same lock to route every streamed output event
+        # (``_emit_to_session``).  Holding it across the fetch deadlocked the
+        # two until each fetch's 15 s timeout expired: 121 s for eight loaded
+        # sessions, observed live, failing two ``session.new`` confirmations.
         with self._lock:
-            for session in self._sessions.values():
-                # #1138: the same read as ``is_processing`` below, on the
-                # same object -- but NOT on the two fields the issue named.
-                # Those are written only by the DAEMON-side permission /
-                # clarification hooks, and all three prompt-raising plugins
-                # are ``PLUGIN_TIER = "runner"``, so on the default path the
-                # prompt is pending in the runner-RPC relay instead.
-                # ``awaiting_of`` asks the server, which reads both.
-                awaiting, awaiting_since = awaiting_of(session.server)
-                result[session.session_id] = RuntimeSessionInfo(
-                    session_id=session.session_id,
-                    name=session.name,
-                    description=session.description,
-                    created_at=session.created_at,
-                    last_activity=session.last_activity,
-                    model_provider=session.server.model_provider,
-                    model_name=session.server.model_name,
-                    is_processing=session.server.is_processing,
-                    is_loaded=True,
-                    client_count=len(session.attached_clients),
-                    turn_count=len(session.server.get_history()) // 2,
-                    workspace_path=session.workspace_path,
-                    created_by=session.created_by,
-                    # #812: a listing that shows a session and not whether
-                    # anything is consuming it, nor which process is running
-                    # it, is the listing the issue's reporter had.
-                    orphaned=self._is_orphaned(session),
-                    runner=(
-                        session.runner_identity.to_dict()
-                        if session.runner_identity is not None else None
-                    ),
-                    awaiting=awaiting,
-                    awaiting_since=awaiting_since,
-                    inbox_pending=self._inbox_pending_count(
-                        session.session_id, session.workspace_path),
-                    profile_name=getattr(session.server, "profile_name", None),
-                    ended_at=session.ended_at,
-                    end_reason=session.end_reason,
-                )
+            loaded = list(self._sessions.values())
+        for session in loaded:
+            # #1138: the same read as ``is_processing`` below, on the
+            # same object -- but NOT on the two fields the issue named.
+            # Those are written only by the DAEMON-side permission /
+            # clarification hooks, and all three prompt-raising plugins
+            # are ``PLUGIN_TIER = "runner"``, so on the default path the
+            # prompt is pending in the runner-RPC relay instead.
+            # ``awaiting_of`` asks the server, which reads both.
+            awaiting, awaiting_since = awaiting_of(session.server)
+            result[session.session_id] = RuntimeSessionInfo(
+                session_id=session.session_id,
+                name=session.name,
+                description=session.description,
+                created_at=session.created_at,
+                last_activity=session.last_activity,
+                model_provider=session.server.model_provider,
+                model_name=session.server.model_name,
+                is_processing=session.server.is_processing,
+                is_loaded=True,
+                client_count=len(session.attached_clients),
+                turn_count=len(session.server.get_history()) // 2,
+                workspace_path=session.workspace_path,
+                created_by=session.created_by,
+                # #812: a listing that shows a session and not whether
+                # anything is consuming it, nor which process is running
+                # it, is the listing the issue's reporter had.
+                orphaned=self._is_orphaned(session),
+                runner=(
+                    session.runner_identity.to_dict()
+                    if session.runner_identity is not None else None
+                ),
+                awaiting=awaiting,
+                awaiting_since=awaiting_since,
+                inbox_pending=self._inbox_pending_count(
+                    session.session_id, session.workspace_path),
+                profile_name=getattr(session.server, "profile_name", None),
+                ended_at=session.ended_at,
+                end_reason=session.end_reason,
+            )
 
         # Sort by last activity
         sessions = list(result.values())

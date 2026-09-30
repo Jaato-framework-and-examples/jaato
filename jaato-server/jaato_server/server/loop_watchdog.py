@@ -44,6 +44,17 @@ NAMES the code holding the loop.
 On recovery it logs the stall's total duration, so the log carries the pair
 the investigation needs: *what was running* and *for how long*.
 
+**#1452 additions.**  Every ``LOOP_STALL`` line names the current owner of
+each profiled lock (:mod:`server.lock_profile`) with its current stack,
+so a stall on ``SessionManager._lock`` names its holder instead of leaving
+it to be inferred.  A thread parked in ``threading.Condition.wait`` (every
+future, event and queue wait) is a holder CANDIDATE, not "blocked
+acquiring a lock": #1452's holder sat there and was misfiled.  Blocked
+threads are printed with their stacks, grouped when identical.  And the
+heartbeat feeds a loop-lag histogram (:meth:`LoopWatchdog.get_telemetry`),
+logged as ``LOOP_LAG`` every ``lag_report_every`` seconds, so steady-state
+latency is a number rather than the absence of a WARNING.
+
 **Cost when healthy:** one no-op coroutine per second on the loop and one
 timestamp comparison per second on a daemon thread.  The stack dump happens
 only during a stall, rate-limited to one per ``resample_every`` while a single
@@ -77,6 +88,12 @@ logger = logging.getLogger(__name__)
 #: other from the adjacent lines.
 _STALL_TOKEN = "LOOP_STALL"
 _RESUME_TOKEN = "LOOP_RESUMED"
+_LAG_TOKEN = "LOOP_LAG"
+
+#: Upper bounds, in milliseconds, of the loop-lag histogram buckets (#1452).
+#: Fixed so two daemons, or two releases, report comparable counts.  The
+#: last bucket (``inf``) holds everything above ``LAG_BUCKETS_MS[-1]``.
+LAG_BUCKETS_MS = (1, 5, 10, 50, 100, 500, 1000, 2000, 10000)
 
 
 class LoopWatchdog:
@@ -94,6 +111,7 @@ class LoopWatchdog:
         threshold: float = 2.0,
         resample_every: float = 10.0,
         all_threads_after: float = 10.0,
+        lag_report_every: float = 600.0,
     ) -> None:
         """
         Args:
@@ -116,6 +134,9 @@ class LoopWatchdog:
                 at 10-12s on a timeout ceiling and are understood; the
                 unexplained ones observed since run past 30s on a held mutex,
                 where the loop's own stack names only the BLOCKED party.
+            lag_report_every: Seconds between ``LOOP_LAG`` INFO lines
+                carrying :meth:`get_telemetry` (#1452); ``0`` disables them.
+                A line is written only when there are new samples.
         """
         self._interval = interval
         self._threshold = threshold
@@ -131,6 +152,16 @@ class LoopWatchdog:
         self._task: Optional[asyncio.Task] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        #: Loop-lag histogram (#1452), fed by the heartbeat: how late each
+        #: beat woke up relative to when it asked to.  A count per bucket
+        #: bound, plus ``inf``; see :meth:`get_telemetry`.
+        self._lag_counts: Dict[str, int] = {
+            **{f"le_{b}ms": 0 for b in LAG_BUCKETS_MS}, "inf": 0,
+        }
+        self._lag_max = 0.0
+        self._lag_report_every = lag_report_every
+        self._lag_reported_at = time.monotonic()
+        self._lag_reported_samples = 0
 
     # ---------------------------------------------------------------- loop side
 
@@ -160,8 +191,59 @@ class LoopWatchdog:
             while not self._stop.is_set():
                 self._beat = time.monotonic()
                 await asyncio.sleep(self._interval)
+                self.record_lag(time.monotonic() - self._beat - self._interval)
         except asyncio.CancelledError:
             pass
+
+    def record_lag(self, lag: float) -> None:
+        """Count one heartbeat's lateness, in seconds, into the histogram.
+
+        The lag is the time the loop took to resume the heartbeat beyond
+        the sleep it asked for: zero on an idle loop, the stall's length on
+        a stalled one.  The WARNING past ``threshold`` says a stall
+        happened; this says what steady-state latency looks like, which is
+        what compares across releases.
+        """
+        lag_ms = max(lag, 0.0) * 1000.0
+        self._lag_max = max(self._lag_max, lag_ms)
+        for bound in LAG_BUCKETS_MS:
+            if lag_ms <= bound:
+                self._lag_counts[f"le_{bound}ms"] += 1
+                return
+        self._lag_counts["inf"] += 1
+
+    def _maybe_report_lag(self) -> None:
+        """Log the lag histogram every ``lag_report_every`` seconds.
+
+        Runs on the monitor thread, so a report never waits on the loop.
+        Skipped when nothing was sampled since the last one.
+        """
+        if not self._lag_report_every:
+            return
+        now = time.monotonic()
+        if now - self._lag_reported_at < self._lag_report_every:
+            return
+        telemetry = self.get_telemetry()
+        samples = telemetry["loop_lag_samples_total"]
+        self._lag_reported_at = now
+        if samples == self._lag_reported_samples:
+            return
+        self._lag_reported_samples = samples
+        logger.info("%s: %s", _LAG_TOKEN, telemetry)
+
+    def get_telemetry(self) -> Dict[str, float]:
+        """Snapshot of the loop-lag histogram, beside the pool's (#1452).
+
+        The shape of ``PoolManager.get_telemetry()``: a flat dict of
+        process-lifetime counters, one key per bucket (non-cumulative),
+        plus ``loop_lag_samples_total`` and ``loop_lag_max_ms``.
+        """
+        counts = dict(self._lag_counts)
+        return {
+            **{f"loop_lag_{k}": v for k, v in counts.items()},
+            "loop_lag_samples_total": sum(counts.values()),
+            "loop_lag_max_ms": round(self._lag_max, 1),
+        }
 
     # ------------------------------------------------------------- thread side
 
@@ -169,6 +251,7 @@ class LoopWatchdog:
         stall_started: Optional[float] = None
         last_dump = 0.0
         while not self._stop.wait(self._interval):
+            self._maybe_report_lag()
             age = time.monotonic() - self._beat
             if age <= self._threshold:
                 if stall_started is not None:
@@ -191,8 +274,8 @@ class LoopWatchdog:
             stack = self._loop_stack()
             logger.warning(
                 "%s: event loop has not run for %.1fs -- the loop thread is "
-                "executing:\n%s", _STALL_TOKEN, age,
-                stack or "<loop thread not found>",
+                "executing:\n%s%s", _STALL_TOKEN, age,
+                stack or "<loop thread not found>", self._lock_owners(),
             )
 
             # Past ``all_threads_after`` the loop's own stack is no longer the
@@ -274,20 +357,54 @@ class LoopWatchdog:
                 del self._digest_seen[ident]
 
         candidates: List[str] = []
-        waiters: Dict[str, List[str]] = {}
+        waiters: Dict[str, Dict[str, List[str]]] = {}
 
         for ident, frame in sorted(frames.items()):
             label = self._label(ident, named, frame, now)
             line = self._innermost_line(frame)
-            if self._is_waiting_for_a_lock(line):
+            stack = "".join(traceback.format_stack(frame))
+            if (self._is_waiting_for_a_lock(line)
+                    and not self._is_a_condition_wait(frame)):
                 where = (f"{os.path.basename(frame.f_code.co_filename)}:"
                          f"{frame.f_lineno}  {line}")
-                waiters.setdefault(where, []).append(label)
+                waiters.setdefault(where, {}).setdefault(stack, []).append(
+                    label)
             else:
-                stack = "".join(traceback.format_stack(frame))
                 candidates.append(f"--- {label}\n{stack}")
 
         return self._render(candidates, waiters)
+
+    @staticmethod
+    def _is_a_condition_wait(frame) -> bool:
+        """Is this thread parked in ``threading.Condition.wait``?
+
+        Its innermost line is ``waiter.acquire()``, which
+        :meth:`_is_waiting_for_a_lock` matches -- but the lock it acquires
+        is a private waiter lock, not one anybody else wants.  It is how
+        every ``Future.result()``, ``Event.wait()`` and ``Queue.get()``
+        waits, so a thread here may well HOLD a lock while it waits.
+        #1452's holder was in this group, filed as "blocked, not blocking",
+        and the dump could not name it.  It belongs with the candidates.
+        """
+        return (os.path.basename(frame.f_code.co_filename) == "threading.py"
+                and frame.f_code.co_name == "wait")
+
+    @staticmethod
+    def _lock_owners() -> str:
+        """The holders of every profiled lock, for the stall dump (#1452).
+
+        A profiled lock records its own owner, so a stall on one names its
+        holder directly instead of leaving it to be inferred from stacks.
+        """
+        try:
+            from .lock_profile import held_locks
+            held = held_locks()
+        except Exception:  # noqa: BLE001 -- a dump must never raise
+            logger.debug("lock owner snapshot failed", exc_info=True)
+            return ""
+        if not held:
+            return "\nno profiled lock is held."
+        return "".join(f"\n{h.render()}" for h in held)
 
     def _label(self, ident: int, named: dict, frame, now: float) -> str:
         """``thread <id> '<name>'`` plus how long it has sat on this stack."""
@@ -308,8 +425,18 @@ class LoopWatchdog:
         return f"thread {ident} {name!r}{held}{marker}"
 
     @staticmethod
-    def _render(candidates: List[str], waiters: Dict[str, List[str]]) -> str:
-        blocked = sum(len(v) for v in waiters.values())
+    def _render(
+        candidates: List[str], waiters: Dict[str, Dict[str, List[str]]],
+    ) -> str:
+        """Candidates in full, then waiters by blocked line and by stack.
+
+        Waiters carry their stacks too (#1452): which lock a thread wants is
+        on its innermost line, but WHY it wanted it -- the call chain -- is
+        what tells two convoys on one lock apart.  Identical stacks are
+        printed once with every thread that shares them.
+        """
+        blocked = sum(len(labels) for by_stack in waiters.values()
+                      for labels in by_stack.values())
         # The two headers must not be substrings of one another.  "NOT
         # WAITING FOR A LOCK" contains "WAITING FOR A LOCK", so anything
         # splitting the dump on the second lands inside the first -- which
@@ -324,8 +451,11 @@ class LoopWatchdog:
             f"holds nothing it acquired at that line, because it never got "
             f"it.",
         ]
-        for where, labels in sorted(waiters.items()):
-            parts.append(f"  {where}\n    " + "\n    ".join(sorted(labels)))
+        for where, by_stack in sorted(waiters.items()):
+            parts.append(f"  {where}")
+            for stack, labels in by_stack.items():
+                parts.append("    " + "\n    ".join(sorted(labels)))
+                parts.append(stack.rstrip("\n"))
         return "\n".join(parts)
 
     def _loop_stack(self) -> str:

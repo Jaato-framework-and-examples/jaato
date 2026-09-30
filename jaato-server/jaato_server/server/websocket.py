@@ -39,6 +39,7 @@ except ImportError:
 
 from jaato_server.shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
 from .core import JaatoServer
+from . import session_new_timing
 from .ws_tickets import (
     AppCredentialStore,
     BoundIdentity,
@@ -2702,6 +2703,9 @@ class JaatoWSServer:
                 await self._send_error(client_id, f"Unknown message type: {msg_type}")
             return
 
+        # #1452: start the phase clock of a session.new where it was read.
+        session_new_timing.note_request(event)
+
         # --- Workspace management (transport-level, all modes) ---
         # Workspace negotiation is a transport concern, not a command concern.
         # These events are handled by the WS server regardless of whether a
@@ -3603,6 +3607,9 @@ class JaatoWSServer:
                     await client.websocket.send(serialize_event(event))
                 except Exception as e:
                     logger.error(f"Send error to {client_id}: {e}")
+                    return
+                # #1452: a session.new answer is timed to the socket.
+                session_new_timing.note_written(event, "websocket")
 
     async def _send_error(self, client_id: str, error: str) -> None:
         """Send an error event to a client."""
