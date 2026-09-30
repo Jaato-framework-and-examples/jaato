@@ -147,6 +147,16 @@ not honour. `new` runs its own output back through `validate` (profiles) or a
 compile check (clients), so generated output is valid by construction. `--json`
 on any verb for machine consumption.
 
+**`validate` needs jaato-server somewhere.** With only jaato-sdk installed it asks
+a running daemon (the default socket, or `--connect SOCKET`), and with no daemon
+it refuses with exit 2 rather than pass on checks that did not run. In CI, install
+jaato-server in the job and validate locally; no daemon is needed:
+
+```
+pip install jaato-sdk jaato-server      # no extras needed to validate
+jaato-scaffold validate . --set S       # exit 1 on errors
+```
+
 **The EU AI Act keys are profile keys, and the tools already know them.**
 `regulatory:` (the Art. 6(4) determination, the provider, whether persons
 interact with it), `trace.ledger` and `record_keeping:` (Arts. 12 and 19) are
