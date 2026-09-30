@@ -767,7 +767,7 @@ test("workspace mode: a new workspace clones its repositories before the session
   await plate.getByPlaceholder("owner/repo").fill("acme/claims-service");
   await plate.getByPlaceholder("owner/repo").press("Enter");
   await plate.getByPlaceholder("owner/repo").fill("acme/fails");
-  await plate.getByRole("button", { name: "+ Add acme/fails" }).click();
+  await plate.getByRole("option", { name: "+ Add acme/fails" }).click();
   await expect(plate.getByTestId("picked-repo")).toHaveCount(2);
   await expect(plate).toContainText("→ claims-refactor/claims-service");
   await plate.getByLabel("Branch of acme/claims-service").fill("main");
@@ -810,10 +810,14 @@ test("new workspace with a GitHub backend: search the listed repositories, pick 
   await page.goto("/");
   const plate = page.getByTestId("new-workspace");
   await expect(plate).toContainText("Find repositories on GitHub @d-alonso");
+  await expect(plate.getByRole("listbox")).toHaveCount(0);
   await plate.getByPlaceholder("owner/repo").fill("acme");
-  await expect(plate.getByRole("checkbox")).toHaveCount(2);
-  await plate.getByRole("checkbox", { name: /acme\/email-templates/ }).click();
-  await expect(plate.getByRole("checkbox", { name: /acme\/email-templates/ })).toHaveAttribute("aria-checked", "true");
+  // Nothing is listed until something is typed; then only the matches.
+  await expect(plate.getByRole("option")).toHaveCount(2);
+  await plate.getByRole("option", { name: /acme\/email-templates/ }).click();
+  await expect(plate.getByTestId("picked-repo")).toHaveCount(1);
+  await expect(plate.getByPlaceholder("owner/repo")).toHaveValue("");
+  await expect(plate.getByRole("listbox")).toHaveCount(0);
   // The branch list arrives from the backend; the default branch is preselected.
   const branch = plate.getByLabel("Branch of acme/email-templates");
   await expect(branch.locator("option")).toHaveCount(2);
