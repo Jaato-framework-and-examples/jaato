@@ -4299,7 +4299,8 @@ reconciled; and `references bundle reconcile` typed in a confined session
 still cannot write the index (the same base-profile deny). This split is a
 **stopgap**: #1422 makes `tool_hat` real, lets the runner write its own
 catalog, and lists what to remove from here. A running session sees the new
-entry at its next catalog reload.
+entry on its next references call (see [A Catalog Written After the Session
+Loaded It](#a-catalog-written-after-the-session-loaded-it-1145)).
 
 Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
 reversions (the numpy-backed reconcile tests skip without numpy).
@@ -4338,11 +4339,17 @@ The instruction the model reads carries a `**Links**` line
 
 **Who declares an edge** (the brainstorm's open question 7): an agent may
 propose one, and none takes effect until a person promotes it.
-`proposeReference` takes `links`, refused at the call when a target is not
-in the agent's own catalog; the claim carries them, the curator's row shows
-them (`links`, notes as text) with a non-blocking `warnings` entry for a
-target the workspace catalog cannot place, and promotion writes them into
-the catalog file. `listReferences` shows a claim's edges to another model
+`proposeReference` takes `links` and refuses only a malformed one. A
+target not in the catalog is kept, because pages proposed together (often
+in parallel) link to each other before any is promoted; a demo's three
+runbook pages could not link at all while such targets were refused. The
+call's result names those targets (`forward_links`, with the `claim_id`
+when the target is already proposed), so a typo still reaches the agent
+that made it. The claim carries the links, the curator's row shows them
+(`links`, notes as text) with a non-blocking `warnings` entry for a target
+the workspace catalog cannot place (naming the pending claim when it is
+one), and promotion writes them into the catalog file, dangling until the
+target is promoted too. `listReferences` shows a claim's edges to another model
 as `{to, rel}` with the target re-checked as one token and no note, since
 that listing is outside the untrusted fence. The web Proposals panel draws
 each edge and marks a `supersedes`, because promoting it reroutes requests
@@ -4381,14 +4388,53 @@ link followed) with its `links` (a dangling one marked), `linked_from` and
 web coder's **References** rail section lists the catalog (the badge is
 `!` while any reference holds a dangling edge) and gives the owner an
 editor per reference; a promotion from Proposals re-lists it. A running
-session sees an edit at its next catalog reload. Like promotion into a bundle, the
+session sees an edit on its next references call. Like promotion into a bundle, the
 write is daemon-side only because no runner profile may write the catalog;
 #1422 (a real `tool_hat`) moves it back to the runner, with the daemon
 keeping the owner gate.
 
 Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
-`server/tests/test_a_proposal_carries_typed_links.py` (five) and
+`server/tests/test_a_proposal_carries_typed_links.py` (seven) and
 `server/tests/test_a_person_edits_a_references_links.py` (six).
+
+### A Catalog Written After the Session Loaded It (#1145)
+
+A session loaded its references catalog once, at `initialize()`. A
+promotion, a link edit, a bundle merge or a `git pull` landing after that
+reached no running session until `references reload` was typed or a new
+session started. After #1420 a promoted page went further than stale: the
+running session listed it under `proposed` until promotion deleted the
+claim, and then had it nowhere.
+
+Every read path the model reaches now refreshes first:
+`listReferences`, `selectReferences`, `proposeReference` (its collision
+check) and `enrich_prompt` (the turn boundary). The check is one `stat` per
+watched path, and a reload runs only when one moved
+(`references/catalog_watch.py`, stdlib only).
+
+| Watched | Why it is enough |
+|---|---|
+| each bundle directory, each tier root, `<ws>/.jaato/references` | creating, deleting or renaming a file moves its directory's mtime, and every framework writer (`write_contained`, `reconcile`, `merge`) replaces a file by rename, so an edit is a rename; a new sub-bundle is a new directory in a tier root |
+| each `references.json` candidate, individually | the workspace root's own mtime moves with every file created there |
+
+| Rule | Why |
+|---|---|
+| **one reload path** (`_reload_from_disk`, shared with `references reload`) | it now includes the bundle half: `references reload` used to reload the workspace root alone, dropping every sub-bundle and user-tier reference, and did not re-attach similarity matchers |
+| **a write racing the load is not lost** | `settle` stores a path as `UNSETTLED` (equal to no stamp, so the next check reloads) when it moved between the snapshots taken before and after the load, or its mtime is within 2 s of the snapshot. The second is git's "racily clean" rule: a kernel stamps mtimes from a coarse clock, so a write in the same tick leaves the mtime unchanged |
+| **a dropped selection is said, not hidden** | a selected reference that left the catalog is deauthorized and reported once, as `catalog_changed: {added, removed, dropped_selected, note}` on the next references result, and at the turn boundary as a `⟦JAATO⟧` note naming it |
+| **inline `sources` are never refreshed** | a reload reads disk, which would replace them |
+| **opt-out** | `plugin_configs.references.refresh_catalog: false` keeps the load-once snapshot |
+
+No daemon push: every read path checks, so no write can be missed by a
+session that did not hear about it. Stated limit: an in-place edit by
+another tool (an editor saving over the file without a rename) moves no
+directory mtime and is seen only when something else in that directory
+changes, or on `references reload`. The refresh reads only paths the plugin
+already reads, so its AppArmor contribution is unchanged.
+
+Guard:
+`shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,
+five reversions.
 
 ### Plugin-Level Traits
 
