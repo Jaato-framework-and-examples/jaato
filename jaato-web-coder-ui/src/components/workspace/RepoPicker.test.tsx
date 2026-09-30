@@ -65,8 +65,10 @@ describe("RepoPicker", () => {
   it("autocompletes an org repository through search, marks it and warns once picked", async () => {
     const calls = stubFetch();
     render(<Harness />);
-    fireEvent.change(screen.getByPlaceholderText("owner/repo"), { target: { value: "Jaato-framework-and-examples/ja" } });
-    const hit = await screen.findByRole("checkbox", { name: /Jaato-framework-and-examples\/jaato/ }, { timeout: 2000 });
+    const field = screen.getByPlaceholderText("owner/repo");
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "Jaato-framework-and-examples/ja" } });
+    const hit = await screen.findByRole("option", { name: /Jaato-framework-and-examples\/jaato/ }, { timeout: 2000 });
     expect(calls.some((u) => u.includes("/search?q=Jaato-framework-and-examples%2Fja"))).toBe(true);
     expect(hit.textContent).toMatch(/App not installed/);
     fireEvent.click(hit);
@@ -78,8 +80,41 @@ describe("RepoPicker", () => {
   it("does not warn for a repository the installations cover", async () => {
     stubFetch();
     render(<Harness />);
-    fireEvent.click(await screen.findByRole("checkbox", { name: /alice\/dots/ }));
+    const field = screen.getByPlaceholderText("owner/repo");
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "dots" } });
+    fireEvent.click(await screen.findByRole("option", { name: /alice\/dots/ }));
     await waitFor(() => expect(screen.getAllByTestId("picked-repo")).toHaveLength(1));
     expect(screen.queryByTestId("reach-warning")).toBeNull();
+  });
+
+  it("lists nothing until something is typed, then only what matches", async () => {
+    stubFetch();
+    render(<Harness />);
+    const field = screen.getByPlaceholderText("owner/repo");
+    fireEvent.focus(field);
+    await screen.findByText(/Type to search 1 repository/);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(field.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.change(field, { target: { value: "zzz" } });
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /alice\/dots/ })).toBeNull();
+    expect(screen.getByText("No repositories match.")).toBeTruthy();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("picks with the keyboard and clears the field for the next one", async () => {
+    stubFetch();
+    render(<Harness />);
+    const field = screen.getByPlaceholderText("owner/repo") as HTMLInputElement;
+    fireEvent.focus(field);
+    await screen.findByText(/Type to search 1 repository/);
+    fireEvent.change(field, { target: { value: "ali" } });
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() => expect(screen.getAllByTestId("picked-repo")).toHaveLength(1));
+    expect(field.value).toBe("");
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 });

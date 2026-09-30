@@ -1,8 +1,15 @@
 /**
  * Pick GitHub repositories and a branch for each (design 3b, form phase):
- * a search over the repositories the signed-in user's GitHub App
+ * a search field over the repositories the signed-in user's GitHub App
  * installations can reach, on the left, and the repositories picked, each
  * with its branch and target path, on the right.
+ *
+ * The field is a combobox: nothing is listed until something is typed, and
+ * then a dropdown under it shows only the repositories that match.  Picking
+ * one (click, or arrows and Enter) adds it to the right column and clears
+ * the field, so the next one can be typed; a picked repository reads as
+ * checked in the dropdown and picking it again removes it.  Escape, or
+ * leaving the field, closes the dropdown.
  *
  * The listing comes from the web backend (``/api/github/repos``,
  * ``/api/github/branches``), which holds the token; the browser only ever
@@ -17,7 +24,7 @@
  * workspace's sessions get cannot push, branch or open a pull request there
  * until the App is installed on its owner (``appReach``).
  */
-import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useId, useMemo, useState, type Dispatch, type KeyboardEvent, type MouseEvent, type ReactNode, type SetStateAction } from "react";
 import { appReach, githubApi, reachWarning, type GitHubRepo, type RepoListing, type SearchedRepo } from "@/app/github";
 import { cloneTarget } from "@/protocol/workspaces";
 
@@ -137,12 +144,40 @@ export function RepoPicker({ githubUrl, workspace, picked, onChange, leading }: 
       onChange([...picked, { repo: r.fullName, branch: r.defaultBranch || "", private: r.private }]);
       loadBranches(r.fullName);
     }
+    setQuery("");
   };
   const addTyped = () => {
     onChange([...picked, { repo: typed, branch: "" }]);
     setQuery("");
     loadBranches(typed);
   };
+
+  // The dropdown's rows: the matches, then "+ Add owner/repo" when the typed
+  // name is a repository nothing listed.  ``active`` indexes into them.
+  const [focused, setFocused] = useState(false);
+  const [active, setActive] = useState(-1);
+  useEffect(() => { setActive(-1); }, [typed]);
+  const rows = shown.length + (canAddTyped ? 1 : 0);
+  const open = focused && typed.length > 0;
+  const listId = useId();
+  const optionId = (i: number) => `${listId}-opt-${i}`;
+  const choose = (i: number) => {
+    const r = shown[i];
+    if (r) toggle(r);
+    else if (canAddTyped) addTyped();
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown" && rows > 0) { e.preventDefault(); setFocused(true); setActive((a) => (a + 1) % rows); }
+    else if (e.key === "ArrowUp" && rows > 0) { e.preventDefault(); setActive((a) => (a <= 0 ? rows - 1 : a - 1)); }
+    else if (e.key === "Enter") {
+      if (open && active >= 0) { e.preventDefault(); choose(active); }
+      else if (canAddTyped) { e.preventDefault(); addTyped(); }
+      else if (open && shown.length === 1) { e.preventDefault(); choose(0); }
+    } else if (e.key === "Escape" && open) { e.preventDefault(); setQuery(""); }
+  };
+  // Rows take the mouse down without moving focus, so a click on one lands
+  // before the field's blur closes the dropdown.
+  const keepFocus = (e: MouseEvent) => e.preventDefault();
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-[1fr_1px_1.25fr]">
@@ -151,41 +186,72 @@ export function RepoPicker({ githubUrl, workspace, picked, onChange, leading }: 
         <label htmlFor="repo-search" className="text-[12px] text-text-muted">
           {githubUrl ? <>Find repositories on GitHub {login && <span className="font-mono text-text">@{login}</span>}</> : "Add a public GitHub repository"}
         </label>
-        <input
-          id="repo-search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && canAddTyped) { e.preventDefault(); addTyped(); } }}
-          placeholder="owner/repo"
-          spellCheck={false}
-          autoComplete="off"
-          className="input input-mono"
-        />
+        <div className="relative">
+          <input
+            id="repo-search"
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={open && active >= 0 ? optionId(active) : undefined}
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setFocused(true); }}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            onKeyDown={onKeyDown}
+            placeholder="owner/repo"
+            spellCheck={false}
+            autoComplete="off"
+            className="input input-mono"
+          />
+          {open && (
+            <ul id={listId} role="listbox" aria-label="Repositories" aria-multiselectable="true" className="absolute left-0 right-0 top-full mt-1 z-30 m-0 p-0 list-none max-h-[260px] overflow-auto border hairline bg-surface shadow-md">
+              {loading && <li className="px-3 py-2 text-[13px] text-text-muted">Loading repositories…</li>}
+              {shown.map((r, i) => {
+                const on = isPicked(r.fullName);
+                return (
+                  <li
+                    key={r.fullName}
+                    id={optionId(i)}
+                    role="option"
+                    aria-selected={on}
+                    onMouseDown={keepFocus}
+                    onMouseEnter={() => setActive(i)}
+                    onClick={() => choose(i)}
+                    className={`flex items-center gap-2.5 px-3 py-1.5 border-b hairline cursor-pointer ${i === active ? "tint" : on ? "tint" : "hover:bg-tint/60"}`}
+                  >
+                    <Check on={on} />
+                    <span className="font-mono text-[12px] flex-1 min-w-0 truncate">{r.fullName}</span>
+                    {r.appCanWrite === false && <span className="chrome chrome-sm text-[11px] text-warning" title="The GitHub App cannot write here: agents cannot push, branch or open pull requests">App not installed</span>}
+                    <span className="chrome chrome-sm text-[11px] text-text-muted">{r.private ? "Private" : "Public"}</span>
+                  </li>
+                );
+              })}
+              {canAddTyped && (
+                <li
+                  id={optionId(shown.length)}
+                  role="option"
+                  aria-selected={false}
+                  onMouseDown={keepFocus}
+                  onMouseEnter={() => setActive(shown.length)}
+                  onClick={addTyped}
+                  className={`px-3 py-1.5 chrome chrome-sm text-steel cursor-pointer ${active === shown.length ? "tint" : "hover:bg-tint"}`}
+                >
+                  + Add {typed}
+                </li>
+              )}
+              {!loading && rows === 0 && (
+                <li className="px-3 py-2 text-[13px] text-text-muted">{repos.length || githubUrl ? "No repositories match." : "Type owner/repo to add one."}</li>
+              )}
+            </ul>
+          )}
+        </div>
         {error && <span className="text-[12px] text-warning">{error}</span>}
-        <ul className="border hairline m-0 p-0 list-none max-h-[230px] overflow-auto" aria-label="Repositories">
-          {loading && <li className="px-3 py-2 text-[13px] text-text-muted">Loading repositories…</li>}
-          {shown.map((r) => {
-            const on = isPicked(r.fullName);
-            return (
-              <li key={r.fullName}>
-                <button type="button" role="checkbox" aria-checked={on} onClick={() => toggle(r)} className={`w-full flex items-center gap-2.5 px-3 py-1.5 border-b hairline text-left ${on ? "tint" : "hover:bg-tint/60"}`}>
-                  <Check on={on} />
-                  <span className="font-mono text-[12px] flex-1 min-w-0 truncate">{r.fullName}</span>
-                  {r.appCanWrite === false && <span className="chrome chrome-sm text-[11px] text-warning" title="The GitHub App cannot write here: agents cannot push, branch or open pull requests">App not installed</span>}
-                  <span className="chrome chrome-sm text-[11px] text-text-muted">{r.private ? "Private" : "Public"}</span>
-                </button>
-              </li>
-            );
-          })}
-          {canAddTyped && (
-            <li>
-              <button type="button" onClick={addTyped} className="w-full text-left px-3 py-1.5 chrome chrome-sm text-steel hover:bg-tint">+ Add {typed}</button>
-            </li>
-          )}
-          {!loading && shown.length === 0 && !canAddTyped && (
-            <li className="px-3 py-2 text-[13px] text-text-muted">{repos.length || githubUrl ? "No repositories match." : "Type owner/repo to add one."}</li>
-          )}
-        </ul>
+        {!open && !error && (
+          <span className="text-[12px] text-text-muted">
+            {loading ? "Loading repositories…" : repos.length ? `Type to search ${repos.length} ${repos.length === 1 ? "repository" : "repositories"}${githubUrl ? " or GitHub" : ""}.` : githubUrl ? "Type to search GitHub, or an owner/repo to add." : "Type owner/repo, then Enter."}
+          </span>
+        )}
       </div>
       <div className="hidden md:block bg-divider" aria-hidden="true" />
       <div className="p-5 flex flex-col gap-2 min-w-0" aria-label="Repositories to clone">
