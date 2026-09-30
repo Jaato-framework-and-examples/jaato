@@ -1,0 +1,524 @@
+# An SELinux Confinement Backend
+
+Status: **proposed**. Nothing here is implemented. Written against the tree
+at the time of the RHEL compatibility question; AppArmor template v43.
+
+## 1. Why
+
+Every kernel-enforced boundary jaato has is AppArmor: the per-session
+profile, the `//child` sub-profile for model-driven subprocesses, the
+isolated sub-runner profile, the per-thread verification (#1023), the mode
+check (#1014), the grant record (#1326), the private `/tmp` (#1381).
+`AppArmorManager.is_available()` needs `apparmor_parser`, `aa-exec` and
+`/sys/kernel/security/apparmor`, none of which exist on RHEL, Fedora, Rocky,
+Alma or CentOS Stream. There the daemon logs "AppArmor confinement NOT
+available" and falls back to the application-layer heuristics:
+
+| Surface | Without a kernel boundary |
+|---|---|
+| runner process | unconfined; `cli` containment is string-level |
+| model-driven subprocesses | unconfined; `interactive_shell` warns, `require_confinement` refuses every spawn |
+| notebook | audit-hook tier: `import ctypes` refused, so no numpy / pandas in a cell |
+| private `/tmp` | off (only the confined path provisions it) |
+| `JAATO_REQUIRE_APPARMOR` | the daemon refuses to start |
+
+Those hosts ship SELinux, enforcing by default. This design adds an SELinux
+backend that is selected when AppArmor is not, and gives those hosts the
+same guarantees, with the differences stated where the two LSMs genuinely
+differ.
+
+The two cannot both be the active major LSM on one kernel, so "instead of"
+is the only mode: there is no host on which both are available.
+
+## 2. The central difference: paths vs labels
+
+AppArmor rules name **paths**. A profile rendered per session can say
+"`/srv/ws/abc/**` rwkl, `.jaato/agents/**` write-denied, `/usr/bin/git`
+executable", and a fresh profile is loaded per boundary.
+
+SELinux rules name **types** carried on inodes (xattrs) and processes. A
+policy is compiled and loaded as a module, which is slow (seconds) and
+global. Loading one module per session, the literal translation of the
+AppArmor design, is wrong: `semodule -i` takes 5–30 s, serialises on the
+policy store, and grows the policy with every workspace.
+
+So the backend does what container runtimes do (sVirt, `container-selinux`):
+
+* **One policy module, installed once**, defining a small fixed set of
+  domains and file types (section 4).
+* **Per-boundary isolation by MCS categories.** Each workspace gets a
+  stable category pair (`s0:c123,c456`). The runner runs at that level and
+  the workspace's files are labelled at that level. The MCS constraint then
+  keeps a runner out of every other workspace even though all of them share
+  the same types, exactly as it keeps one container out of another.
+
+Consequences that shape the rest of this document:
+
+1. **Nothing is loaded per session.** Provisioning is: allocate or look up
+   the category pair, make sure the workspace tree carries it, and compute
+   the label to transition to. No privileged tool runs per session once the
+   tree is labelled.
+2. **Labelling has a cost AppArmor does not have.** A workspace must be
+   relabelled once (a recursive `setfilecon`). Files created afterwards
+   inherit the right type from their parent and the level from the creating
+   process, so the relabel is one-time per workspace, not per session
+   (section 6).
+3. **Per-path grants outside the workspace do not translate.** A fragment
+   saying "read `/srv/corpus`" has no SELinux equivalent short of labelling
+   `/srv/corpus`. Section 8 says what each AppArmor feature becomes, and
+   which ones become "unsupported, said so".
+
+## 3. The seam: a `ConfinementBackend`
+
+Today the call sites import `AppArmorManager` and the runner-side helpers
+directly (`server/websocket.py`, `server/session_manager.py`,
+`server/runner_spawn.py`, `server/runner_pool.py`, `server/runner/bootstrap.py`,
+`server/runner/session.py`, `server/runner/rpc.py`, `server/core.py`,
+`server/diagnostics_verbs.py`, `server/runner_rpc_handlers/*`,
+`shared/jaato_session.py`, `shared/safe_pool.py`). The first step is a
+refactor with **no behaviour change**: put a protocol between them and
+AppArmor.
+
+```
+server/confinement/
+  __init__.py        select_backend() -> ConfinementBackend
+  base.py            ConfinementBackend (Protocol), Boundary, ConfinementHandle
+  apparmor.py        AppArmorBackend: wraps today's AppArmorManager, unchanged
+  selinux.py         SELinuxBackend (daemon side)
+shared/lsm_label.py  LSM-neutral label parsing (generalises apparmor_label.py)
+server/runner/lsm_confine.py   runner-side transition, per LSM
+```
+
+### 3.1 Daemon side
+
+```python
+@dataclass(frozen=True)
+class Boundary:
+    workspace_path: str            # realpath
+    config_root: Optional[str]
+    env_file: Optional[str]
+    managed: bool                  # under the WS workspace_root
+    private_tmp_dir: Optional[str]
+    requested_fragments: tuple[str, ...]
+    plugin_rules: tuple[str, ...]
+
+@dataclass(frozen=True)
+class ConfinementHandle:
+    backend: str                   # "apparmor" | "selinux"
+    label: str                     # what the runner transitions to
+    confinement_id: str            # slot-key component (#1033)
+    child_label: str               # what model-driven subprocesses exec into
+    grants: dict                   # the #1326 record, backend-shaped
+
+class ConfinementBackend(Protocol):
+    name: str
+    def is_available(self) -> bool: ...
+    @property
+    def unavailable_reason(self) -> Optional[str]: ...
+    def confinement_id_for_boundary(self, b: Boundary) -> str: ...
+    def provision(self, session_id: str, b: Boundary) -> Optional[ConfinementHandle]: ...
+    def release(self, handle: ConfinementHandle) -> None: ...   # per-slot, as today
+    def provision_isolated(self, parent: ConfinementHandle, subagent_id: str,
+                           workspace_path: str) -> Optional[ConfinementHandle]: ...
+    def add_reference_grant(self, handle, ref_id: str, path: str) -> bool: ...
+    def remove_reference_grant(self, handle, ref_id: str) -> bool: ...
+    def record(self, handle) -> dict: ...                       # diagnostics
+```
+
+`select_backend()` order: an explicit `JAATO_CONFINEMENT=apparmor|selinux|none`
+wins; otherwise AppArmor if available, else SELinux if available, else none.
+Because the two cannot coexist, "else" only ever matters for the reason
+string: on a SELinux host the log says "AppArmor unavailable (no
+securityfs entry); SELinux backend selected" rather than the current
+degraded-isolation warning.
+
+`JAATO_REQUIRE_APPARMOR` / `--apparmor` keep their meaning (AppArmor
+specifically). A new `JAATO_REQUIRE_CONFINEMENT` / `--require-confinement`
+means "some kernel backend, or refuse to start", and is what RHEL
+deployments set. `--apparmor` on an SELinux host keeps failing, with a
+message naming the new flag.
+
+### 3.2 Envelope
+
+`SessionInitEnvelope.profile_name` stays (older runners read it) and gains
+a sibling `confinement: {backend, label, child_label}`. A runner that does
+not understand `backend: selinux` must refuse the bootstrap rather than run
+unconfined, so this is an **envelope version bump**, not an additive field.
+Both ends ship in `jaato-server`, so there is no cross-version pairing in
+practice; the bump is what makes a mismatched pool template fail loudly.
+
+### 3.3 Runner side
+
+`shared/apparmor_label.py` becomes a special case of `shared/lsm_label.py`,
+stdlib-only as now:
+
+```python
+@dataclass(frozen=True)
+class LsmLabel:
+    backend: str          # "apparmor" | "selinux" | "none"
+    raw: str
+    identity: str         # AppArmor profile name | SELinux "type:level"
+    enforced: bool
+    mode: str             # enforce/complain | enforcing/permissive
+```
+
+The two questions #1014 keeps apart stay apart: `identity_ignoring_mode`
+(which boundary is this task in) and `enforced` (is the kernel applying it).
+For SELinux, `enforced` is true only when **both** `/sys/fs/selinux/enforce`
+reads `1` **and** the domain is not permissive. Per-domain permissive is
+the SELinux analogue of AppArmor complain mode; it is visible through
+`libselinux` (`security_compute_av_flags` returns `SELINUX_AVD_FLAGS_PERMISSIVE`
+for a permissive source domain). An unreadable answer is "not enforced", as
+today.
+
+`sandbox_mode` gains `selinux` and `selinux-permissive`. The two existing
+predicates (`sandbox_mode_is_apparmor`, `sandbox_mode_is_enforced`) are
+renamed `sandbox_mode_is_kernel` / `sandbox_mode_is_enforced` with the old
+names kept as aliases; an older reader comparing `== "apparmor"` reads an
+SELinux session as unconfined, the safe direction, as #1014 already argued
+for `apparmor-complain`.
+
+## 4. The policy module
+
+Shipped as source under `jaato-server/selinux/` (`jaato.te`, `jaato.fc`,
+`jaato.if`), built with `make -f /usr/share/selinux/devel/Makefile`, and
+installed once by the operator (later: a `jaato-server-selinux` RPM, the
+`container-selinux` pattern). The module carries a version; the backend
+refuses (`unavailable_reason`) when the loaded version is older than the
+one the daemon was built for, the way `TEMPLATE_VERSION` gates AppArmor
+profiles today.
+
+### 4.1 Domains
+
+| Domain | AppArmor equivalent | Entered by |
+|---|---|---|
+| `jaato_runner_t` | base profile `jaato-ws-<id>` | cold spawn: `setexeccon` in the daemon's fork before `execve`; pool slot: `setcon` (section 7) |
+| `jaato_child_t` | `//child` | `setexeccon` in the `preexec_fn` of every model-driven subprocess |
+| `jaato_isolated_t` | isolated sub-runner profile | daemon `setexeccon` at sub-runner spawn |
+| `jaato_template_t` | (unconfined pool template) | only with pool support, section 7 |
+
+There is no `tool_hat` domain. The AppArmor `tool_hat` sub-profile is never
+entered on the current tree (#1422), so omitting it is not a regression; if
+#1422 makes it real, it becomes a `jaato_tool_t` bounded by
+`jaato_runner_t`.
+
+The daemon itself stays in whatever domain systemd gives it
+(`unconfined_service_t` on RHEL), as it stays unconfined under AppArmor.
+The module grants `unconfined_service_t` (and `unconfined_t`, for a daemon
+started from a login shell) `process transition` into `jaato_runner_t` and
+`jaato_isolated_t`, plus `entrypoint` on the interpreter's file type.
+
+### 4.2 File types
+
+| Type | Labels | `jaato_runner_t` | `jaato_child_t` |
+|---|---|---|---|
+| `jaato_workspace_t` | the workspace tree | read, write, create, unlink, rename, lock, link | same |
+| `jaato_managed_ws_t` | a managed workspace's tree (under `workspace_root`) | as above, **plus execute** | same |
+| `jaato_authored_t` | `.jaato/{agents,profiles,scripts,services/*/,instructions,references,templates,plans,completion_schemas,spawn_schemas}` and `reactors.json`, `template_routing.yaml` | read, search | read, search |
+| `jaato_claims_t` | `.jaato/references-claims/` | read, write | read only (template v43's `//child` deny) |
+| `jaato_tmp_t` | session tmpdir and private `/tmp` | read, write, create | same |
+
+The authored set is the one `jaato_sdk/scaffold/gitignore.py` `AUTHORED`
+already declares and `test_gitignore_authored_set_tracks_apparmor.py`
+already checks against the AppArmor write-denies; that guard gains the
+`.fc`/relabel list as a third party to agree with.
+
+**Execution from the workspace** follows the AppArmor rule: a managed
+workspace (#1273/#1274: `node_modules/.bin`, the tool venv, `.home/.local/bin`)
+is executable, a user's own checkout is not. Two types rather than a
+boolean, because a boolean would be global and the distinction is per
+workspace.
+
+### 4.3 Everything else, as type rules
+
+| AppArmor rule | SELinux rule |
+|---|---|
+| `/usr/bin/** ix`, `/usr/lib/** rm`, `/etc/ld.so.cache r`, … | `corecmd_exec_bin`, `libs_use_ld_so`, `files_read_etc_files` (refpolicy interfaces) |
+| `network inet stream/dgram` | `corenet_tcp_connect_all_ports`, `corenet_udp_*`, `sysnet_dns_name_resolve` |
+| `deny network raw` | no `rawip_socket create` |
+| `deny ptrace`, `deny capability sys_admin/net_admin/sys_ptrace` | none of those permissions granted; `dontaudit` where noisy |
+| `deny mount` | no `mount`/`mounton`; no `filesystem mount` |
+| `change_profile -> …//child` | `allow jaato_runner_t jaato_child_t:process transition` + `setexec` |
+| `change_profile -> unconfined` | **nothing.** See 4.4 |
+| `audit deny /proc/*/environ …` (other processes) | no `file read` on other domains' `/proc` entries; `jaato_child_t` gets no read on `jaato_runner_t:file`, so a subprocess cannot read the runner's environ, mem, cmdline |
+| `/proc/self/** r`, `owner /proc/*/limits r` | `allow jaato_runner_t self:file read`, `self:dir search` |
+| `/dev/null rw`, `/dev/urandom r`, `/dev/pts/* rw` | `dev_rw_null`, `dev_read_urand`, `term_use_all_ptys` (for `interactive_shell`) |
+
+Home directories (`user_home_t`), `/etc/shadow`, other services' data and
+other workspaces are unreachable by type or by level without any rule
+saying so. This is broader coverage than the AppArmor template, which is
+allow-listed by path and so only as good as its list.
+
+### 4.4 An escape AppArmor needs and SELinux does not
+
+The AppArmor base profile keeps `change_profile -> unconfined` and write
+access to `/proc/self/attr/current`, because the framework historically
+restored its own threads (see the `apparmor_confine` docstring). That is
+why `//child` exists: a subprocess must not inherit a profile it can leave
+(#1323). Since phase 2 the runner never restores itself, so under SELinux
+`jaato_runner_t` gets **no** `dyntransition` and **no** `setcurrent`. Code
+running in the runner cannot change its own domain, and `setexec` is
+constrained by `process transition` to `jaato_child_t` only. The notebook
+kernel's check (#1323: "a kernel that finds itself in a profile it could
+leave does not count it") therefore passes for the runner domain too, not
+only for `jaato_child_t`.
+
+## 5. MCS levels
+
+### 5.1 Allocation
+
+One category pair per **workspace**, not per session. This matches the
+AppArmor boundary (#1033: sessions of one workspace and config root share a
+profile), and it is what makes relabelling one-time.
+
+* Derived from `sha256(realpath(workspace))` into a pair `cA,cB` with
+  `A < B` in `c0..c1023`, then collision-checked against the daemon's
+  allocation table; on collision, probe the next pair.
+* Recorded daemon-side, never in the workspace (the runner can write the
+  workspace): the WS workspace registry row gains `selinux_level`; IPC
+  workspaces go in `~/.jaato/selinux_levels.json` (daemon-owned, 0600).
+* The pool of pairs is 523,776; container runtimes allocate from the same
+  space at random, but a collision with a container is harmless because
+  type enforcement (`container_t` vs `jaato_runner_t`) already separates
+  them. MCS only separates processes of one type.
+
+### 5.2 What the level separates
+
+| Two processes | Type | Level | Result |
+|---|---|---|---|
+| runner A, workspace A files | same | same | allowed |
+| runner A, workspace B files | same | different | **denied by the MCS constraint** |
+| runner A, runner B `/proc` | same | different | denied |
+| runner A, session tmpdir of B | same | different | denied |
+| two sessions of workspace A | same | same | share, as under AppArmor |
+
+`confinement_id_for_boundary` becomes, for SELinux, a slug plus a digest of
+`(policy_version, level, managed, private_tmp_dir)`. The rendered-body
+digest it uses for AppArmor has no analogue (nothing is rendered), and the
+inputs that change what the runner may do are exactly those four.
+
+### 5.3 Isolated sub-runners
+
+`jaato_isolated_t` at a **second** pair allocated for the sub-runner's own
+workspace. Its parent's files are then out of reach by level, as the
+isolated profile keeps them out of reach by path today.
+
+## 6. Labelling a workspace
+
+Done by the daemon (unconfined, root or with `relabelfrom/relabelto` on the
+jaato types), at provisioning, before the runner spawns.
+
+1. `realpath` the workspace; refuse one under `/`, `/usr`, `/etc`, `/home`
+   itself or `$HOME` itself (relabelling a whole home is never intended).
+2. Create the authored directories that do not exist yet (empty), so they
+   can carry `jaato_authored_t`. A runner creating one later would give it
+   `jaato_workspace_t`; pre-creating them closes that.
+3. Walk the tree with `lsetfilecon` (never following symlinks), setting
+   `jaato_workspace_t` / `jaato_managed_ws_t` at the workspace level, and
+   the authored and claims types on their subtrees. `.git` objects are
+   labelled like any other file.
+4. Record a stamp in the daemon registry (not in the workspace):
+   `(level, policy_version, labelled_at, file_count)`.
+
+Later sessions check the root's label and the stamp; a match skips the
+walk. A mismatch (policy version changed, level re-allocated, someone ran
+`restorecon -F`) re-runs it.
+
+Measured costs to verify in phase 0: `lsetfilecon` is one syscall per
+inode; a clone with a large `node_modules` (~100k files) is expected in the
+low seconds. It runs off the event loop, once.
+
+**Surviving `restorecon`.** `restorecon` without `-F` resets the type and
+keeps the level; with `-F` it resets both. So the install step registers
+one fcontext rule for the daemon's workspace root:
+
+```
+semanage fcontext -a -t jaato_managed_ws_t '/srv/jaato/workspaces(/.*)?'
+restorecon -R /srv/jaato/workspaces
+```
+
+and the per-subtree authored types via `jaato.fc` patterns relative to it.
+A plain `restorecon` then preserves isolation. A `restorecon -F` strips the
+levels, which the stamp check detects at the next provisioning.
+
+**Files created by the runner.** A new file gets the type of its parent
+directory (default type inheritance) and the level of the creating process
+(MCS default for files is the process's low level). Both are right without
+a `type_transition` rule, except in `/tmp`, where
+`type_transition jaato_runner_t tmp_t:{file dir} jaato_tmp_t` applies.
+
+**Renaming authored directories away.** The runner could try to rename
+`.jaato/agents` and create a fresh one. Renaming a directory needs `rename`
+(and `reparent` to move it) on the directory itself, and deleting needs
+`rmdir`; `jaato_authored_t:dir` grants none of them, nor `add_name` /
+`remove_name` inside it. Guarded by a test against the compiled policy
+(`sesearch`), section 11.
+
+**User checkouts (IPC, user-CWD).** Relabelling a user's own repository is
+a visible change to their files. It stays opt-in, as AppArmor confinement
+is for IPC today (`IPCClient(..., apparmor=True)` becomes `confine=True`,
+old name kept). A checkout under a home directory needs an fcontext rule
+the operator adds; the backend refuses to relabel under `$HOME` without
+one, naming the command.
+
+## 7. Entering the domain
+
+### 7.1 Cold spawn: exec transition
+
+`RunnerSpawner` already forks and `execvpe`s the runner. Between the two,
+in the child, call `setexeccon(label)` (write `/proc/self/attr/exec`). The
+`execve` then lands in `jaato_runner_t:level` atomically, single-threaded,
+before any Python code of the runner runs. This is strictly simpler than
+AppArmor's `aa_change_profile` on the runner's main thread, and it removes
+the #1023 problem for cold spawns: there is no thread that predates the
+transition.
+
+`private_tmp` (#1381) keeps its order: the child unshares and binds before
+the exec, because `jaato_runner_t` has no `mount`. The tmpfs mounted on
+`/dev/shm` gets `context=system_u:object_r:jaato_tmp_t:<level>` as a mount
+option.
+
+### 7.2 Pool slots: dynamic transition
+
+A pool slot is forked from the template and never execs. It would have to
+`setcon`, and SELinux refuses `setcon` in a multi-threaded process unless
+the new domain is **bounded** by the old one (`typebounds`). A slot has
+threads by the time it serves its first bootstrap.
+
+Phase plan:
+
+* **Phase 1: SELinux-confined sessions do not use the pool.** The
+  routing gate in `spawn_session_runner` already routes `cgroup_attach`
+  sessions away from the pool; SELinux confinement joins it. Cost: the
+  cold start (~7 s vs ~1 s warm). Unconfined sessions still use the pool.
+* **Phase 3: bounded pool.** The template runs as
+  `jaato_template_t:s0-s0:c0.c1023` with
+  `typebounds jaato_template_t jaato_runner_t`, and each slot calls
+  `setcon(jaato_runner_t:<level>)` on its main thread. Threads created
+  before the transition keep the template label, so #1023's
+  `recycle_worker_pools` + `verify_thread_confinement` apply unchanged
+  (the scan reads `/proc/self/task/*/attr/current`, which SELinux fills
+  with a context string). The slot key already contains the label via
+  `confinement_id`, so #1033 and #1100 need no change. To be verified:
+  whether `typebounds` constrains a Python runtime's template enough to be
+  worth it, since the template must hold every permission any runner has.
+
+### 7.3 Model-driven subprocesses
+
+`make_child_transition_callback` becomes per backend. For SELinux the
+`preexec_fn` writes `jaato_child_t:<level>` to `/proc/self/attr/exec`, and
+the following `execve` transitions. Fail-closed as today: a failed write
+raises in the child and the spawn fails. `cli`, `interactive_shell` and the
+notebook kernel (#1323) take it through the existing
+`set_apparmor_child_transition_callback` seam, renamed
+`set_child_transition_callback` with the old name kept.
+
+## 8. Feature map
+
+| AppArmor feature | SELinux backend |
+|---|---|
+| per-session profile | per-workspace level + fixed domain |
+| `//child` | `jaato_child_t` via exec transition |
+| isolated sub-runner | `jaato_isolated_t` at its own level |
+| complain mode (`JAATO_APPARMOR_COMPLAIN`) | per-domain permissive (`semanage permissive -a jaato_runner_t`), host-wide; the backend reads it and reports `selinux-permissive`, WARNING once, same as #1014 |
+| per-thread verification (#1023) | same code; label comparison via `lsm_label` |
+| mode check (#1014), `require_confinement` means enforce | same; enforcing and not permissive |
+| private `/tmp` (#1381) | same namespace code; `jaato_tmp_t` labels |
+| plugin-contributed rules (`get_apparmor_rules`) | **not translated.** Workspace-internal grants are already implied; exec grants in a managed workspace come from `jaato_managed_ws_t`; anything else is logged at WARNING as unsupported under SELinux. Plugins may add `get_selinux_booleans()` later if a real need appears |
+| user / workspace / cache fragments | **not translated**, same WARNING. A fragment that needs a path outside the workspace needs that path labelled (`semanage fcontext -t jaato_shared_ro_t`), which is an operator act |
+| exec scoping (`exec_scope: scoped`) | **unsupported**: exec is by type, not by binary path; the grant record reports `exec_scope: unscoped` and a scoped request is refused with a clear reason if the profile demands it |
+| reference grants (`selectReferences`) | a reference inside the workspace needs nothing; one outside it is refused with a reason naming `jaato_shared_ro_t`, where AppArmor would add a fragment |
+| grant record (#1326) | `{backend, domain, level, child_domain, labelled_roots, policy_version, unsupported: [...]}` |
+| denial hints (#1348) | phase 1: none (verdict unknown). A later version can read the AVC from `audit` via the daemon; the runner cannot |
+| `/proc/*/environ` of the runner itself, read in-process | **not denied.** `self:file read` covers `/proc/self`; AppArmor denies it by path. The application check `is_sensitive_proc_path` still covers file tools. Stated, not hidden |
+| template version gate | policy module version gate |
+
+The unsupported rows are why this backend must state its coverage in
+`get_environment(aspect="runtime")` and in `explain oversight`, rather than
+reusing the AppArmor wording.
+
+## 9. Operator setup (target shape)
+
+```bash
+dnf install selinux-policy-devel policycoreutils-python-utils
+make -C jaato-server/selinux -f /usr/share/selinux/devel/Makefile jaato.pp
+semodule -i jaato-server/selinux/jaato.pp
+semanage fcontext -a -t jaato_managed_ws_t '/srv/jaato/workspaces(/.*)?'
+restorecon -R /srv/jaato/workspaces
+# venv outside /home so jaato_runner_t can read site-packages:
+semanage fcontext -a -t lib_t '/opt/jaato/venv(/.*)?'
+restorecon -R /opt/jaato/venv
+JAATO_REQUIRE_CONFINEMENT=1 /opt/jaato/venv/bin/python -m jaato_server ...
+```
+
+The last step is the only per-host runtime requirement; the daemon needs
+root (or the relabel permissions) for section 6 and nothing privileged per
+session. That is an improvement on the AppArmor path, which runs
+`sudo apparmor_parser -r` per boundary.
+
+`jaato-doctor` gains a check: backend selected, SELinux mode, module
+loaded and its version, the interpreter's and venv's labels, and whether
+`workspace_root` has an fcontext rule.
+
+## 10. Availability check
+
+`SELinuxBackend._check_availability`, first failing precondition wins and
+becomes `unavailable_reason`, as today:
+
+1. Linux, `/sys/fs/selinux` mounted, `libselinux.so.1` loadable (ctypes;
+   no new Python dependency).
+2. `security_getenforce()` returns 0 or 1 (disabled → unavailable).
+3. The policy knows `jaato_runner_t` (`security_check_context` on
+   `system_u:system_r:jaato_runner_t:s0`), and the module version is at
+   least the one this build needs.
+4. The daemon's own domain may transition to `jaato_runner_t`
+   (`security_compute_av` for `process transition`) and relabel to
+   `jaato_workspace_t` (`relabelto`).
+5. MCS is enabled (the policy is `targeted`/`mls` with categories).
+
+Permissive host-wide (`getenforce` = 0) is **available but not enforced**:
+sessions run with `sandbox_mode: selinux-permissive`, a WARNING, and
+`--require-confinement` refuses, matching how complain mode is handled.
+
+## 11. Testing
+
+The AppArmor side is tested without a kernel (CI has no LSM) and says so.
+The SELinux side can do better on one axis: **policy compilation works in a
+container**, only loading needs a kernel.
+
+| Layer | Where |
+|---|---|
+| label parsing, mode, sandbox_mode, slot key, allocation, relabel planning | unit tests, fabricated `attr/current` strings, like the AppArmor tests |
+| the policy compiles; the authored types deny write/rename; `jaato_child_t` has no `setexec`/`dyntransition`; `jaato_runner_t` has no `setcurrent`; no domain has `sys_admin`/`mount` | a CI job in a Fedora container: `make` the module, then `sesearch` assertions against the compiled `.pp` (checks the rules exist, not that the kernel applies them) |
+| the backend's contract matches AppArmor's for the shared features | one parametrised suite over both backends through the `ConfinementBackend` protocol |
+| end to end on an enforcing kernel | a manual / scheduled job on a Rocky or Fedora VM (GitHub-hosted runners are Ubuntu; Testing Farm or a self-hosted runner). Not required for merge, like the AppArmor "not verified on an enforcing kernel" notes |
+
+The reversion meta-guard applies: each `sesearch` assertion declares the
+policy line whose removal must fail it.
+
+## 12. Rollout
+
+| Phase | Content | Behaviour change |
+|---|---|---|
+| 0 | Verify on a Fedora/Rocky VM: exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost on a large tree, `/dev/shm` `context=` mount | none |
+| 1 | `ConfinementBackend` seam, `lsm_label`, envelope field; AppArmor behind it unchanged | none (refactor) |
+| 2 | Policy module + `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
+| 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
+| 4 | Bounded pool slots | confined sessions warm again |
+| 5 | RPM packaging, AVC-based denial hints | operator convenience |
+
+## 13. Open questions
+
+1. **Daemon domain.** Keeping the daemon in `unconfined_service_t` mirrors
+   AppArmor. Confining the daemon itself (`jaato_daemon_t`) is possible and
+   out of scope here.
+2. **Relabel ownership on a non-root daemon.** A service user needs
+   `relabelfrom/relabelto` and `process transition`; granting those to an
+   `unconfined_t` service user is policy the operator must accept. Section 9
+   assumes root, as the private `/tmp` does.
+3. **Bounded pool.** Whether the template can be written as a bound
+   (a superset domain) tight enough to be worth it, or whether confined
+   sessions should simply always cold-spawn on SELinux.
+4. **Shared read-only data.** Whether `jaato_shared_ro_t` (operator-labelled,
+   readable by every runner at any level) is the right way to express
+   "read `/srv/corpus`", given that it is global rather than per workspace.
