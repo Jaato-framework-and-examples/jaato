@@ -2604,6 +2604,59 @@ class IPCClient:
             args=[name or ""],
         ))
 
+    MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34"
+
+    async def validate_workspace(
+        self,
+        profile_set: Optional[str] = None,
+        profile: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to run ``jaato-scaffold validate`` (protocol 1.34).
+
+        ``jaato-scaffold`` ships with jaato-sdk, and ``validate`` needs
+        jaato-server's loader: most checks run on a profile only once it is
+        parsed, merged with its ``inherits:`` and set overlay, and
+        constructed.  An install with only the SDK therefore asks the daemon,
+        whose full validator (contributed validators included) checks this
+        connection's OWN workspace — the one declared at the handshake, which
+        the daemon refuses unless the connecting account can reach it.  There
+        is deliberately no path parameter, for the reason
+        :meth:`explain_topic` gives.
+
+        The daemon answers with one ``ScaffoldValidateEvent``: ``ok`` with
+        the ``findings`` (``Diagnostic.as_dict()`` shape) and their
+        ``errors`` / ``warnings`` counts, or ``ok=False`` with ``error`` when
+        the validator could not run.  ``ok`` never means "valid".
+
+        Args:
+            profile_set: A ``JAATO_PROFILE_SET`` name to overlay.
+            profile: Validate only this profile.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SCAFFOLD_VALIDATE_PROTOCOL`, which would ignore the
+                command silently, and a caller waiting on findings would read
+                the silence as "no findings".
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SCAFFOLD_VALIDATE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"validate_workspace: this daemon speaks protocol {spoken} and "
+                f"does not serve scaffold.validate (needs >= "
+                f"{self.MIN_SCAFFOLD_VALIDATE_PROTOCOL}).  It would ignore the "
+                f"command silently, which a caller would read as no findings.  "
+                f"Upgrade the daemon, or run jaato-scaffold validate where "
+                f"jaato-server is installed."
+            )
+        # Both positions are always sent, "" for absent, so a profile with no
+        # set does not land where the handler reads the set.
+        await self._send_event(CommandRequest(
+            command="scaffold.validate",
+            args=[profile_set or "", profile or ""],
+        ))
+
     # =========================================================================
     # The memory verbs (#1232, protocol 1.22)
     #

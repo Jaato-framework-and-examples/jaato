@@ -238,6 +238,18 @@ def _daemon_version() -> str:
         return ""
 
 
+def _checked_sources(sources: Dict[str, Optional[str]]) -> str:
+    """The workspace sources a refusal names, as ``key=value`` pairs."""
+    return ", ".join(f"{k}={'none' if v is None else repr(v)}"
+                     for k, v in sources.items())
+
+
+def _severity_counts(diags: Any) -> Dict[str, int]:
+    """``errors`` / ``warnings`` counts of a validate run's findings."""
+    return {"errors": sum(1 for d in diags if d.severity == "error"),
+            "warnings": sum(1 for d in diags if d.severity == "warn")}
+
+
 def _integration_refresh_fields(result: Any) -> Dict[str, Any]:
     """Read the ``--refresh`` contract's four fields off whatever it returned.
 
@@ -702,6 +714,10 @@ class CommandRouter:
             return True
         if cmd == "scaffold.integration":
             self._handle_scaffold_integration(
+                client_id, args, workspace_path, session_id=session_id)
+            return True
+        if cmd == "scaffold.validate":
+            self._handle_scaffold_validate(
                 client_id, args, workspace_path, session_id=session_id)
             return True
         if cmd in ("reference.promote", "reference.dismiss"):
@@ -1236,6 +1252,79 @@ class CommandRouter:
                     client_id, name, fields["state_before"],
                     fields["state_after"], fields["changed"])
         answer(ok=True, target=str(dest), **fields)
+
+    def _handle_scaffold_validate(
+        self, client_id: str, args: list, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``scaffold.validate [set] [profile]`` (protocol 1.34).
+
+        ``jaato-scaffold`` ships with jaato-sdk (#1267), and ``validate``
+        needs what the SDK does not have: most checks run on a RESOLVED
+        profile, and only jaato-server's loader builds one.  An SDK-only
+        install therefore asks the daemon, and this handler runs the daemon's
+        own full validator, :func:`validate.validate_workspace` (contributed
+        validators, #1306, included), so there is one validator and no
+        second opinion about a rule.
+
+        **Which workspace.**  The caller's own, from
+        :meth:`resolve_caller_workspace`: the workspace the connection
+        selected (WS, where selection is the ``resolve_visible`` ownership
+        rule) or declared at the handshake (IPC, where a declared path is
+        refused unless the connecting account can reach it).  There is no
+        directory parameter, so this verb adds no path ingress.  With no
+        workspace it refuses rather than validating the daemon's own cwd,
+        which would report about somebody else's files.
+
+        Every outcome answers with one ``ScaffoldValidateEvent``: the caller
+        is blocked on it, and a daemon that answered nothing would be
+        indistinguishable from one that does not serve the verb.
+        """
+        from jaato_sdk.events import ScaffoldValidateEvent
+        from jaato_sdk.scaffold.findings import scope_label
+
+        profile_set = (args[0] if len(args) > 0 else "") or None
+        only = (args[1] if len(args) > 1 else "") or None
+
+        def answer(**fields: Any) -> None:
+            self._event_sink.send_event(
+                client_id,
+                ScaffoldValidateEvent(profile_set=profile_set or "",
+                                      profile=only or "",
+                                      scope=scope_label(only),
+                                      server_version=_daemon_version(),
+                                      **fields))
+
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+        if not workspace:
+            checked = _checked_sources(sources)
+            logger.warning("scaffold.validate: client=%s has no resolvable "
+                           "workspace (%s)", client_id, checked)
+            answer(ok=False,
+                   error=f"scaffold.validate: this connection has no "
+                         f"workspace to validate ({checked}); select one, or "
+                         f"connect with a workspace path")
+            return
+
+        try:
+            from jaato_server.shared.scaffold import validate as _validate
+            diags = _validate.validate_workspace(
+                workspace, profile_set=profile_set, only=only)
+        except Exception as exc:
+            logger.warning("scaffold.validate: client=%s workspace=%s "
+                           "raised: %s", client_id, workspace, exc)
+            answer(ok=False, workspace=workspace,
+                   error=f"scaffold.validate: the daemon's validator failed: "
+                         f"{type(exc).__name__}: {exc}")
+            return
+
+        counts = _severity_counts(diags)
+        logger.info("scaffold.validate: client=%s workspace=%s set=%s "
+                    "profile=%s findings=%d errors=%d", client_id, workspace,
+                    profile_set, only, len(diags), counts["errors"])
+        answer(ok=True, workspace=workspace,
+               findings=[d.as_dict() for d in diags], **counts)
 
     def _dispatch_cascade_command(
         self, cmd: str, client_id: str, args: list, payload: Any = None,

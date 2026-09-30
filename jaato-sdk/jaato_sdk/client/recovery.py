@@ -964,6 +964,23 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.run_integration(name)
 
+    async def validate_workspace(
+        self,
+        profile_set: Optional[str] = None,
+        profile: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to run ``jaato-scaffold validate`` (1.34).
+
+        See :meth:`IPCClient.validate_workspace` for full docs.  The answer
+        arrives as a ``ScaffoldValidateEvent`` on the event stream, so this
+        forwards the request and nothing more.  The inner client raises
+        against a daemon below the protocol floor rather than waiting out a
+        reply it will never send, which would read as *no findings*.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.validate_workspace(profile_set, profile)
+
     # ------------------------------------------------------------------
     # The memory verbs (#1232, protocol 1.22)
     #

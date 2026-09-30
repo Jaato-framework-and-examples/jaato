@@ -583,7 +583,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ways, and ``ReferenceLinksUpdateRequest`` ->
 # ``ReferenceLinksUpdateResultEvent`` replaces one reference's links, again
 # written by the daemon under the owner rule.
-PROTOCOL_VERSION = "1.33"
+#
+# 1.34 -- ``scaffold.validate [set] [profile]`` -> ``ScaffoldValidateEvent``
+# (#1267, tier 3).  ``jaato-scaffold`` ships with jaato-sdk, and ``validate``
+# needs jaato-server's loader: a profile is checked only once it is parsed,
+# merged with its ``inherits:`` and set overlay, and constructed, which is
+# behaviour no snapshot carries.  So an SDK-only install asks the daemon,
+# whose full validator (contributed validators included, #1306) checks the
+# caller's OWN workspace: the one the connection selected (WS) or declared
+# at the handshake (IPC, peer-checked).  There is no path parameter.  The
+# findings come back in ``Diagnostic.as_dict()`` shape with the daemon's
+# ``server_version``, so a client prints them as a local run would and
+# says whose install answered.  A NEW verb (the 1.7 rule): an older daemon
+# ignores it silently, and an empty answer would read as "no findings", so
+# both SDKs refuse below ``MIN_SCAFFOLD_VALIDATE_PROTOCOL``.
+PROTOCOL_VERSION = "1.34"
 
 
 # =============================================================================
@@ -816,6 +830,7 @@ class EventType(str, Enum):
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
+    SCAFFOLD_VALIDATE_RESULT = "scaffold.validate.result"  # Answer to `scaffold.validate [set] [profile]` (1.34)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -3206,6 +3221,50 @@ class ScaffoldIntegrationEvent(Event):
     server_version: str = ""
 
 
+class ScaffoldValidateEvent(Event):
+    """The daemon's ``jaato-scaffold validate`` of the caller's workspace (1.34).
+
+    ``jaato-scaffold`` ships with jaato-sdk, and ``validate`` cannot run from
+    the SDK alone: most checks run on a RESOLVED profile (parsed, merged with
+    its ``inherits:`` and set overlay, constructed), and only jaato-server's
+    loader builds one.  So an SDK-only install asks the daemon, and the
+    daemon's full validator answers, contributed validators (#1306)
+    included.  It checks the workspace this connection is in (selected over
+    WS, declared at the handshake over IPC); there is no path parameter.
+
+    Fields:
+        ok: Whether the validator RAN.  ``False`` only when it could not: no
+            workspace for this connection, or the daemon cannot load its own
+            validator.  A run that found errors is ``ok=True`` with
+            ``errors > 0``; ``ok`` never means "valid".
+        workspace: The absolute path validated, on the daemon's host.
+        profile_set: The set overlay applied, or ``""``.
+        profile: The one profile validated, or ``""`` for all of them.
+        scope: How the run names what it validated (``all profiles``,
+            ``profile 'x'``), the same words a local run prints.
+        findings: Every finding, in ``Diagnostic.as_dict()`` shape
+            (``severity`` / ``code`` / ``message`` / ``profile`` / ``where``
+            / ``tier``, plus ``source`` on a contributed one).
+        errors: How many findings are ``error``, the count a caller's exit
+            code follows.
+        warnings: How many are ``warn``.
+        error: Why the validator did not run, when ``ok`` is ``False``.
+        server_version: The daemon's ``jaato-server`` version, so a client
+            says whose install produced the findings.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_VALIDATE_RESULT)
+    ok: bool = True
+    workspace: str = ""
+    profile_set: str = ""
+    profile: str = ""
+    scope: str = ""
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    errors: int = 0
+    warnings: int = 0
+    error: str = ""
+    server_version: str = ""
+
+
 # =============================================================================
 # Client -> Server Events (Requests)
 # =============================================================================
@@ -5400,6 +5459,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,
+    EventType.SCAFFOLD_VALIDATE_RESULT.value: ScaffoldValidateEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,

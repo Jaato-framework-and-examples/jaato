@@ -582,6 +582,7 @@ await client.create_session(profile="researcher")
 - `ReferenceCatalogRequest` → `ReferenceCatalogEvent` / `ReferenceLinksUpdateRequest` → `ReferenceLinksUpdateResultEvent` — list the workspace reference catalog with its typed links both ways, and replace one reference's links (protocol 1.33, see [Typed Links Between References](#typed-links-between-references-wikillm-seam-3))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
+- `scaffold.validate [set] [profile]` — run the daemon's full `jaato-scaffold validate` on the caller's own workspace, for an install with only the SDK (→ `ScaffoldValidateEvent`; protocol 1.34, see [`validate` Through the Daemon](#validate-through-the-daemon-1267-tier-3))
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
 - `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 - `workspace.file.fetch` (a `WorkspaceFileFetchRequest`, WS only) — download one file from the caller's workspace (→ `WorkspaceFileContentEvent` + one binary frame; protocol 1.20, see [A File That Could Go In and Not Come Out](#a-file-that-could-go-in-and-not-come-out))
@@ -4611,8 +4612,9 @@ with *"install jaato-server in this environment (pip install
 jaato-server), or ..."*, never an `ImportError`. `explain` first asks a
 running daemon (the protocol 1.18 path, unchanged: `--connect`, or a daemon
 listening on the default socket); `releases` points at `jaato-doctor`, whose
-release check needs only the SDK; `validate` and `dependencies` have no
-daemon verb yet. Tier 1 also refused, before writing anything, the four
+release check needs only the SDK; `validate` asks a daemon too since tier 3
+(protocol 1.34, below); `dependencies` has no daemon route, because it
+describes this environment. Tier 1 also refused, before writing anything, the four
 authoring invocations that reached into jaato-server (`new profile-set`,
 `new client --profile`, `new processor` / gated `new sweep`, `new
 dossier`). Tier 2 (next section) lifts three of those; `new dossier` is
@@ -4651,9 +4653,8 @@ Not done, and why:
   rest into the SDK, and adding pyyaml to it. Decided against in tier 2
   (next section): profiles stay server-side and their facts go in the
   snapshot.
-- **A daemon `scaffold.validate`**: it must read the caller's workspace,
-  which the daemon may not be able to (another user, another host), so it
-  needs the peer-entitlement check or the client sending `.jaato/` content.
+- ~~A daemon `scaffold.validate`~~: done in tier 3 (below), on the
+  entitlement path every daemon-level verb already uses.
 - The scaffold tests stay in `shared/scaffold/tests/`, importing through the
   shims.
 
@@ -4739,6 +4740,38 @@ seven reversions: the SDK-only profile-set, client, processor and sweep
 runs (subprocess, `jaato_server` blocked), the note and the no-refusal with
 the server, the profile section against the live projection, and the scan
 reading the recorded extensions.
+
+### `validate` Through the Daemon (#1267, tier 3)
+
+An SDK-only install could not validate: most checks run on a RESOLVED
+profile (parsed, merged with `inherits:` and the set overlay, constructed),
+and only jaato-server's loader builds one. Measured on #1267: at most 14 of
+80 finding codes could run from the snapshot, and none of the per-profile
+ones. So `validate` goes to the daemon, whose own full validator answers.
+There is no snapshot fact source and no second validator.
+
+| Piece | Where |
+|---|---|
+| the verb: `scaffold.validate [set] [profile]` -> `ScaffoldValidateEvent` (`ok`, `workspace`, `scope`, `findings` in `Diagnostic.as_dict()` shape, `errors`, `warnings`, `error`, `server_version`), protocol **1.34** | `CommandRouter._handle_scaffold_validate`, `jaato_sdk/events.py` |
+| the clients: `IPCClient.validate_workspace` / `validateScaffoldWorkspace`, refused below `MIN_SCAFFOLD_VALIDATE_PROTOCOL` (the 1.7 rule: an older daemon ignores the verb, and silence would read as no findings) | `client/ipc.py`, `recovery.py`, `jaato-sdk-ts/src/client.ts` |
+| the shell: SDK-only `validate` asks a daemon on the default socket (or `--connect SOCKET`) before refusing; jaato-server's own `validate --connect` asks one too | `remote.validate_from_daemon`, `scaffold/cli.py`, `introspection_verbs.ValidateVerb` |
+| one reading of the target and one finding line for both routes | `jaato_sdk/scaffold/findings.py` (`resolve_target`, `format_finding`, `clean_line`) |
+
+| Rule | Why |
+|---|---|
+| **the caller's own workspace, no path parameter** | `resolve_caller_workspace`, as `scaffold.explain` / `scaffold.integration` use: over WS the selected workspace as it stands on the server (selection is the `resolve_visible` ownership rule), over IPC the path declared at the handshake, refused unless the connecting account can reach it. No workspace is a refusal, never the daemon's cwd |
+| **`ok` is "the validator ran", never "valid"** | a validator that raised, or no workspace, answers `ok=False` and the shell exits 2 without a pass line |
+| **one validator** | the handler calls `validate_workspace`, so contributed validators (#1306) and the environment checks (`provider_dependency_missing`, `plugin_missing_tier`) describe the machine the sessions run on |
+| **printed as a local run prints it** | the findings are the same dicts and go through the same `format_finding`; a trailing line names the daemon and its `jaato-server` version. Verified identical to a local run in text, `--json` and `--profile` modes |
+| **with no daemon, still a refusal** | exit 2 naming both remedies, so CI cannot pass on a validator that did not run |
+
+A standalone profile file (outside `<ws>/.jaato/profiles/`) is not sent: a
+daemon validates a workspace. The shell refuses it by name. There is no
+`--require-full`, which the earlier plan named: the refusal is already a
+non-zero exit.
+
+Guard: `jaato_server/server/tests/test_scaffold_validate_verb_1267.py`, five
+reversions.
 
 ### An Integration Declares Its Own Paths, and Its Own Harness
 
