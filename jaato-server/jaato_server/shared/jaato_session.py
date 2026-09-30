@@ -3133,6 +3133,13 @@ class JaatoSession:
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
+        # Tool bodies run in the session profile's ``tool_hat`` when the
+        # runtime carries a factory (a confined runner, #1422).  Read
+        # from the runtime so in-process subagents get it too; read from
+        # the instance dict so a mock runtime does not invent one.
+        self._executor.set_apparmor_context(
+            getattr(self._runtime, "__dict__", {}).get("tool_hat_factory"),
+        )
 
         # Get tool schemas and executors from runtime
         self._tools = self._runtime.get_tool_schemas(plugins, preloaded_plugins=self._preloaded_plugins)
@@ -3228,6 +3235,12 @@ class JaatoSession:
             for name, fn in self._lifecycle_tools.get_executors().items():
                 if name in exposed_lifecycle_names:
                     self._executor.register(name, fn)
+            # The completion tools load and run the profile's completion
+            # processors from ``.jaato/scripts``, which tool_hat
+            # read-denies; they run in the base profile (#1422).
+            self._executor.mark_base_profile_tools(
+                {"signal_completion", "prepare_completion"},
+            )
             # Auto-approve so no permission prompt — same gating: only
             # whitelist lifecycle tools that are actually exposed.
             if self._runtime.permission_plugin:
@@ -13413,7 +13426,10 @@ NOTES
         cmd = self._user_commands[command_name]
         args = args or {}
 
-        _ok, result = self._executor.execute(command_name, args)
+        # A person typed it: the runner's own bookkeeping, run in the base
+        # profile, never in the tool hat (#1422).
+        with self._executor.base_profile_calls():
+            _ok, result = self._executor.execute(command_name, args)
 
         if cmd.share_with_model and self._provider:
             self._inject_command_into_history(command_name, args, result)

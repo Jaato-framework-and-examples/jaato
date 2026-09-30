@@ -1232,7 +1232,10 @@ def _retire_and_verify_threads(
         return
 
     try:
-        scan = verify_thread_confinement(target_profile)
+        from jaato_server.shared.apparmor_hat import stuck_hat_tids
+        scan = verify_thread_confinement(
+            target_profile, stuck_hat_tids=stuck_hat_tids,
+        )
     except ThreadConfinementDivergence as exc:
         raise BootstrapError(
             "confine",
@@ -1326,6 +1329,63 @@ def _prearm_child_callback(
             runner_profile, exc_info=True,
         )
         return None
+
+
+def _tool_hat_profile(envelope: SessionInitEnvelope) -> Optional[str]:
+    """The base profile whose ``tool_hat`` tool bodies enter, or ``None``.
+
+    The same matrix as :func:`_maybe_install_child_callback`: no hat for
+    an unconfined runner (empty ``profile_name``) or for an isolated
+    sub-runner (a profile name carrying ``//``, which has no hat).
+    """
+    profile = (envelope.profile_name or "").strip()
+    if not profile or "//" in profile:
+        return None
+    return profile
+
+
+def _arm_tool_hat(envelope: SessionInitEnvelope, runtime: Any) -> None:
+    """Put the ``tool_hat`` factory on the runtime before sessions exist.
+
+    ``JaatoSession.configure`` hands ``runtime.tool_hat_factory`` to the
+    ToolExecutor it creates, so this one assignment covers the main
+    session and every in-process subagent (#1422).  The runtime is built
+    fresh on every bootstrap, so a pool slot never carries one session's
+    factory into the next.
+    """
+    profile = _tool_hat_profile(envelope)
+    if profile is None:
+        runtime.tool_hat_factory = None
+        return
+    from jaato_server.shared.apparmor_hat import make_tool_hat_context
+    runtime.tool_hat_factory = make_tool_hat_context(profile)
+
+
+def _require_tool_hat(envelope: SessionInitEnvelope, session: Any) -> None:
+    """Fail the bootstrap when a confined session's executor has no hat.
+
+    The base profile no longer write-denies ``.jaato/references/**``
+    (#1422): that deny lives in ``tool_hat``.  A confined session whose
+    tool bodies would run in base is therefore refused rather than run
+    with a wider boundary than its record claims.
+
+    Raises:
+        BootstrapError: stage ``configure``.
+    """
+    profile = _tool_hat_profile(envelope)
+    if profile is None:
+        return
+    executor = getattr(session, "_executor", None)
+    if getattr(executor, "_apparmor_context", None) is None:
+        raise BootstrapError(
+            "configure",
+            f"AppArmor tool_hat not installed on the session executor for "
+            f"profile {profile!r}: tool bodies would run in the base "
+            "profile.  Operator escape hatch: JAATO_RUNNER_DISABLE_CONFINE=1.",
+        )
+    logger.info(
+        "runner-session bootstrap: tool bodies run in %s//tool_hat", profile,
+    )
 
 
 def _maybe_install_child_callback(
@@ -1696,6 +1756,10 @@ def bootstrap_session(
     # notice described the audit tier ("import ctypes is refused") on
     # every confined session while the kernel then ran in ``//child``.
     child_cb = _prearm_child_callback(envelope, runtime)
+    # ---- 2e. Tool bodies run in ``tool_hat`` (#1422).  On the runtime,
+    # so the main session and every in-process subagent it configures
+    # hand it to their ToolExecutor.
+    _arm_tool_hat(envelope, runtime)
 
     # ---- 3. Construct + configure the session ----
     try:
@@ -1754,6 +1818,7 @@ def bootstrap_session(
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.
     _maybe_install_child_callback(envelope, session, child_cb)
+    _require_tool_hat(envelope, session)
 
     logger.info(
         "runner-session bootstrap ready: session_id=%s profile=%s "

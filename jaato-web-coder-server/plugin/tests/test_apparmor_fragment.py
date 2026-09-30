@@ -46,10 +46,10 @@ def test_the_fragment_carries_the_deny():
 
 
 def _bodies(profile):
-    """The base body (outside the hats) and each ``profile <name> {`` sub-body, as text."""
+    """The base body (outside the hats) and each ``profile <name> {`` or ``hat <name> {`` sub-body, as text."""
     bodies, stack, base = {}, [], []
     for line in profile.splitlines():
-        m = re.match(r"^\s+profile\s+(\w+)\s*\{", line)
+        m = re.match(r"^\s+(?:profile|hat)\s+(\w+)\b[^{]*\{", line)
         if m:
             stack.append(m.group(1)); bodies[m.group(1)] = []
             continue

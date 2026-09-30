@@ -95,6 +95,7 @@ def tokenize_prompt_args(text: str) -> List[str]:
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     DISCOVERABILITY_DEFERRED,
+    TRAIT_FRAMEWORK_LEVEL,
 )
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
@@ -1865,6 +1866,9 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             parameters=self._params_to_json_schema(info.params),
             category="prompt",
             discoverability=DISCOVERABILITY_DEFERRED,
+            # Re-reads its prompt file under ``.jaato/prompts`` /
+            # ``.jaato/agents`` on every call: base profile (#1422).
+            traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
         )
 
     # ==================== Model Tools ====================
@@ -1924,6 +1928,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                 },
                 category="prompt",
                 discoverability=DISCOVERABILITY_DEFERRED,
+                # Reads and writes the prompt library under
+                # ``.jaato/prompts`` / ``.jaato/agents``, which tool_hat
+                # read-denies: runs in the base profile (#1422).
+                traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
             ),
             # deletePrompt - remove prompts
             ToolSchema(
@@ -1949,6 +1957,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                 },
                 category="prompt",
                 discoverability=DISCOVERABILITY_DEFERRED,
+                # Reads and writes the prompt library under
+                # ``.jaato/prompts`` / ``.jaato/agents``, which tool_hat
+                # read-denies: runs in the base profile (#1422).
+                traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
             ),
         ]
 

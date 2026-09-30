@@ -164,12 +164,37 @@ When a WS client creates a session, the server:
 | Resource | Denied |
 |----------|--------|
 | Other sessions' workspaces | Read and write |
-| User-authored config in the workspace (`.jaato/agents/`, `profiles/`, `scripts/`, `services/<name>/`, `reactors.json`, `completion_schemas/`, `spawn_schemas/`, `instructions/`, `references/`, `templates/`, `template_routing.yaml`, `apparmor-fragments/`) | Write, link, lock |
+| User-authored config in the workspace (`.jaato/agents/`, `profiles/`, `scripts/`, `services/<name>/`, `reactors.json`, `completion_schemas/`, `spawn_schemas/`, `instructions/`, `templates/`, `template_routing.yaml`, `apparmor-fragments/`) | Write, link, lock |
+| The reference catalog (`.jaato/references/`), in a model-called tool body and in every subprocess | Write, link, lock (the runner's own bookkeeping may write it; see below) |
 | Procfs secret + memory entries (`/proc/*/environ`, `mem`, `pagemap`, `auxv`, `cmdline`, and each one's `task/<tid>/` twin) | Read (and write, for `mem`) |
 | Raw sockets | All |
 | ptrace (debugging other processes) | All |
 | mount/umount | All |
 | `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | All |
+
+### Tool bodies run in `tool_hat` (template v44, #1422)
+
+A session profile has three scopes:
+
+| Scope | Who runs in it | Entered by |
+|-------|----------------|------------|
+| base (`jaato-ws-<id>`) | the runner's framework and plugin code, user commands, completion processors, `TRAIT_FRAMEWORK_LEVEL` tools | `aa_change_profile` at bootstrap |
+| `^tool_hat` | every model-called tool body that runs in the runner process (`file_edit`, `readFile`, memory, `web_fetch`, `proposeReference`, out-of-tree plugins) | `change_hat` with a 64-bit token, per thread, around each body; left with the same token |
+| `//child` | every subprocess a tool starts (`cli`, `interactive_shell`, the notebook kernel) | `changeprofile` between `fork()` and `exec()` |
+
+`tool_hat` adds read-denies on the workspace's `.jaato/agents/`, `profiles/`,
+`prompts/`, `scripts/`, `completion_schemas/`, `spawn_schemas/`,
+`instructions/` and `reactors.json`, and write-denies the reference catalog.
+Base does not write-deny the catalog, so `references bundle add|create|
+reconcile|merge|unpack` work in a confined session.
+
+**What the hat bounds.** It stops accidents and ordinary tool code paths.
+It does not stop deliberately hostile code running in the runner process:
+the return token lives in that process, and Python code there can find it,
+return to base, and do what base allows. Only out-of-process execution
+(`//child`) is a hard boundary.
+
+Verify on your host with `sudo .venv/bin/python scripts/verify_tool_hat_1422.py`.
 
 #### The procfs denies are the secret scrub's kernel backstop (#712)
 

@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
+    TRAIT_FRAMEWORK_LEVEL,
     TRAIT_REPLAY_SAFE,
     DISCOVERABILITY_EAGER,
     DISCOVERABILITY_DEFERRED,
@@ -152,7 +153,9 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                 },
                 category="system",
                 discoverability=DISCOVERABILITY_EAGER,
-                traits=frozenset({TRAIT_REPLAY_SAFE}),
+                # Walks every plugin's live schemas, which reads authored
+                # config (prompt_library): base profile (#1422).
+                traits=frozenset({TRAIT_REPLAY_SAFE, TRAIT_FRAMEWORK_LEVEL}),
             ),
             ToolSchema(
                 name="get_tool_schemas",
@@ -176,7 +179,9 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                 },
                 category="system",
                 discoverability=DISCOVERABILITY_EAGER,
-                traits=frozenset({TRAIT_REPLAY_SAFE}),
+                # Walks every plugin's live schemas, which reads authored
+                # config (prompt_library): base profile (#1422).
+                traits=frozenset({TRAIT_REPLAY_SAFE, TRAIT_FRAMEWORK_LEVEL}),
             ),
         ]
 

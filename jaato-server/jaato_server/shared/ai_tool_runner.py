@@ -8,6 +8,7 @@ execution with support for:
 """
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -15,13 +16,18 @@ import subprocess
 import threading
 import time
 import traceback
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from jaato_server.shared.safe_pool import SafeThreadPoolExecutor
 from typing import (
-    Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple, TYPE_CHECKING
+    Any, Callable, ContextManager, Dict, List, NamedTuple, Optional, Set, Tuple,
+    TYPE_CHECKING,
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-thread count of open ``ToolExecutor.base_profile_calls`` blocks.
+_base_profile_local = threading.local()
 
 from jaato_server.shared.trace import trace as _trace_write
 from jaato_server.shared.token_accounting import TokenLedger
@@ -377,14 +383,16 @@ class ToolExecutor:
         # Reliability plugin for tracking tool failures and adaptive trust
         self._reliability_plugin: Optional['ReliabilityPlugin'] = None
 
-        # AppArmor thread-level confinement context factory.
-        # When set, every tool execution is wrapped in this context
-        # manager, which confines the current OS thread to the session's
-        # AppArmor profile for the duration of the call.  This ensures
-        # in-process file I/O (readFile, glob_files, file_edit) is
-        # subject to the same AppArmor profile as subprocess commands.
-        # Set via set_apparmor_context() from the server layer.
+        # AppArmor per-thread tool-body context factory (#1422).  A
+        # confined runner installs ``apparmor_hat.make_tool_hat_context``
+        # so every tool body runs in the session's ``tool_hat`` on the
+        # thread that runs it, and returns to the base profile when it
+        # ends.  ``None`` (unconfined runner, daemon, embedded) runs
+        # bodies with no transition.  See ``_tool_body_confinement``.
         self._apparmor_context: Optional[Callable] = None
+        # Tools whose bodies run in the base profile (#1422); see
+        # ``mark_base_profile_tools``.
+        self._base_profile_tools: Set[str] = set()
 
         # Per-session runtime limits surfaced to subprocess-launching
         # plugins (cli, interactive_shell).  Set via the server layer
@@ -753,17 +761,103 @@ class ToolExecutor:
         self._registry = registry
 
     def set_apparmor_context(self, context_factory: Optional[Callable]) -> None:
-        """Set the AppArmor thread-level confinement context factory.
+        """Set the AppArmor tool-body context factory (#1422).
 
-        When set, every tool execution is wrapped in the context manager
-        returned by ``context_factory()``, which confines the current OS
-        thread to the session's AppArmor profile.
+        When set, every tool body -- in ``_execute_impl``, in the
+        synchronous fallback and on the auto-background pool -- runs
+        inside the context manager ``context_factory()`` returns, entered
+        on the thread that runs the body.  The runner installs
+        ``apparmor_hat.make_tool_hat_context(profile)``, which enters the
+        session profile's ``tool_hat`` with ``change_hat`` and returns in
+        ``finally``.  A context that raises on entry refuses the call.
+
+        Not covered: ``-stream`` tool variants, which run on the
+        StreamManager's own event-loop thread (``JaatoSession.
+        _execute_streaming_tool``), in the base profile.
 
         Args:
             context_factory: A zero-argument callable returning a context
                 manager, or ``None`` to disable confinement.
         """
         self._apparmor_context = context_factory
+
+    def _tool_body_confinement(self, name: str) -> ContextManager:
+        """The context a tool body runs in on the CALLING thread.
+
+        With a factory installed (a confined runner installs
+        ``apparmor_hat.make_tool_hat_context``), the body runs in the
+        session profile's ``tool_hat`` and returns to the base profile
+        when it ends, on every path (#1422).  A tool declaring
+        ``TRAIT_FRAMEWORK_LEVEL`` (``spawn_subagent``) runs in the base
+        profile: it is framework setup, not model-driven I/O.
+
+        Until #1422 this path wrote ``changeprofile unconfined`` for a
+        framework-level tool.  In a confined runner that write succeeds
+        (base keeps the rule to restore its own threads) and would have
+        left the worker unconfined for good, so it is gone.
+
+        Raises (from ``__enter__``):
+            apparmor_hat.ToolHatError: the thread could not enter the
+                hat; the body must not run.
+        """
+        if self._apparmor_context is None or self._runs_in_base_profile(name):
+            return nullcontext()
+        return self._apparmor_context()
+
+    def _runs_in_base_profile(self, name: str) -> bool:
+        """Does *name*'s body run in the base profile rather than the hat?
+
+        True for a user command (:meth:`base_profile_calls`), for a tool
+        :meth:`mark_base_profile_tools` named, and for a tool declaring
+        ``TRAIT_FRAMEWORK_LEVEL``.
+        """
+        if getattr(_base_profile_local, "depth", 0) or name in self._base_profile_tools:
+            return True
+        from jaato_sdk.plugins.model_provider.types import TRAIT_FRAMEWORK_LEVEL
+        return bool(
+            self._registry
+            and TRAIT_FRAMEWORK_LEVEL in self._registry.get_tool_traits(name)
+        )
+
+    def mark_base_profile_tools(self, names: Set[str]) -> None:
+        """Run these tools' bodies in the base profile, not ``tool_hat``.
+
+        For framework tools that are not registry plugins and so carry no
+        schema traits the registry can see: the session's lifecycle tools
+        (``signal_completion`` / ``prepare_completion`` load and run the
+        profile's completion processors from ``.jaato/scripts``, which the
+        hat read-denies).  Additive.
+        """
+        self._base_profile_tools.update(names)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def base_profile_calls():
+        """Run every tool executed on this thread inside the block in the
+        base profile.
+
+        For user commands: a person typed them, and the runner's own
+        bookkeeping (``references bundle add|create|reconcile|merge|
+        unpack``) must write the catalog, which ``tool_hat`` denies
+        (#1422).  Thread-local and re-entrant.
+        """
+        _base_profile_local.depth = getattr(_base_profile_local, "depth", 0) + 1
+        try:
+            yield
+        finally:
+            _base_profile_local.depth -= 1
+
+    def _in_tool_confinement(self, name: str, fn: Callable) -> Callable:
+        """Wrap *fn* so it enters :meth:`_tool_body_confinement` on whatever
+        thread calls it (the auto-background pool, #1422)."""
+        if self._apparmor_context is None:
+            return fn
+
+        @functools.wraps(fn)
+        def _confined(*a, **kw):
+            with self._tool_body_confinement(name):
+                return fn(*a, **kw)
+        return _confined
 
     def set_runtime_limits(
         self,
@@ -1327,10 +1421,11 @@ class ToolExecutor:
             return False, {'error': f'No executor registered for {name}'}
 
         try:
-            if fn.__name__ == 'mcp_based_tool':
-                result = fn(name, args)
-            else:
-                result = fn(args)
+            with self._tool_body_confinement(name):
+                if fn.__name__ == 'mcp_based_tool':
+                    result = fn(name, args)
+                else:
+                    result = fn(args)
             return self._normalize_executor_return(result)
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
@@ -1429,6 +1524,9 @@ class ToolExecutor:
         if executor_fn is None:
             # Fall back to sync execution if no executor found
             return self._execute_sync(name, args)
+        # The body runs on a background-pool thread; the hat is entered
+        # there, around the body, not here (#1422).
+        executor_fn = self._in_tool_confinement(name, executor_fn)
 
         # Start as background task immediately - this uses the streaming
         # executor which captures output incrementally.
@@ -1792,38 +1890,9 @@ class ToolExecutor:
         try:
             if debug:
                 print(f"[ai_tool_runner] execute: invoking {name} with args={args}")
-            # AppArmor thread-level confinement: confine by default,
-            # opt out via TRAIT_FRAMEWORK_LEVEL.  Any tool that touches
-            # the filesystem (directly or via side effects like save_to
-            # downloads) is automatically sandboxed.  Only framework-
-            # setup tools (spawn_subagent) declare the opt-out trait.
-            from jaato_sdk.plugins.model_provider.types import TRAIT_FRAMEWORK_LEVEL
-            is_framework_tool = (
-                self._registry
-                and TRAIT_FRAMEWORK_LEVEL in self._registry.get_tool_traits(name)
-            )
-
-            if is_framework_tool and self._apparmor_context:
-                # Framework-level tools must run unconfined.  The thread
-                # may be stuck in a session profile from a prior tool
-                # call whose exit failed ("could not restore unconfined").
-                # Actively try to escape confinement before executing.
-                try:
-                    import threading as _threading
-                    attr_path = f"/proc/self/task/{_threading.get_native_id()}/attr/current"
-                    with open(attr_path, "w") as _f:
-                        _f.write("changeprofile unconfined")
-                except (OSError, PermissionError):
-                    pass  # Best effort — if we can't unconfine, the tool may still work
-
-            ctx = (
-                self._apparmor_context()
-                if (self._apparmor_context and not is_framework_tool)
-                else None
-            )
-            if ctx:
-                ctx.__enter__()
-            try:
+            # AppArmor: the body runs in the session's ``tool_hat`` on this
+            # thread (#1422); see :meth:`_tool_body_confinement`.
+            with self._tool_body_confinement(name):
                 # The tool body may record who approved it at the prompt
                 # (``current_call_witness``); bound even when None so a
                 # pool thread cannot leak a previous call's witness.
@@ -1832,9 +1901,6 @@ class ToolExecutor:
                         result = fn(name, args)
                     else:
                         result = fn(args)
-            finally:
-                if ctx:
-                    ctx.__exit__(None, None, None)
             # Normalize the executor's return; this path keeps the pieces
             # separately because it injects permission metadata and notifies
             # the reliability plugin before returning.

@@ -662,7 +662,25 @@ class AppArmorManager:
     #       so does the flat isolated sub-runner, whose subprocesses and
     #       in-process tools share one body: there a hand-written claim is
     #       still possible.
-    _TEMPLATE_VERSION = 43
+    #   v44 (#1422): ``tool_hat`` is a HAT (``hat tool_hat``), entered
+    #       per thread by ``ToolExecutor`` with ``change_hat`` and a
+    #       64-bit token around every model-called tool body
+    #       (``shared/apparmor_hat.py``), and left with the same token.
+    #       Before v44 it was a ``profile tool_hat`` child nothing
+    #       entered, so every in-process tool ran in BASE and base had
+    #       to carry the tool-scope denies.  The hat drops
+    #       ``change_profile -> unconfined`` (it returns by token, not by
+    #       leaving confinement) and gains ``change_profile ->
+    #       jaato-ws-{session_id}//child`` so a subprocess a tool spawns
+    #       still reaches ``//child``.  BASE drops its
+    #       ``.jaato/references/**`` write-deny: the runner's own plugin
+    #       bookkeeping (``references bundle add|create|reconcile|merge|
+    #       unpack``, a promotion into a bundle) runs in base and must
+    #       write the catalog.  ``tool_hat``, ``//child`` and the isolated
+    #       sub-runner keep the deny.  The hat stops accidents and
+    #       ordinary tool paths, not hostile in-process code, which can
+    #       find the token; only ``//child`` is a hard boundary.
+    _TEMPLATE_VERSION = 44
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -717,7 +735,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
   audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
   audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
-  audit deny "{workspace_path}/.jaato/references/**"         wlk,
+  # .jaato/references/** is NOT write-denied in base (v44, #1422): the
+  # runner's own bookkeeping (``references bundle ...``, a promotion into
+  # a bundle) runs here and maintains the catalog.  Model-called tool
+  # bodies run in ``tool_hat``, and ``tool_hat``, ``//child`` and the
+  # isolated sub-runner keep the deny.
   # Template catalog (#893) — a template is not inert data: it is
   # authored content that BECOMES code at render time, and in a
   # KB-driven pipeline it is where a governed rule is *prevented*
@@ -1093,13 +1115,13 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 
 {plugin_contributed_rules}
 
-  # ---- tool_hat sub-profile (server 0.6.55+, template v13) ----
-  # Tool execution context.  ``ToolExecutor.execute`` enters this
-  # sub-profile via ``change_profile -> jaato-ws-{session_id}//tool_hat``
-  # before invoking a plugin, and exits back to the parent profile
-  # on tool finish.  AppArmor sub-profiles do NOT inherit base rules
+  # ---- tool_hat (server 0.6.55+, template v13; a hat since v44) ----
+  # Tool execution context.  ``ToolExecutor`` enters this hat with
+  # ``change_hat`` and a token on the thread that runs each model-called
+  # tool body, and returns to this profile with the same token when the
+  # body ends (#1422).  Hats do NOT inherit base rules
   # (verified empirically against AppArmor 4.0.1) — every allow and
-  # deny the sub-profile honors must be redeclared.
+  # deny the hat honors must be redeclared.
   #
   # The sub-profile mirrors the base body exactly + ADDS read-denies
   # on user-authored config so LLM-driven file reads can't inspect
@@ -1107,11 +1129,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # instructions, or reactors.json.  Information-isolation between
   # agents in a cascade.
   #
-  # Reactors and session-init stay in BASE (not in tool_hat) because
-  # they need read access to the same paths to load agent personas,
-  # validate completion payloads, etc.  ``apparmor_confine`` for
-  # tool execution uses the sub-profile name; for everything else
-  # (prefetch, reactor dispatch) uses the base profile name.
+  # Reactors, session-init, user commands and plugin bookkeeping stay
+  # in BASE (not in tool_hat) because they need read access to the same
+  # paths to load agent personas, validate completion payloads, and
+  # write the reference catalog.
 {tool_hat_subprofile}
 
   # ---- //child sub-profile (Phase 5 §5.10, template v14) ----
@@ -2959,7 +2980,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # sub-profiles do NOT inherit the parent's flag set, so
         # JAATO_APPARMOR_COMPLAIN=1 has to be emitted on each sub-profile
         # header explicitly.  When the env is unset, the clause is empty
-        # — preserving the v21 ``profile tool_hat {`` shape byte-for-byte
+        # — preserving the v21 sub-profile header shape byte-for-byte
         # (no ``attach_disconnected`` on sub-profiles per AppArmor doc:
         # the flag is base-profile-only).
         subprofile_flag_clause = " flags=(complain)" if complain else ""
@@ -3067,14 +3088,18 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         subprofile_flag_clause: str = "",
         private_tmp_rules: str = "",
     ) -> str:
-        """Build the ``profile tool_hat { ... }`` sub-profile body
-        (server 0.6.55+).
+        """Build the ``hat tool_hat { ... }`` body (server 0.6.55+, a hat
+        since template v44).
 
-        The sub-profile mirrors the base profile's rule set verbatim
-        (sub-profiles don't inherit) and ADDS read-denies on user-
-        authored config subpaths.  ``ToolExecutor.execute`` enters the
-        sub-profile via ``change_profile -> jaato-ws-{session_id}//tool_hat``
-        before invoking each plugin.
+        The hat mirrors the base profile's rule set verbatim (hats don't
+        inherit) and ADDS read-denies on user-authored config subpaths,
+        plus the ``.jaato/references/**`` write-deny base no longer
+        carries.  ``ToolExecutor`` enters it on the thread that runs each
+        model-called tool body with ``change_hat`` and a token
+        (``shared/apparmor_hat.py``) and returns with the same token in
+        ``finally`` (#1422).  Hostile in-process code can find the token,
+        so this bounds ordinary tool paths, not an attacker in the
+        process.
         """
         # Re-indent extension_fragments_inline from 2-space to 4-space
         # so it nests correctly inside the sub-profile block.
@@ -3082,7 +3107,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             f"  {line}" if line.strip() else line
             for line in extension_fragments_inline.splitlines()
         )
-        return f"""  profile tool_hat{subprofile_flag_clause} {{
+        return f"""  hat tool_hat{subprofile_flag_clause} {{
     #include <abstractions/base>
     #include <abstractions/nameservice>
     #include <abstractions/python>
@@ -3217,10 +3242,16 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     deny capability net_admin,
     deny capability sys_ptrace,
 
-    # ---- profile transitions (mirrors base, needed to exit hat) ----
+    # ---- leaving the hat, and spawning into //child (v44, #1422) ----
+    # The hat returns to base with ``changehat <token>^`` written to the
+    # thread's own ``attr/current``, so it keeps write access there and
+    # needs no ``change_profile -> unconfined`` (dropped in v44: a tool
+    # body must not be able to leave confinement without the token).
+    # A subprocess a tool spawns still transitions into ``//child``
+    # between fork and exec, which needs the explicit rule.
     # ``owner /proc/*/...`` form matches the kernel's resolved path
     # for both read and write (see v15 note in the base profile body).
-    change_profile -> unconfined,
+    change_profile -> jaato-ws-{session_id}//child,
     owner /proc/*/attr/current      rw,
     owner /proc/*/task/*/attr/current rw,
 
@@ -4023,29 +4054,25 @@ def make_confine_context(profile_name: str) -> Callable[[], ContextManager]:
 def make_tool_confine_context(
     session_profile_name: str,
 ) -> Callable[[], ContextManager]:
-    """Create a callable that enters the per-session ``tool_hat``
-    sub-profile (server 0.6.55+, template v13+).
+    """Create a callable that runs a tool body in the session's
+    ``tool_hat`` on the calling thread (template v44+, #1422).
 
-    Tool execution context.  ``ToolExecutor.execute`` calls this
-    factory once per tool call to wrap the plugin's executor in
-    ``apparmor_confine("jaato-ws-X//tool_hat")``.  The sub-profile
-    REPLACES the parent's rules (AppArmor sub-profiles don't
-    inherit) and adds read-denies on user-authored config —
-    information-isolation between agents in a cascade.
-
-    On exit, the existing apparmor_confine machinery writes
-    ``changeprofile unconfined`` to the thread's attr/current,
-    same as for base-profile exit.
+    Delegates to :func:`shared.apparmor_hat.make_tool_hat_context`, which
+    enters the hat with ``change_hat`` and a 64-bit token and returns to
+    the base profile with the same token.  Before v44 this bounced
+    through ``unconfined`` into a ``profile tool_hat`` child with
+    :func:`apparmor_confine`, and left the thread UNCONFINED on exit; no
+    caller used it.
 
     Args:
         session_profile_name: The session's BASE profile name (e.g.
-            ``"jaato-ws-20260506_135835"``).  The sub-profile name
-            ``"//tool_hat"`` is appended automatically.
+            ``"jaato-ws-20260506_135835"``).
 
     Returns:
         A zero-argument callable that returns a context manager.
     """
-    return make_confine_context(f"{session_profile_name}//tool_hat")
+    from jaato_server.shared.apparmor_hat import make_tool_hat_context
+    return make_tool_hat_context(session_profile_name)
 
 
 def make_child_transition_callback(

@@ -94,7 +94,7 @@ def _grants(rules) -> ConfinementGrants:
 
 def _base_rules(profile: str):
     # The base body: everything before the first sub-profile.
-    head = profile.split("  profile tool_hat", 1)[0]
+    head = profile.split("  hat tool_hat", 1)[0]
     return [line.strip() for line in head.splitlines()
             if line.strip().startswith(('"/', "/", "audit deny", "owner", "deny"))]
 

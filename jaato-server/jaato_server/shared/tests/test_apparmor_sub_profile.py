@@ -373,8 +373,8 @@ class TestRenderSubProfile:
             subagent_id="agent-1",
             workspace_path="/workspace",
         )
-        # No nested ``profile tool_hat`` declaration.
-        assert "profile tool_hat" not in body
+        # No nested ``hat tool_hat`` declaration.
+        assert "hat tool_hat" not in body
 
     def test_no_fragment_include_directive(self, manager):
         """Audit 6: drop fragment-admit — sub-profile can't have
@@ -546,7 +546,7 @@ class TestSubProfileTighteningsRender:
         """Pin: §4.3.4 + v15 + §5.10e DROP invariants stay
         intact under tightenings.  No ``change_profile``, no
         fragment-admit ``include if exists``, no nested
-        ``profile tool_hat`` — these are layered guarantees that
+        ``hat tool_hat`` — these are layered guarantees that
         tightenings only add to, never remove from."""
         body = manager._render_sub_profile(
             parent_session_id="sess-A",
@@ -559,7 +559,7 @@ class TestSubProfileTighteningsRender:
         )
         assert "change_profile -> unconfined" not in body
         assert "include if exists" not in body
-        assert "profile tool_hat" not in body
+        assert "hat tool_hat" not in body
 
     def test_profile_name_unchanged_by_tightenings(self, manager):
         """Pin: tightenings affect rule bodies, NOT the profile

@@ -2677,6 +2677,43 @@ handed. Not covered: the flat isolated sub-runner profile, and where a
 walker-generated cache-tier fragment came from (jaato sees only the file).
 Guard: `jaato_server/shared/tests/test_diagnostics_show_apparmor_grants_1326.py`.
 
+### A Hat Nothing Entered (#1422)
+
+The template rendered a `tool_hat` for model-called tool code, and nothing
+entered it. Every in-process tool (`file_edit`, `readFile`, memory,
+`web_fetch`, `proposeReference`, out-of-tree plugins) ran in the runner's
+BASE profile, so base carried the tool-scope denies, and those blocked the
+runner's own bookkeeping: `references bundle add|create|reconcile|merge|
+unpack` got EACCES under `.jaato/references/**` on a confined host.
+
+| Piece | Where |
+|---|---|
+| the hat: `hat tool_hat` (was `profile tool_hat`: `change_hat` refuses a child profile), no `change_profile -> unconfined`, `change_profile -> …//child` so a tool's subprocess still reaches `//child`; base drops the `.jaato/references/**` write-deny, the hat, `//child` and the isolated sub-runner keep it. Template **v44** | `server/apparmor.py` |
+| entering it: `tool_hat(base_profile)` writes `changehat <token>^tool_hat` to the calling thread's `attr/current` and `changehat <token>^` in `finally`; a random non-zero 64-bit token per call; nested calls and threads already in the hat run in place (a fresh token from inside a hat is a wrong token, which the kernel answers by killing the task); a thread outside the session profile, or a refused entry, raises `ToolHatError` and the body does not run | `shared/apparmor_hat.py` |
+| where: `ToolExecutor._tool_body_confinement` around the body in `_execute_impl`, the sync fallback, and the auto-background `executor_fn` (entered on the pool thread) | `shared/ai_tool_runner.py` |
+| who installs it: `_arm_tool_hat` puts `make_tool_hat_context(profile)` on `runtime.tool_hat_factory` before the session is built; `JaatoSession.configure` hands it to every executor, subagents included; `_require_tool_hat` fails a confined bootstrap whose executor has none | `server/runner/session.py`, `shared/jaato_session.py` |
+| what stays in base: user commands (`ToolExecutor.base_profile_calls`), `signal_completion` / `prepare_completion` (they load processors from `.jaato/scripts`), and `TRAIT_FRAMEWORK_LEVEL` tools: `spawn_subagent`, `send_to_subagent` (a pool worker created in the hat stays in it), `validateProfile`, the prompt library, `list_tools` / `get_tool_schemas` (they walk every plugin's live schemas) | the tools' schemas |
+| #1023: a thread in `…//tool_hat` is inside the boundary, unless its return failed (`apparmor_hat.stuck_hat_tids()`), which is divergence | `server/runner/bootstrap.py` |
+
+The framework-level branch that wrote `changeprofile unconfined` before a
+`TRAIT_FRAMEWORK_LEVEL` tool is gone: in a confined runner that write
+succeeds and would have left the worker unconfined for good.
+
+**What the hat bounds.** Accidents and ordinary tool code paths. The token
+lives in the runner process, and deliberately hostile Python there can find
+it, return to base and do what base allows. Only out-of-process execution
+(`//child`) is a hard boundary.
+
+Not covered: `-stream` tool variants run on the StreamManager's own event
+loop thread, in base. The slot key and profile name (#1033) are unchanged;
+only the per-thread hat changes.
+
+Not verified on an enforcing kernel: CI checks the rendered text and
+injected `attr/current` writes. `scripts/verify_tool_hat_1422.py` (root)
+loads a real profile and drives the production code; run it before relying
+on this. Guard: `jaato_server/shared/tests/test_tool_bodies_run_in_the_hat_1422.py`,
+seven reversions.
+
 ### A Fragment Tier a Confined Session Could Write (#1385)
 
 `_render_profile` composes `*.rules` from three tiers: user

@@ -104,7 +104,7 @@ def _bodies(manager) -> dict:
     """The four bodies, each WITHOUT the sub-profiles nested in it, so a
     rule present only in ``tool_hat`` cannot satisfy the base check."""
     profile = manager._render_profile("s1", "/workspace")
-    tool_hat = _brace_body(profile, "profile tool_hat")
+    tool_hat = _brace_body(profile, "hat tool_hat")
     child = _brace_body(profile, "profile child")
     base = profile.replace(tool_hat, "").replace(child, "")
     sub = manager._render_sub_profile(
@@ -129,7 +129,7 @@ def test_the_bodies_are_really_separated(manager):
     """The check above is only per-body if the base text no longer holds
     the sub-profiles' rules."""
     bodies = _bodies(manager)
-    assert "profile tool_hat" in bodies["base"]
+    assert "hat tool_hat" in bodies["base"]
     assert len(_CACHE_DENY.findall(bodies["base"])) == 1
 
 

@@ -98,11 +98,11 @@ def _bodies(profile: str):
     """Split a rendered profile into (base, tool_hat, child) bodies.
 
     ``_render_profile`` returns one string: the base body's own rules come
-    first, then ``profile tool_hat {``, then ``profile child {``.  An anchor
+    first, then ``hat tool_hat {``, then ``profile child {``.  An anchor
     that is missing fails here, saying the guard is stale rather than
     letting a later assertion pass on an empty body.
     """
-    hat = profile.find("profile tool_hat {")
+    hat = profile.find("hat tool_hat {")
     child = profile.find("profile child {")
     assert 0 < hat < child, (
         "could not find the tool_hat / child sub-profiles in the rendered "

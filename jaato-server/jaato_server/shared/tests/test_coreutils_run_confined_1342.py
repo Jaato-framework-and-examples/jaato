@@ -70,7 +70,7 @@ def _bodies(root: Path, requested_fragments: Optional[List[str]]) -> Dict[str, s
         "sid", str(workspace), requested_fragments=requested_fragments,
         plugin_rules=['"/usr/bin/python3.14" ix,'],
     )
-    hat = text.index("profile tool_hat {")
+    hat = text.index("hat tool_hat {")
     child = text.index("profile child {")
     return {
         "base": text[:hat],

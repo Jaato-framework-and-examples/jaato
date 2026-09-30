@@ -222,8 +222,8 @@ class TestRenderProfile:
         session_id = "20260515_x_v17"
         profile = manager._render_profile(session_id, "/workspace")
         # Take only the parent body (everything before the
-        # ``profile tool_hat`` sub-profile declaration).
-        parent_end = profile.find("profile tool_hat")
+        # ``hat tool_hat`` sub-profile declaration).
+        parent_end = profile.find("hat tool_hat")
         assert parent_end > 0, "tool_hat sub-profile marker missing"
         parent_body = profile[:parent_end]
         rule_lines = [
@@ -248,7 +248,7 @@ class TestRenderProfile:
         documented escape vector (see PROFILE_TEMPLATE block
         at apparmor.py:447-510) that's distinct from this fix."""
         profile = manager._render_profile("s1", "/workspace")
-        parent_end = profile.find("profile tool_hat")
+        parent_end = profile.find("hat tool_hat")
         parent_body = profile[:parent_end] if parent_end > 0 else profile
         rule_lines = [
             l.strip() for l in parent_body.splitlines()
@@ -421,7 +421,7 @@ class TestRenderProfile:
         runs in those contexts and needs to exec a long tail of
         helpers we don't enumerate."""
         rendered = manager._render_profile("v18_test", "/workspace")
-        tool_hat_start = rendered.find("profile tool_hat")
+        tool_hat_start = rendered.find("hat tool_hat")
         child_start = rendered.find("profile child")
         assert 0 < tool_hat_start < child_start
 
@@ -508,13 +508,13 @@ class TestRenderProfile:
         break the hat path."""
         import re
         profile = manager._render_profile("s1", "/workspace")
-        if "profile tool_hat" not in profile:
+        if "hat tool_hat" not in profile:
             return  # tool_hat may be optional in some templates
         # Find tool_hat body by brace-counting (the body has `@{HOME}`
         # references with literal `}` characters that confuse naive
-        # split-on-`}`).  Start at the `{` right after "profile tool_hat"
+        # split-on-`}`).  Start at the `{` right after "hat tool_hat"
         # and walk until depth returns to zero.
-        start = profile.find("profile tool_hat")
+        start = profile.find("hat tool_hat")
         brace_start = profile.find("{", start)
         depth = 0
         body_end = None
@@ -626,7 +626,7 @@ class TestRenderProfile:
         # base.  Order matters: child + tool_hat come after the
         # base-only rules.
         base_body = profile
-        for anchor in ("profile child", "profile tool_hat"):
+        for anchor in ("profile child", "hat tool_hat"):
             if anchor in base_body:
                 base_body = base_body.split(anchor)[0]
         assert "/usr/local/venv/**/*.so    mr," in base_body, (
@@ -647,10 +647,10 @@ class TestRenderProfile:
         tool_hat (CLI, interactive_shell) need the same
         C-extension import capability as the base."""
         profile = manager._render_profile("s1", "/workspace")
-        if "profile tool_hat" not in profile:
+        if "hat tool_hat" not in profile:
             return
         tool_hat_body = self._extract_brace_body(
-            profile, "profile tool_hat",
+            profile, "hat tool_hat",
         )
         assert "/usr/local/venv/**/*.so    mr," in tool_hat_body, (
             "v16 tool_hat body missing mmap-exec grant on "
@@ -734,9 +734,9 @@ class TestRenderProfile:
         )
 
         # tool_hat body (extract via brace counting)
-        if "profile tool_hat" in profile:
+        if "hat tool_hat" in profile:
             tool_hat_body = self._extract_brace_body(
-                profile, "profile tool_hat",
+                profile, "hat tool_hat",
             )
             assert (
                 'audit deny "/workspace/.jaato/apparmor-fragments/**" wlk'
@@ -790,9 +790,9 @@ class TestRenderProfile:
         )
 
         # tool_hat body (extract via brace counting)
-        if "profile tool_hat" in profile:
+        if "hat tool_hat" in profile:
             tool_hat_body = self._extract_brace_body(
-                profile, "profile tool_hat",
+                profile, "hat tool_hat",
             )
             assert deny.search(tool_hat_body), (
                 "tool_hat body missing templates write-deny"
@@ -834,7 +834,7 @@ class TestRenderProfile:
             "isolated sub-profile missing routing write-deny"
         )
 
-        for label in ("profile tool_hat", "profile child"):
+        for label in ("hat tool_hat", "profile child"):
             if label in profile:
                 assert deny.search(
                     self._extract_brace_body(profile, label)
@@ -937,7 +937,7 @@ class TestRenderProfile:
         """
         profile = manager._render_profile("s1", "/workspace")
         # Find the BASE profile body (everything before the tool_hat sub-profile).
-        base_body = profile.split("profile tool_hat")[0]
+        base_body = profile.split("hat tool_hat")[0]
         # Base must NOT deny reads on user-authored config — reactor
         # dispatch, prefetch, and session-init all need them.
         assert 'audit deny "/workspace/.jaato/agents/**"             r' not in base_body
@@ -998,15 +998,15 @@ class TestRenderProfile:
             )
 
     def test_tool_hat_subprofile_present(self, manager):
-        """v13 introduces the ``profile tool_hat { ... }`` sub-profile.
+        """v13 introduces the ``hat tool_hat { ... }`` sub-profile.
         Tool execution enters it via ``change_profile -> jaato-ws-X//tool_hat``;
         prefetch / reactor dispatch / session-init stay in BASE.
         """
         profile = manager._render_profile("s1", "/workspace")
-        assert "profile tool_hat" in profile
+        assert "hat tool_hat" in profile
         # Sub-profile redeclares workspace allow (sub-profiles don't
         # inherit base rules).
-        tool_hat_body = profile.split("profile tool_hat")[1]
+        tool_hat_body = profile.split("hat tool_hat")[1]
         assert '"/workspace/"   rw,' in tool_hat_body
         assert '"/workspace/**" rwkl,' in tool_hat_body
 
@@ -1022,7 +1022,7 @@ class TestRenderProfile:
         """
         import re
         profile = manager._render_profile("s1", "/workspace")
-        tool_hat_body = profile.split("profile tool_hat")[1]
+        tool_hat_body = profile.split("hat tool_hat")[1]
         for path in (
             "/workspace/.jaato/agents/**",
             "/workspace/.jaato/profiles/**",
@@ -2766,9 +2766,9 @@ class TestSubprofileComplainFlag:
         is ``complain``; absent the knob, no clause is emitted at all."""
         monkeypatch.delenv("JAATO_APPARMOR_COMPLAIN", raising=False)
         rendered = manager._render_profile("s1", "/workspace")
-        assert "profile tool_hat {" in rendered
+        assert "hat tool_hat {" in rendered
         assert "profile child {" in rendered
-        assert "profile tool_hat flags=" not in rendered
+        assert "hat tool_hat flags=" not in rendered
         assert "profile child flags=" not in rendered
 
     def test_complain_env_propagates_to_both_subprofiles(self, manager, monkeypatch):
@@ -2777,7 +2777,7 @@ class TestSubprofileComplainFlag:
         transitioning into ``//child`` also run complain-mode."""
         monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", "1")
         rendered = manager._render_profile("s1", "/workspace")
-        assert "profile tool_hat flags=(complain) {" in rendered
+        assert "hat tool_hat flags=(complain) {" in rendered
         assert "profile child flags=(complain) {" in rendered
         # Base profile keeps the existing combined flag set
         assert "flags=(attach_disconnected, complain)" in rendered
@@ -2788,7 +2788,7 @@ class TestSubprofileComplainFlag:
         for value in ("1", "true", "True", "YES"):
             monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", value)
             rendered = manager._render_profile("s1", "/workspace")
-            assert "profile tool_hat flags=(complain) {" in rendered, (
+            assert "hat tool_hat flags=(complain) {" in rendered, (
                 f"JAATO_APPARMOR_COMPLAIN={value!r} did not enable complain on tool_hat"
             )
 
@@ -2797,7 +2797,7 @@ class TestSubprofileComplainFlag:
         for value in ("", "0", "false", "no"):
             monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", value)
             rendered = manager._render_profile("s1", "/workspace")
-            assert "profile tool_hat flags=" not in rendered, (
+            assert "hat tool_hat flags=" not in rendered, (
                 f"JAATO_APPARMOR_COMPLAIN={value!r} incorrectly enabled complain on tool_hat"
             )
 

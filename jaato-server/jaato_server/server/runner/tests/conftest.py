@@ -78,6 +78,15 @@ def _disable_runner_apparmor_helpers(request):
             return_value=None,
         ))
 
+    # ``_require_tool_hat`` (#1422) refuses a confined bootstrap whose
+    # stub executor carries no tool_hat factory.  Always mocked here; the
+    # guard ``shared/tests/test_tool_bodies_run_in_the_hat_1422.py`` calls
+    # it directly.
+    patchers.append(patch(
+        "jaato_server.server.runner.session._require_tool_hat",
+        return_value=None,
+    ))
+
     for p in patchers:
         p.start()
     try:

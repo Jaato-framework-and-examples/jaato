@@ -1203,6 +1203,10 @@ class SubagentPlugin:
                 },
                 category="coordination",
                 discoverability=DISCOVERABILITY_DEFERRED,
+                # Drives the child's turn on this plugin's pool; a worker
+                # created inside tool_hat would stay in the hat and run
+                # the child's framework work there.  Base profile (#1422).
+                traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
             ),
             ToolSchema(
                 name='close_subagent',
@@ -1328,6 +1332,9 @@ class SubagentPlugin:
                 },
                 category="coordination",
                 discoverability=DISCOVERABILITY_DEFERRED,
+                # Reads the profile it is given, normally under
+                # ``.jaato/profiles``, which tool_hat read-denies (#1422).
+                traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
             ),
         ]
         return declarations

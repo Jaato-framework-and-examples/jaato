@@ -15,6 +15,11 @@ out of its source and checks them against
 * every entry flagged ``confined=True`` is in the template — the flag is a
   claim about the template, and a claim nobody checks is decoration.
 
+A deny in ANY body counts.  Since template v44 (#1422) the base profile no
+longer write-denies ``.jaato/references/**`` (the runner's own bookkeeping
+writes the catalog there); ``tool_hat``, ``//child`` and the isolated
+sub-runner still do, so the catalog stays an authored, confined subpath.
+
 Read from the template's SOURCE rather than by rendering a profile: the
 question is what the author declared, and rendering would need a
 workspace, a venv path and the fragment tiers to exist.

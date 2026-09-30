@@ -284,12 +284,13 @@ def apparmor_enforced_profile() -> Optional[str]:
 def profile_can_leave_itself(profile: Optional[str]) -> bool:
     """Whether code running under ``profile`` can unconfine itself (#1323).
 
-    A jaato session's BASE profile (``jaato-ws-<id>``) and its ``tool_hat``
-    sub-profile keep ``change_profile -> unconfined`` plus write access to
+    A jaato session's BASE profile (``jaato-ws-<id>``) keeps
+    ``change_profile -> unconfined`` plus write access to
     ``/proc/self/attr/current``: the framework needs them to restore its own
-    threads.  Any code running under either can therefore write
-    ``changeprofile unconfined`` and leave confinement, so neither bounds a
-    notebook cell.  ``//child`` (where ``cli`` subprocesses and, since
+    threads.  Its ``tool_hat`` hat (template v44) returns to base with the
+    ``change_hat`` token, which in-process code can find (#1422).  Code
+    running under either can therefore leave confinement, so neither bounds
+    a notebook cell.  ``//child`` (where ``cli`` subprocesses and, since
     #1323, the notebook kernel run) and the flat isolated sub-runner profile
     (``jaato-ws-<id>__sub_<n>``) drop those rules.
 

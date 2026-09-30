@@ -550,6 +550,10 @@ class JaatoRuntime:
         # ``shared/safe_pool.py`` for the per-thread reset and
         # ``server/apparmor.py`` for the context manager itself.
         self._confine_context_factory: Optional[Callable] = None
+        # Per-thread tool-body context (#1422): every session this runtime
+        # configures hands it to its ToolExecutor.  Set by the confined
+        # runner's bootstrap; ``None`` everywhere else.
+        self.tool_hat_factory: Optional[Callable] = None
 
         # Formatter pipeline (optional, for collecting formatter instructions)
         self._formatter_pipeline: Optional[Any] = None

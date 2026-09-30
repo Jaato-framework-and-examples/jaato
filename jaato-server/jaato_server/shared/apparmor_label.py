@@ -61,6 +61,11 @@ from typing import Optional
 #: The kernel's own spelling for "no profile attached".
 UNCONFINED = "unconfined"
 
+#: The hat model-called tool bodies run in, inside every ``jaato-ws-*``
+#: profile (#1422).  A thread wears ``<profile>//tool_hat`` only for the
+#: length of one tool call; see :mod:`shared.apparmor_hat`.
+TOOL_HAT = "tool_hat"
+
 #: Enforcement modes AppArmor annotates a label with.  ``enforce`` is the
 #: only one that blocks a syscall; ``complain`` logs and allows.
 MODE_ENFORCE = "enforce"

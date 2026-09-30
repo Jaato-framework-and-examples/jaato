@@ -302,24 +302,29 @@ def _file_rules(text: str):
     """File-rule lines of a profile body, headers and braces dropped."""
     return [line.strip() for line in text.splitlines()
             if line.strip() and not line.strip().startswith("#")
-            and "profile " not in line and line.strip() not in ("{", "}")]
+            and "profile " not in line and not line.strip().startswith("hat ")
+            and line.strip() not in ("{", "}")]
 
 
-def _base_body(profile: str) -> str:
-    """The base body WITHOUT its nested sub-profiles."""
-    for anchor in ("profile tool_hat", "profile child"):
-        start = profile.find(anchor)
-        open_at = profile.find("{", start)
-        depth = 0
-        for i, ch in enumerate(profile[open_at:], open_at):
-            depth += {"{": 1, "}": -1}.get(ch, 0)
-            if depth == 0:
-                profile = profile.replace(profile[open_at + 1:i], "")
-                break
-    return profile
+def _hat_body(profile: str) -> str:
+    """The ``tool_hat`` body, where ``proposeReference`` runs (#1422)."""
+    start = profile.find("hat tool_hat")
+    open_at = profile.find("{", start)
+    depth = 0
+    for i, ch in enumerate(profile[open_at:], open_at):
+        depth += {"{": 1, "}": -1}.get(ch, 0)
+        if depth == 0:
+            return profile[open_at + 1:i]
+    raise AssertionError("no tool_hat body")
 
 
 class TestTheProfileAllowsClaimsAndDeniesTheCatalog:
+    """``proposeReference`` is a model-called tool: its body runs in
+    ``tool_hat`` (#1422), which grants the claims directory and denies the
+    catalog.  Base no longer denies the catalog (the runner's own
+    bookkeeping writes it); ``test_tool_bodies_run_in_the_hat_1422`` pins
+    that side."""
+
     WS = "/workspace"
 
     def _plugin_rules(self):
@@ -336,7 +341,7 @@ class TestTheProfileAllowsClaimsAndDeniesTheCatalog:
         profile = manager._render_profile(
             "s1", self.WS, plugin_rules=self._plugin_rules())
         return ConfinementGrants(profile_name="x", exec_scope=None,
-                                 rules=_file_rules(_base_body(profile)))
+                                 rules=_file_rules(_hat_body(profile)))
 
     def test_the_plugin_grants_its_own_claims_directory(self):
         grants = ConfinementGrants(profile_name="x", exec_scope=None,

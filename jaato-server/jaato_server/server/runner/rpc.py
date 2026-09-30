@@ -2052,7 +2052,10 @@ class RunnerRPC:
 
         expected_profile = str(getattr(host.envelope, "profile_name", "") or "")
         try:
-            probe = probe_confinement_now(expected_profile)
+            from jaato_server.shared.apparmor_hat import stuck_hat_tids
+            probe = probe_confinement_now(
+                expected_profile, stuck_hat_tids=stuck_hat_tids(),
+            )
         except Exception as exc:  # noqa: BLE001 -- a probe must not raise
             probe = {
                 "ok": False,

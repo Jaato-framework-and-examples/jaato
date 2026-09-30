@@ -96,7 +96,7 @@ def _bodies(manager):
     )
     return {
         "base": profile,
-        "tool_hat": _extract_brace_body(profile, "profile tool_hat"),
+        "tool_hat": _extract_brace_body(profile, "hat tool_hat"),
         "child": _extract_brace_body(profile, "profile child"),
         "isolated_sub_runner": sub,
     }

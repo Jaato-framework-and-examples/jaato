@@ -87,18 +87,21 @@ Usage::
 
 
 TRAIT_FRAMEWORK_LEVEL = "framework_level"
-"""Trait for tools that perform framework-level operations and must run unconfined.
+"""Trait for tools whose body runs in the session's BASE AppArmor profile.
 
-By default, ALL tools execute under the session's AppArmor profile (when
-AppArmor is available), so any file I/O — direct or via subprocesses —
-is constrained to the workspace and other allowed paths.  This is the
-secure default: any tool that touches the filesystem (intentionally or
-as a side effect like ``save_to`` downloads) is automatically sandboxed.
+On a confined runner every model-called tool body runs in the session
+profile's ``tool_hat`` hat (#1422), which read-denies the workspace's
+authored config (``.jaato/agents``, ``profiles``, ``prompts``,
+``scripts``, ``completion_schemas``, ``spawn_schemas``, ``instructions``,
+``reactors.json``) and write-denies the reference catalog.  A tool that
+declares this trait runs in the base profile instead: still confined,
+without those tool-scope denies.
 
-Tools that declare this trait OPT OUT of confinement.  Use ONLY for
-tools that legitimately need to read plugin code, skill definitions,
-agent templates, or other framework resources that live outside the
-workspace and outside the standard allowed paths.
+Use ONLY for tools that do framework work on the agent's behalf and
+legitimately read that config (loading personas or prompts, walking every
+plugin's schemas), or that drive another session's turn on a thread pool
+(a worker created inside the hat would stay in it).  A tool that only
+reads and writes workspace files must not declare it.
 
 The canonical example is ``spawn_subagent``: subagent initialization
 runs plugin discovery, loads agent definitions, imports provider

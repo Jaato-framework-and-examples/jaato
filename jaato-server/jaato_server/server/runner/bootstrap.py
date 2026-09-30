@@ -69,10 +69,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import (
-    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
+    Any, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
 
 from jaato_server.shared.apparmor_label import (
+    TOOL_HAT,
     AppArmorLabel,
     COMPLAIN_ENV_VAR,
     parse_label,
@@ -692,10 +693,29 @@ def _read_one_thread_label(task_dir: str, tid: int) -> Tuple[str, str]:
     return "label", label
 
 
+def _stuck_in_hat(
+    label: str, expected: str, tid: int, stuck_hat_tids: Collection[int],
+) -> bool:
+    """Is *tid* left in ``expected//tool_hat`` by a return that failed?
+
+    A worker enters the hat for the length of one tool body (#1422) and
+    returns with its token.  ``stuck_hat_tids`` names the threads whose
+    return failed.  Such a worker is divergence: it runs every later
+    framework task under the hat's read-denies, which is not the boundary
+    the session record describes.  A worker legitimately mid-tool, and a
+    thread created inside the hat (which inherits it), are inside the
+    boundary and are not listed.
+    """
+    if profile_name_ignoring_mode(label) != f"{expected}//{TOOL_HAT}":
+        return False
+    return tid in stuck_hat_tids
+
+
 def scan_thread_profiles(
     expected_profile: str,
     *,
     task_dir: str = DEFAULT_TASK_ATTR_DIR,
+    stuck_hat_tids: Collection[int] = frozenset(),
 ) -> ThreadProfileScan:
     """Read every thread's AppArmor label and classify it.
 
@@ -707,6 +727,9 @@ def scan_thread_profiles(
         expected_profile: The profile name the process just entered.
         task_dir: ``/proc/self/task`` in production; a fabricated
             ``<dir>/<tid>/attr/current`` tree in tests.
+        stuck_hat_tids: Threads whose return from ``tool_hat`` failed
+            (``apparmor_hat.stuck_hat_tids()``).  A listed thread wearing
+            the hat is divergent (#1422).
 
     Returns:
         A :class:`ThreadProfileScan`.  Never raises for a thread that
@@ -732,7 +755,9 @@ def scan_thread_profiles(
             gone.append(tid)
         elif kind == "unreadable":
             unreadable.append((tid, value))
-        elif _label_is_inside(value, expected_profile):
+        elif _label_is_inside(value, expected_profile) and not _stuck_in_hat(
+            value, expected_profile, tid, stuck_hat_tids,
+        ):
             matched.append(tid)
         else:
             divergent.append((tid, value))
@@ -756,6 +781,7 @@ def verify_thread_confinement(
     poll_seconds: float = DEFAULT_VERIFY_POLL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    stuck_hat_tids: Callable[[], Collection[int]] = frozenset,
 ) -> ThreadProfileScan:
     """Assert that every thread of this process is inside *expected_profile*.
 
@@ -788,6 +814,9 @@ def verify_thread_confinement(
         sleep: Injection point so the grace window is testable without
             spending it.
         monotonic: Injection point for the same reason.
+        stuck_hat_tids: Called once per scan for the threads whose return
+            from ``tool_hat`` failed (#1422).  Read per scan, not once,
+            because a tool may end inside the grace window.
 
     Returns:
         The final :class:`ThreadProfileScan` when no divergence
@@ -796,14 +825,18 @@ def verify_thread_confinement(
     Raises:
         ThreadConfinementDivergence: divergence persisted.
     """
-    scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+    scan = scan_thread_profiles(
+        expected_profile, task_dir=task_dir, stuck_hat_tids=stuck_hat_tids(),
+    )
     if not scan.divergent:
         return scan
 
     deadline = monotonic() + max(0.0, grace_seconds)
     while monotonic() < deadline:
         sleep(poll_seconds)
-        scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+        scan = scan_thread_profiles(
+            expected_profile, task_dir=task_dir, stuck_hat_tids=stuck_hat_tids(),
+        )
         if not scan.divergent:
             return scan
 
@@ -828,6 +861,7 @@ def probe_confinement_now(
     *,
     proc_attr_path: str = DEFAULT_PROC_ATTR_PATH,
     task_dir: str = DEFAULT_TASK_ATTR_DIR,
+    stuck_hat_tids: Collection[int] = frozenset(),
 ) -> Dict[str, Any]:
     """One ON-DEMAND re-probe of this process's confinement, right now (#1294).
 
@@ -863,6 +897,7 @@ def probe_confinement_now(
             this exists to catch too).
         proc_attr_path: Override for tests.
         task_dir: Override for tests; see :func:`scan_thread_profiles`.
+        stuck_hat_tids: See :func:`scan_thread_profiles`.
 
     Returns:
         A JSON-safe dict:
@@ -896,7 +931,9 @@ def probe_confinement_now(
         }
 
     try:
-        scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+        scan = scan_thread_profiles(
+            expected_profile, task_dir=task_dir, stuck_hat_tids=stuck_hat_tids,
+        )
     except Exception as exc:  # noqa: BLE001 -- a probe must not raise
         return {
             "ok": False,
