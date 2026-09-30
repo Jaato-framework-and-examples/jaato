@@ -71,7 +71,7 @@ REVERSIONS = [
             "            return False, getattr(self, \"_completion_nudges_fired\", 0)\n"
         ),
         replace="",
-        test="test_an_operator_stop_mid_turn_is_not_nudged",
+        test="TestAStopIsNotUndone::test_an_operator_stop_mid_turn_is_not_nudged",
         because="the gate no longer asks why the loop ended, so a stop is nudged",
     ),
     Reversion(
@@ -81,7 +81,7 @@ REVERSIONS = [
             "        if self._cancel_token and self._is_running:"
         ),
         replace="        if self._cancel_token and self._is_running:",
-        test="test_a_stop_between_turn_end_and_nudge_is_not_nudged",
+        test="TestAStopIsNotUndone::test_a_stop_between_turn_end_and_nudge_is_not_nudged",
         because="a stop that finds no turn running no longer counts",
     ),
     Reversion(
@@ -94,7 +94,7 @@ REVERSIONS = [
             "        self._nudge_suppressed_reason = None\n"
         ),
         replace="        self._truncation_recovery_count = 0\n",
-        test="test_stop_cancels_the_turn_and_the_session_stays_drivable",
+        test="TestAStopIsNotUndone::test_stop_cancels_the_turn_and_the_session_stays_drivable",
         because="one stop suppresses every later nudge for the life of the session",
     ),
     Reversion(
@@ -110,7 +110,7 @@ REVERSIONS = [
             "\n"
             "            # Update instruction budget with conversation tokens\n"
         ),
-        test="test_a_token_tripped_elsewhere_is_not_nudged",
+        test="TestAStopIsNotUndone::test_a_token_tripped_elsewhere_is_not_nudged",
         because="only request_stop suppresses; a token cancelled another way is nudged",
     ),
 ]
