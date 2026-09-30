@@ -103,12 +103,12 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/shared/plugins/gc/utils.py",
-        find="""            # Binary parts (audio, images, PDFs) — the payload that
-            # dominates a voice request and used to be sized at zero.
-            elif part.inline_data:
-                media_tokens += estimate_media_tokens(part.inline_data)""",
-        replace="""            elif part.inline_data:
-                media_tokens += 0""",
+        # The one place a part's own ``inline_data`` becomes a media view;
+        # ``estimate_message_tokens`` sizes media through it (#1440).
+        find="""    if part.inline_data:
+        return [part.inline_data]""",
+        replace="""    if part.inline_data:
+        return []""",
         test="test_gc_sizes_binary_payload_instead_of_scoring_it_zero",
         because="GC sizing a 600 KB utterance at the one-token floor, so no "
                 "threshold can fire on the payload it exists to bound",
