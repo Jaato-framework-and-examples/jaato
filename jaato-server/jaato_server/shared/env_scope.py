@@ -316,6 +316,12 @@ CATALOG: Dict[str, EnvClass] = {
         "reading JAATO_IPC_EVENT_QUEUE_MAX gets.  Sessions on one "
         "channel cannot disagree about it, because a pool slot serves "
         "several of them in turn through one RunnerRPCClient"),
+    "JAATO_LOCK_HOLD_WARN_MS": EnvClass(HOST, None,
+        "milliseconds a profiled daemon lock (SessionManager._lock) may be "
+        "held before its release is logged at WARNING with the holder's "
+        "stack (#1452; default 500, 0 disables).  Host-scoped: the lock "
+        "belongs to the daemon process, and its holders serve different "
+        "sessions, so no one session could own the threshold"),
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),

@@ -56,6 +56,7 @@ from jaato_server.server.confinement_id import (
 # profile's declared block (#735) rather than duck-typing it, and a lazy
 # import inside a per-session helper would pay the lookup on every spawn.
 from jaato_server.shared.runtime_limits import RuntimeLimits
+from jaato_server.server import session_new_timing
 from jaato_server.shared.plugins.workspace_venv import inject_workspace_venv
 from jaato_server.shared.plugins.workspace_home import (
     ensure_workspace_home_dir, inject_workspace_home,
@@ -501,6 +502,9 @@ def spawn_session_runner(
         not disable_confine,
         pool_served,
     )
+    session_new_timing.mark(
+        "runner_ready", session_id=session_id,
+        detail=f"pid={spawned.pid} pool_served={pool_served}")
 
 
 def _cold_spawn_runner(
@@ -1458,6 +1462,7 @@ def dispatch_bootstrap_envelope(
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)
+        session_new_timing.mark("bootstrap_acked", session_id=session_id)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
             session_id, result,

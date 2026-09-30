@@ -10231,6 +10231,51 @@ Stated limits:
 - Not addressed: #693 (SIGTERM skips `SessionManager`) and #1061 (the
   shutdown triple captured without a lock).
 
+### A Lock Held Across the Loop (#1452)
+
+The daemon loop stopped for 121 s inside `SessionManager._emit_to_session`,
+on `with self._lock:`, routing a runner's streamed output, and two
+`session.new` confirmations missed their callers' 60 s budget. The holder
+was a session listing. `list_sessions` held `_lock` while it built each
+loaded session's row, and `turn_count` is `len(server.get_history())`: a
+`session_get_history_threadsafe` round-trip through the loop that was
+waiting for the lock. Each fetch broke only when its 15 s outer timeout
+expired, which is the eight `DaemonLoopTimeout`s in the incident. #1355
+moved listings off the loop thread, which turned a refused call into this
+deadlock. `session.new`'s own confirmation builds a listing too
+(`_build_session_info_event`).
+
+**The rule: never hold `SessionManager._lock` across a `*_threadsafe`
+call or a sync entry point that reaches one.** Snapshot under the lock,
+ask the runner after releasing it. Two sites broke it: `list_sessions`
+(now snapshots the loaded set) and `get_or_create_default` (attached under
+the lock, then ran `emit_current_state` and the info event inside it; now
+emits after releasing, as `attach_session` does). The #1355 entry-point
+list gained `emit_current_state` and `_build_session_info_event`.
+
+What the instrumentation now says, so the next stall names its cause:
+
+| Piece | Where |
+|---|---|
+| `SessionManager._lock` is a `ProfiledRLock`: RLock semantics (Condition protocol included), records owner, start and acquiring site; a hold past `JAATO_LOCK_HOLD_WARN_MS` (default 500, `0` off) logs `LOCK_HELD_LONG` with its stack on release | `server/lock_profile.py` |
+| every `LOOP_STALL` line names each held profiled lock's owner and its current stack | `LoopWatchdog._lock_owners` |
+| a thread in `threading.Condition.wait` (every future, event or queue wait) is a holder candidate, not "blocked acquiring a lock"; the incident's holder was misfiled there. Blocked threads are printed with their stacks, grouped when identical | `LoopWatchdog._is_a_condition_wait`, `_render` |
+| `session.new` logs `SESSION_NEW_PHASE` per phase with elapsed ms: `received` (transport read), `handler_started`, `runner_ready`, `bootstrap_acked`, `server_initialized`, `session_created`, `answer_queued`, `answer_written` (the frame reached the socket), keyed by `request_id` | `server/session_new_timing.py`, both transports |
+| loop lag as a fixed-bucket histogram, `LoopWatchdog.get_telemetry()` (the shape of the pool's), logged as `LOOP_LAG` every 10 min when there are new samples | `loop_watchdog.py` |
+
+Not done: per-client emit-to-write latency per event type (ask 4). It
+would change the IPC queue's item type under its lossy-eviction policy,
+and wants its own change. Only `_lock` is profiled; the three smaller
+`SessionManager` locks are not. The holder is identified by reading the
+code and reproducing the shape against a real `RunnerRPCClient`; it was
+not captured on the incident's host.
+
+Guard: `jaato_server/server/tests/test_a_lock_held_across_the_loop_1452.py`,
+seven reversions. It drives the listing on a worker thread against a real
+client and runner while the loop takes the lock at the moment the history
+fetch reaches it, and carries an AST check that no `with self._lock:`
+block in `session_manager.py` calls a runner-blocking entry point.
+
 ### A Failure While Reporting a Failure, Discarded (#1077)
 
 The daemon's model thread wound its turn down inside a `finally` holding
@@ -12308,6 +12353,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_TRUST_PEER_PATHS` | Switch OFF the IPC peer-entitlement check, so the daemon acts on whatever `workspace_path` / `config_root` a client names. Host-scoped: it is a property of the SOCKET, and a session must not be able to widen the transport's own trust posture. Announced at WARNING the first time it applies. See [Two Principals on One Socket](#two-principals-on-one-socket). |
 | `JAATO_UMASK` | Octal umask for the daemon PROCESS, inherited by the pre-warm template, every pool slot forked from it and every runner — so it governs the mode of every file the agent writes into a workspace. Unset (the default) leaves the umask the daemon inherited, which is what every existing deployment gets. Host-scoped because `os.umask` is a process attribute and the daemon serves all of its sessions from one process: a per-session value could not be applied without racing whatever turn is already running, and would in any case miss the files the *daemon* puts in a workspace (session records, `.jaato/logs`, the provisioned tree). CLI twin `--umask`, which outranks it; a malformed value is refused at ERROR and the inherited umask is kept rather than an invented one applied. See [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-1168). |
+| `JAATO_LOCK_HOLD_WARN_MS` | Milliseconds `SessionManager._lock` may be held before its release is logged at WARNING (`LOCK_HELD_LONG`) with the holder's stack (default 500; `0` disables). Host-scoped: the lock belongs to the daemon process. An unparseable or negative value falls back to the default. See [A Lock Held Across the Loop](#a-lock-held-across-the-loop-1452). |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
 | `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |
