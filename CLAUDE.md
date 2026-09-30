@@ -4770,6 +4770,17 @@ daemon validates a workspace. The shell refuses it by name. There is no
 `--require-full`, which the earlier plan named: the refusal is already a
 non-zero exit.
 
+**CI installs jaato-server and validates locally; the refusal is the stated
+behaviour for a job that does not.** A daemon in CI buys nothing for one run: it
+needs jaato-server installed to start, which already enables local `validate`,
+and its first answer costs what a local run does (it discovers the plugins
+either way). Measured on a two-profile set: installing jaato-sdk plus
+jaato-server with no extras takes ~8 s, a local `validate` 11–20 s, and a daemon
+~4 s to its socket plus the same ~11 s for its first answer (~1.2 s warm). A
+daemon pays off only for many `validate` calls in one job, or when it runs from
+a prebuilt jaato-server image so the app's venv stays SDK-only. The recipe is in
+the `jaato-sdk` integration skill.
+
 Guard: `jaato_server/server/tests/test_scaffold_validate_verb_1267.py`, five
 reversions.
 
