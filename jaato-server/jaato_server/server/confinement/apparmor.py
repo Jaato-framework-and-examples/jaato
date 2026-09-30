@@ -9,7 +9,7 @@ arguments and its results into a :class:`ConfinementHandle`.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from jaato_server.server.confinement.base import Boundary, ConfinementHandle
 from jaato_server.shared.lsm_label import BACKEND_APPARMOR
@@ -39,8 +39,13 @@ class AppArmorBackend:
         kwargs: Dict[str, Any] = {
             "config_root": boundary.config_root,
             "env_file": boundary.env_file,
-            "requested_fragments": list(boundary.requested_fragments) or None,
-            "plugin_rules": list(boundary.plugin_rules) or None,
+            # ``None`` and ``[]`` are different profiles (unscoped vs
+            # scoped ``//child``), so neither is folded into the other.
+            "requested_fragments": (
+                None if boundary.requested_fragments is None
+                else list(boundary.requested_fragments)
+            ),
+            "plugin_rules": _plugin_rules(boundary),
         }
         # Passed only when set: the manager's callers follow the same rule
         # (``private_tmp_kwargs``), so a manager predating #1381 still works.
@@ -70,12 +75,68 @@ class AppArmorBackend:
             backend=BACKEND_APPARMOR,
             label=profile,
             confinement_id=confinement_id,
-            child_label=f"{profile}//child",
+            child_label=child_label_for(profile),
             grants=_recorded_grants(confinement_id),
+            complain=_complain(self._manager, session_id),
         )
 
     def release(self, handle: ConfinementHandle) -> None:
         self._manager.teardown_profile_by_confinement_id(handle.confinement_id)
+
+
+def child_label_for(profile_name: str) -> str:
+    """What a subprocess of a runner in *profile_name* execs into.
+
+    ``<profile>//child`` for a main runner.  A profile that is already a
+    sub-profile (the isolated sub-runner, name containing ``//``) has no
+    child of its own: its subprocesses inherit it (v15 design intent).
+    """
+    return profile_name if "//" in profile_name else f"{profile_name}//child"
+
+
+def envelope_descriptor(profile_name: Optional[str]) -> Optional[Dict[str, str]]:
+    """``SessionInitEnvelope.confinement`` for an AppArmor *profile_name*.
+
+    ``None`` for an unconfined session (empty name).  The one place the
+    daemon writes the descriptor, so the runner's
+    ``lsm_confine.resolve`` has one shape to read.
+    """
+    if not profile_name:
+        return None
+    return {
+        "backend": BACKEND_APPARMOR,
+        "label": profile_name,
+        "child_label": child_label_for(profile_name),
+    }
+
+
+def _plugin_rules(boundary: Boundary) -> Optional[List[str]]:
+    """The manager's ``plugin_rules`` argument, attribution restored (#1326)."""
+    if boundary.plugin_rules is None:
+        return None
+    if not boundary.plugin_rule_owners:
+        # A plain list, as the caller had: the record then reads it as
+        # "(unattributed)" exactly as before.
+        return list(boundary.plugin_rules)
+    from jaato_server.server.apparmor import PluginRules
+
+    return PluginRules(
+        list(boundary.plugin_rules),
+        {name: list(rules) for name, rules in boundary.plugin_rule_owners},
+    )
+
+
+def _complain(manager: Any, session_id: str) -> bool:
+    """Whether the manager RENDERED the profile in complain mode (#1014).
+
+    Read from the manager's record rather than the environment, which a
+    profile's ``env:`` overlay may have changed since.  ``is True`` so a
+    test double answering with a mock reads as enforcing.
+    """
+    probe = getattr(manager, "profile_is_complain_mode", None)
+    if probe is None:
+        return False
+    return probe(session_id) is True
 
 
 def _recorded_grants(confinement_id: str) -> Dict[str, Any]:

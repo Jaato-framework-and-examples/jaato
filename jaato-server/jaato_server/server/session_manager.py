@@ -2592,7 +2592,6 @@ class SessionManager:
               spawn the runner (with disable_confine=True) — that's
               the §7a always-spawn intent.
         """
-        from jaato_server.server.runner_spawn import private_tmp_kwargs
         # Lazy-init the AppArmor manager.
         if getattr(self, "_apparmor_manager", None) is None:
             from jaato_server.server.apparmor import AppArmorManager
@@ -2613,32 +2612,27 @@ class SessionManager:
             )
             return "", SANDBOX_MODE_SOFT
 
-        # #1033: name the profile after the BOUNDARY, not after this
+        # #1033: the profile is named after the BOUNDARY, not after this
         # session.  A pre-warm pool slot cannot change the profile its
         # existing threads wear (``aa_change_profile`` is per-task, and
-        # the kernel refuses to let one thread re-confine another —
+        # the kernel refuses to let one thread re-confine another --
         # #1023), so a per-session name made every slot reuse a straddle
-        # of two profiles and every reused bootstrap a refusal.  Derived
-        # here so the same id reaches ``acquire_slot`` as part of the
-        # slot key and reaches the runner on the envelope.
-        confinement_id = apparmor.confinement_id_for_boundary(
-            workspace_path,
-            config_root=config_root,
-            env_file=env_file,
-            requested_fragments=requested_fragments,
-            plugin_rules=plugin_rules,
-            **private_tmp_kwargs(private_tmp_dir),
+        # of two profiles and every reused bootstrap a refusal.  The
+        # backend derives the id and provisions under it in one call
+        # (selinux-backend.md §3.1).
+        from jaato_server.server.confinement import (
+            Boundary, fragment_field, plugin_rule_fields,
         )
-        if not apparmor.provision_profile(
-            session_id,
-            workspace_path,
+        from jaato_server.server.confinement.apparmor import AppArmorBackend
+        handle = AppArmorBackend(apparmor).provision(session_id, Boundary(
+            workspace_path=workspace_path,
             config_root=config_root,
             env_file=env_file,
-            requested_fragments=requested_fragments,
-            plugin_rules=plugin_rules,
-            confinement_id=confinement_id,
-            **private_tmp_kwargs(private_tmp_dir),
-        ):
+            private_tmp_dir=private_tmp_dir,
+            requested_fragments=fragment_field(requested_fragments),
+            **plugin_rule_fields(plugin_rules),
+        ))
+        if handle is None:
             self._notify_apparmor(
                 client_id, session_id,
                 "profile provisioning failed (see daemon log) — "
@@ -2647,16 +2641,12 @@ class SessionManager:
             )
             return "", SANDBOX_MODE_SOFT
 
-        # #1014 ask 2: the mode is read from the manager, which recorded
-        # what it RENDERED, rather than from the environment as it stands
-        # now — ``_with_session_env`` overlays a profile's ``env:`` map
-        # onto the daemon's ``os.environ`` for the duration of a turn, so
-        # a second read of the env var is a second question.
-        complain = apparmor.profile_is_complain_mode(session_id)
-        return (
-            apparmor.get_profile_name(session_id),
-            sandbox_mode_for_profile(complain=complain),
-        )
+        # #1014 ask 2: ``handle.complain`` is read from the manager, which
+        # recorded what it RENDERED, rather than from the environment as it
+        # stands now — ``_with_session_env`` overlays a profile's ``env:``
+        # map onto the daemon's ``os.environ`` for the duration of a turn,
+        # so a second read of the env var is a second question.
+        return handle.label, sandbox_mode_for_profile(complain=handle.complain)
 
     def _teardown_prior_apparmor_profile_after_transition(
         self,
@@ -3787,6 +3777,7 @@ class SessionManager:
         # conditional because this builder sits on its complexity
         # baseline.
         from jaato_server.shared.plugins.subagent.config import _runtime_limits_to_dict
+        from jaato_server.server.confinement.apparmor import envelope_descriptor
         _iso_limits = _isolated_limits(effective_runtime_limits, profile)
         _iso_width = getattr(_iso_limits, "max_parallel_tools", None)
         return SessionInitEnvelope(
@@ -3823,6 +3814,9 @@ class SessionManager:
                 getattr(profile, "completion_processors", []) or []
             ),
             created_by=created_by,
+            # v8: the one writer of the descriptor, so the sub-runner's
+            # ``lsm_confine.resolve`` reads the shape the main runner does.
+            confinement=envelope_descriptor(sub_apparmor_profile),
         )
 
     def _dispatch_isolated_session_bootstrap(

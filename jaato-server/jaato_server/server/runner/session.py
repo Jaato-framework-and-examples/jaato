@@ -1006,6 +1006,13 @@ def _maybe_self_confine(
             in the error message so operators know to restart the
             daemon to pick up the new template.
     """
+    # The envelope's confinement descriptor is checked FIRST: a daemon that
+    # provisioned a boundary this runner cannot enter (``backend: selinux``)
+    # is refused here, before the unconfined no-op below could read an empty
+    # ``profile_name`` as "the operator opted out" (selinux-backend.md §3.2).
+    from . import lsm_confine
+    confinement = lsm_confine.resolve(envelope)
+    backend = confinement.backend if confinement else ""
     target_profile = envelope.profile_name or ""
     if not target_profile:
         if getattr(envelope, "confinement_required", False):
@@ -1042,7 +1049,6 @@ def _maybe_self_confine(
     try:
         from .bootstrap import (
             ConfinementMismatchError,
-            confine_to_profile,
             current_confinement,
         )
     except ImportError as exc:  # noqa: BLE001 — boundary surface
@@ -1099,7 +1105,7 @@ def _maybe_self_confine(
     # Need to transition.  ``confine_to_profile`` does the
     # ``aa_change_profile`` syscall + verifies the kernel agrees.
     try:
-        confine_to_profile(target_profile)
+        lsm_confine.self_confine(backend, target_profile)
     except ConfinementMismatchError as exc:
         # Phase 3 cascade-sharing diagnostic: an empty/non-jaato-ws
         # current profile usually means daemon-side provisioning
@@ -1220,10 +1226,8 @@ def _retire_and_verify_threads(
             )
 
     try:
-        from .bootstrap import (
-            ThreadConfinementDivergence,
-            verify_thread_confinement,
-        )
+        from . import lsm_confine
+        from .bootstrap import ThreadConfinementDivergence
     except ImportError as exc:  # noqa: BLE001 — boundary surface
         logger.warning(
             "runner-session bootstrap: per-thread confinement check "
@@ -1232,7 +1236,9 @@ def _retire_and_verify_threads(
         return
 
     try:
-        scan = verify_thread_confinement(target_profile)
+        scan = lsm_confine.verify_threads(
+            lsm_confine.BACKEND_APPARMOR, target_profile,
+        )
     except ThreadConfinementDivergence as exc:
         raise BootstrapError(
             "confine",
@@ -1309,8 +1315,10 @@ def _prearm_child_callback(
     if not runner_profile or "//" in runner_profile:
         return None
     try:
-        from jaato_server.server.apparmor import make_child_transition_callback
-        child_cb = make_child_transition_callback(runner_profile)
+        from . import lsm_confine
+        child_cb = lsm_confine.child_transition_callback(
+            lsm_confine.BACKEND_APPARMOR, runner_profile,
+        )
         registry = getattr(runtime, "_registry", None)
         for name in (registry.list_exposed() if registry else ()):
             plugin = registry.get_plugin(name)
@@ -1413,8 +1421,10 @@ def _maybe_install_child_callback(
     # Case 3: main runner, install required + audibly failing.
     try:
         if child_cb is None:
-            from jaato_server.server.apparmor import make_child_transition_callback
-            child_cb = make_child_transition_callback(runner_profile)
+            from . import lsm_confine
+            child_cb = lsm_confine.child_transition_callback(
+                lsm_confine.BACKEND_APPARMOR, runner_profile,
+            )
         executor = getattr(session, "_executor", None)
         if executor is None or not hasattr(
             executor, "set_apparmor_child_transition_callback",

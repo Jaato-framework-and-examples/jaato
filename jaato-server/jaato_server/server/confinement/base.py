@@ -10,7 +10,9 @@ the handle.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Protocol, Tuple, runtime_checkable
+from typing import (
+    Any, Dict, Optional, Protocol, Sequence, Tuple, runtime_checkable,
+)
 
 
 @dataclass(frozen=True)
@@ -25,8 +27,15 @@ class Boundary:
             (executables built in it may run, #1273/#1274).
         private_tmp_dir: ``<ws>/.tmp`` when the runner binds it over
             ``/tmp`` (#1381).
-        requested_fragments: AppArmor fragment names the profile asked for.
-        plugin_rules: AppArmor rule lines plugins contributed.
+        requested_fragments: AppArmor fragment names the profile asked
+            for.  ``None`` and ``()`` are different boundaries: ``None``
+            composes every fragment on disk (an unscoped ``//child``),
+            ``()`` composes none (the most locked-down stage).  Collapsing
+            one into the other widens or narrows a session silently.
+        plugin_rules: AppArmor rule lines plugins contributed, or ``None``.
+        plugin_rule_owners: Which plugin contributed which of
+            ``plugin_rules`` (#1326), as ``((plugin, (rule, ...)), ...)``.
+            Read only by the grant record the diagnostics panel shows.
     """
 
     workspace_path: str
@@ -34,8 +43,29 @@ class Boundary:
     env_file: Optional[str] = None
     managed: bool = False
     private_tmp_dir: Optional[str] = None
-    requested_fragments: Tuple[str, ...] = ()
-    plugin_rules: Tuple[str, ...] = ()
+    requested_fragments: Optional[Tuple[str, ...]] = None
+    plugin_rules: Optional[Tuple[str, ...]] = None
+    plugin_rule_owners: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+
+
+def plugin_rule_fields(plugin_rules: Optional[Sequence[str]]) -> Dict[str, Any]:
+    """``Boundary`` keyword arguments for what ``resolve_plugin_apparmor_rules``
+    returned: the rules, and who contributed each when the value carries a
+    ``by_plugin`` map (``PluginRules``, #1326).  ``None`` stays ``None``."""
+    if plugin_rules is None:
+        return {"plugin_rules": None, "plugin_rule_owners": ()}
+    by_plugin = getattr(plugin_rules, "by_plugin", None) or {}
+    return {
+        "plugin_rules": tuple(plugin_rules),
+        "plugin_rule_owners": tuple(
+            (name, tuple(rules)) for name, rules in sorted(by_plugin.items())
+        ),
+    }
+
+
+def fragment_field(requested_fragments: Optional[Sequence[str]]) -> Optional[Tuple[str, ...]]:
+    """``requested_fragments`` as a ``Boundary`` holds it, ``None`` kept ``None``."""
+    return None if requested_fragments is None else tuple(requested_fragments)
 
 
 @dataclass(frozen=True)
@@ -50,6 +80,9 @@ class ConfinementHandle:
             under equal rules.
         child_label: What model-driven subprocesses exec into.
         grants: The diagnostics record (#1326), backend-shaped.
+        complain: The kernel loaded the label and does not enforce it
+            (AppArmor complain mode, SELinux permissive domain, #1014).
+            A session record must then not claim a boundary.
     """
 
     backend: str
@@ -57,6 +90,7 @@ class ConfinementHandle:
     confinement_id: str
     child_label: str
     grants: Dict[str, Any] = field(default_factory=dict)
+    complain: bool = False
 
 
 @runtime_checkable

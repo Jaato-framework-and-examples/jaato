@@ -138,6 +138,35 @@ def _ws_daemon_loop(ws_server: "JaatoWSServer") -> Optional[asyncio.AbstractEven
     return adapter._event_loop if adapter is not None else None
 
 
+def _provision_ws_boundary(
+    apparmor: Any,
+    session_id: str,
+    workspace_path: str,
+    plugin_rules: Any,
+    private_tmp_dir: Optional[str],
+) -> Any:
+    """Provision a WS session's boundary through the confinement seam.
+
+    Shared by the pre-init hook and its post-init re-run, which must render
+    the same boundary: the same plugin rules and the private ``/tmp`` the
+    hook decided (#1381).  The WS path names no ``config_root`` / ``env_file``
+    / fragments in the boundary, as it never has.
+
+    Returns:
+        The :class:`ConfinementHandle`, or ``None`` when provisioning failed
+        (each caller decides what a failure means: a refusal before spawn,
+        a ``soft`` record after).
+    """
+    from jaato_server.server.confinement import Boundary, plugin_rule_fields
+    from jaato_server.server.confinement.apparmor import AppArmorBackend
+
+    return AppArmorBackend(apparmor).provision(session_id, Boundary(
+        workspace_path=workspace_path,
+        private_tmp_dir=private_tmp_dir,
+        **plugin_rule_fields(plugin_rules),
+    ))
+
+
 def _record_bootstrap_refusal(server: Any, reason: str) -> None:
     """#1253: record a bootstrap-outcome refusal on *server*.
 
@@ -1204,19 +1233,16 @@ class JaatoWSServer:
                 # the /tmp grants), so it is decided before the render and
                 # stashed for the spawn and the envelope to read back.
                 from jaato_server.server.runner_spawn import (
-                    private_tmp_kwargs, resolve_session_private_tmp,
+                    resolve_session_private_tmp,
                 )
                 private_tmp = resolve_session_private_tmp(
                     server, workspace_path, ws_workspace_root)
-                if apparmor.provision_profile(
-                    session_id, workspace_path,
-                    plugin_rules=plugin_rules,
-                    confinement_id=apparmor.confinement_id_for_boundary(
-                        workspace_path, plugin_rules=plugin_rules,
-                        **private_tmp_kwargs(private_tmp)),
-                    **private_tmp_kwargs(private_tmp),
-                ):
-                    profile_name = apparmor.get_profile_name(session_id)
+                handle = _provision_ws_boundary(
+                    apparmor, session_id, workspace_path, plugin_rules,
+                    private_tmp,
+                )
+                if handle is not None:
+                    profile_name = handle.label
                 else:
                     # #1253 FAIL CLOSED: confinement was required and the
                     # profile did NOT provision.  Refuse the session rather
@@ -1477,18 +1503,11 @@ class JaatoWSServer:
             # #1381: re-render with the private /tmp the pre-init hook
             # decided (read back, never re-decided), or this would load a
             # different body under a different name after the spawn.
-            from jaato_server.server.runner_spawn import (
-                private_tmp_kwargs, stashed_private_tmp,
-            )
-            private_tmp = private_tmp_kwargs(stashed_private_tmp(server))
-            if not apparmor.provision_profile(
-                session_id, sess.workspace_path,
-                plugin_rules=plugin_rules,
-                confinement_id=apparmor.confinement_id_for_boundary(
-                    sess.workspace_path, plugin_rules=plugin_rules,
-                    **private_tmp),
-                **private_tmp,
-            ):
+            from jaato_server.server.runner_spawn import stashed_private_tmp
+            if _provision_ws_boundary(
+                apparmor, session_id, sess.workspace_path, plugin_rules,
+                stashed_private_tmp(server),
+            ) is None:
                 # #1253: reaching here means confinement was REQUIRED for this
                 # WS-provisioned session — the host has an available
                 # AppArmorManager (the ``is_available`` gate above) and the

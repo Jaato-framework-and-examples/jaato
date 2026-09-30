@@ -101,7 +101,14 @@ from .path_utils import require_absolute_path
 # disagree.  ``max_parallel_tools`` keeps its own v6 field for
 # daemon/runner skew: a v6 runner still reads it, a v7 runner prefers
 # the block and falls back to the standalone field.
-SESSION_ENVELOPE_VERSION = 7
+#
+# v8 (2026-09-30, selinux-backend.md §3.2): added ``confinement`` --
+# ``{backend, label, child_label}`` naming the kernel LSM the daemon
+# provisioned the boundary with.  A bump rather than an additive field,
+# unlike the fields since v7: a v7 runner handed an SELinux boundary would
+# read only ``profile_name`` (empty for SELinux) and could not tell "enter
+# this context" from "unconfined", so it must refuse the envelope instead.
+SESSION_ENVELOPE_VERSION = 8
 
 
 def _optional_str(value: Any) -> Optional[str]:
@@ -472,6 +479,15 @@ class SessionInitEnvelope:
     # private ``/tmp`` -- also what an older daemon's envelope means (and
     # an older daemon renders no ``/tmp`` grant), so no schema_version bump.
     private_tmp_dir: Optional[str] = None
+    # v8: which kernel LSM provisioned the boundary and what the runner
+    # enters -- ``{"backend": "apparmor", "label": <profile_name>,
+    # "child_label": "<profile_name>//child"}``.  ``None`` = unconfined.
+    # Carried raw (not lenient-parsed like the fields above): the runner's
+    # ``lsm_confine.resolve`` REFUSES a value it cannot use, because
+    # reading a malformed or unknown descriptor as "absent" would fall back
+    # to ``profile_name`` and could run an SELinux-provisioned session
+    # unconfined.
+    confinement: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -556,6 +572,7 @@ class SessionInitEnvelope:
             "granted_env_names": list(self.granted_env_names),
             "confinement_grants": self.confinement_grants,
             "private_tmp_dir": self.private_tmp_dir,
+            "confinement": self.confinement,
         }
 
     @classmethod
@@ -639,6 +656,7 @@ class SessionInitEnvelope:
             granted_env_names=env_name_list(d.get("granted_env_names")),
             confinement_grants=_optional_dict(d.get("confinement_grants")),
             private_tmp_dir=_optional_str(d.get("private_tmp_dir")),
+            confinement=d.get("confinement"),
         )
 
 

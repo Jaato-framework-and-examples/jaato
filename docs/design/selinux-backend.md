@@ -530,11 +530,38 @@ policy line whose removal must fail it.
 |---|---|---|
 | 0 | **done** on Fedora 44 under WSL2 ([runbook](selinux-phase0-handoff.md), findings below): exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost, `/dev/shm` `context=` mount, threaded `setcon` | none |
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
-| 1b | call sites move onto the seam (the WS pre-init hook, IPC provisioning, runner self-confinement, the `//child` callback, thread verification); envelope field | none (refactor) |
+| 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2 | Policy module + `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
+
+### What phase 1b decided
+
+* **`Boundary.requested_fragments` is `Optional`, and `None` ≠ `()`.** The
+  phase-1a adapter folded `[]` into `None`; no call site used it then, but
+  moving IPC provisioning onto it would have given a stage that declared
+  `apparmor_fragments: []` an unscoped `//child`. `fragment_field` keeps
+  the distinction; `plugin_rule_fields` keeps #1326's per-plugin
+  attribution (`Boundary.plugin_rule_owners`), which a tuple would have
+  dropped.
+* **`ConfinementHandle.complain`** carries #1014's rendered mode, so the IPC
+  path records `apparmor-complain` from the handle rather than asking the
+  manager a second question.
+* **The descriptor is derived from `profile_name`** (`envelope_descriptor`),
+  the one value every spawn path already carries, on both envelope
+  builders (main and isolated sub-runner). It cannot disagree with
+  `profile_name` for AppArmor, and the runner refuses one that does.
+* **The runner checks the descriptor first**, at the top of step 1c, before
+  the empty-`profile_name` no-op: an SELinux boundary carries no AppArmor
+  profile name, and reading that as "the operator opted out" would serve it
+  unconfined. Steps 2d, 4 and the #1023 verification run after that gate,
+  so they call the dispatcher with the AppArmor backend.
+* **Left for phase 2**, where SELinux needs them: the cold-spawn path in
+  `runner/__main__.py` still confines from `JAATO_RUNNER_PROFILE` before any
+  envelope exists (SELinux cold spawn enters its domain by exec transition
+  instead), the step-1c idempotency readback still parses an AppArmor label,
+  and the `sandbox_mode_is_kernel` rename of §3.3 is not done.
 
 ### What phase 1a decided
 

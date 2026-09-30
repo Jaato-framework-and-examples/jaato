@@ -1321,7 +1321,18 @@ def build_session_envelope(
         confinement_grants=_confinement_grants_of(profile_name),
         # #1381: the <ws>/.tmp the profile's /tmp grant was rendered for.
         private_tmp_dir=session_private_tmp(server, profile_name),
+        # v8: which LSM provisioned the boundary.  Only AppArmor provisions
+        # today, so the descriptor is derived from ``profile_name`` -- the
+        # one value every spawn path already carries -- and cannot disagree
+        # with it (the runner refuses a descriptor that does).
+        confinement=_apparmor_descriptor(profile_name),
     )
+
+
+def _apparmor_descriptor(profile_name: str) -> Optional[Dict[str, str]]:
+    from jaato_server.server.confinement.apparmor import envelope_descriptor
+
+    return envelope_descriptor(profile_name)
 
 
 def _confinement_grants_of(profile_name: str) -> Optional[Dict[str, Any]]:
