@@ -197,10 +197,18 @@ profiles today.
 | `jaato_isolated_t` | isolated sub-runner profile | daemon `setexeccon` at sub-runner spawn |
 | `jaato_template_t` | (unconfined pool template) | only with pool support, section 7 |
 
-There is no `tool_hat` domain. The AppArmor `tool_hat` sub-profile is never
-entered on the current tree (#1422), so omitting it is not a regression; if
-#1422 makes it real, it becomes a `jaato_tool_t` bounded by
-`jaato_runner_t`.
+There is no `tool_hat` domain, and there cannot be one of the same shape.
+A per-call hat would need `setcon` on a worker thread: into a tool domain
+that is `typebounds`-bounded by `jaato_runner_t` (phase 0, 5.7, showed the
+kernel refuses an unbounded one in a threaded process), and then back, which
+the bounded check refuses because `jaato_runner_t` is not bounded by the tool
+domain. The runner is also given no `dyntransition` by design. Tool bodies
+therefore run in `jaato_runner_t`, so `jaato_runner_t` never gets write on
+the reference catalog: catalog writes (a promotion, a links edit, a bundle
+reconcile) stay daemon-side, the #1420 path. The AppArmor `tool_hat`
+sub-profile is still never entered on the current tree; draft PR #1443
+proposed entering it and moving those writes back into the runner, and was
+not merged.
 
 The daemon itself stays in whatever domain systemd gives it
 (`unconfined_service_t` on RHEL), as it stays unconfined under AppArmor.
