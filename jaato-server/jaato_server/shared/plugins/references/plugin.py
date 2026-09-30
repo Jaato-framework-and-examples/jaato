@@ -91,9 +91,11 @@ from .claims import (
     CLAIMS_DIRNAME,
     build_proposed_reference,
     claim_tags,
+    forward_links,
     listing_entry,
     load_claims,
     new_claim,
+    pending_claim_ids,
     write_claim,
 )
 from .embedding_types import (
@@ -197,6 +199,17 @@ _ID_CONTAINS_BOUNDARY_RE = re.compile("[" + _ID_BOUNDARY_CHARS + "]")
 #: once per session, naming the knob.  Unbounded is a legitimate posture; an
 #: unbounded expansion nobody can see is not.
 _UNBOUNDED_EXPANSION_WARN_AT = 50
+
+# What ``proposeReference`` tells the agent about edges whose target is not
+# in the catalog yet.  Kept, not refused: pages proposed together link to
+# each other before any of them is promoted.  A target with no claim_id is
+# either a page still to be proposed or a typo, and only the agent knows.
+_FORWARD_LINKS_NOTE = (
+    "These edges point at references not in the catalog yet. They are kept "
+    "and take effect once the target is promoted. One with a 'claim_id' is "
+    "a page already proposed; one without is a page not proposed yet, or a "
+    "typo: if it is a typo, propose this page again with the right id."
+)
 
 
 class ReferencesPlugin(RunnerForwardingMixin):
@@ -2318,7 +2331,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
                         "links": {
                             "type": "array",
                             "description": (
-                                "Typed edges to references already in the catalog. "
+                                "Typed edges to other references: ones in the catalog, "
+                                "or pages you are proposing too (their ids; an edge to "
+                                "one not promoted yet is kept and takes effect when it "
+                                "is). "
                                 "'depends-on': a reader needs the target too (selected "
                                 "with it). 'elaborates': the target goes deeper (offered, "
                                 "not selected). 'supersedes': this replaces the target "
@@ -2759,10 +2775,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         entry, errors = build_proposed_reference(
             args, workspace=workspace,
             catalog_ids=[s.id for s in self._sources],
-            link_targets=[s.id for s in self._sources],
         )
         if entry is None:
             return False, {"error": "; ".join(errors), "errors": errors}
+        pending_claims, _skipped = load_claims(workspace)
+        forward = forward_links(entry.get("links"), [s.id for s in self._sources],
+                                pending_claim_ids(pending_claims))
         try:
             session = get_current_session()
         except LookupError:
@@ -2773,7 +2791,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         except OSError as exc:
             return False, {"error": f"Could not write the claim: {exc}"}
         self._trace(f"proposeReference: id={entry['id']} claim={claim['claim_id']}")
-        return {
+        result = {
             "success": True,
             "status": claim["status"],
             "claim_id": claim["claim_id"],
@@ -2786,6 +2804,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "it into the catalog (reference.promote) or dismisses it."
             ),
         }
+        if forward:
+            result["forward_links"] = forward
+            result["forward_links_note"] = _FORWARD_LINKS_NOTE
+        return result
 
     def _execute_validate_reference(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Validate a single reference JSON file against the expected schema.

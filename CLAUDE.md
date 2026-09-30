@@ -4305,11 +4305,17 @@ The instruction the model reads carries a `**Links**` line
 
 **Who declares an edge** (the brainstorm's open question 7): an agent may
 propose one, and none takes effect until a person promotes it.
-`proposeReference` takes `links`, refused at the call when a target is not
-in the agent's own catalog; the claim carries them, the curator's row shows
-them (`links`, notes as text) with a non-blocking `warnings` entry for a
-target the workspace catalog cannot place, and promotion writes them into
-the catalog file. `listReferences` shows a claim's edges to another model
+`proposeReference` takes `links` and refuses only a malformed one. A
+target not in the catalog is kept, because pages proposed together (often
+in parallel) link to each other before any is promoted; a demo's three
+runbook pages could not link at all while such targets were refused. The
+call's result names those targets (`forward_links`, with the `claim_id`
+when the target is already proposed), so a typo still reaches the agent
+that made it. The claim carries the links, the curator's row shows them
+(`links`, notes as text) with a non-blocking `warnings` entry for a target
+the workspace catalog cannot place (naming the pending claim when it is
+one), and promotion writes them into the catalog file, dangling until the
+target is promoted too. `listReferences` shows a claim's edges to another model
 as `{to, rel}` with the target re-checked as one token and no note, since
 that listing is outside the untrusted fence. The web Proposals panel draws
 each edge and marks a `supersedes`, because promoting it reroutes requests
@@ -4354,7 +4360,7 @@ write is daemon-side only because no runner profile may write the catalog;
 keeping the owner gate.
 
 Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
-`server/tests/test_a_proposal_carries_typed_links.py` (five) and
+`server/tests/test_a_proposal_carries_typed_links.py` (seven) and
 `server/tests/test_a_person_edits_a_references_links.py` (six).
 
 ### Plugin-Level Traits
