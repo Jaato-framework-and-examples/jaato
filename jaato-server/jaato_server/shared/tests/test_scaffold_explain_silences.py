@@ -202,6 +202,7 @@ def test_every_documented_timeout_default_is_the_live_one(clients_text):
         return hits[0].default
 
     assert reported("create_session") == live["create"]
+    assert reported("session_timeout=") == live["create"]
     assert reported("IPCClient.connect") == live["bare_connect"]
     assert reported("autostart_timeout") == live["autostart"]
     assert reported("connect_timeout") == live["facade_connect"]

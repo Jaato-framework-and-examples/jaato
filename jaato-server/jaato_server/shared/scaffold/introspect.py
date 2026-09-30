@@ -486,11 +486,12 @@ def client_timeouts() -> List[ClientTimeout]:
         # The facade's spelling of the same clock (#1450).  Its own row,
         # because ``session_timeout`` is what a facade author greps for;
         # the default shown is create_session's, since unset forwards
-        # nothing and that default is what applies.
+        # nothing and that default is what applies.  Copied from the row
+        # above rather than read a second time, so the two cannot disagree.
         rows.append(ClientTimeout(
             name="session_timeout",
             where="jaato.session(session_timeout=)",
-            default=_num(_sig_default(IPCClient.create_session, "timeout")),
+            default=rows[-1].default,
             bounds="the same `session.new` confirmation, from the facade",
             settable_via="facade",
             on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
