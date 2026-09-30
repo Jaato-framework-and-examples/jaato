@@ -22,5 +22,6 @@
   "percent_used": 0.0,
   "tokens_remaining": 0,
   "reserved_output_tokens": 0,
-  "turns": 0
+  "turns": 0,
+  "source": null
 }

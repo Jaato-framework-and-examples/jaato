@@ -2720,6 +2720,7 @@ class JaatoServer:
                 context_limit = session.get_context_limit()
                 emit(ContextUpdatedEvent(
                     agent_id=agent_id,
+                    source="budget",
                     usage=self._build_usage(
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),
@@ -3797,6 +3798,7 @@ class JaatoServer:
                 self._cached_context_limit = int(context_limit)
             self.emit(ContextUpdatedEvent(
                 agent_id=self._main_agent_id,
+                source="budget",
                 usage=self._build_usage(
                     prompt_tokens=usage.get('prompt_tokens', 0),
                     output_tokens=usage.get('output_tokens', 0),
@@ -4568,6 +4570,7 @@ class JaatoServer:
                         cache_creation_tokens = last_turn.get('cache_creation')
                 server.emit(ContextUpdatedEvent(
                     agent_id=agent_id,
+                    source="budget",
                     usage=server._build_usage(
                         prompt_tokens=prompt_tokens,
                         output_tokens=output_tokens,
@@ -6471,6 +6474,7 @@ class JaatoServer:
                     turns = int(payload.get("turns", 0) or 0)
                     server.emit(ContextUpdatedEvent(
                         agent_id=server._main_agent_id,
+                        source="provider",
                         usage=server._build_usage(
                             prompt_tokens=int(payload.get("prompt_tokens", 0)),
                             output_tokens=int(payload.get("output_tokens", 0)),
@@ -7182,6 +7186,7 @@ class JaatoServer:
                         )
                         server.emit(ContextUpdatedEvent(
                             agent_id=server._main_agent_id,
+                            source="budget",
                             usage=server._build_usage(
                                 prompt_tokens=usage.get('prompt_tokens', 0),
                                 output_tokens=usage.get('output_tokens', 0),
@@ -8695,6 +8700,7 @@ class JaatoServer:
                     )
                     self.emit(ContextUpdatedEvent(
                         agent_id=self._main_agent_id,
+                        source="budget",
                         usage=self._build_usage(
                             prompt_tokens=usage.get('prompt_tokens', 0),
                             output_tokens=usage.get('output_tokens', 0),

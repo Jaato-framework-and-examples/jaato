@@ -306,63 +306,122 @@ def history_media_bytes(history: Sequence[Message]) -> int:
     return sum(message_media_bytes(m) for m in history)
 
 
+def function_call_wire_text(function_call: Any) -> str:
+    """The text a function call puts on the wire: its name and its arguments.
+
+    Arguments are serialised the way the OpenAI-shaped converters serialise
+    them (``json.dumps(fc.args)``), because that is the string the upstream
+    tokenizes.  An argument the JSON encoder cannot represent falls back to
+    ``str`` rather than raising -- this is a size estimate, and a sizing
+    helper that raised would take the budget update down with it.  A call
+    whose arguments could not be parsed carries the raw text on
+    ``unreadable_args`` (#750); that text is what was sent, so it counts.
+    """
+    name = getattr(function_call, "name", None) or ""
+    args = getattr(function_call, "args", None)
+    if args:
+        try:
+            args_text = json.dumps(args)
+        except (TypeError, ValueError):
+            args_text = str(args)
+    else:
+        args_text = getattr(function_call, "unreadable_args", None) or ""
+    return name + args_text
+
+
+def function_response_wire_text(response: Any) -> str:
+    """The text a tool result puts on the wire: name, result and suffix.
+
+    ``model_suffix`` is appended to the rendered result the model reads
+    (the task-completion spur, the mid-turn interrupt line), so it is part
+    of the request.  The result's binary attachments are NOT text; they are
+    sized by :func:`part_media_tokens`.
+    """
+    name = getattr(response, "name", None) or ""
+    result = getattr(response, "result", None)
+    result_text = "" if result is None else (
+        result if isinstance(result, str) else str(result))
+    return name + result_text + (getattr(response, "model_suffix", None) or "")
+
+
+def part_wire_texts(part: Part, *, include_thought: bool = True) -> List[str]:
+    """Every string one part contributes to a request (#1440).
+
+    The ONE per-part size rule.  ``InstructionBudget``'s conversation
+    figure (``JaatoSession._update_conversation_budget``, which counts
+    each string with the session's tokenizer) and
+    :func:`estimate_message_tokens` (which counts characters) both read
+    the part through this function, so the budget that DECIDES whether GC
+    runs and the estimate GC reports its RESULT in agree about what a
+    message carries.  Before it, the budget counted text and tool results
+    only: tool-call arguments (a notebook cell's code, a whole file handed
+    to ``writeNewFile``) and replayed reasoning were invisible to the
+    threshold, and a session drifted 350k tokens past what the budget
+    said while ``gc_budget`` freed nothing.
+
+    Not exclusive: a part carrying text AND reasoning (the #1290 shape)
+    contributes both, as the wire sends both.
+
+    Args:
+        part: The part to size.
+        include_thought: Whether ``Part.thought`` reaches the wire.  It does
+            on a ``replay_reasoning`` provider (MiniMax, Kimi, MiMo), where
+            it is sent back as ``reasoning_content`` on every request; a
+            session keeps thought parts in history only then, so the
+            default is True.  A caller that knows the active wire does not
+            replay passes False.
+
+    Returns:
+        The strings, in part-field order; empty strings are omitted.
+        Binary payload is not text and is sized by :func:`part_media_tokens`.
+    """
+    texts: List[str] = []
+    if part.text:
+        texts.append(part.text)
+    if include_thought and part.thought:
+        texts.append(part.thought)
+    if part.function_call:
+        texts.append(function_call_wire_text(part.function_call))
+    if part.function_response:
+        texts.append(function_response_wire_text(part.function_response))
+    if part.executable_code:
+        texts.append(part.executable_code)
+    if part.code_execution_result:
+        texts.append(part.code_execution_result)
+    return [t for t in texts if t]
+
+
+def message_wire_texts(message: Message, *, include_thought: bool = True) -> List[str]:
+    """:func:`part_wire_texts` over every part of one message."""
+    texts: List[str] = []
+    for part in (message.parts or []):
+        texts.extend(part_wire_texts(part, include_thought=include_thought))
+    return texts
+
+
 def estimate_message_tokens(message: Message) -> int:
     """Estimate token count for a single Message object.
 
-    Uses a simple heuristic: ~4 characters per token for text, and
-    :data:`MEDIA_BYTES_PER_TOKEN` for binary ``inline_data`` parts (which
-    were previously counted as nothing at all — see #850).
+    Uses a simple heuristic: ~4 characters per token over every string
+    :func:`part_wire_texts` says the part puts on the wire (text, replayed
+    reasoning, tool-call name and arguments, tool results, code parts),
+    plus :data:`MEDIA_BYTES_PER_TOKEN` for binary payload -- a part's own
+    ``inline_data`` and a tool result's attachments (#850, #989).
+
+    Reasoning is counted: this estimate is used where history is sized
+    whatever the active wire (GC's before/after figures), and a history
+    holds thought parts only for a replaying wire, where it is context in
+    the plainest sense -- a Kimi K3 turn at maximum effort carries tens of
+    thousands of tokens of it.
 
     Args:
         message: A Message object to estimate.
 
     Returns:
-        Estimated token count.
+        Estimated token count (at least 1).
     """
-    total_chars = 0
-    media_tokens = 0
-
-    if message.parts:
-        for part in message.parts:
-            # Text parts
-            if part.text:
-                total_chars += len(part.text)
-
-            # Function call parts
-            elif part.function_call:
-                fc = part.function_call
-                total_chars += len(fc.name) if fc.name else 0
-                if fc.args:
-                    # Args is typically a dict, estimate from string repr
-                    total_chars += len(str(fc.args))
-
-            # Function response parts
-            elif part.function_response:
-                fr = part.function_response
-                total_chars += len(fr.name) if fr.name else 0
-                if fr.result:
-                    total_chars += len(str(fr.result))
-                # A tool result's own binary payload — an image a tool
-                # produced, or the audio a clarification was answered with
-                # (#989).  Invisible here until now, exactly as
-                # ``inline_data`` was before #850.
-                media_tokens += part_media_tokens(part)
-
-            # Binary parts (audio, images, PDFs) — the payload that
-            # dominates a voice request and used to be sized at zero.
-            elif part.inline_data:
-                media_tokens += estimate_media_tokens(part.inline_data)
-
-            # Reasoning a replaying wire sends back on every later request
-            # (docs/design/minimax-kimi-mimo-providers.md §3).  It is
-            # context in the plainest sense, and a Kimi K3 turn at maximum
-            # effort carries tens of thousands of tokens of it — the #850
-            # blind spot again, in text, unless it is counted here.
-            elif part.thought:
-                total_chars += len(part.thought)
-
-    # Rough estimate: 4 chars per token (conservative)
-    return max(1, total_chars // 4 + media_tokens)
+    total_chars = sum(len(t) for t in message_wire_texts(message))
+    return max(1, total_chars // 4 + message_media_tokens(message))
 
 
 def estimate_turn_tokens(contents: List[Message]) -> int:

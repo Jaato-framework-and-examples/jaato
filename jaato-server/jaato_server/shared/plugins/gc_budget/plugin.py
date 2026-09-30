@@ -13,6 +13,7 @@ Supports two modes:
   (enabled by setting pressure_percent to 0 or None)
 """
 
+import math
 import os
 import tempfile
 from datetime import datetime
@@ -291,12 +292,18 @@ class BudgetGCPlugin:
             self._trace("collect: no budget available, falling back to turn-based GC")
             return self._fallback_truncate(history, context_usage, config, reason)
 
-        # Calculate target tokens
-        current_tokens = budget.total_tokens()
-        # Of the effective input limit, not the raw window: the output a
-        # request reserves is not room the history can use (#1444).
+        # Calculate target tokens.  The decision is on the EFFECTIVE total
+        # (#1440): the budget's estimate, scaled up when the provider last
+        # reported a larger prompt.  Entries are sized in estimate units, so
+        # the amount to free is converted back into those units -- freeing
+        # ``current - target`` estimate tokens from a scaled total would
+        # collect ``factor`` times too much.  The target is of the effective
+        # input limit, not the raw window: the output a request reserves is
+        # not room the history can use (#1444).
+        current_tokens = budget.effective_total_tokens()
         target_tokens = int(budget.effective_input_limit() * config.target_percent / 100)
-        tokens_to_free = current_tokens - target_tokens
+        tokens_to_free = _in_estimate_units(
+            current_tokens - target_tokens, budget.calibration_factor)
 
         if tokens_to_free <= 0:
             self._trace(
@@ -931,6 +938,19 @@ class BudgetGCPlugin:
                 "turns_after": len(kept_turns),
             }
         )
+
+
+def _in_estimate_units(real_tokens: int, calibration_factor: float) -> int:
+    """Convert a token amount on the calibrated scale into estimate units.
+
+    ``InstructionBudget.effective_total_tokens`` is the estimate times
+    ``calibration_factor`` (>= 1.0); every entry GC can remove is sized in
+    the estimate's units.  Rounds up so a positive amount never becomes 0.
+    Non-positive amounts are returned unchanged ("nothing to free").
+    """
+    if real_tokens <= 0 or calibration_factor <= 1.0:
+        return real_tokens
+    return max(1, math.ceil(real_tokens / calibration_factor))
 
 
 def create_plugin() -> BudgetGCPlugin:

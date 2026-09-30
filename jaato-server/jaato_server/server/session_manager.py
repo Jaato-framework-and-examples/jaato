@@ -12554,6 +12554,7 @@ class SessionManager:
                     # Emit context update so clients show correct usage
                     server.emit(ContextUpdatedEvent(
                         agent_id=main_agent_id,
+                        source="budget",
                         usage=server._build_usage(
                             prompt_tokens=usage.get('prompt_tokens', 0),
                             output_tokens=usage.get('output_tokens', 0),
@@ -12840,6 +12841,7 @@ class SessionManager:
                 context_limit = session.get_context_limit()
                 server.emit(ContextUpdatedEvent(
                     agent_id=agent_id,
+                    source="budget",
                     usage=server._build_usage(
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),
