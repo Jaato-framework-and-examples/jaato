@@ -78,8 +78,8 @@ _PLUGIN = "jaato-server/jaato_server/shared/plugins/references/plugin.py"
 REVERSIONS = [
     Reversion(
         target=_PLUGIN,
-        find='        claim = new_claim(entry, session)\n',
-        replace='        claim = new_claim(entry, session)\n'
+        find='            entry, workspace, self._template_render_lookup()))\n',
+        replace='            entry, workspace, self._template_render_lookup()))\n'
                 '        claim["origin"] = args.get("origin") or claim["origin"]\n',
         because=(
             "an origin carried in by the caller would outrank the stamped "
