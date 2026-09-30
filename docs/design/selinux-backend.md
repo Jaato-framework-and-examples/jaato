@@ -501,11 +501,30 @@ policy line whose removal must fail it.
 | Phase | Content | Behaviour change |
 |---|---|---|
 | 0 | Verify on a Fedora/Rocky VM: exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost on a large tree, `/dev/shm` `context=` mount | none |
-| 1 | `ConfinementBackend` seam, `lsm_label`, envelope field; AppArmor behind it unchanged | none (refactor) |
+| 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
+| 1b | call sites move onto the seam (the WS pre-init hook, IPC provisioning, runner self-confinement, the `//child` callback, thread verification); envelope field | none (refactor) |
 | 2 | Policy module + `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
+
+### What phase 1a decided
+
+* **The SELinux backend reports `is_available() == False` on a ready host**,
+  with the reason "the host is ready … but this build cannot provision
+  SELinux boundaries yet". `host_readiness()` is the check itself. Saying
+  "available" before provisioning exists would let selection pick a backend
+  that confines nothing.
+* **The policy version is read from a marker type**, `jaato_policy_v<N>_t`,
+  which the module (phase 2) must declare. Asking whether a context is valid
+  needs no privilege; `semodule -l` needs root.
+* **An unknown `JAATO_CONFINEMENT` refuses to start** rather than falling back
+  to `auto`.
+* **The label's backend is named by the caller, never guessed** from the
+  string, so an AppArmor profile name containing `:` cannot read as an
+  SELinux context.
+* **SELinux "confined" means one of jaato's domains.** Every task on an
+  SELinux host has a domain; `unconfined_t` is not a jaato boundary.
 
 ## 13. Open questions
 
