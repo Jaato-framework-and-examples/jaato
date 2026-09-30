@@ -517,12 +517,12 @@ container**, only loading needs a kernel.
 | Layer | Where |
 |---|---|
 | label parsing, mode, sandbox_mode, slot key, allocation, relabel planning | unit tests, fabricated `attr/current` strings, like the AppArmor tests |
-| the policy compiles; the authored types deny write/rename; `jaato_child_t` has no `setexec`/`dyntransition`; `jaato_runner_t` has no `setcurrent`; no domain has `sys_admin`/`mount` | a CI job in a Fedora container: `make` the module, then `sesearch` assertions against the compiled `.pp` (checks the rules exist, not that the kernel applies them) |
+| the policy compiles; the authored types deny write/rename; `jaato_child_t` has no `setexec`/`dyntransition`; `jaato_runner_t` has no `setcurrent`; no domain has `sys_admin`/`mount` | the `selinux-policy` CI job (Fedora container): `make` the module, link it into targeted with `semodule -N -i`, and query the linked policy with the setools Python API (checks the rules exist, not that the kernel applies them) |
 | the backend's contract matches AppArmor's for the shared features | one parametrised suite over both backends through the `ConfinementBackend` protocol |
 | end to end on an enforcing kernel | a manual / scheduled job on a Rocky or Fedora VM (GitHub-hosted runners are Ubuntu; Testing Farm or a self-hosted runner). Not required for merge, like the AppArmor "not verified on an enforcing kernel" notes |
 
-The reversion meta-guard applies: each `sesearch` assertion declares the
-policy line whose removal must fail it.
+Each assertion declares the `jaato.te` edit that must fail it, and the same
+job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 
 ## 12. Rollout
 
@@ -531,10 +531,40 @@ policy line whose removal must fail it.
 | 0 | **done** on Fedora 44 under WSL2 ([runbook](selinux-phase0-handoff.md), findings below): exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost, `/dev/shm` `context=` mount, threaded `setcon` | none |
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
-| 2 | Policy module + `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
+| 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 31 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
+| 2b | `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
+
+### What phase 2a decided
+
+* **The module stops at the two domains phase 2b needs.** `jaato_isolated_t`
+  (phase 3) and `jaato_template_t` (phase 4) are not declared; declaring
+  them before anything enters them would be policy nobody tests.
+* **A presence check counts only unconditional rules.** Targeted grants
+  `domain domain:fd use` under the boolean `domain_fd_use` (default on),
+  so "the runner may use the daemon's fds" held with the module's own line
+  removed, and the fd assertions were decorative until the reversion pass
+  said so. The module grants fd use on the daemon's domains itself, and
+  the checks ignore conditional rules, so a host that switches the boolean
+  off keeps its runners. An absence check still counts every rule: a
+  permission that any boolean can grant is a permission the domain may have.
+* **The reversions run in the same job, not in the meta-guard.** The
+  repository's reversion meta-guard runs on Ubuntu, which has no targeted
+  policy. Each check carries the `jaato.te` edit that must break it, and
+  `test_each_assertion_detects_its_reversion` rebuilds and re-queries.
+  Linking costs ~9.5 s, so the job takes ~9 minutes.
+* **Known gaps for 2b**, found writing the rules:
+  * config under `~/.jaato` (user-tier profiles, agents) is `user_home_t`,
+    which the runner cannot read by design. It needs a label, or the daemon
+    hands the content over as it does for the rendered profile.
+  * the session tmpdir under `/tmp` must be created and labelled
+    `jaato_tmp_t` by the daemon; the module gives the runner no `add_name`
+    on `tmp_t`, so a runner-created tmpdir is refused, not mislabelled.
+  * two runners of one workspace share a level, so each can read the
+    other's `/proc/<pid>`. Same boundary as AppArmor (#1033: one profile per
+    workspace); stated, not new.
 
 ### What phase 1b decided
 

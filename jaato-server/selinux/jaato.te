@@ -1,0 +1,325 @@
+policy_module(jaato, 1.0.0)
+
+########################################
+#
+# jaato confinement module (docs/design/selinux-backend.md §4).
+#
+# What a session runner may do, by TYPE; which workspace it may do it to,
+# by MCS LEVEL (one category pair per workspace, §5). The daemon stays in
+# whatever domain systemd or the login shell gives it, as it stays
+# unconfined under AppArmor.
+#
+# Each block names the AppArmor template lines it translates
+# (jaato_server/server/apparmor.py, template v43). What AppArmor denies
+# by path is here denied by NOT granting it; comments of the form
+# "Deliberately absent" record those, and tests/test_policy_rules.py
+# asserts both what is granted and what is not.
+#
+# Scope of this version (phase 2a): the runner and //child domains, the
+# workspace, authored, claims and tmp file types. Not yet: the isolated
+# sub-runner (jaato_isolated_t, phase 3) and the pool template
+# (jaato_template_t, phase 4).
+#
+
+gen_require(`
+	type unconfined_t;
+	type unconfined_service_t;
+	role system_r;
+	role unconfined_r;
+')
+
+########################################
+#
+# Declarations
+#
+
+## The version marker. SELinuxBackend's readiness check asks whether
+## system_u:object_r:jaato_policy_v1_t:s0 is a valid context (no
+## privilege needed) and refuses an older module. Bump the number, and
+## REQUIRED_POLICY_VERSION in server/confinement/selinux.py, together.
+type jaato_policy_v1_t;
+files_type(jaato_policy_v1_t)
+
+## The session runner (AppArmor: the base profile jaato-ws-<id>).
+type jaato_runner_t;
+domain_type(jaato_runner_t)
+
+## Model-driven subprocesses: cli, interactive_shell, the notebook
+## kernel (AppArmor: //child).
+type jaato_child_t;
+domain_type(jaato_child_t)
+
+## A user's own checkout (IPC, user-CWD): read/write, no execute.
+type jaato_workspace_t;
+files_type(jaato_workspace_t)
+
+## A workspace the daemon manages under its workspace_root: as above,
+## plus execute (#1273/#1274: node_modules/.bin, the tool venv).
+type jaato_managed_ws_t;
+files_type(jaato_managed_ws_t)
+
+## Authored config inside a workspace (.jaato/agents, profiles, scripts,
+## ...): readable, never writable, renamable or removable by a session.
+type jaato_authored_t;
+files_type(jaato_authored_t)
+
+## .jaato/references-claims/: the runner writes claims, //child cannot
+## (template v43).
+type jaato_claims_t;
+files_type(jaato_claims_t)
+
+## The session tmpdir and the private /tmp mount (#1171, #1381).
+type jaato_tmp_t;
+files_tmp_file(jaato_tmp_t)
+
+# A session keeps the daemon's SELinux user and role (setexeccon sets
+# type and level only), so both roles the daemon runs under are
+# authorized for the jaato domains. Phase 0: without the role, the
+# transition fails with "user and role not authorized".
+role system_r types { jaato_runner_t jaato_child_t };
+role unconfined_r types { jaato_runner_t jaato_child_t };
+
+# MCS: the level decides which workspace. Without this the targeted
+# policy applies no MCS constraint to these types at all.
+mcs_constrained(jaato_runner_t)
+mcs_constrained(jaato_child_t)
+
+########################################
+#
+# Entering the runner: exec transition from the daemon (§7.1)
+#
+
+# The daemon forks, setexeccon()s, and execs the interpreter. The
+# interpreter is bin_t (a venv's bin/python links to /usr/bin/python3.x).
+allow unconfined_t jaato_runner_t:process transition;
+allow unconfined_service_t jaato_runner_t:process transition;
+corecmd_bin_entry_type(jaato_runner_t)
+
+# Inherited descriptors. The runner's RPC socketpair, stdio pipes and log
+# fd come from the daemon. Phase 0: without these the kernel closes them
+# at exec, the denial is dontaudit-ed, and the runner starts with no RPC
+# channel and no output.
+allow jaato_runner_t { unconfined_t unconfined_service_t }:fd use;
+allow jaato_runner_t { unconfined_t unconfined_service_t }:fifo_file rw_inherited_fifo_file_perms;
+allow jaato_runner_t { unconfined_t unconfined_service_t }:unix_stream_socket { getattr getopt setopt read write shutdown };
+allow jaato_runner_t { unconfined_t unconfined_service_t }:process sigchld;
+
+########################################
+#
+# The runner itself
+#
+
+allow jaato_runner_t self:process { fork sigchld signal signull sigkill sigstop getattr getsched setsched getpgid setpgid getsession };
+allow jaato_runner_t self:fifo_file rw_fifo_file_perms;
+allow jaato_runner_t self:unix_stream_socket create_stream_socket_perms;
+allow jaato_runner_t self:unix_dgram_socket create_socket_perms;
+
+# /proc/self/** r, /proc/*/task/ r, owner /proc/*/limits r,
+# /proc/cpuinfo r (AppArmor). SELinux labels /proc/<pid> with the
+# process's own context, so "self" is exactly this domain at this level;
+# another workspace's runner has another level and MCS refuses it
+# (phase 0: the whole /proc/<pid> directory closes across levels).
+allow jaato_runner_t self:dir list_dir_perms;
+allow jaato_runner_t self:file rw_file_perms;
+allow jaato_runner_t self:lnk_file read_lnk_file_perms;
+kernel_read_system_state(jaato_runner_t)
+kernel_read_kernel_sysctls(jaato_runner_t)
+dev_read_sysfs(jaato_runner_t)
+fs_getattr_all_fs(jaato_runner_t)
+
+# Deliberately absent (AppArmor keeps change_profile -> unconfined and
+# writes /proc/self/attr/current; SELinux does not need either, §4.4):
+#   jaato_runner_t self:process { dyntransition setcurrent }
+# so nothing running in the runner can change its own domain. The one
+# process attribute it may set is the exec context of its children:
+allow jaato_runner_t self:process setexec;
+allow jaato_runner_t jaato_child_t:process transition;
+
+########################################
+#
+# Model-driven subprocesses: //child (§7.3)
+#
+
+# The first exec after setexeccon: /bin/sh -c ... (shell_exec_t), a
+# binary under /usr/bin (bin_t), or something a managed workspace built.
+corecmd_shell_entry_type(jaato_child_t)
+corecmd_bin_entry_type(jaato_child_t)
+allow jaato_child_t jaato_managed_ws_t:file entrypoint;
+
+allow jaato_child_t jaato_runner_t:fd use;
+allow jaato_child_t jaato_runner_t:fifo_file rw_inherited_fifo_file_perms;
+allow jaato_child_t jaato_runner_t:unix_stream_socket { getattr read write };
+allow jaato_child_t jaato_runner_t:process sigchld;
+allow jaato_runner_t jaato_child_t:process { signal signull sigkill sigstop getattr getpgid };
+allow jaato_runner_t jaato_child_t:dir list_dir_perms;
+allow jaato_runner_t jaato_child_t:file read_file_perms;
+
+allow jaato_child_t self:process { fork sigchld signal signull sigkill sigstop getattr getsched setsched getpgid setpgid getsession setrlimit };
+allow jaato_child_t self:fifo_file rw_fifo_file_perms;
+allow jaato_child_t self:unix_stream_socket create_stream_socket_perms;
+allow jaato_child_t self:unix_dgram_socket create_socket_perms;
+allow jaato_child_t self:dir list_dir_perms;
+allow jaato_child_t self:file read_file_perms;
+allow jaato_child_t self:lnk_file read_lnk_file_perms;
+kernel_read_system_state(jaato_child_t)
+kernel_read_kernel_sysctls(jaato_child_t)
+dev_read_sysfs(jaato_child_t)
+fs_getattr_all_fs(jaato_child_t)
+
+# Deliberately absent: jaato_child_t self:process { setexec dyntransition
+# setcurrent }. A child cannot leave //child, and cannot choose the
+# domain of what it runs next: it runs its own children in jaato_child_t.
+#
+# Deliberately absent: jaato_child_t read on jaato_runner_t:file. A
+# subprocess cannot read the runner's /proc/<pid>/environ, mem or
+# cmdline (AppArmor: audit deny /proc/*/environ etc.), which is where the
+# provider credential lives.
+
+########################################
+#
+# What both run: system binaries, libraries, the interpreter (AppArmor:
+# /usr/bin/** ix r, /usr/lib/** rm, /etc/ld.so.cache r, /etc/passwd r,
+# /etc/nsswitch.conf r, /etc/mime.types r, the venv and source tree r)
+#
+# The venv and an editable checkout must carry a readable type (lib_t by
+# the operator's `semanage fcontext`, §9); under /home they are
+# user_home_t, which neither domain can read. Stated, not worked around.
+#
+
+corecmd_exec_bin(jaato_runner_t)
+corecmd_exec_shell(jaato_runner_t)
+corecmd_exec_bin(jaato_child_t)
+corecmd_exec_shell(jaato_child_t)
+libs_use_ld_so(jaato_runner_t)
+libs_use_shared_libs(jaato_runner_t)
+libs_read_lib_files(jaato_runner_t)
+libs_use_ld_so(jaato_child_t)
+libs_use_shared_libs(jaato_child_t)
+libs_read_lib_files(jaato_child_t)
+files_read_usr_files(jaato_runner_t)
+files_read_usr_files(jaato_child_t)
+files_read_etc_files(jaato_runner_t)
+files_read_etc_files(jaato_child_t)
+auth_read_passwd(jaato_runner_t)
+auth_read_passwd(jaato_child_t)
+miscfiles_read_localization(jaato_runner_t)
+miscfiles_read_localization(jaato_child_t)
+miscfiles_read_generic_certs(jaato_runner_t)
+miscfiles_read_generic_certs(jaato_child_t)
+
+# /dev/null rw, /dev/urandom r, /dev/pts/* rw
+dev_rw_null(jaato_runner_t)
+dev_rw_null(jaato_child_t)
+dev_read_urand(jaato_runner_t)
+dev_read_urand(jaato_child_t)
+dev_read_rand(jaato_runner_t)
+dev_read_rand(jaato_child_t)
+term_use_all_ptys(jaato_runner_t)
+term_use_all_ptys(jaato_child_t)
+term_use_ptmx(jaato_runner_t)
+
+########################################
+#
+# Network (AppArmor: network inet/inet6 stream and dgram; deny raw)
+#
+# The runner calls provider APIs; a child runs git, pip, curl.
+#
+
+allow jaato_runner_t self:tcp_socket create_stream_socket_perms;
+allow jaato_runner_t self:udp_socket create_socket_perms;
+corenet_tcp_connect_all_ports(jaato_runner_t)
+sysnet_dns_name_resolve(jaato_runner_t)
+allow jaato_child_t self:tcp_socket create_stream_socket_perms;
+allow jaato_child_t self:udp_socket create_socket_perms;
+corenet_tcp_connect_all_ports(jaato_child_t)
+sysnet_dns_name_resolve(jaato_child_t)
+
+# Deliberately absent: rawip_socket, packet_socket, netlink_route_socket
+# write; every capability (sys_admin, net_admin, sys_ptrace, ...); ptrace;
+# mount/mounton and filesystem mount. AppArmor states these as deny rules
+# because it grants by path; here nothing grants them.
+
+########################################
+#
+# The workspace (AppArmor: "<ws>/**" rwkl, and for a managed workspace
+# "<ws>/**" mix from the toolchain plugin)
+#
+# The TYPE grants the operation; the LEVEL decides which workspace.
+#
+
+manage_dirs_pattern(jaato_runner_t, jaato_workspace_t, jaato_workspace_t)
+manage_files_pattern(jaato_runner_t, jaato_workspace_t, jaato_workspace_t)
+manage_lnk_files_pattern(jaato_runner_t, jaato_workspace_t, jaato_workspace_t)
+manage_fifo_files_pattern(jaato_runner_t, jaato_workspace_t, jaato_workspace_t)
+manage_sock_files_pattern(jaato_runner_t, jaato_workspace_t, jaato_workspace_t)
+manage_dirs_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
+manage_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
+manage_lnk_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
+manage_fifo_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
+manage_sock_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
+allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file lock;
+# Deliberately absent: execute on jaato_workspace_t. A user's own
+# checkout is not a place the session runs binaries from.
+
+manage_dirs_pattern(jaato_runner_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_files_pattern(jaato_runner_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_lnk_files_pattern(jaato_runner_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_fifo_files_pattern(jaato_runner_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_sock_files_pattern(jaato_runner_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_dirs_pattern(jaato_child_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_files_pattern(jaato_child_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_lnk_files_pattern(jaato_child_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_fifo_files_pattern(jaato_child_t, jaato_managed_ws_t, jaato_managed_ws_t)
+manage_sock_files_pattern(jaato_child_t, jaato_managed_ws_t, jaato_managed_ws_t)
+allow { jaato_runner_t jaato_child_t } jaato_managed_ws_t:file { lock map execute execute_no_trans };
+
+########################################
+#
+# Authored config (AppArmor: audit deny "<ws>/.jaato/agents/**" wlk and
+# the same for profiles, scripts, services/*/, reactors.json,
+# completion_schemas, spawn_schemas, instructions, references, templates,
+# template_routing.yaml, plans, apparmor-fragments, .cache/apparmor-fragments)
+#
+# Read and search only. No write, append, create, unlink, rename,
+# reparent, rmdir, setattr, add_name or remove_name: so a session can
+# neither edit an authored file nor move the directory away and make a
+# fresh one (§6).
+#
+
+list_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato_authored_t)
+read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato_authored_t)
+read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato_authored_t)
+
+########################################
+#
+# Reference claims (template v43: the runner's proposeReference writes
+# them; //child is write-denied, so no shell command can forge one)
+#
+
+manage_dirs_pattern(jaato_runner_t, jaato_claims_t, jaato_claims_t)
+manage_files_pattern(jaato_runner_t, jaato_claims_t, jaato_claims_t)
+list_dirs_pattern(jaato_child_t, jaato_claims_t, jaato_claims_t)
+read_files_pattern(jaato_child_t, jaato_claims_t, jaato_claims_t)
+
+########################################
+#
+# Temporary files (AppArmor: /tmp/jaato-<id>/** rw, and the private /tmp
+# grants of template v39/v41)
+#
+# The daemon creates and labels the session tmpdir and mounts the private
+# /tmp and /dev/shm with context=jaato_tmp_t. A domain may search /tmp to
+# reach its tmpdir; it may not create files directly in the host's /tmp.
+#
+
+files_search_tmp(jaato_runner_t)
+files_search_tmp(jaato_child_t)
+manage_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_tmp_t, jaato_tmp_t)
+manage_files_pattern({ jaato_runner_t jaato_child_t }, jaato_tmp_t, jaato_tmp_t)
+manage_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_tmp_t, jaato_tmp_t)
+manage_sock_files_pattern({ jaato_runner_t jaato_child_t }, jaato_tmp_t, jaato_tmp_t)
+allow { jaato_runner_t jaato_child_t } jaato_tmp_t:file { lock map };
+allow jaato_tmp_t self:filesystem associate;
+
+# Deliberately absent: add_name on tmp_t (the host's /tmp). Models write
+# to /tmp by habit; #1381's private /tmp is the answer, not a grant on
+# the host's /tmp.

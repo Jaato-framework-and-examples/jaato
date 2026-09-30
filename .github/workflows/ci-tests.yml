@@ -158,6 +158,34 @@ jobs:
             jaato-server/jaato_server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
+  # The SELinux policy module (jaato-server/selinux/,
+  # docs/design/selinux-backend.md §11).  Compiled, linked into Fedora's
+  # full `targeted` policy with `semodule -N -i` (no kernel needed), and
+  # queried with setools: what a runner and //child may do, and what they
+  # must not.  Each assertion also rebuilds the policy with its own
+  # reversion and must fail there, which the reversion meta-guard cannot
+  # do on Ubuntu (no targeted policy).  ~10 min: every rebuild relinks
+  # the whole policy.  Loading and enforcing need an SELinux kernel and
+  # are not tested here.
+  # ---------------------------------------------------------------
+  selinux-policy:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    timeout-minutes: 30
+    steps:
+      - name: Install the policy toolchain
+        run: |
+          dnf -y -q install git selinux-policy-devel selinux-policy-targeted \
+            setools-console policycoreutils make python3-pytest
+      - uses: actions/checkout@v5
+      - name: The policy module grants what it must and nothing it must not
+        env:
+          JAATO_SELINUX_POLICY_TESTS: "1"
+        run: |
+          pytest -q -p no:cacheprovider --noconftest \
+            jaato-server/selinux/tests
+
+  # ---------------------------------------------------------------
   # The suites, fanned out one job per leg.
   #
   # These used to be seven sequential steps of a single `full-suite` job, so

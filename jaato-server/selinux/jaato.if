@@ -1,0 +1,13 @@
+## <summary>jaato agent-runner confinement.</summary>
+## <desc>
+##	<p>
+##	Domains for jaato session runners (jaato_runner_t) and the
+##	subprocesses a model drives (jaato_child_t), and the file types a
+##	workspace is labelled with. See docs/design/selinux-backend.md.
+##	</p>
+##	<p>
+##	No interfaces are exported yet: nothing outside this module needs to
+##	interact with jaato's types. A daemon confined in its own domain
+##	(design §13, open question 1) would be the first caller.
+##	</p>
+## </desc>
