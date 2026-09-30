@@ -15,6 +15,7 @@ Enrichment Support:
 - Tool result enrichment: Detects @reference-id mentions in tool outputs
 """
 
+import dataclasses
 import json
 from jaato_sdk.framework_note import framework_note
 import logging
@@ -99,6 +100,7 @@ from .claims import (
     load_claims,
     new_claim,
     pending_claim_ids,
+    rendered_from,
     write_claim,
 )
 from .embedding_types import (
@@ -120,7 +122,7 @@ from jaato_sdk.plugins.base import (
 
 from jaato_server.shared.path_utils import normalize_for_comparison
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
-from jaato_server.shared.session_context import get_current_session
+from jaato_server.shared.session_context import get_current_session, session_plugin_setting
 from jaato_server.shared.trace import trace as _trace_write
 
 
@@ -291,6 +293,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # approves each proposal and the claim records who
         # (``origin.witnessed_by``).
         self._witness_proposals: bool = False
+        # ``plugin_configs.references.allow_inline_content``: ``false``
+        # makes ``proposeReference`` take a workspace file (``path``) only.
+        # Read through ``_inline_content_allowed``, which prefers the
+        # calling session's own block (the instance is shared).
+        self._allow_inline_content: bool = True
         # Set by ``_resolve_transitive_references`` when it stopped early;
         # surfaced on the selectReferences result so the model is never
         # handed a silently-cut neighbourhood.
@@ -1730,6 +1737,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._refresh_catalog = self._refresh_allowed(config)
         self._matcher_config = config
         self._witness_proposals = config.get("witness_proposals") is True
+        self._allow_inline_content = config.get("allow_inline_content") is not False
         if self._transitive_enabled and self._selected_source_ids:
             # Build complete catalog including inline sources
             full_catalog = dict(catalog_by_id)
@@ -2334,6 +2342,20 @@ class ReferencesPlugin(RunnerForwardingMixin):
                         "claims, not yet promoted) from listReferences; only "
                         "their count is reported. Off: claims are listed, "
                         "marked unreviewed, their text fenced as untrusted."
+                    ),
+                },
+                "allow_inline_content": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Whether proposeReference accepts the page inline "
+                        "('content').  false: a proposal must name a "
+                        "workspace file ('path'), and 'content' is removed "
+                        "from the tool's schema.  With "
+                        "template.allow_inline_template: false and no "
+                        "free-form write tool on the profile, every page is "
+                        "then a rendered catalog template.  Read per "
+                        "session: a subagent's own block governs it."
                     ),
                 },
                 "witness_proposals": {
@@ -2979,6 +3001,14 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return False, {"error": "No workspace is bound; a claim has nowhere to go."}
         # A target promoted since this session loaded is not a forward link.
         self._refresh_catalog_if_changed()
+        if args.get("content") and not self._inline_content_allowed():
+            return False, {"error": (
+                "Inline 'content' is turned off for this session "
+                "(plugin_configs.references.allow_inline_content: false). "
+                "Write the page to a workspace file (renderTemplateToFile "
+                "with a template_id from listAvailableTemplates) and pass "
+                "its 'path'."
+            )}
         entry, errors = build_proposed_reference(
             args, workspace=workspace,
             catalog_ids=[s.id for s in self._sources],
@@ -2992,7 +3022,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             session = get_current_session()
         except LookupError:
             session = None  # no session in context: provenance unknown
-        claim = new_claim(entry, session)
+        claim = new_claim(entry, session, rendered_from(
+            entry, workspace, self._template_render_lookup()))
         try:
             target = write_claim(workspace, claim)
         except OSError as exc:
@@ -3015,6 +3046,57 @@ class ReferencesPlugin(RunnerForwardingMixin):
             result["forward_links"] = forward
             result["forward_links_note"] = _FORWARD_LINKS_NOTE
         return result
+
+    def _template_render_lookup(self) -> Optional[Callable[[str], Any]]:
+        """The template plugin's ``render_record``, when that plugin is
+        loaded in this registry; ``None`` otherwise."""
+        registry = getattr(self, "_plugin_registry", None)
+        getter = getattr(registry, "get_plugin", None)
+        if not callable(getter):
+            return None
+        template = getter("template")
+        lookup = getattr(template, "render_record", None)
+        return lookup if callable(lookup) else None
+
+    def _inline_content_allowed(self) -> bool:
+        """Whether the calling session may propose a page inline: its own
+        ``plugin_configs.references.allow_inline_content`` when it declared
+        one, else the instance's value."""
+        return session_plugin_setting(
+            "references", "allow_inline_content", self._allow_inline_content,
+        ) is not False
+
+    def narrow_tool_schema(self, schema: ToolSchema) -> ToolSchema:
+        """``proposeReference`` without ``content`` when the calling session
+        turns inline pages off, so the model is not offered what the
+        executor would refuse.  Every other schema is returned unchanged
+        (see ``tool_visibility``)."""
+        if schema.name != "proposeReference" or self._inline_content_allowed():
+            return schema
+        params = dict(schema.parameters or {})
+        props = {k: v for k, v in (params.get("properties") or {}).items() if k != "content"}
+        path = dict(props.get("path") or {})
+        path["description"] = (
+            "Workspace file holding the page, e.g. one renderTemplateToFile "
+            "wrote from a catalog template."
+        )
+        props["path"] = path
+        params["properties"] = props
+        params["required"] = sorted(set(params.get("required") or []) | {"path"})
+        return dataclasses.replace(
+            schema,
+            description=(
+                "Propose a page you wrote as a reference other agents can "
+                "select. The result is a CLAIM, not a catalog entry: it is "
+                "listed by listReferences as 'proposed' and unreviewed until "
+                "a curator promotes it. Who proposed it is recorded for you. "
+                "Write the page to a workspace file first (renderTemplateToFile "
+                "with a catalog template) and pass its 'path'; inline content "
+                "is turned off for this session. Use store_memory instead for "
+                "a fact or event rather than a document."
+            ),
+            parameters=params,
+        )
 
     def _execute_validate_reference(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Validate a single reference JSON file against the expected schema.

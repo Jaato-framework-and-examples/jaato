@@ -87,6 +87,24 @@ export function describeClaimOrigin(origin: Record<string, unknown> | null | und
 }
 
 /**
+ * The template a proposed page was rendered from, as the daemon last
+ * checked it: ``{ text: "from template runbook.md.tpl", edited: false }``,
+ * or ``null`` when the claim records no render (a page written some other
+ * way, or proposed inline).  ``edited`` means the file no longer matches
+ * the render, so the curator is reading something the template did not
+ * produce on its own.
+ */
+export function describeRenderedFrom(
+  origin: Record<string, unknown> | null | undefined,
+): { text: string; edited: boolean } | null {
+  const rendered = origin?.rendered_from as Record<string, unknown> | undefined;
+  if (!rendered || typeof rendered !== "object") return null;
+  const name = typeof rendered.template === "string" && rendered.template ? ` ${rendered.template}` : "";
+  const edited = rendered.edited_after_render === true;
+  return { text: `from template${name}${edited ? ", edited since" : ""}`, edited };
+}
+
+/**
  * One declared edge in words, as a curator reads it before promoting:
  * ``supersedes adr-1 — rewritten``.  ``supersedes`` is the one with a
  * consequence past the listing (a request for the target is routed to this

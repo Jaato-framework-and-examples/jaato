@@ -134,6 +134,31 @@ def get_current_session() -> 'JaatoSession':
     return session
 
 
+def session_plugin_setting(plugin_name: str, key: str, fallback: Any) -> Any:
+    """The calling session's own value of ``plugin_configs.<plugin>.<key>``.
+
+    A plugin instance is shared by a parent and its in-process subagents,
+    so a setting stored on the instance at ``initialize()`` holds whatever
+    the last configured session declared.  For a setting that must hold
+    for the session that declared it, read it here at call time: the
+    current session's declared block when it carries ``key``, else
+    ``fallback`` (the instance's value, which on the runner is the root
+    profile's).  No current session, or a session object without
+    ``declared_plugin_config``, also answers ``fallback``.
+    """
+    session = _current_session.get(None)
+    reader = getattr(session, "declared_plugin_config", None)
+    if not callable(reader):
+        return fallback
+    try:
+        block = reader(plugin_name)
+    except Exception:
+        return fallback
+    if isinstance(block, dict) and key in block:
+        return block[key]
+    return fallback
+
+
 @contextmanager
 def isolated_current_session() -> Iterator[None]:
     """Restore :data:`_current_session` to its entry state on exit.

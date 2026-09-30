@@ -158,6 +158,20 @@ describe("the origin line", () => {
   });
 });
 
+describe("the template line", () => {
+  it("names the template, and says when the page was edited since", () => {
+    expect(rc.describeRenderedFrom({ kind: "agent", rendered_from: { template: "runbook.md.tpl", digest: "d" } }))
+      .toEqual({ text: "from template runbook.md.tpl", edited: false });
+    expect(rc.describeRenderedFrom({ kind: "agent", rendered_from: { template: "runbook.md.tpl", edited_after_render: true } }))
+      .toEqual({ text: "from template runbook.md.tpl, edited since", edited: true });
+  });
+
+  it("says nothing for a page no template rendered", () => {
+    expect(rc.describeRenderedFrom({ kind: "agent" })).toBeNull();
+    expect(rc.describeRenderedFrom(null)).toBeNull();
+  });
+});
+
 describe("links", () => {
   it("reads an edge in words and marks only supersedes as routing", () => {
     expect(rc.describeClaimLink({ to: "adr-1", rel: "supersedes", note: "newer" })).toBe("supersedes adr-1 — newer");
