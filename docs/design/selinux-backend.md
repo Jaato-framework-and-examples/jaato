@@ -500,7 +500,7 @@ policy line whose removal must fail it.
 
 | Phase | Content | Behaviour change |
 |---|---|---|
-| 0 | Verify on a Fedora/Rocky VM: exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost on a large tree, `/dev/shm` `context=` mount | none |
+| 0 | Verify on a Fedora/Rocky VM: exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost on a large tree, `/dev/shm` `context=` mount ([runbook](selinux-phase0-handoff.md)) | none |
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | call sites move onto the seam (the WS pre-init hook, IPC provisioning, runner self-confinement, the `//child` callback, thread verification); envelope field | none (refactor) |
 | 2 | Policy module + `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
