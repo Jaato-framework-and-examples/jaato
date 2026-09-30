@@ -87,7 +87,9 @@ def test_an_update_is_rendered_with_the_command_that_installs_it(served):
     _, text = mod.releases()
     assert "0.23.0" in text and "0.24.0rc1" in text
     assert "pip install -U jaato-sdk" in text          # production
-    assert "--pre" in text and "test.pypi.org" in text  # candidate
+    assert "test.pypi.org" in text                      # candidate
+    assert '"jaato-sdk==0.24.0rc1"' in text             # pinned (#1455)
+    assert "--pre " not in text
 
 
 def test_both_installers_are_offered_for_every_stale_channel(served):
@@ -99,7 +101,8 @@ def test_both_installers_are_offered_for_every_stale_channel(served):
     served(_report(rows=_BOTH_STALE))
     _, text = mod.releases()
     assert "uv pip install -U jaato-sdk" in text                  # production
-    assert "--prerelease allow" in text                           # candidate
+    assert "--prerelease if-necessary-or-explicit" in text        # candidate
+    assert "--prerelease allow" not in text                       # (#1455)
     assert "--index-strategy unsafe-best-match" in text
 
 
@@ -113,7 +116,7 @@ def test_the_renderer_names_no_installer_of_its_own(served):
     import inspect
     source = inspect.getsource(mod)
     assert "install_commands" in source
-    assert "uv_install_command" not in source, (
+    assert '"uv"' not in source and "'uv'" not in source, (
         "the renderer must not reach for one installer by name"
     )
 
@@ -196,3 +199,21 @@ def test_the_renderer_passes_its_knobs_through(monkeypatch):
     seen.clear()
     mod.releases()
     assert seen["timeout"] == rc.DEFAULT_TIMEOUT and seen["refresh"] is False
+
+
+def test_two_candidates_are_offered_as_one_pinned_command(served):
+    """Candidates of one release resolve together, each pinned (#1455)."""
+    served(_report(rows=[
+        ("jaato-sdk", "0.29.0", [("testpypi", "0.30.0rc1", "update", None, [])]),
+        ("jaato-server", "1.2.0", [("testpypi", "1.3.0rc1", "update", None, [])]),
+    ]))
+    _, text = mod.releases()
+    assert text.count('"jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"') == 2
+
+
+def test_a_candidate_that_cannot_be_pinned_is_named_not_installed(served):
+    served(_report(rows=[("jaato-sdk", "0.29.0",
+                          [("testpypi", None, "update", None, [])])]))
+    _, text = mod.releases()
+    assert "--index-url" not in text
+    assert "no command for jaato-sdk" in text

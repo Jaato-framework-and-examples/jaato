@@ -46,6 +46,24 @@ def _channel_line(status) -> str:
             f"{latest:14} {_VERDICT_WORDS[status.verdict]}{cached}")
 
 
+def _install_lines(channel, packages) -> List[str]:
+    """The commands that install *packages* from *channel*, one per installer.
+
+    One command per installer for all the channel's stale packages, so two
+    candidates of one release resolve together.  On the candidate channel
+    each requirement pins the version found; a package whose version cannot
+    be pinned is named rather than given an unpinned command, which would
+    need a global pre-release flag (#1455).
+    """
+    lines = [f"      {command}" for _, command
+             in channel.install_commands(packages)]
+    skipped = channel.unpinnable(packages)
+    if skipped:
+        lines.append("      no command for " + ", ".join(skipped)
+                     + ": its version could not be pinned")
+    return lines
+
+
 def releases(*, timeout: Optional[float] = None,
              refresh: bool = False) -> Tuple[Dict[str, Any], str]:
     """Render every channel's answer about every installed jaato package.
@@ -98,11 +116,11 @@ def releases(*, timeout: Optional[float] = None,
     if updates:
         lines.append("  to upgrade:")
         for channel in _rc.CHANNELS:
-            names = [d.name for d, s in updates if s.channel is channel]
-            if names:
+            packages = [(d.name, s.latest) for d, s in updates
+                        if s.channel is channel]
+            if packages:
                 lines.append(f"    {channel.label}:")
-                lines += [f"      {command}" for _, command
-                          in channel.install_commands(" ".join(names))]
+                lines += _install_lines(channel, packages)
     else:
         lines.append("  nothing newer is published on either channel.")
 

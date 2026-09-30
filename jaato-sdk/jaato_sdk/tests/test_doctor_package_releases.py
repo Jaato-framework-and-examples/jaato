@@ -83,12 +83,25 @@ def test_a_newer_build_warns_and_names_version_channel_and_command(served):
     assert check.status == WARN
     assert "0.22.0" in check.detail and "0.23.0rc4" in check.detail
     assert "release candidate" in check.detail          # WHICH channel
-    assert "--pre" in check.detail                      # and how to get it
-    # ...for uv users too: the candidate channel's uv form differs by three
-    # flags, so a uv reader given only the pip line translates it wrongly and
-    # silently installs the PyPI stable.
+    # ...and how to get it: the real package, pinned to the candidate, with
+    # no global pre-release flag (which installed a beta pydantic, #1455).
+    assert '"jaato-sdk==0.23.0rc4"' in check.detail
+    assert "<package>" not in check.detail
+    assert "--pre " not in check.detail
+    assert "--prerelease allow" not in check.detail
+    # ...for uv users too: the candidate channel's uv form is not a rename,
+    # so a uv reader given only the pip line translates it wrongly.
     assert "uv pip install" in check.detail
     assert "--index-strategy unsafe-best-match" in check.detail
+
+
+def test_a_candidate_whose_version_cannot_be_pinned_gets_no_command(served):
+    """No unpinned candidate command: it would need a global pre-release flag."""
+    served(_report(rows=[("jaato-sdk", "0.22.0",
+                          [("testpypi", None, "update", None)])]))
+    check = _one()
+    assert "--index-url" not in check.detail
+    assert "no install command for jaato-sdk" in check.detail
 
 
 def test_everything_current_passes_and_says_what_it_compared(served):

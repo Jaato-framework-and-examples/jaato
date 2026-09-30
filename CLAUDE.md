@@ -1510,10 +1510,11 @@ what is newest**:
 | `jaato-scaffold explain releases` | every channel's answer per package, with the commands that install each |
 
 **Each channel carries a `pip` and a `uv` command, and the second is not a
-rename of the first.** Both renderers loop over `Channel.install_commands`
-rather than naming the installers, so they cannot document different sets.
-The candidate channel is where the translation is load-bearing — measured
-2026-09-18, with `jaato-sdk` 0.22.0 on PyPI and 0.23.0rc4 on TestPyPI:
+rename of the first.** Both renderers loop over
+`Channel.install_commands(packages)` rather than naming the installers, so
+they cannot document different sets. The candidate channel is where the
+translation is load-bearing — measured 2026-09-18, with `jaato-sdk` 0.22.0 on
+PyPI and 0.23.0rc4 on TestPyPI:
 
 ```
 uv pip install -U --prerelease allow \
@@ -1523,16 +1524,44 @@ uv pip install -U --prerelease allow \
 ```
 
 It runs cleanly and installs the wrong package, which is the worst shape a
-documented command can have. Two flags differ, not one: `--pre` is
-`--prerelease allow`, and uv gives `--extra-index-url` priority **over**
+documented command can have. uv gives `--extra-index-url` priority **over**
 `--index-url` (pip's precedence is the reverse) while defaulting to
 `--index-strategy first-index`, so the first index holding the name wins
 outright. `--index-strategy unsafe-best-match` restores pip's rule —
-consider every index, take the best version — and with it both commands
-resolve `jaato-sdk==0.23.0rc4` and the same seven packages. The flags are
-therefore spelled out per channel rather than derived from the pip string:
-they are not a transformation of it, and a helper that pretended otherwise
-would re-introduce exactly that wrong-package failure.
+consider every index, take the best version. The flags are therefore
+spelled out per channel rather than derived from the pip string: they are
+not a transformation of it, and a helper that pretended otherwise would
+re-introduce exactly that wrong-package failure.
+
+**The candidate command pins the candidate and carries no global
+pre-release flag (#1455).** `--pre` / `--prerelease allow` admit a
+pre-release of *every* package, and jaato-sdk's `pydantic>=2.0,<3` admitted
+`2.14.0b2`, which is what a fresh resolve installed. A specifier naming a
+pre-release admits pre-releases for that requirement only (PEP 440), so the
+command is rendered with the exact version the report found, one command for
+every stale package of the channel:
+
+```
+pip install -U --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"
+uv pip install -U --prerelease if-necessary-or-explicit \
+    --index-strategy unsafe-best-match \
+    --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"
+```
+
+Measured 2026-09-30 (pip 24.0, uv 0.8.17, Python 3.12, fresh venv): both
+resolve the two candidates, pydantic 2.13.5 and the same 60 packages with no
+other pre-release; the old forms resolve pydantic 2.14.0b2. Without
+`unsafe-best-match` the pinned uv command fails to resolve rather than
+installing the stable, so the flag stays. A package whose version is unknown
+or not PEP 440 gets **no** candidate command, and the renderers name it
+(`Channel.unpinnable`): an unpinned one would need the global flag back. The
+production channel is unchanged (`pip install -U <dist>`, unpinned). Guard:
+`jaato_server/shared/tests/test_candidate_command_pins_the_candidate_1455.py`,
+three reversions.
 
 **The index's own `latest` is the wrong answer, on the channel that matters.**
 PyPI pins a project's "latest" to the newest **stable** version whenever one

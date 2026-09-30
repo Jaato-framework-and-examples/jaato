@@ -217,10 +217,12 @@ def test_the_uv_candidate_command_resolves_the_candidate():
     nobody wrote -- the rule every test in this family follows.
     """
     candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
-    command = candidate.uv_install_command("jaato-sdk")
+    command = dict(candidate.install_commands([("jaato-sdk", "0.23.0rc4")]))["uv"]
     assert "--index-strategy unsafe-best-match" in command, (
         "without pip's index rule, this command installs the PyPI stable "
         "instead of the release candidate the notification just named -- "
         f"cleanly, with nothing to read. Got: {command!r}"
     )
-    assert "--prerelease allow" in command, "uv has no --pre"
+    # Pinned since #1455, so without the index rule the command now fails to
+    # resolve rather than installing the stable -- loud, but still broken.
+    assert '"jaato-sdk==0.23.0rc4"' in command

@@ -122,9 +122,12 @@ def test_the_two_shipped_channels_are_the_two_the_workflows_publish_to():
     assert by_name["pypi"].allow_prereleases is False
     assert by_name["testpypi"].allow_prereleases is True
     # The candidate channel's command must actually reach that index, and
-    # must permit a pre-release, or following it installs nothing new.
-    candidate = by_name["testpypi"].install_command("jaato-sdk")
-    assert "--pre" in candidate and "test.pypi.org" in candidate
+    # must admit the candidate, or following it installs nothing new.  It
+    # admits it by PINNING it, never by a global pre-release flag (#1455).
+    commands = dict(by_name["testpypi"].install_commands(
+        [("jaato-sdk", "0.23.0rc4")]))
+    assert '"jaato-sdk==0.23.0rc4"' in commands["pip"]
+    assert "test.pypi.org" in commands["pip"]
 
 
 def test_unparseable_versions_are_reported_rather_than_dropped():
@@ -502,15 +505,26 @@ def test_a_retired_channel_still_serves_a_stale_cached_answer(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# The uv commands
+# The install commands
 #
 # The candidate channel's uv form is NOT a flag rename of the pip form, and
 # getting it wrong is SILENT: the naive translation runs cleanly and installs
-# the PyPI stable instead of the candidate.  Measured 2026-09-18 against the
-# real indexes.  These pin the three properties that make the two equivalent;
-# what they cannot do is re-resolve against a live index, so the module's
-# comment carries the measurement and these carry the flags.
+# the PyPI stable instead of the candidate (measured 2026-09-18).  And
+# neither form may carry a GLOBAL pre-release flag: `--pre` / `--prerelease
+# allow` admit a pre-release of every dependency and installed pydantic
+# 2.14.0b2 (#1455, measured 2026-09-30).  These pin the properties that
+# make the commands right; what they cannot do is re-resolve against a live
+# index, so the module's comment carries the measurements and these carry
+# the flags.
 # --------------------------------------------------------------------------
+
+_PAIR = [("jaato-sdk", "0.23.0rc4")]
+
+
+def _commands(name, packages=_PAIR):
+    channel = {c.name: c for c in rc.CHANNELS}[name]
+    return dict(channel.install_commands(packages))
+
 
 def test_every_channel_documents_pip_and_uv():
     """A uv user told only the pip form has to translate it themselves.
@@ -518,7 +532,7 @@ def test_every_channel_documents_pip_and_uv():
     Which is the thing that goes wrong — hence both, per channel.
     """
     for channel in rc.CHANNELS:
-        installers = [name for name, _ in channel.install_commands("jaato-sdk")]
+        installers = [name for name, _ in channel.install_commands(_PAIR)]
         assert installers == ["pip", "uv"], (
             f"{channel.name} documents {installers}, not both installers"
         )
@@ -527,7 +541,7 @@ def test_every_channel_documents_pip_and_uv():
 def test_each_command_starts_with_the_installer_it_is_for():
     """The command names its own tool, which is what lets renderers drop labels."""
     for channel in rc.CHANNELS:
-        for installer, command in channel.install_commands("jaato-sdk"):
+        for installer, command in channel.install_commands(_PAIR):
             assert command.startswith(f"{installer} "), (
                 f"{channel.name}/{installer} command does not invoke it: {command!r}"
             )
@@ -535,30 +549,62 @@ def test_each_command_starts_with_the_installer_it_is_for():
 
 def test_every_command_carries_the_distribution_name():
     for channel in rc.CHANNELS:
-        for _, command in channel.install_commands("jaato-made-up"):
-            assert command.endswith("jaato-made-up")
+        for _, command in channel.install_commands([("jaato-made-up", "1.0rc1")]):
+            assert "jaato-made-up" in command
+
+
+def test_the_candidate_commands_pin_the_candidate_and_admit_no_other_prerelease():
+    """#1455: a global pre-release flag installed pydantic 2.14.0b2.
+
+    A specifier naming a pre-release admits pre-releases for that
+    requirement only (PEP 440), so the pin is what admits the candidate and
+    the global flags have to be gone.
+    """
+    for installer, command in _commands("testpypi").items():
+        assert '"jaato-sdk==0.23.0rc4"' in command, installer
+        assert "--pre " not in command and not command.endswith("--pre"), installer
+        assert "--prerelease allow" not in command, installer
+    assert "--prerelease if-necessary-or-explicit" in _commands("testpypi")["uv"]
+
+
+def test_several_candidates_are_one_command_so_they_resolve_together():
+    commands = _commands("testpypi", [("jaato-sdk", "0.30.0rc1"),
+                                      ("jaato-server", "1.3.0rc1")])
+    for command in commands.values():
+        assert command.endswith('"jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"')
+
+
+def test_a_candidate_with_no_pinnable_version_gets_no_command():
+    """Never an unpinned candidate command: it would need the global flag."""
+    candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
+    for version in (None, "", "moonshot"):
+        packages = [("jaato-sdk", version)]
+        assert candidate.install_commands(packages) == ()
+        assert candidate.unpinnable(packages) == ["jaato-sdk"]
+    mixed = [("jaato-sdk", "0.30.0rc1"), ("jaato-server", None)]
+    commands = dict(candidate.install_commands(mixed))
+    assert "jaato-server" not in commands["pip"]
+    assert candidate.unpinnable(mixed) == ["jaato-server"]
 
 
 def test_the_candidate_uv_command_carries_the_flags_that_make_it_equivalent():
-    """The whole finding, as three assertions.
+    """Each flag is load-bearing and each was measured:
 
-    Each flag is load-bearing and each was measured:
-
-    * ``--prerelease allow`` — uv has no ``--pre``, so without it the
-      candidate is not a candidate for resolution at all.
     * ``--index-strategy unsafe-best-match`` — uv gives ``--extra-index-url``
       priority OVER ``--index-url`` (pip's precedence is the reverse) and
-      defaults to ``first-index``, so without it the command resolved
-      ``jaato-sdk==0.22.0``: the PyPI stable, cleanly installed, wrong.
+      defaults to ``first-index``: unpinned, the command resolved
+      ``jaato-sdk==0.22.0`` (the PyPI stable, cleanly installed, wrong);
+      pinned, it fails to resolve.
+    * ``--prerelease if-necessary-or-explicit`` — admits a pre-release only
+      where a requirement names one, i.e. the pinned candidate.
     * the TestPyPI index — or it is not asking the candidate channel.
     """
-    candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
-    command = candidate.uv_install_command("jaato-sdk")
-    assert "--prerelease allow" in command, "uv has no --pre"
+    command = _commands("testpypi")["uv"]
     assert "--index-strategy unsafe-best-match" in command, (
         "without pip's index rule, uv takes the first index holding the name "
-        "and installs the PyPI stable instead of the candidate"
+        "and does not install the candidate"
     )
+    assert "--prerelease if-necessary-or-explicit" in command
     assert "test.pypi.org" in command
 
 
@@ -567,24 +613,21 @@ def test_the_uv_command_is_not_a_textual_rewrite_of_the_pip_one():
 
     Deriving `uv …` by prefixing or substituting on the pip string is exactly
     what produces the wrong-package failure, because the flags differ rather
-    than being renamed.  The two candidate commands must not be one
-    transformation apart.
+    than being renamed.
     """
-    candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
-    pip_command = candidate.install_command("jaato-sdk")
-    uv_command = candidate.uv_install_command("jaato-sdk")
-    assert uv_command != f"uv {pip_command}", (
-        "the uv form cannot be the pip form with a prefix: --pre and the "
-        "index strategy have to change too"
+    commands = _commands("testpypi")
+    assert commands["uv"] != f"uv {commands['pip']}", (
+        "the uv form cannot be the pip form with a prefix: the index "
+        "strategy has to change too"
     )
-    assert "--pre " not in uv_command, "'--pre' is not a uv flag"
 
 
-def test_the_production_uv_command_is_the_simple_one():
+def test_the_production_commands_are_the_simple_ones():
     """One index, no pre-releases — here the translation IS just the prefix.
 
     Asserted so the candidate channel's extra flags read as specific to it
-    rather than as ceremony every uv command needs.
+    rather than as ceremony every command needs; unpinned, as before.
     """
-    production = {c.name: c for c in rc.CHANNELS}["pypi"]
-    assert production.uv_install_command("jaato-sdk") == "uv pip install -U jaato-sdk"
+    commands = _commands("pypi", [("jaato-sdk", "0.22.0")])
+    assert commands == {"pip": "pip install -U jaato-sdk",
+                        "uv": "uv pip install -U jaato-sdk"}
