@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import threading
 import traceback
@@ -247,7 +248,7 @@ WORK_LANE_METHODS = frozenset({
     "session.send_message",      # runs an entire turn
     "session.replay_messages",   # re-runs the model loop
     "session.execute_user_command",   # runs a user command
-    "session.embed_texts",       # runs the embedding model (may load it)
+    "session.write_reference",   # may reconcile an index (runs the model)
     "echo",                      # §8.3 RPC-overhead benchmark; deliberately
                                  # in the work lane so a benchmark cannot
                                  # measure the control lane's latency
@@ -290,12 +291,12 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # persistence`` in ``RunnerRPC._SESSION_READS``.
     "session.restore_permission_persistence":
         "_handle_session_restore_permission_persistence",
-    # Vectors for the daemon's reconcile of a bundle's index after a
-    # reference promotion.  The daemon writes ``.jaato/references/**``
-    # (the runner's profile denies it); the embedding model lives here.
-    # WORK lane (``WORK_LANE_METHODS``): the first call may load the model.
-    # A stopgap for #1422: goes once the runner may write its own catalog.
-    "session.embed_texts": "_handle_session_embed_texts",
+    # One file of the workspace's reference catalog, written on a
+    # person's behalf (a promotion, a links edit) in THIS runner's base
+    # profile, and the bundle's vector index reconciled with the plugin's
+    # own embedding provider (#1422).  The daemon decides what is written.
+    # WORK lane (``WORK_LANE_METHODS``): a reconcile may load the model.
+    "session.write_reference": "_handle_session_write_reference",
 }
 
 #: How many recently-registered request ids the reader thread remembers,
@@ -1933,34 +1934,52 @@ class RunnerRPC:
             }
         return True, answer
 
-    def _handle_session_embed_texts(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
-        """``session.embed_texts`` -- vectors from THIS runner's references plugin.
+    def _handle_session_write_reference(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
+        """``session.write_reference`` -- write one catalog file here (#1422).
 
-        ``args = {"texts": [str, ...]}``.  The body is
-        ``ReferencesPlugin.embed_texts``: it writes nothing, so the answer
-        is the same whichever process asks.  The daemon uses it to
-        reconcile a bundle's vector index after a promotion; see
-        ``server/reference_curation.py``.
+        ``args = {"workspace", "rel_file", "data", "replace", "bundle",
+        "ref_id", "reconcile"}``.  The body is
+        :func:`~jaato_server.server.reference_catalog_write.write_catalog_file`,
+        run on this RPC worker thread, which is in the session's BASE
+        profile: template v44 lets base write ``.jaato/references/**``,
+        while a model-called tool body (``tool_hat``) still may not.  The
+        reconcile uses the references plugin's own embedding provider.
+
+        ``workspace`` must be this session's: a runner writes only the
+        catalog of the workspace it serves (``wrong_workspace`` otherwise).
 
         Returns:
-            ``(True, <answer>)`` -- the answer carries its own ``ok`` /
-            ``category`` (``no_plugin`` when the session does not load
-            ``references``).  ``(False, {"error", "stage"})`` for
-            ``no_host`` / ``no_session`` / ``call``.
+            ``(True, <answer>)`` with the writer's
+            ``{"ok", "category", "error", "reconcile", "reconcile_detail"}``;
+            ``(False, {"error", "stage"})`` for ``no_host`` / ``no_session``
+            / ``call``.
         """
+        from jaato_server.server.reference_catalog_write import write_catalog_file
+
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
+        with self._session_lock:
+            host = self._session_host
+        own = str(getattr(getattr(host, "envelope", None), "workspace_path", "") or "")
+        root = os.path.realpath(own) if own else ""
+        if not root or os.path.realpath(str(args.get("workspace") or "")) != root:
+            return True, {"ok": False, "category": "wrong_workspace",
+                          "error": "this runner does not serve that workspace",
+                          "reconcile": "", "reconcile_detail": ""}
         runtime = getattr(session, "_runtime", None)
         registry = getattr(runtime, "registry", None) if runtime else None
         plugin = registry.get_plugin("references") if registry is not None else None
-        if plugin is None or not hasattr(plugin, "embed_texts"):
-            return True, {"ok": False, "category": "no_plugin",
-                          "error": "this session does not load the references plugin"}
+        provider = plugin.reconcile_provider() if hasattr(plugin, "reconcile_provider") else None
         try:
-            return True, plugin.embed_texts(args.get("texts"))
+            return True, write_catalog_file(
+                root, str(args.get("rel_file") or ""), args.get("data"),
+                replace=bool(args.get("replace")), bundle=str(args.get("bundle") or ""),
+                ref_id=str(args.get("ref_id") or ""), reconcile=bool(args.get("reconcile")),
+                provider=provider,
+            )
         except Exception as exc:  # noqa: BLE001 -- boundary
-            return False, {"error": f"session.embed_texts: {type(exc).__name__}: {exc}",
+            return False, {"error": f"session.write_reference: {type(exc).__name__}: {exc}",
                            "stage": "call"}
 
     @staticmethod

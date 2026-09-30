@@ -3,12 +3,14 @@
 ``reference.promote <claim_id> --bundle <name>`` (and the correlated
 ``ReferenceCurationRequest.bundle``) writes the entry into a workspace-tier
 sub-bundle instead of the catalog root.  When the destination bundle has a
-vector index, the new entry has no row in it, so the DAEMON reconciles it:
-on a confined host it is the only process that may write
-``.jaato/references/**`` (every runner body denies it, the base profile
-included).  The embedding model is in the runner, so the vectors come from
-the caller's session (``session.embed_texts``) through
-``RunnerEmbeddingProvider``.
+vector index, the new entry has no row in it, so the index is reconciled.
+
+Since #1422 the RUNNER does both: the daemon gates, re-validates and stamps
+(``reference_curation``), then hands the bytes to ``session.write_reference``,
+which writes in the runner's base profile (template v44 lets base write the
+catalog) and reconciles with the references plugin's own provider
+(``reference_catalog_write``).  With no session in the workspace the daemon
+writes itself and an indexed bundle is ``unavailable``.
 
 Properties, each a way it could go wrong:
 
@@ -17,13 +19,13 @@ Properties, each a way it could go wrong:
 2. **An unknown bundle is refused** before anything is written, and the
    claim is left for another try; a name that is not one path component is
    a usage error.
-3. **Vectors from another model never enter an index**: a session whose
+3. **Vectors from another model never enter an index**: a provider whose
    model differs from the index's is ``unavailable``, reported.
 4. **The outcome is reported, and the reference is placed either way**:
-   ``none`` for a bundle with no index, ``unavailable`` with no session to
-   embed with.
+   ``none`` for a bundle with no index, ``unavailable`` with no provider.
 5. **The typed command takes ``--bundle`` and nothing else** after the id.
 6. **The listing offers the sub-bundles**, marking the indexed ones.
+7. **The runner writes only its own workspace's catalog.**
 
 The reconcile itself (``reconcile_bundle``, unchanged) needs numpy, which is
 optional; the tests that drive it through to a written sidecar skip without
@@ -39,8 +41,8 @@ from typing import Any, Dict, List
 import pytest
 
 from jaato_server.server.command_router import _curation_args
+from jaato_server.server.reference_catalog_write import write_catalog_file
 from jaato_server.server.reference_curation import (
-    RunnerEmbeddingProvider,
     curate_claim,
     list_claims,
 )
@@ -55,7 +57,9 @@ from jaato_server.shared.plugins.references.config_loader import discover_refere
 from jaato_server.shared.tests.reversion import Reversion
 
 _CURATION = "jaato-server/jaato_server/server/reference_curation.py"
+_WRITE = "jaato-server/jaato_server/server/reference_catalog_write.py"
 _ROUTER = "jaato-server/jaato_server/server/command_router.py"
+_RPC = "jaato-server/jaato_server/server/runner/rpc.py"
 
 REVERSIONS = [
     Reversion(
@@ -67,25 +71,31 @@ REVERSIONS = [
     ),
     Reversion(
         target=_CURATION,
-        find="    if outcome.bundle and _destination_bundle(root, outcome.bundle) is None:\n",
+        find="    if outcome.bundle and destination_bundle(root, outcome.bundle) is None:\n",
         replace="    if False:\n",
         because="a mistyped bundle would be created as a directory nobody declared",
         test="TestIntoTheBundle::test_an_unknown_bundle_is_refused_and_the_claim_kept",
     ),
     Reversion(
-        target=_CURATION,
-        find="    if probe.get(\"model\") != dest.embedding_model:\n",
+        target=_WRITE,
+        find="    if provider.model_name != dest.embedding_model:\n",
         replace="    if False:\n",
         because="vectors from another model would be written into the index",
         test="TestTheIndex::test_a_different_model_is_unavailable_and_reported",
     ),
     Reversion(
         target=_CURATION,
-        find="    outcome.reconcile, outcome.reconcile_detail = reconcile_destination(\n"
-             "        root, outcome.bundle, embed, ref_id)\n",
-        replace="    outcome.reconcile, outcome.reconcile_detail = \"none\", \"\"\n",
+        find="    outcome.reconcile = written.get(\"reconcile\") or \"none\"\n",
+        replace="    outcome.reconcile = \"none\"\n",
         because="an index left without the new row would be reported as having none",
         test="TestTheIndex::test_no_session_to_embed_with_is_reported_and_the_entry_placed",
+    ),
+    Reversion(
+        target=_RPC,
+        find="        if not root or os.path.realpath(str(args.get(\"workspace\") or \"\")) != root:\n",
+        replace="        if not root:\n",
+        because="a runner would write another workspace's catalog",
+        test="TestTheRunnerHalf::test_another_workspace_is_refused",
     ),
     Reversion(
         target=_ROUTER,
@@ -132,23 +142,37 @@ def _claim(ws: Path, ref_id: str = "runbook") -> Dict[str, Any]:
     return claim
 
 
-def _promote(ws: Path, claim: Dict[str, Any], bundle: str = "", embed=None):
-    return curate_claim(str(ws), "promote", claim["claim_id"], owner=None, user_id=None,
-                        creator_in_workspace=lambda _s, _w: None, bundle=bundle, embed=embed)
+class _Provider:
+    """The references plugin's embedding provider, as the runner holds it."""
 
+    dimensions = DIM
 
-class _Session:
-    """A stand-in for ``JaatoServer.embed_texts``: one vector per text."""
+    def __init__(self, model: str = MODEL, vectors: bool = True) -> None:
+        self.model_name, self.vectors, self.available = model, vectors, True
+        self.calls: List[List[str]] = []
 
-    def __init__(self, model: str = MODEL, ok: bool = True) -> None:
-        self.model, self.ok, self.calls = model, ok, []
+    def load_model(self) -> bool:
+        return True
 
-    def __call__(self, texts: List[str]) -> Dict[str, Any]:
+    def embed_batch(self, texts):
+        from jaato_server.shared.plugins.references.embedding_types import EmbeddingResult
         self.calls.append(list(texts))
-        if not self.ok:
-            return {"ok": False, "category": "no_provider", "error": "no embedding provider"}
-        return {"ok": True, "model": self.model, "dimensions": DIM,
-                "vectors": [[float(len(t)), 1.0, 0.0, 0.0] for t in texts]}
+        return [EmbeddingResult(embedding=[float(len(t)), 1.0, 0.0, 0.0], model=self.model_name,
+                                dimensions=DIM) if self.vectors else None for t in texts]
+
+    def embed_text(self, text):
+        return self.embed_batch([text])[0]
+
+
+def _runner_writer(ws: Path, provider):
+    """What ``session.write_reference`` does in the runner, minus the wire."""
+    return lambda args: write_catalog_file(str(ws), provider=provider, **args)
+
+
+def _promote(ws: Path, claim: Dict[str, Any], bundle: str = "", provider=None, runner=True):
+    write = _runner_writer(ws, provider) if runner else None
+    return curate_claim(str(ws), "promote", claim["claim_id"], owner=None, user_id=None,
+                        creator_in_workspace=lambda _s, _w: None, bundle=bundle, write=write)
 
 
 class TestIntoTheBundle:
@@ -181,11 +205,21 @@ class TestIntoTheBundle:
         assert outcome.ok and outcome.reference_file == ".jaato/references/runbook.json"
         assert (outcome.bundle, outcome.reconcile) == ("", "none")
 
+    def test_a_failed_write_keeps_the_claim(self, ws):
+        claim = _claim(ws)
+        outcome = curate_claim(
+            str(ws), "promote", claim["claim_id"], owner=None, user_id=None,
+            creator_in_workspace=lambda _s, _w: None,
+            write=lambda _a: {"ok": False, "category": "runner_unreachable",
+                              "error": "no answer"})
+        assert (outcome.ok, outcome.category) == (False, "runner_unreachable")
+        assert [r["claim_id"] for r in list_claims(str(ws)).claims] == [claim["claim_id"]]
+
 
 class TestTheIndex:
     def test_no_session_to_embed_with_is_reported_and_the_entry_placed(self, ws):
         _bundle(ws, "ops", indexed=True)
-        outcome = _promote(ws, _claim(ws), "ops", embed=None)
+        outcome = _promote(ws, _claim(ws), "ops", runner=False)
         assert outcome.ok
         assert outcome.reconcile == "unavailable"
         assert "no session" in outcome.reconcile_detail
@@ -193,28 +227,22 @@ class TestTheIndex:
 
     def test_a_session_without_a_provider_is_unavailable(self, ws):
         _bundle(ws, "ops", indexed=True)
-        outcome = _promote(ws, _claim(ws), "ops", embed=_Session(ok=False))
+        outcome = _promote(ws, _claim(ws), "ops", provider=None)
         assert outcome.ok and outcome.reconcile == "unavailable"
         assert "no embedding provider" in outcome.reconcile_detail
 
     def test_a_different_model_is_unavailable_and_reported(self, ws):
         _bundle(ws, "ops", indexed=True)
-        session = _Session(model="other-model")
-        outcome = _promote(ws, _claim(ws), "ops", embed=session)
+        provider = _Provider(model="other-model")
+        outcome = _promote(ws, _claim(ws), "ops", provider=provider)
         assert outcome.ok and outcome.reconcile == "unavailable"
         assert "other-model" in outcome.reconcile_detail
-        assert session.calls == [[]], "only the model probe; nothing embedded"
-
-    def test_the_adapter_refuses_an_answer_from_another_model(self):
-        provider = RunnerEmbeddingProvider(_Session(model="other"), MODEL, DIM)
-        with pytest.raises(RuntimeError):
-            provider.embed_batch(["x"])
+        assert provider.calls == [], "nothing embedded"
 
     def test_the_index_gains_the_row(self, ws):
         np = pytest.importorskip("numpy")
         bundle = _bundle(ws, "ops", indexed=True)
-        session = _Session()
-        outcome = _promote(ws, _claim(ws), "ops", embed=session)
+        outcome = _promote(ws, _claim(ws), "ops", provider=_Provider())
         assert (outcome.ok, outcome.reconcile) == (True, "updated"), outcome.reconcile_detail
         config = json.loads((bundle / EMBEDDING_CONFIG_FILENAME).read_text())
         assert config["rows"] == ["runbook"]
@@ -224,13 +252,7 @@ class TestTheIndex:
     def test_a_skipped_row_is_an_error_not_updated(self, ws):
         pytest.importorskip("numpy")
         _bundle(ws, "ops", indexed=True)
-
-        def no_vector(texts):
-            answer = _Session()(texts)
-            answer["vectors"] = [None for _ in texts]
-            return answer
-
-        outcome = _promote(ws, _claim(ws), "ops", embed=no_vector)
+        outcome = _promote(ws, _claim(ws), "ops", provider=_Provider(vectors=False))
         assert outcome.ok and outcome.reconcile == "error"
         assert "runbook" in outcome.reconcile_detail
 
@@ -252,38 +274,62 @@ def test_the_listing_offers_the_sub_bundles(ws):
     ]
 
 
-class _Provider:
-    model_name, dimensions, available = MODEL, DIM, True
-
-    def load_model(self):
-        return True
-
-    def embed_batch(self, texts):
-        from jaato_server.shared.plugins.references.embedding_types import EmbeddingResult
-        return [EmbeddingResult(embedding=[1.0] * DIM, model=MODEL, dimensions=DIM) for _ in texts]
-
-
 class TestTheRunnerHalf:
-    """``ReferencesPlugin.embed_texts`` -- what ``session.embed_texts`` serves."""
+    """``session.write_reference`` -- the runner writes its own catalog (#1422)."""
 
-    def _plugin(self, provider=None):
-        from jaato_server.shared.plugins.references.plugin import ReferencesPlugin
-        plugin = ReferencesPlugin()
-        plugin._embedding_provider = provider
-        return plugin
+    def _rpc(self, ws: Path, provider=None):
+        import socket
+        from types import SimpleNamespace
 
-    def test_vectors_and_the_model_come_back(self):
-        answer = self._plugin(_Provider()).embed_texts(["a", "b"])
-        assert answer == {"ok": True, "model": MODEL, "dimensions": DIM,
-                          "vectors": [[1.0] * DIM, [1.0] * DIM]}
+        from jaato_server.server.runner.rpc import RunnerRPC
+        from jaato_server.server.runner.session import RunnerSessionHost
+        from jaato_server.shared.session_envelope import SessionInitEnvelope
 
-    def test_an_empty_probe_names_the_model_and_embeds_nothing(self):
-        answer = self._plugin(_Provider()).embed_texts([])
-        assert (answer["ok"], answer["model"], answer["vectors"]) == (True, MODEL, [])
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        b.close()
+        rpc = RunnerRPC(a, lambda _n, _a: (False, {}))
+        plugin = SimpleNamespace(reconcile_provider=lambda: provider)
+        registry = SimpleNamespace(get_plugin=lambda n: plugin if n == "references" else None)
+        session = SimpleNamespace(_runtime=SimpleNamespace(registry=registry))
+        rpc._session_host = RunnerSessionHost(
+            envelope=SessionInitEnvelope(session_id="s", workspace_path=str(ws),
+                                         profile_name="", provider_name="p",
+                                         model_name="m", plugins=[]),
+            runtime=None, session=session)
+        return rpc
 
-    def test_no_provider_is_said(self):
-        assert self._plugin(None).embed_texts(["a"])["category"] == "no_provider"
+    def _args(self, ws: Path, **over):
+        args = {"workspace": str(ws), "rel_file": ".jaato/references/r.json",
+                "data": '{"id": "r"}\n', "replace": False, "bundle": "",
+                "ref_id": "r", "reconcile": True}
+        args.update(over)
+        return args
 
-    @pytest.mark.parametrize("texts", ["a", [1], ["x" * (32 * 1024 + 1)], ["a"] * 257])
-    def test_bad_input_is_refused(self, texts):
-        assert self._plugin(_Provider()).embed_texts(texts)["category"] == "invalid"
+    def test_the_runner_writes_and_reconciles_with_its_own_provider(self, ws):
+        pytest.importorskip("numpy")
+        _bundle(ws, "ops", indexed=True)
+        provider = _Provider()
+        ok, answer = self._rpc(ws, provider)._handle_session_write_reference(self._args(
+            ws, rel_file=".jaato/references/ops/r.json", bundle="ops",
+            data=json.dumps({"id": "r", "name": "R", "description": "d",
+                             "type": "inline", "content": "x"})))
+        assert ok and answer["ok"], answer
+        assert answer["reconcile"] == "updated", answer
+        assert provider.calls
+
+    def test_another_workspace_is_refused(self, ws, tmp_path):
+        other = tmp_path / "other"
+        other.mkdir()
+        ok, answer = self._rpc(ws)._handle_session_write_reference(
+            self._args(ws, workspace=str(other)))
+        assert ok and answer["category"] == "wrong_workspace"
+        assert not (ws / ".jaato" / "references" / "r.json").exists()
+
+    def test_only_the_catalog_is_writable_and_existing_files_collide(self, ws):
+        rpc = self._rpc(ws)
+        _ok, outside = rpc._handle_session_write_reference(
+            self._args(ws, rel_file=".jaato/profiles/p.yaml"))
+        assert outside["category"] == "invalid_request"
+        _ok, first = rpc._handle_session_write_reference(self._args(ws))
+        _ok, again = rpc._handle_session_write_reference(self._args(ws))
+        assert first["ok"] and again["category"] == "collision"

@@ -5498,41 +5498,39 @@ class JaatoServer:
             )
         return {**answer, "source": "runner"}
 
-    def embed_texts(
-        self, texts: List[str], *, timeout: float = 120.0,
+    def write_reference(
+        self, args: Dict[str, Any], *, timeout: float = 120.0,
     ) -> Dict[str, Any]:
-        """Vectors for ``texts`` from this session's references plugin.
+        """Write one reference catalog file for this session's workspace (#1422).
 
-        The daemon reconciles a bundle's vector index after a reference
-        promotion (``server/reference_curation.py``) because on a confined
-        host only the daemon may write ``.jaato/references/**``; the
-        embedding model is loaded by the plugin in the RUNNER.  So the runner
-        is asked (``session.embed_texts``, work lane).  Where there is no
-        runner (embedded, standalone WS) the daemon's own plugin is the
-        session's, and answers directly.
-
-        A stopgap for #1422: once in-process tools run in a real
-        ``tool_hat``, the runner reconciles its own catalog and this goes.
+        ``args`` is :func:`~.reference_catalog_write.write_catalog_file`'s,
+        plus ``workspace``.  The runner is asked (``session.write_reference``,
+        work lane): it writes in its base profile and reconciles with the
+        references plugin's own embedding provider.  Where there is no
+        runner (embedded, standalone WS) this process writes, with the
+        daemon-side plugin's provider.
 
         Returns:
-            ``{"ok": True, "model", "dimensions", "vectors"}`` or
-            ``{"ok": False, "category", "error"}``; a failed ask is
-            ``category="runner_unreachable"``, never an empty answer.
+            The writer's ``{"ok", "category", "error", "reconcile",
+            "reconcile_detail"}``; a failed ask is
+            ``category="runner_unreachable"``, never a silent success.
         """
         runner = getattr(self, "_runner_rpc", None)
         if runner is not None:
             try:
-                return runner.session_embed_texts_threadsafe(list(texts), timeout=timeout)
-            except Exception as exc:  # noqa: BLE001 -- reported, never an empty answer
-                logger.warning("embed_texts: the runner did not answer (%s)", exc)
+                return runner.session_write_reference_threadsafe(dict(args), timeout=timeout)
+            except Exception as exc:  # noqa: BLE001 -- reported, never silent
+                logger.warning("write_reference: the runner did not answer (%s)", exc)
                 return {"ok": False, "category": "runner_unreachable",
                         "error": f"the session's runner did not answer: {exc}"}
+        from .reference_catalog_write import write_catalog_file
+
         registry = self._runtime.registry if self._runtime is not None else None
         plugin = registry.get_plugin("references") if registry is not None else None
-        if plugin is None or not hasattr(plugin, "embed_texts"):
-            return {"ok": False, "category": "no_plugin",
-                    "error": "this session does not load the references plugin"}
-        return plugin.embed_texts(list(texts))
+        provider = plugin.reconcile_provider() if hasattr(plugin, "reconcile_provider") else None
+        fields = {k: v for k, v in args.items() if k != "workspace"}
+        return write_catalog_file(os.path.realpath(str(args.get("workspace") or "")),
+                                  provider=provider, **fields)
 
     def diagnostics_probe(self, *, timeout: float = 5.0) -> Dict[str, Any]:
         """The live self-probe (#1294): "is the confined runner still confined".

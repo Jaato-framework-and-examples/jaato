@@ -877,17 +877,15 @@ class CommandRouter:
     ) -> None:
         """Promote or dismiss one claim and send the one answer (1.33).
 
-        Daemon-level: the catalog is write-denied to a confined runner, so
-        the daemon, which is not confined, is where a claim becomes a catalog
-        entry.  The workspace is :meth:`resolve_caller_workspace`'s; the
-        owner gate reads the TRANSPORT's identity for this connection and
-        the workspace owner the session manager knows, never anything in the
-        request.  The work itself is
-        :func:`~.reference_curation.curate_claim`, which refuses an unknown
-        ``action``.  Every outcome, refusals included, answers with one
-        ``ReferenceCurationResultEvent``.  When the destination bundle has a
-        vector index, its vectors come from the caller's own session in this
-        workspace (:meth:`_workspace_embedder`).
+        Daemon-level for the gate: the workspace is
+        :meth:`resolve_caller_workspace`'s; the owner gate reads the
+        TRANSPORT's identity for this connection and the workspace owner the
+        session manager knows, never anything in the request.  The decision
+        is :func:`~.reference_curation.curate_claim`, which refuses an
+        unknown ``action``; the write, and the destination bundle's
+        reconcile, are the runner's (:meth:`_catalog_writer`, #1422).  Every
+        outcome, refusals included, answers with one
+        ``ReferenceCurationResultEvent``.
         """
         from jaato_sdk.events import ReferenceCurationResultEvent
 
@@ -910,7 +908,7 @@ class CommandRouter:
             owner=self._workspace_owner(workspace), user_id=user_id,
             creator_in_workspace=self._session_manager.creator_in_workspace,
             bundle=bundle,
-            embed=self._workspace_embedder(client_id, session_id, workspace))
+            write=self._catalog_writer(client_id, session_id, workspace))
         logger.info("%s: client=%s user=%s claim=%s ok=%s category=%s ref=%s "
                     "bundle=%s reconcile=%s", label, client_id, user_id or "-",
                     claim_id, outcome.ok, outcome.category or "-",
@@ -924,15 +922,17 @@ class CommandRouter:
             reconcile=outcome.reconcile,
             reconcile_detail=outcome.reconcile_detail))
 
-    def _workspace_embedder(
+    def _catalog_writer(
         self, client_id: str, session_id: Optional[str], workspace: str,
-    ) -> Optional[Callable[[List[str]], Dict[str, Any]]]:
-        """``JaatoServer.embed_texts`` of the caller's session in ``workspace``.
+    ) -> Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]:
+        """Write catalog files through a session serving ``workspace`` (#1422).
 
         The caller's attached session first, then the one the transport
-        names; only a session whose workspace IS the promotion's, so the
-        vectors come from the model configured for that workspace.  ``None``
-        when there is none, which the promotion reports as ``unavailable``.
+        names; only a session whose workspace IS the catalog's.  Its runner
+        writes in the base profile and reconciles with its own embedding
+        provider (``JaatoServer.write_reference``).  ``None`` when there is
+        no such session: the caller then writes here with no provider
+        (``reference_curation.local_writer``).
         """
         candidates = [self._session_manager.get_client_session(client_id)]
         if session_id and hasattr(self._session_manager, "get_session"):
@@ -941,8 +941,8 @@ class CommandRouter:
         for session in candidates:
             ws = getattr(session, "workspace_path", None) if session else None
             server = getattr(session, "server", None) if session else None
-            if ws and os.path.realpath(ws) == target and hasattr(server, "embed_texts"):
-                return server.embed_texts
+            if ws and os.path.realpath(ws) == target and hasattr(server, "write_reference"):
+                return lambda args, _w=server.write_reference: _w({**args, "workspace": target})
         return None
 
     def _handle_reference_claims_request(
@@ -1015,10 +1015,11 @@ class CommandRouter:
     ) -> None:
         """Answer ``ReferenceLinksUpdateRequest`` with one result event (1.33).
 
-        Daemon-level for the reason promotion is: the catalog is
-        write-denied to a confined runner.  The owner gate reads the
-        transport's identity for this connection; the work and every
-        refusal are :func:`~.reference_catalog.update_links`'s.
+        The owner gate reads the transport's identity for this connection;
+        the decision and every refusal are
+        :func:`~.reference_catalog.update_links`'s, and the write goes to
+        the runner of a session in the workspace (:meth:`_catalog_writer`,
+        #1422).
         """
         from jaato_sdk.events import ReferenceLinksUpdateResultEvent
 
@@ -1039,7 +1040,8 @@ class CommandRouter:
         user_id = self._event_sink.get_client_user(client_id)
         outcome = update_links(
             workspace, event.reference_id, event.links,
-            owner=self._workspace_owner(workspace), user_id=user_id)
+            owner=self._workspace_owner(workspace), user_id=user_id,
+            write=self._catalog_writer(client_id, session_id, workspace))
         logger.info("reference.links: client=%s user=%s ref=%s ok=%s category=%s "
                     "links=%d", client_id, user_id or "-", event.reference_id,
                     outcome.ok, outcome.category or "-", len(outcome.links))

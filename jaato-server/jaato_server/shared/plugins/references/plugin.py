@@ -2837,52 +2837,18 @@ class ReferencesPlugin(RunnerForwardingMixin):
             },
         }
 
-    #: Most texts one :meth:`embed_texts` call accepts, and the longest one:
-    #: the answer rides one RPC frame, and a 1024-d vector is ~20 KB of JSON.
-    EMBED_TEXTS_MAX_COUNT = 256
-    EMBED_TEXTS_MAX_CHARS = 32 * 1024
+    def reconcile_provider(self) -> Any:
+        """This session's embedding provider, for a catalog reconcile (#1422).
 
-    @classmethod
-    def _valid_embed_texts(cls, texts: Any) -> bool:
-        """Whether ``texts`` is a list :meth:`embed_texts` accepts."""
-        return (isinstance(texts, list) and len(texts) <= cls.EMBED_TEXTS_MAX_COUNT
-                and all(isinstance(t, str) and len(t) <= cls.EMBED_TEXTS_MAX_CHARS
-                        for t in texts))
-
-    def embed_texts(self, texts: List[str]) -> Dict[str, Any]:
-        """Embed ``texts`` with this plugin's provider, for a caller elsewhere.
-
-        The daemon reconciles a bundle's vector index after a promotion
-        (``server/reference_curation.py``), because on a confined host it is
-        the only process that may write ``.jaato/references/**``; the
-        embedding MODEL lives here, in the runner.  This is the half that
-        stays here: vectors in, nothing written.  Loads the provider the way
-        ``compute_embedding`` does when ``initialize()`` skipped it.
-
-        Returns:
-            ``{"ok": True, "model", "dimensions", "vectors"}`` -- one vector
-            (a list of floats) or ``None`` per text, in order -- or
-            ``{"ok": False, "category", "error"}`` with ``category``
-            ``invalid`` or ``no_provider``.
+        ``session.write_reference`` reconciles a bundle's vector index in
+        the runner after the daemon has it write a promoted entry.  Loads
+        the provider the way ``compute_embedding`` does when
+        ``initialize()`` skipped it; ``None`` when there is none.  The
+        model itself is loaded by the caller, only if an index needs it.
         """
-        if not self._valid_embed_texts(texts):
-            return {"ok": False, "category": "invalid",
-                    "error": f"texts must be a list of at most "
-                             f"{self.EMBED_TEXTS_MAX_COUNT} strings of at most "
-                             f"{self.EMBED_TEXTS_MAX_CHARS} characters"}
         if not self._embedding_provider and self._cached_init_config is not None:
             self._init_embedding_provider(self._cached_init_config)
-        provider = self._embedding_provider
-        if provider is not None and not provider.available:
-            provider.load_model()
-        if provider is None or not provider.available:
-            return {"ok": False, "category": "no_provider",
-                    "error": "no embedding provider is available in this session"}
-        results = provider.embed_batch(texts) if texts else []
-        vectors = [[float(x) for x in r.embedding] if r is not None else None
-                   for r in results]
-        return {"ok": True, "model": provider.model_name,
-                "dimensions": getattr(provider, "dimensions", None), "vectors": vectors}
+        return self._embedding_provider
 
     def _execute_compute_embedding(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Compute a vector embedding for text or file contents.

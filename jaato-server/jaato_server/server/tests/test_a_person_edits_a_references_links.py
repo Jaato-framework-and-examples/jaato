@@ -2,10 +2,11 @@
 
 After a reference is in the catalog -- written by hand, or promoted from an
 agent's claim -- its ``links`` could be changed only by editing the file on
-the host: a confined runner is write-denied on ``.jaato/references/**``.
-``reference.catalog`` and ``reference.links`` (protocol 1.33,
-:mod:`jaato_server.server.reference_catalog`) are the daemon's half.  What
-each must get right:
+the host.  ``reference.catalog`` and ``reference.links`` (protocol 1.33,
+:mod:`jaato_server.server.reference_catalog`) are the daemon's half; since
+#1422 the file is written by the runner of a session in the workspace
+(``session.write_reference``, base profile), or by the daemon when there is
+none.  What each must get right:
 
 1. **Only the workspace owner edits** (``may_curate``, the identity read
    from the transport).  A ``supersedes`` reroutes every request for its
@@ -94,12 +95,22 @@ REVERSIONS = [
         target=_ROUTER,
         find="        outcome = update_links(\n"
              "            workspace, event.reference_id, event.links,\n"
-             "            owner=self._workspace_owner(workspace), user_id=user_id)\n",
+             "            owner=self._workspace_owner(workspace), user_id=user_id,\n",
         replace="        outcome = update_links(\n"
                 "            workspace, event.reference_id, event.links,\n"
-                "            owner=None, user_id=user_id)\n",
+                "            owner=None, user_id=user_id,\n",
         because="the gate would never see who owns the workspace",
         test="TestTheRouter::test_the_owner_reaches_the_gate",
+    ),
+    Reversion(
+        target=_ROUTER,
+        find="            owner=self._workspace_owner(workspace), user_id=user_id,\n"
+             "            write=self._catalog_writer(client_id, session_id, workspace))\n",
+        replace="            owner=self._workspace_owner(workspace), user_id=user_id,\n"
+                "            write=None)\n",
+        because="the daemon would write the file itself while a runner serves the "
+                "workspace (#1422)",
+        test="TestTheRouter::test_the_runner_of_the_workspace_writes_the_file",
     ),
 ]
 
@@ -270,12 +281,27 @@ class _Sink:
         self.sent.append(event)
 
 
+class _Server:
+    """A session's ``JaatoServer.write_reference``: the runner's writer."""
+
+    def __init__(self) -> None:
+        self.calls: List[dict] = []
+
+    def write_reference(self, args: dict) -> dict:
+        from jaato_server.server.reference_catalog_write import write_catalog_file
+        self.calls.append(dict(args))
+        fields = {k: v for k, v in args.items() if k != "workspace"}
+        return write_catalog_file(args["workspace"], provider=None, **fields)
+
+
 class _Manager:
-    def __init__(self, ws: Optional[Path], owner: Optional[str]) -> None:
-        self.ws, self.owner = ws, owner
+    def __init__(self, ws: Optional[Path], owner: Optional[str],
+                 server: Optional[_Server] = None) -> None:
+        self.ws, self.owner, self.server = ws, owner, server
 
     def get_client_session(self, client_id: str) -> Any:
-        return SimpleNamespace(workspace_path=str(self.ws)) if self.ws else None
+        return (SimpleNamespace(workspace_path=str(self.ws), server=self.server)
+                if self.ws else None)
 
     def get_session(self, session_id: str) -> Any:
         return None
@@ -284,10 +310,11 @@ class _Manager:
         return self.owner
 
 
-def _router(ws: Optional[Path], *, owner: Optional[str], user: Optional[str]) -> CommandRouter:
+def _router(ws: Optional[Path], *, owner: Optional[str], user: Optional[str],
+            server: Optional[_Server] = None) -> CommandRouter:
     router = object.__new__(CommandRouter)
     router._event_sink = _Sink(user)
-    router._session_manager = _Manager(ws, owner)
+    router._session_manager = _Manager(ws, owner, server)
     return router
 
 
@@ -316,6 +343,22 @@ class TestTheRouter:
             links=[{"to": "adr-1", "rel": "supersedes"}]))
         [event] = router._event_sink.sent
         assert (event.ok, event.links) == (True, [{"to": "adr-1", "rel": "supersedes"}])
+
+    def test_the_runner_of_the_workspace_writes_the_file(self, workspace: Path) -> None:
+        """#1422: a session serving the workspace writes the catalog (in its
+        base profile); the daemon only decides what to write."""
+        server = _Server()
+        router = _router(workspace, owner=None, user=None, server=server)
+        router._dispatch("c1", "", ReferenceLinksUpdateRequest(
+            request_id="rk-4", reference_id="adr-2",
+            links=[{"to": "adr-1", "rel": "supersedes"}]))
+        [event] = router._event_sink.sent
+        assert event.ok, event.error
+        [call] = server.calls
+        assert (call["replace"], call["reconcile"]) == (True, False)
+        assert call["workspace"] == os.path.realpath(workspace)
+        assert _file(workspace, ".jaato/references/adr-2.json")["links"] == [
+            {"to": "adr-1", "rel": "supersedes"}]
 
     def test_no_workspace_is_said(self) -> None:
         router = _router(None, owner=None, user=None)

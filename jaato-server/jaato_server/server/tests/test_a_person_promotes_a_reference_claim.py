@@ -91,9 +91,9 @@ REVERSIONS = [
         test="TestNoLinkIsFollowed::test_a_symlinked_claim_is_refused",
     ),
     Reversion(
-        target=_CURATION,
-        find="    if ref_id in ids or os.path.lexists(os.path.join(root, rel_file)):\n",
-        replace="    if ref_id in ids:\n",
+        target="jaato-server/jaato_server/server/reference_catalog_write.py",
+        find="    if not replace and os.path.lexists(os.path.join(root, norm)):\n",
+        replace="    if False:\n",
         because="a promotion would overwrite a catalog file someone curated",
         test="TestNothingIsOverwritten::test_an_existing_file_of_that_name_is_kept",
     ),

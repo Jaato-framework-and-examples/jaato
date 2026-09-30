@@ -2550,38 +2550,37 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
-    async def session_embed_texts(
+    async def session_write_reference(
         self,
-        texts: "List[str]",
+        args: "Dict[str, Any]",
         *,
         timeout: Optional[float] = 120.0,
     ) -> "Dict[str, Any]":
-        """Embed ``texts`` with the runner's references plugin (work lane).
+        """Write one reference catalog file in the runner (work lane, #1422).
 
-        For the daemon's reconcile of a bundle's vector index after a
-        reference promotion: the daemon writes the index, the model lives
-        in the runner.  The generous default timeout covers a first call
-        that loads the model.
+        The daemon decides what a promotion or a links edit writes; the
+        runner writes it in its base profile and reconciles the bundle's
+        vector index with its own embedding provider.  The generous
+        default timeout covers a reconcile that loads the model.
 
         Returns:
-            ``{"ok": True, "model", "dimensions", "vectors"}`` or
-            ``{"ok": False, "category", "error"}``.
+            ``{"ok", "category", "error", "reconcile", "reconcile_detail"}``.
 
         Raises:
             RunnerCallError on transport failure or a runner-side refusal.
         """
         return await self._call_named(
-            "session.embed_texts", {"texts": list(texts)}, timeout=timeout,
+            "session.write_reference", dict(args), timeout=timeout,
         )
 
-    def session_embed_texts_threadsafe(
+    def session_write_reference_threadsafe(
         self,
-        texts: "List[str]",
+        args: "Dict[str, Any]",
         *,
         timeout: Optional[float] = 120.0,
     ) -> "Dict[str, Any]":
         return self._run_threadsafe(
-            self.session_embed_texts(texts, timeout=timeout),
+            self.session_write_reference(args, timeout=timeout),
             timeout=timeout,
         )
 

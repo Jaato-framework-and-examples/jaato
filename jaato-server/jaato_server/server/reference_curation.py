@@ -3,11 +3,11 @@
 An agent proposes a reference with ``proposeReference``, which writes a
 claim under ``<workspace>/.jaato/references-claims/``
 (:mod:`jaato_server.shared.plugins.references.claims`).  It never writes the
-catalog: every AppArmor body is ``audit deny ... wlk`` on
-``<workspace>/.jaato/references/**``.  This module is the other half, run by
-the DAEMON for the person on a connection (``reference.promote`` /
-``reference.dismiss``, protocol 1.33), and it is the only in-tree code that
-turns a claim into a catalog entry.
+catalog: a model-called tool body runs in ``tool_hat``, which is ``audit
+deny ... wlk`` on ``<workspace>/.jaato/references/**`` (#1422).  This
+module is the other half, run by the DAEMON for the person on a connection
+(``reference.promote`` / ``reference.dismiss``, protocol 1.33): it decides
+what a claim becomes, and a writer (below) puts it in the catalog.
 
 What a promotion does, in order, and why each step is here:
 
@@ -33,9 +33,10 @@ What a promotion does, in order, and why each step is here:
    (:meth:`SessionManager.creator_in_workspace`); otherwise it is absent.
    ``curated_by`` is the person the transport authenticated, and ``at`` is
    the instant the reference arrived in the catalog.
-4. **The write never goes through a link.**  ``write_contained`` (#1386)
-   writes ``<workspace>/.jaato/references/<id>.json``; a destination that
-   already exists is a collision, never an overwrite.
+4. **The write never goes through a link.**  The writer
+   (:func:`~.reference_catalog_write.write_catalog_file`) uses
+   ``write_contained`` (#1386) for ``<workspace>/.jaato/references/<id>.json``;
+   a destination that already exists is a collision, never an overwrite.
 5. **The claim is removed** once the entry is written.  A claim that cannot
    be removed afterwards is reported, and the next promotion of it answers
    ``collision`` rather than writing a second copy.
@@ -47,19 +48,20 @@ directory.
 
 **Into a named bundle, and its index.**  A promotion may name a
 workspace-tier sub-bundle (``bundle``): the entry is written into that
-bundle's directory instead of the catalog root.  Either way, when the
-destination bundle declares a vector index (``embedding_config.json``), the
-new entry has no row in it yet, so the daemon reconciles that index
-(:func:`reconcile_destination`).  The daemon does the writing because on a
-confined host it is the only process that may write ``.jaato/references/**``
--- every runner body denies it, the base profile included, and in-process
-tools run in the base profile.  The embedding MODEL is in the runner, so
-the vectors come from the caller's session over ``session.embed_texts``
-(:class:`RunnerEmbeddingProvider`).  The reference is placed whatever the
-reconcile's outcome, which is reported, never silent.  This split is a
-stopgap: once in-process tools run in a real ``tool_hat`` and the base
-profile can let the plugin write its own catalog, the reconcile belongs
-back in the runner (#1422, which lists what to remove).
+bundle's directory instead of the catalog root.  When the destination
+bundle declares a vector index (``embedding_config.json``), the new entry
+has no row in it yet, so the index is reconciled.
+
+**Who writes.**  This module decides WHAT is written; the bytes go to a
+``Writer`` the caller supplies.  The daemon's writer asks the runner of a
+session in this workspace (``session.write_reference``), which writes in
+its base profile and reconciles with its own embedding provider
+(:mod:`.reference_catalog_write`).  Before #1422 the daemon wrote and
+reconciled here, with vectors fetched from the runner, because every
+runner body denied the catalog; template v44 moved that deny out of base.
+With no session to ask, the daemon writes itself and an indexed bundle is
+reported ``unavailable``.  The reference is placed whatever the reconcile's
+outcome, which is reported, never silent.
 
 Stdlib plus the references plugin's own helpers; no daemon state.  The
 caller hands in the owner, the identity and a creator lookup.
@@ -79,9 +81,7 @@ from jaato_server.shared.plugins.references.bundle import (
     BUNDLE_TIER_WORKSPACE,
     REFERENCE_NON_SOURCE_FILENAMES,
     ROOT_BUNDLE_NAME,
-    ReferenceBundle,
     discover_bundles,
-    load_reference_bundle,
 )
 from jaato_server.shared.plugins.references.claims import (
     CLAIMS_DIRNAME,
@@ -93,15 +93,19 @@ from jaato_server.shared.plugins.references.claims import (
     link_warnings,
     valid_id,
 )
-from jaato_server.shared.plugins.references.config_loader import discover_references
-from jaato_server.shared.plugins.references.embedding_types import EmbeddingResult
 from jaato_server.shared.plugins.references.models import (
     ORIGIN_AGENT,
     ReferenceOrigin,
 )
 
-from .contained_write import PathLeavesRoot, contained_dir, write_contained
+from .contained_write import PathLeavesRoot, contained_dir
 from .memory_verbs import may_curate
+from .reference_catalog_write import (
+    CATALOG_REL,
+    destination_bundle,
+    destination_rel,
+    write_catalog_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,23 +115,21 @@ CURATION_COMMANDS: Dict[str, str] = {
     "reference.dismiss": "dismiss",
 }
 
-#: Where the catalog lives, relative to the workspace (the workspace tier
-#: ``discover_references`` reads by default).
-CATALOG_REL = ".jaato/references"
-
 #: Where claims live, relative to the workspace.
 CLAIMS_REL = f".jaato/{CLAIMS_DIRNAME}"
 
-#: ``texts -> answer`` -- the caller's session embedding texts
-#: (``JaatoServer.embed_texts``): ``{"ok", "model", "dimensions", "vectors"}``
-#: or ``{"ok": False, "category", "error"}``.
-Embed = Callable[[List[str]], Dict[str, Any]]
+#: ``args -> answer`` -- writes one catalog file:
+#: ``args = {"rel_file", "data", "replace", "bundle", "ref_id", "reconcile"}``
+#: answered ``{"ok", "category", "error", "reconcile", "reconcile_detail"}``
+#: (:func:`~.reference_catalog_write.write_catalog_file`'s shape).  The
+#: daemon's writer is the runner of a session in the workspace
+#: (``JaatoServer.write_reference``); :func:`local_writer` is the fallback.
+Writer = Callable[[Dict[str, Any]], Dict[str, Any]]
 
-#: What :func:`reconcile_destination` reports, for ``reconcile`` on the
-#: answer: ``none`` (the bundle has no vector index), ``updated``,
-#: ``clean``, ``busy`` (another reconcile holds the lock), ``unavailable``
-#: (no session, no provider, a model that differs from the index's, or no
-#: numpy here), ``error``.
+#: What the reconcile reports, for ``reconcile`` on the answer: ``none``
+#: (the bundle has no vector index), ``updated``, ``clean``, ``busy``
+#: (another reconcile holds the lock), ``unavailable`` (no session, no
+#: provider, or a model that differs from the index's), ``error``.
 RECONCILE_OUTCOMES = ("none", "updated", "clean", "busy", "unavailable", "error")
 
 
@@ -269,9 +271,20 @@ def promoted_origin(
     )
 
 
-def destination_rel(bundle: str) -> str:
-    """The workspace-relative directory a promotion into ``bundle`` writes to."""
-    return f"{CATALOG_REL}/{bundle}" if bundle else CATALOG_REL
+def local_writer(root: str) -> Writer:
+    """Write in THIS process, with no embedding provider.
+
+    For when no session in the workspace can be asked: the daemon is not
+    confined, so the entry is placed, and an indexed bundle is reported
+    ``unavailable`` (nothing here can embed).
+    """
+    def _write(args: Dict[str, Any]) -> Dict[str, Any]:
+        answer = write_catalog_file(root, provider=None, **args)
+        if answer.get("reconcile") == "unavailable":
+            answer["reconcile_detail"] = (
+                "no session is attached in this workspace to embed with")
+        return answer
+    return _write
 
 
 def _catalog_entry(entry: Dict[str, Any], root: str, origin: ReferenceOrigin,
@@ -288,14 +301,14 @@ def _catalog_entry(entry: Dict[str, Any], root: str, origin: ReferenceOrigin,
 def _promote(
     root: str, claim_path: str, claim: Dict[str, Any], *, user_id: Optional[str],
     creator_in_workspace: Callable[[str, str], Optional[str]],
-    outcome: CurationOutcome, embed: Optional[Embed] = None,
+    outcome: CurationOutcome, write: Writer,
 ) -> CurationOutcome:
     """Steps 2 (re-validation) to 5 of the module docstring, then the index."""
     ids = catalog_ids(root)
     ref_id = claim["reference"]["id"]
     dest_rel = destination_rel(outcome.bundle)
     rel_file = f"{dest_rel}/{ref_id}.json"
-    if ref_id in ids or os.path.lexists(os.path.join(root, rel_file)):
+    if ref_id in ids:
         return _fail(outcome, "collision",
                      f"'{ref_id}' is already in the catalog; dismiss the claim, or "
                      "revise the existing reference")
@@ -308,118 +321,24 @@ def _promote(
                              at=datetime.now(timezone.utc).isoformat())
     data = json.dumps(_catalog_entry(entry, root, origin, dest_rel), indent=2,
                       ensure_ascii=False)
-    try:
-        write_contained(root, rel_file, (data + "\n").encode("utf-8"))
-    except PathLeavesRoot as exc:
-        return _fail(outcome, "unsafe_path", str(exc))
-    except OSError as exc:
-        return _fail(outcome, "io_error", f"could not write {rel_file}: {exc}")
+    written = write({"rel_file": rel_file, "data": data + "\n", "replace": False,
+                     "bundle": outcome.bundle, "ref_id": ref_id, "reconcile": True})
+    if not written.get("ok"):
+        return _fail(outcome, written.get("category") or "io_error",
+                     written.get("error") or f"could not write {rel_file}")
     outcome.ok, outcome.reference_id, outcome.reference_file = True, ref_id, rel_file
     try:
         os.unlink(claim_path)
     except OSError as exc:
         outcome.warnings.append(f"promoted, but the claim file could not be removed: {exc}")
-    outcome.reconcile, outcome.reconcile_detail = reconcile_destination(
-        root, outcome.bundle, embed, ref_id)
+    outcome.reconcile = written.get("reconcile") or "none"
+    outcome.reconcile_detail = written.get("reconcile_detail") or ""
     if outcome.reconcile not in ("none", "updated", "clean"):
         outcome.warnings.append(
             f"promoted, but the bundle's vector index was not updated "
             f"({outcome.reconcile}: {outcome.reconcile_detail}); similarity "
             f"matching will not find '{ref_id}' until it is reconciled")
     return outcome
-
-
-class RunnerEmbeddingProvider:
-    """An embedding provider whose vectors come from the caller's session.
-
-    Satisfies what :func:`~...references.reconcile.reconcile_bundle` uses of
-    ``EmbeddingProviderProtocol`` -- ``available``, ``model_name``,
-    ``dimensions``, ``embed_batch``, ``embed_text`` -- by forwarding to
-    ``embed`` (``JaatoServer.embed_texts``, i.e. ``session.embed_texts`` on
-    the runner).  A failed answer, or one from a model other than
-    ``model_name``, raises, which ``reconcile_bundle`` records per text as
-    skipped rather than writing a vector from the wrong model.
-    """
-
-    def __init__(self, embed: Embed, model_name: str, dimensions: int) -> None:
-        self._embed = embed
-        self.model_name = model_name
-        self.dimensions = dimensions
-        self.available = True
-
-    def load_model(self) -> bool:
-        return True
-
-    def embed_batch(self, texts: List[str]) -> List[Optional[EmbeddingResult]]:
-        answer = self._embed(list(texts))
-        if not answer.get("ok"):
-            raise RuntimeError(answer.get("error") or answer.get("category") or "embedding failed")
-        if answer.get("model") != self.model_name:
-            raise RuntimeError(f"the session's model changed to {answer.get('model')!r}")
-        vectors = list(answer.get("vectors") or [])
-        vectors += [None] * (len(texts) - len(vectors))
-        return [EmbeddingResult(embedding=v, model=self.model_name, dimensions=len(v))
-                if isinstance(v, list) else None for v in vectors[:len(texts)]]
-
-    def embed_text(self, text: str) -> Optional[EmbeddingResult]:
-        return self.embed_batch([text])[0]
-
-
-_RECONCILE_STATUS = {"updated": "updated", "clean": "clean",
-                     "skipped_busy": "busy", "unavailable": "unavailable",
-                     "error": "error"}
-
-
-def _destination_bundle(root: str, bundle: str) -> Optional[ReferenceBundle]:
-    """The workspace-tier bundle ``bundle`` names (``""`` = catalog root), or ``None``."""
-    try:
-        directory = contained_dir(root, destination_rel(bundle), create=False)
-    except PathLeavesRoot:
-        return None
-    if not directory:
-        return None
-    return load_reference_bundle(Path(directory), name=bundle or ROOT_BUNDLE_NAME,
-                                 tier=BUNDLE_TIER_WORKSPACE)
-
-
-def reconcile_destination(
-    root: str, bundle: str, embed: Optional[Embed], ref_id: str,
-) -> "tuple[str, str]":
-    """Bring the destination bundle's vector index up to date: ``(outcome, detail)``.
-
-    ``none`` when the bundle declares no index -- a bundle of definitions
-    has nothing to reconcile.  Otherwise the session is asked for vectors
-    once with no texts, to learn its model; a model other than the index's
-    is ``unavailable``, because vectors from two models are not comparable.
-    Then :func:`~...references.reconcile.reconcile_bundle` runs here, in
-    the daemon, with :class:`RunnerEmbeddingProvider` -- the one code path
-    that writes an index, unchanged.  ``updated`` means ``ref_id`` got its
-    row; a reconcile that ran and skipped it is ``error``, with the reason.
-    """
-    from jaato_server.shared.plugins.references.reconcile import reconcile_bundle
-
-    dest = _destination_bundle(root, bundle)
-    if dest is None or not dest.has_index:
-        return "none", ""
-    if embed is None:
-        return "unavailable", "no session is attached in this workspace to embed with"
-    probe = embed([])
-    if not probe.get("ok"):
-        return "unavailable", str(probe.get("error") or probe.get("category") or "no answer")
-    if probe.get("model") != dest.embedding_model:
-        return "unavailable", (f"the session embeds with {probe.get('model')!r} and the "
-                               f"index was built with {dest.embedding_model!r}")
-    sources = discover_references(str(dest.directory), base_path=str(dest.directory.parent),
-                                  project_root=root)
-    for source in sources:
-        source.bundle_name = dest.name
-    provider = RunnerEmbeddingProvider(embed, dest.embedding_model, dest.embedding_dimensions)
-    result = reconcile_bundle(dest, sources, provider)
-    outcome = _RECONCILE_STATUS.get(result.status.value, "error")
-    skipped = dict(result.skipped)
-    if ref_id in skipped:
-        return "error", f"'{ref_id}' was not embedded: {skipped[ref_id]}"
-    return outcome, result.error or ""
 
 
 def workspace_bundles(root: str) -> List[Dict[str, Any]]:
@@ -557,7 +476,7 @@ def curate_claim(
     workspace: str, action: str, claim_id: str, *, owner: Optional[str],
     user_id: Optional[str],
     creator_in_workspace: Callable[[str, str], Optional[str]],
-    bundle: str = "", embed: Optional[Embed] = None,
+    bundle: str = "", write: Optional[Writer] = None,
 ) -> CurationOutcome:
     """Promote or dismiss ``claim_id`` in ``workspace``.
 
@@ -574,10 +493,11 @@ def curate_claim(
         bundle: Promote into this workspace-tier sub-bundle instead of the
             catalog root (``unknown_bundle`` when there is none by that
             name).  Ignored by ``dismiss``.
-        embed: The caller's session embedding texts, for the destination
-            bundle's vector index; ``None`` when no session in this
-            workspace can be asked (the index is then reported
-            ``unavailable``, and the reference is placed anyway).
+        write: Writes the entry and reconciles the destination bundle's
+            index (the runner of a session in this workspace);
+            ``None`` writes here with no embedding provider
+            (:func:`local_writer`), which reports an indexed bundle
+            ``unavailable`` and places the reference anyway.
 
     Returns:
         A :class:`CurationOutcome`; this never raises for a refusal.
@@ -593,7 +513,7 @@ def curate_claim(
         return _fail(outcome, "not_owner",
                      "only the workspace owner may curate its references")
     root = os.path.realpath(workspace)
-    if outcome.bundle and _destination_bundle(root, outcome.bundle) is None:
+    if outcome.bundle and destination_bundle(root, outcome.bundle) is None:
         return _fail(outcome, "unknown_bundle",
                      f"no bundle '{outcome.bundle}' in {CATALOG_REL}")
     claim_path, claim, category, error = _read_claim(root, claim_id)
@@ -602,7 +522,7 @@ def curate_claim(
     if action == "promote":
         return _promote(root, claim_path, claim, user_id=user_id,
                         creator_in_workspace=creator_in_workspace, outcome=outcome,
-                        embed=embed)
+                        write=write or local_writer(root))
     try:
         os.unlink(claim_path)
     except OSError as exc:

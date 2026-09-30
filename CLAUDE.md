@@ -578,7 +578,7 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
-- `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.33, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-133)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
+- `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.33, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-runner-writes-the-catalog-protocol-133)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
 - `ReferenceCatalogRequest` → `ReferenceCatalogEvent` / `ReferenceLinksUpdateRequest` → `ReferenceLinksUpdateResultEvent` — list the workspace reference catalog with its typed links both ways, and replace one reference's links (protocol 1.33, see [Typed Links Between References](#typed-links-between-references-wikillm-seam-3))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
@@ -2704,6 +2704,13 @@ lives in the runner process, and deliberately hostile Python there can find
 it, return to base and do what base allows. Only out-of-process execution
 (`//child`) is a hard boundary.
 
+The daemon-side catalog writes #1420 added as a stopgap (a promotion into a
+bundle and its reconcile, a links edit) are the runner's again:
+`session.write_reference` writes in the runner's base profile and
+reconciles with the references plugin's own provider; `session.embed_texts`
+and `RunnerEmbeddingProvider` are gone. See
+[A Person Promotes the Claim](#a-person-promotes-the-claim-the-runner-writes-the-catalog-protocol-133).
+
 Not covered: `-stream` tool variants run on the StreamManager's own event
 loop thread, in base. The slot key and profile name (#1033) are unchanged;
 only the per-thread hat changes.
@@ -4227,7 +4234,7 @@ Guard: `shared/tests/test_an_agent_proposes_a_reference.py`, six reversions,
 including two checked against the RENDERED profile with the #1348 rule
 matcher: claims writable, catalog still denied. No kernel.
 
-### A Person Promotes the Claim; the Daemon Writes the Catalog (protocol 1.33)
+### A Person Promotes the Claim; the Runner Writes the Catalog (protocol 1.33)
 
 `reference.promote <claim_id>` turns a claim into
 `<workspace>/.jaato/references/<id>.json`; `reference.dismiss <claim_id>`
@@ -4237,9 +4244,11 @@ correlated `ReferenceCurationRequest`, and answered with one
 `ReferenceCurationResultEvent` whatever happened, echoing the request's
 `request_id` (`category`: `invalid_request` / `no_workspace` / `not_owner`
 / `not_found` / `invalid_claim` / `collision` / `unsafe_path` /
-`io_error`). The daemon writes because it is the one process that is not
-confined; the runner's AppArmor contribution is unchanged, since the
-runner still writes only claims.
+`io_error` / `runner_unreachable` / `wrong_workspace`). The daemon
+decides what is written; the runner of a session in the workspace writes
+it, in its base profile (`session.write_reference`, #1422), and the daemon
+writes it only when no session there can be asked. A model-called tool
+body still cannot write the catalog: `tool_hat` denies it.
 
 `ReferenceClaimsRequest` → `ReferenceClaimsEvent` is the curator's
 listing: the claims in the caller's workspace, read the way a promotion
@@ -4292,20 +4301,20 @@ reference is placed whatever that says.
 
 | Piece | Where, and why there |
 |---|---|
-| the write and `reconcile_bundle` | the **daemon** (`reference_curation.reconcile_destination`): on a confined host every runner body denies `.jaato/references/**`, the base profile included, and in-process tools run in base because `tool_hat` is never entered |
-| the vectors | the caller's **runner** (`session.embed_texts`, work lane, `ReferencesPlugin.embed_texts`), because the embedding model is loaded there; the daemon wraps it as `RunnerEmbeddingProvider`, so the code that writes an index is unchanged |
-| the model check | a probe with no texts first: a session embedding with a model other than the index's is `unavailable`, never written into it |
+| the decision | the **daemon** (`reference_curation`): the owner gate, the claim's re-validation, the origin stamp |
+| the write and `reconcile_bundle` | the **runner** of a session in the workspace (`session.write_reference`, work lane, `reference_catalog_write.write_catalog_file`), in its base profile, which may write `.jaato/references/**` since template v44 (#1422); the reconcile uses the references plugin's own embedding provider |
+| the model check | a provider whose model is not the index's is `unavailable`, never written into it |
+| no session to ask | the daemon writes the entry itself (it is not confined), and an indexed bundle is `unavailable` |
 
 Stated limits: with no session attached in the workspace, no embedding
-provider, or no numpy in the daemon's environment, the index is
+provider, or no numpy in the runner's environment, the index is
 `unavailable` and similarity matching cannot find the entry until it is
-reconciled; and `references bundle reconcile` typed in a confined session
-still cannot write the index (the same base-profile deny). This split is a
-**stopgap**: #1422 makes `tool_hat` real, lets the runner write its own
-catalog, and lists what to remove from here. A running session sees the new
-entry at its next catalog reload.
+reconciled. A running session sees the new entry at its next catalog
+reload. Before #1422 the daemon wrote and reconciled, with vectors fetched
+over `session.embed_texts`, because every runner body denied the catalog;
+that verb and `RunnerEmbeddingProvider` are gone.
 
-Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
+Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, six
 reversions (the numpy-backed reconcile tests skip without numpy).
 
 Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
@@ -4386,13 +4395,13 @@ web coder's **References** rail section lists the catalog (the badge is
 `!` while any reference holds a dangling edge) and gives the owner an
 editor per reference; a promotion from Proposals re-lists it. A running
 session sees an edit at its next catalog reload. Like promotion into a bundle, the
-write is daemon-side only because no runner profile may write the catalog;
-#1422 (a real `tool_hat`) moves it back to the runner, with the daemon
-keeping the owner gate.
+daemon keeps the owner gate and the file is written by the runner of a
+session in the workspace (`session.write_reference`, base profile, #1422),
+or by the daemon when there is none.
 
 Guards: `shared/tests/test_typed_reference_links.py` (seven reversions),
 `server/tests/test_a_proposal_carries_typed_links.py` (five) and
-`server/tests/test_a_person_edits_a_references_links.py` (six).
+`server/tests/test_a_person_edits_a_references_links.py` (seven).
 
 ### Plugin-Level Traits
 

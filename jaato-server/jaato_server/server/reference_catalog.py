@@ -4,9 +4,10 @@ Typed links (``links: [{to, rel, note?}]``, ``shared/plugins/references/
 links.py``) reach the catalog two ways: written by hand into a reference's
 JSON, or carried in by the promotion of an agent's proposal
 (``reference_curation``).  After that there was no way to change them short
-of editing the file on the host, and a confined runner cannot write the
-catalog at all (every AppArmor body denies ``.jaato/references/**``).  This
-module is the DAEMON's half of two verbs (protocol 1.33):
+of editing the file on the host.  This module is the DAEMON's half of two
+verbs (protocol 1.33); the file itself is written by the runner of a session
+in the workspace (``session.write_reference``, base profile, #1422), or here
+when there is none:
 
 * :func:`list_catalog` -- ``ReferenceCatalogRequest`` -> ``ReferenceCatalogEvent``:
   every reference in the workspace catalog, sub-bundles included, with its
@@ -28,7 +29,8 @@ Rules, each a way it could go wrong:
    routed nowhere; both are ``warnings``.
 4. **Only the ``links`` key changes.**  The file is re-read, the key
    replaced (removed when the list is empty) and the rest written back as
-   it was, through ``write_contained`` (#1386), so a link planted in the
+   it was, through ``write_contained`` (#1386, in
+   :func:`~.reference_catalog_write.write_catalog_file`), so a link planted in the
    catalog cannot carry the write out of the workspace.  A reference whose
    id appears in two files is ``ambiguous`` and is not edited: which one
    the loader keeps is not this module's to guess.
@@ -47,7 +49,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_server.shared.plugins.bundle_common.bundle import BUNDLE_MANIFEST_FILENAME
 from jaato_server.shared.plugins.references.bundle import REFERENCE_NON_SOURCE_FILENAMES
@@ -59,9 +61,9 @@ from jaato_server.shared.plugins.references.links import (
     parse_links,
 )
 
-from .contained_write import PathLeavesRoot, contained_dir, write_contained
+from .contained_write import PathLeavesRoot, contained_dir
 from .memory_verbs import may_curate
-from .reference_curation import CATALOG_REL
+from .reference_curation import CATALOG_REL, local_writer
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +273,7 @@ def _match_refusal(
 def update_links(
     workspace: str, reference_id: str, links: Any, *,
     owner: Optional[str], user_id: Optional[str],
+    write: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> LinksOutcome:
     """Replace ``reference_id``'s declared links in ``workspace``'s catalog.
 
@@ -282,6 +285,9 @@ def update_links(
         owner: The workspace's qualified owner, ``None`` when unowned.
         user_id: The identity the transport authenticated on this
             connection.
+        write: Writes the file (the runner of a session in this workspace,
+            ``session.write_reference``, #1422); ``None`` writes here.  A
+            links edit changes no embedding, so nothing is reconciled.
 
     Returns:
         A :class:`LinksOutcome`; this never raises for a refusal.
@@ -307,12 +313,12 @@ def update_links(
     else:
         updated.pop("links", None)
     body = json.dumps(updated, indent=2, ensure_ascii=False) + "\n"
-    try:
-        write_contained(root, rel, body.encode("utf-8"))
-    except PathLeavesRoot as exc:
-        return _fail(outcome, "unsafe_path", str(exc))
-    except OSError as exc:
-        return _fail(outcome, "io_error", f"could not write {rel}: {exc}")
+    written = (write or local_writer(root))(
+        {"rel_file": rel, "data": body, "replace": True, "bundle": "",
+         "ref_id": reference_id, "reconcile": False})
+    if not written.get("ok"):
+        return _fail(outcome, written.get("category") or "io_error",
+                     written.get("error") or f"could not write {rel}")
     index = _index([(r, updated if r == rel else d) for r, d in entries])
     outcome.ok, outcome.reference_file, outcome.links = True, rel, normalised
     outcome.warnings = (link_warnings(normalised, index.ids)
