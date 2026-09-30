@@ -40,14 +40,16 @@ plugin writes); a umask is applied once to the process and inherited by
 everything downstream, because ``fork`` inherits it and ``exec``
 preserves it.
 
-WHAT THIS MODULE DOES **NOT** DO.  It does not drop privileges.  That is
-step 3 of #1168 and is deliberately out of scope: it needs a uid field on
-``SlotKey`` (a pool slot that has dropped is permanently that uid, which
-is #1033's own generating rule), a policy for *which* uid, and an answer
-for the WS transport, which has no OS principal to read (``get_client_peer``
-returns ``None`` on WS by design, #1074).  A warning and a umask change
-neither the process model nor what any file is owned by; they make the
-posture visible and its consequence survivable.
+WHERE THE REAL FIX LIVES.  A umask cannot widen a file created with an
+explicit mode (``curated.jsonl`` is ``0600``) or one written by
+``mkstemp`` + ``os.replace``.  Step 3 of #1168 runs the runner AS a user:
+``--runner-uid-policy`` / ``JAATO_RUNNER_UID_POLICY`` (``daemon`` by
+default, ``peer`` or ``workspace-owner``), resolved in
+:mod:`server.runner_user` and performed by :mod:`shared.privilege_drop`.
+This module installs the policy at startup and names it in the root
+warning, because it is the remedy that changes who owns the files; the
+umask stays, as the mitigation for what the policy cannot cover (a WS
+session under ``peer``, which has no OS principal).
 """
 
 from __future__ import annotations
@@ -89,39 +91,56 @@ def running_as_root() -> bool:
     return geteuid() == 0
 
 
-def announce_root_daemon_once() -> None:
-    """WARN, once per daemon process, that the agent writes as root.
+def announce_root_daemon_once(runner_uid_policy: str = "daemon") -> None:
+    """Say, once per daemon process, what a root daemon does to file ownership.
 
     No-op unless :func:`running_as_root`, so an ordinary deployment gains
     nothing — and no-op on every call after the first, so the line does
     not repeat per session.
 
-    The message names the consequence (root-owned files in a workspace
-    the daemon does not own) and both remedies, in order of preference:
-    run as a service user, which is what the deployment guides already
-    assume; or, where that is impossible, set a umask so the files stay
-    group-writable.
+    Args:
+        runner_uid_policy: The installed ``--runner-uid-policy``.  Under
+            ``daemon`` (the default) every runner is root, so this WARNs,
+            naming the consequence and the remedies in order of preference:
+            run as a service user; drop each runner to its user with
+            ``--runner-uid-policy peer|workspace-owner`` (the fix that
+            changes who owns the files); or, where neither is possible, a
+            umask that keeps the files group-writable.  Under any other
+            policy runners drop, so this is INFO naming the policy and the
+            one gap it leaves.
     """
     if not running_as_root():
         return
     if _root_announced.is_set():
         return
     _root_announced.set()
+    if runner_uid_policy != "daemon":
+        logger.info(
+            "This daemon is running as ROOT and drops each session's "
+            "runner to the user named by --runner-uid-policy %s (#1168).  "
+            "A session the policy cannot name a user for (a WebSocket "
+            "connection under 'peer', a root-owned workspace under "
+            "'workspace-owner') keeps a root runner, and says so once.",
+            runner_uid_policy,
+        )
+        return
     logger.warning(
-        "This daemon is running as ROOT (euid 0) and never drops "
+        "This daemon is running as ROOT (euid 0) and, under "
+        "--runner-uid-policy daemon (the default), never drops "
         "privileges — the per-session runner is forked and exec'd under "
         "the same uid.  Every file the agent writes into a workspace is "
         "therefore root-owned: writeNewFile and file_edit backups, the "
-        "parent directories they create, and anything a cli subprocess "
-        "produces (it runs with cwd=<workspace_root>, so one git clone "
-        "or npm install leaves a whole root-owned tree there).  The "
+        "parent directories they create, the memory and references "
+        "stores, and anything a cli subprocess produces.  The "
         "workspace's owner then needs sudo to overwrite or delete their "
-        "own files.  The deployment guides (docs/apparmor-setup.md, "
-        "docs/runtime-limits-setup.md) assume a service user — run the "
-        "daemon as one.  Where that is not possible, --umask 002 (or "
-        "%s=002) plus a setgid workspace keeps those files "
-        "group-writable; it does not change who owns them.",
-        UMASK_ENV_VAR,
+        "own files.  Run the daemon as a service user (the deployment "
+        "guides, docs/apparmor-setup.md and docs/runtime-limits-setup.md, "
+        "assume one), or pass --runner-uid-policy peer (the IPC "
+        "client's uid) or workspace-owner (%s=...) so each runner runs "
+        "as its user.  --umask 002 (%s=002) plus a setgid workspace "
+        "only keeps files group-writable; it does not change who owns "
+        "them, nor help a file created with mode 0600.",
+        "JAATO_RUNNER_UID_POLICY", UMASK_ENV_VAR,
     )
 
 
@@ -223,8 +242,10 @@ def apply_umask(value: Optional[int]) -> Optional[int]:
     return previous
 
 
-def apply_process_posture(umask: Optional[str] = None) -> None:
-    """Apply the umask, then announce a root daemon.  Once, at startup.
+def apply_process_posture(
+    umask: Optional[str] = None, runner_uid_policy: Optional[str] = None,
+) -> str:
+    """Apply the umask and the runner uid policy, then announce a root daemon.
 
     The single entry point, so a caller wires one line and cannot wire
     half of it.  Call it from the daemon's ``start()`` **before** anything
@@ -236,10 +257,24 @@ def apply_process_posture(umask: Optional[str] = None) -> None:
         umask: ``--umask``'s argument for entry points that have the flag.
             Omit it and :data:`UMASK_ENV_VAR` is the only source, which is
             what the standalone WS server uses.
+        runner_uid_policy: ``--runner-uid-policy``'s argument, or ``None``
+            to read ``JAATO_RUNNER_UID_POLICY`` (#1168 step 3).
+
+    Returns:
+        The policy installed (``daemon`` when nothing was configured).
 
     Order is deliberate: the umask is applied first so it governs every
-    file this process opens from here on, and the root warning is emitted
-    second so it appears beside the value that mitigates it.
+    file this process opens from here on, the policy is installed before
+    anything can spawn, and the root announcement comes last so it names
+    the posture that is actually in force.
     """
+    from jaato_server.server import runner_user
+
     apply_umask(resolve_umask(umask))
-    announce_root_daemon_once()
+    policy = runner_user.resolve_policy(runner_uid_policy)
+    runner_user.set_policy(policy)
+    if policy != runner_user.POLICY_DAEMON:
+        logger.info("runner uid policy: %s", policy)
+    runner_user.announce_if_unprivileged(policy)
+    announce_root_daemon_once(policy)
+    return policy

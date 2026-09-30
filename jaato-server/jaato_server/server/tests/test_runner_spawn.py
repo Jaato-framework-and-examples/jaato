@@ -493,7 +493,8 @@ class _FakePoolManager:
         self.last_key = None
 
     def acquire_slot(self, cascade_driver_id=None, config_root=None,
-                     workspace_root=None, profile_name=None):
+                     workspace_root=None, profile_name=None,
+                     runner_uid=None):
         self.acquire_calls += 1
         self.last_cascade_id = cascade_driver_id
         # #1033: the whole key, so a test can assert the spawn path
@@ -503,6 +504,7 @@ class _FakePoolManager:
             "config_root": config_root,
             "workspace_root": workspace_root,
             "profile_name": profile_name,
+            "runner_uid": runner_uid,
         }
         return self.slot
 

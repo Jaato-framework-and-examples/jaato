@@ -1491,6 +1491,8 @@ class SessionManager:
         # Set by ``CommandRouter.__init__``; see set_visible_sessions_resolver.
         self._visible_sessions_resolver: Optional[
             Callable[[str], List["RuntimeSessionInfo"]]] = None
+        # Set by ``CommandRouter.__init__``; see set_client_peer_resolver.
+        self._client_peer_resolver: Optional[Callable[[str], Any]] = None
 
         # Initialize session plugin for persistence.
         # storage_path stays relative (e.g. ".jaato/sessions") — it is
@@ -2940,6 +2942,9 @@ class SessionManager:
                 pool_manager=getattr(self, "_pool_manager_ref", None),
                 cascade_driver_id=cascade_driver_id,
                 managed_workspace_root=managed_workspace_root,
+                # #1168: the connection's OS principal, for the ``peer``
+                # runner uid policy.
+                peer=self._client_peer(client_id),
             )
             # #812: record WHICH PROCESS is running this session, now that
             # the spawn helper has left the ``SpawnedRunner`` on the server.
@@ -3051,13 +3056,8 @@ class SessionManager:
                     )
             return True
         except Exception as exc:  # noqa: BLE001 — boundary
-            self._notify_apparmor(
-                client_id, session_id,
-                f"runner spawn failed ({type(exc).__name__}: {exc}) "
-                "— falling back to in-process tool execution; "
-                "session is NOT kernel-confined",
-                style="warning",
-            )
+            self._report_runner_spawn_failure(
+                server, client_id, session_id, exc)
             logger.exception(
                 "runner spawn failed for session %s", session_id,
             )
@@ -4915,6 +4915,69 @@ class SessionManager:
         if resolver is None or not workspace_path:
             return None
         return resolver.owner_for(workspace_path)
+
+    def set_client_peer_resolver(
+        self, resolver: Optional[Callable[[str], Any]],
+    ) -> None:
+        """Teach the manager how to ask which OS account a client is (#1168).
+
+        The ``peer`` runner uid policy drops a session's runner to the
+        uid that opened the IPC socket (``SO_PEERCRED``).  That credential
+        lives on the transport, and this manager holds an event callback
+        rather than an ``EventSink`` -- so, as with
+        :meth:`set_visible_sessions_resolver`, the router lends its own
+        lookup (``event_sink.client_peer``).  ``None`` means "no peer
+        known", which the policy reads as "keep the daemon's uid" and
+        announces -- never as a guessed uid.
+        """
+        self._client_peer_resolver = resolver
+
+    def _client_peer(self, client_id: str) -> Any:
+        """The connection's ``PeerCredentials``, or ``None`` (#1168).
+
+        A resolver that raises answers ``None``: the consequence is a runner
+        that keeps the daemon's uid, which is today's behaviour and is
+        announced by the policy, rather than a failed session.
+        """
+        resolver = getattr(self, "_client_peer_resolver", None)
+        if resolver is None:
+            return None
+        try:
+            return resolver(client_id)
+        except Exception:  # noqa: BLE001 -- see docstring
+            logger.debug("client peer lookup failed for %s", client_id,
+                         exc_info=True)
+            return None
+
+    def _report_runner_spawn_failure(
+        self, server: 'JaatoServer', client_id: str, session_id: str,
+        exc: BaseException,
+    ) -> None:
+        """Say what a failed IPC runner spawn means for the session.
+
+        The general case falls back to in-process tool execution, as it
+        always has.  A :class:`~server.runner_user.RunnerUserRefused` does
+        NOT (#1168): the policy asked for the session to run as a user, and
+        the in-process fallback would run the model's tools in the root
+        daemon -- so the session is refused by name through
+        ``initialize_or_refuse`` (the #1253 door).
+        """
+        from jaato_server.server.runner_user import RunnerUserRefused
+        if isinstance(exc, RunnerUserRefused):
+            logger.warning(
+                "runner uid drop refused for session %s — REFUSING the "
+                "session rather than running it in the root daemon: %s",
+                session_id, exc,
+            )
+            self._record_bootstrap_refusal(server, str(exc))
+            return
+        self._notify_apparmor(
+            client_id, session_id,
+            f"runner spawn failed ({type(exc).__name__}: {exc}) "
+            "— falling back to in-process tool execution; "
+            "session is NOT kernel-confined",
+            style="warning",
+        )
 
     def set_visible_sessions_resolver(
         self,
