@@ -165,4 +165,22 @@ describe("firstSentence", () => {
   it("falls back to the trimmed text when nothing matches", () => {
     expect(firstSentence("   ")).toBe("");
   });
+
+  it("a call to a tool that does not exist is one muted line, not a red row", () => {
+    const refused = tool("t_7ab511ea-c3ce-453b-b207-9831549a93f7", "error", { errorMessage: "No executor registered for t_7ab511ea-c3ce-453b-b207-9831549a93f7" });
+    const failedForReal = tool("cli_based_tool", "error", { errorMessage: "exit status 1" });
+    const groups = buildTranscript([refused, failedForReal], {}).filter((i): i is ToolGroupItem => i.kind === "toolGroup");
+    expect(groups.map((g) => g.mode)).toEqual(["misfire", "row"]);
+    expect(groups[0]!.label).toMatch(/^called a tool that does not exist: t_7ab511ea/);
+    expect(groups[0]!.calls).toEqual([refused]);
+  });
+
+  it("a misfire is neither paired as a recovery nor folded with housekeeping", () => {
+    const refused = tool("listPlans", "error", { errorMessage: "No executor registered for listPlans" });
+    const groups = buildTranscript([refused, tool("listPlans"), tool("list_tools")], {})
+      .filter((i): i is ToolGroupItem => i.kind === "toolGroup");
+    expect(groups.find((g) => g.mode === "misfire")!.calls).toEqual([refused]);
+    expect(groups.some((g) => g.mode === "recovered")).toBe(false);
+    expect(groups.every((g) => g.mode === "misfire" || !g.calls.includes(refused))).toBe(true);
+  });
 });
