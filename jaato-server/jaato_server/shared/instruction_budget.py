@@ -288,9 +288,24 @@ class InstructionBudget:
     agent_type: Optional[str] = None
     entries: Dict[InstructionSource, SourceEntry] = field(default_factory=dict)
     context_limit: int = 128_000  # Model's context window
+    #: Ratio by which the provider's reported prompt exceeded this budget's
+    #: estimate on the last response that reported one, or 1.0 when they
+    #: agreed within :data:`CALIBRATION_MARGIN` (or the budget was larger).
+    #: Written only by :meth:`calibrate`.  See :meth:`effective_total_tokens`.
+    calibration_factor: float = 1.0
+    #: The provider's own prompt size (uncached + cache read + cache write)
+    #: on the last response that reported usage; ``None`` until one did.
+    provider_prompt_tokens: Optional[int] = None
 
     # Sources excluded from context window calculations (output-only tokens)
     _NON_CONTEXT_SOURCES = frozenset({InstructionSource.THINKING})
+
+    #: Relative difference between the provider's prompt size and this
+    #: budget's estimate beyond which the estimate is not trusted on its
+    #: own (#1440).  Chars/4 and a provider tokenizer routinely differ by a
+    #: few percent; a difference larger than this means the budget is
+    #: missing something the wire carries.
+    CALIBRATION_MARGIN = 0.15
 
     def total_tokens(self) -> int:
         """Total context tokens across all sources (excludes output-only sources)."""
@@ -324,15 +339,68 @@ class InstructionBudget:
             if source not in self._NON_CONTEXT_SOURCES
         )
 
+    def effective_total_tokens(self) -> int:
+        """The context size the GC threshold is judged on (#1440).
+
+        :meth:`total_tokens` is this budget's own estimate.  When the last
+        response's provider-reported prompt exceeded it by more than
+        :data:`CALIBRATION_MARGIN`, the estimate is known to be short, and
+        a denominator known to be wrong must not decide on its own: the
+        estimate is scaled by :attr:`calibration_factor`, which is the
+        larger of the two figures at the moment it was measured.
+
+        Scaled rather than replaced by the reported figure, so a GC pass
+        that removes entries lowers it at once -- the reported figure
+        describes the request before the pass and would keep triggering
+        collection until the next response re-measured it.
+        """
+        total = self.total_tokens()
+        if self.calibration_factor <= 1.0:
+            return total
+        return max(total, int(round(total * self.calibration_factor)))
+
+    def is_calibrated(self) -> bool:
+        """True when :meth:`effective_total_tokens` exceeds the raw estimate."""
+        return self.calibration_factor > 1.0
+
+    def calibrate(self, reported_prompt_tokens: int) -> Optional[float]:
+        """Compare the provider's prompt size with this budget's estimate.
+
+        Called once per response that reported usage.  Records the
+        reported figure and sets :attr:`calibration_factor`: the ratio
+        ``reported / estimate`` when it exceeds ``1 + CALIBRATION_MARGIN``,
+        else 1.0 (the estimate is used when the two agree, and when the
+        budget is the LARGER figure, which already is the larger of the
+        two).  Each call re-measures, so a factor never outlives the next
+        response that disagrees with it less.
+
+        Args:
+            reported_prompt_tokens: The provider's prompt size for the
+                request just answered, cache reads and writes included.
+
+        Returns:
+            The raw ratio ``reported / estimate``, or ``None`` when either
+            side is not a positive number (nothing was compared, and the
+            factor is left as it was).
+        """
+        estimate = self.total_tokens()
+        if reported_prompt_tokens <= 0 or estimate <= 0:
+            return None
+        self.provider_prompt_tokens = int(reported_prompt_tokens)
+        ratio = reported_prompt_tokens / estimate
+        self.calibration_factor = (
+            ratio if ratio > 1.0 + self.CALIBRATION_MARGIN else 1.0)
+        return ratio
+
     def utilization_percent(self) -> float:
-        """Context window utilization as percentage."""
+        """Context window utilization as percentage, of the effective total."""
         if self.context_limit == 0:
             return 0.0
-        return (self.total_tokens() / self.context_limit) * 100
+        return (self.effective_total_tokens() / self.context_limit) * 100
 
     def available_tokens(self) -> int:
-        """Tokens still available in the context window."""
-        return max(0, self.context_limit - self.total_tokens())
+        """Tokens still available in the context window (effective total)."""
+        return max(0, self.context_limit - self.effective_total_tokens())
 
     def gc_headroom_percent(self) -> float:
         """
@@ -432,6 +500,14 @@ class InstructionBudget:
             "agent_type": self.agent_type,
             "context_limit": self.context_limit,
             "total_tokens": self.total_tokens(),
+            # #1440: what the threshold is judged on, and where it came
+            # from.  ``total_tokens`` stays the budget's own estimate (the
+            # sum of the entries below); ``effective_total_tokens`` is that
+            # estimate scaled up when the provider reported a larger prompt.
+            "effective_total_tokens": self.effective_total_tokens(),
+            "total_source": "calibrated" if self.is_calibrated() else "estimate",
+            "calibration_factor": round(self.calibration_factor, 4),
+            "provider_prompt_tokens": self.provider_prompt_tokens,
             "gc_eligible_tokens": self.gc_eligible_tokens(),
             "locked_tokens": self.locked_tokens(),
             "preservable_tokens": self.preservable_tokens(),

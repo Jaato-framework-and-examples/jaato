@@ -203,7 +203,7 @@ declared to the capability contract as `reasoning_replay`:
 | the turn's reasoning becomes a leading `Part.thought` | `_openai_compat/base.py` (streaming loop + `_finish_batch_response`) | history has something to replay; `ProviderResponse.thinking` still feeds the UI |
 | the session keeps thought parts in history | `JaatoSession._add_model_response_to_history`, gated `provider.replay_reasoning is True` | a mock or a non-opted provider changes nothing |
 | the converter replays them | `message_to_openai(..., reasoning_fields=)` → `{"reasoning_content": text}` by default, `content: ""` next to `tool_calls` | a vendor with a second field overrides `_reasoning_replay_fields` (MiniMax adds `reasoning_details`) |
-| GC sizes them | `gc/utils.estimate_message_tokens` | replayed reasoning is context, and a K3 turn at max effort carries tens of thousands of tokens of it |
+| GC and the budget size them | `gc/utils.part_wire_texts`, read by `estimate_message_tokens` and the instruction budget (#1440) | replayed reasoning is context, and a K3 turn at max effort carries tens of thousands of tokens of it |
 | persistence round-trips them | `serialize_message` / `deserialize_message` — since #1290; before it they did **not** (below) | a revived session replays what it replayed live |
 
 Reasoning is read off streaming deltas through `_reasoning_from_delta`, so a
@@ -1631,6 +1631,67 @@ The same three keys are settable per session from a profile's `gc:` block and
 from `.jaato/gc.json`; both layers pass a key only when it is present, so
 omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
 charge rather than silently overriding it.
+
+### The Budget Counts What Is Sent (#1440)
+
+A session on a 1M model tracked 513k in its `InstructionBudget` while the
+provider reported an 861.8k prompt (1.5k uncached + 860k cache read).
+`gc_budget` decides on the budget, so it freed 0 every turn while the
+streaming check (provider total ≥ 80%) kept announcing a GC, and the
+context climbed toward the window. The budget counted text, tool results
+and media, and missed **tool-call arguments** (a notebook cell's code, a
+whole file handed to `writeNewFile`) and **replayed reasoning** (the
+`Part.thought` a `replay_reasoning` provider sends back as
+`reasoning_content` on every request).
+
+**One per-part size rule.** `gc/utils.part_wire_texts` names every string
+a part puts on the wire: text, thought (when the wire replays it), the
+tool-call name plus `json.dumps(args)` (the converters' serialisation, or
+`unreadable_args`), the tool result plus `model_suffix`, and the code
+parts. Not exclusive: a part with text and reasoning contributes both.
+`estimate_message_tokens` (chars/4) and `JaatoSession._message_budget_tokens`
+(the session's tokenizer) both read it, plus `message_media_tokens` for
+bytes, so the figure GC decides on and the figure it reports its result in
+count the same things. Thought counts toward CONVERSATION when the active
+provider has `replay_reasoning is True` (or none exists yet); `THINKING`
+stays the output meter. The per-message cache is keyed by a fingerprint
+(reasoning included or not, part count, string lengths, media bytes), so a
+message whose parts change is recounted.
+
+**Calibration.** Once per response (`_accumulate_turn_tokens`), the
+provider's prompt size, `prompt_tokens + cache_read + cache_creation`, is
+compared with the budget total (`InstructionBudget.calibrate`). A usage
+with `reported=False` (#688) or a zero prompt is not a measurement.
+
+| Ratio reported / estimate | Effect |
+|---|---|
+| within ±15% (`CALIBRATION_MARGIN`) | the estimate decides |
+| above 1.15 | `calibration_factor` = the ratio; `effective_total_tokens()` = estimate × factor decides the threshold (`utilization_percent`, `available_tokens`, `get_context_usage`) |
+| below 0.85 | the estimate (already the larger) decides |
+| either side of the margin | one WARNING per session naming both figures |
+
+The estimate is SCALED rather than replaced by the reported figure, so a
+GC pass lowers it at once; the reported figure describes the request before
+the pass and would keep triggering collection. `gc_budget.collect` judges
+the effective total and converts the amount to free back into estimate
+units (`_in_estimate_units`), because entries are sized in those units.
+Each response re-measures; a fresh `reset_session` clears the factor.
+Nothing here changes the bytes sent: the pre-send gate
+(`_assert_payload_fits_context`) still reads the raw estimate.
+
+**Which measurement a readout is.** `ContextUpdatedEvent.source` is
+`"budget"` (jaato's accounting, calibrated or not) or `"provider"` (the
+usage the upstream reported); `None` from a daemon that does not say.
+Additive and optional, so no protocol bump. The budget snapshot gains
+`effective_total_tokens`, `total_source` (`estimate` / `calibrated`),
+`calibration_factor` and `provider_prompt_tokens`, and `get_context_usage`
+`tokens_source`, `estimate_tokens` and `provider_prompt_tokens`. The web
+Context heading names the source, and the Instructions heading shows the
+figure GC judges when calibrated.
+
+Guard: `jaato_server/shared/tests/test_the_budget_counts_what_is_sent_1440.py`,
+five reversions. It drives the real `message_to_openai` for the wire size
+and the real `gc_budget` plugin.
 
 ### A Strategy Resolved, Carried, Rendered — and Installed on Nobody (#1133)
 

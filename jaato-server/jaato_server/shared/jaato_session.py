@@ -93,7 +93,9 @@ from .plugins.gc.utils import (
     estimate_history_tokens,
     evict_consumed_media,
     history_media_bytes,
+    message_media_bytes,
     message_media_tokens,
+    message_wire_texts,
 )
 from .history_invariant import repair_history
 from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
@@ -530,6 +532,29 @@ def _reasoning_count(usage: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _message_label_facts(msg: Message) -> Tuple[bool, str, List[str]]:
+    """What the budget's per-message label is derived from.
+
+    Returns ``(has_tool_result, text_content, tool_names)``: whether the
+    message carries a tool result, its concatenated text (read for
+    framework-enrichment markers), and the names of the tools whose
+    results it carries.  Labelling only -- the SIZE of a message is
+    ``JaatoSession._message_budget_tokens``.
+    """
+    has_tool_result = False
+    text_content = ""
+    tool_names: List[str] = []
+    for part in msg.parts:
+        if part.text:
+            text_content += part.text
+        elif part.function_response:
+            has_tool_result = True
+            if part.function_response.name:
+                tool_names.append(part.function_response.name)
+    return has_tool_result, text_content, tool_names
+
 
 class JaatoSession:
     """Per-agent conversation session.
@@ -1083,7 +1108,11 @@ class JaatoSession:
         # Maps message_id -> token count. Since message content is immutable
         # once added to history, cached counts never go stale. This avoids
         # O(N) network API calls to count_tokens on every budget rebuild.
-        self._msg_token_cache: Dict[str, int] = {}
+        # message_id -> (fingerprint, tokens); see _message_budget_tokens.
+        self._msg_token_cache: Dict[str, Tuple[Any, int]] = {}
+        # One WARNING per session when the budget and the provider's
+        # reported prompt disagree beyond the margin (#1440).
+        self._budget_drift_warned = False
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
         # GC LIFECYCLE observer: (phase, payload) for about_to_run /
         # started / completed.  Distinct from _gc_threshold_callback
@@ -4434,12 +4463,70 @@ class JaatoSession:
 
         return enrichments
 
+    def _wire_replays_reasoning(self) -> bool:
+        """Whether this session's ``Part.thought`` parts reach the wire.
+
+        True when the active provider opts into reasoning replay
+        (``replay_reasoning is True`` -- MiniMax, Kimi, MiMo), and when no
+        provider exists yet: a revived history holding thought parts was
+        written by a replaying wire, and the first request will send them.
+        The same ``is True`` test ``_add_model_response_to_history`` uses to
+        decide whether to KEEP thought parts, so a mock provider (whose
+        attribute is a truthy mock) is read as non-replaying.
+        """
+        if self._provider is None:
+            return True
+        return getattr(self._provider, "replay_reasoning", False) is True
+
+    def _message_budget_tokens(self, msg: Message, include_thought: bool) -> int:
+        """Token count of one history message as the wire carries it (#1440).
+
+        Every string :func:`gc.utils.message_wire_texts` names -- text,
+        replayed reasoning (when ``include_thought``), tool-call names and
+        arguments, tool results, code parts -- counted with the session's
+        tokenizer, plus the binary payload estimate (#850, #989).  The part
+        rule is shared with ``estimate_message_tokens``, so the budget that
+        decides a GC pass and the estimate that reports its result agree
+        about what a message carries.
+
+        Cached per ``message_id`` with a fingerprint of what was counted
+        (whether reasoning was included, the part count, the lengths of
+        every string, the media bytes).  A message whose parts change in
+        place -- a part added, media evicted, a tier switch that stops
+        replaying reasoning -- is recounted rather than keeping its old
+        figure.  Computing the fingerprint costs a walk of the strings; the
+        tokenizer call it saves is the expensive part.
+        """
+        texts = message_wire_texts(msg, include_thought=include_thought)
+        media_bytes = message_media_bytes(msg)
+        fingerprint = (
+            include_thought, len(msg.parts or []),
+            tuple(len(t) for t in texts), media_bytes,
+        )
+        cached = self._msg_token_cache.get(msg.message_id)
+        if isinstance(cached, tuple) and cached[0] == fingerprint:
+            return cached[1]
+        tokens = sum(self._count_tokens(t) for t in texts)
+        tokens += message_media_tokens(msg)
+        self._msg_token_cache[msg.message_id] = (fingerprint, tokens)
+        return tokens
+
     def _update_conversation_budget(self) -> None:
-        """Update CONVERSATION entry in instruction budget from current history."""
+        """Update CONVERSATION entry in instruction budget from current history.
+
+        Each message is sized by :meth:`_message_budget_tokens` -- every
+        part the wire carries, including tool-call arguments and (on a
+        ``replay_reasoning`` provider) the reasoning replayed as
+        ``reasoning_content`` (#1440).  Before that fix only text, tool
+        results and media were counted, and a session could sit hundreds of
+        thousands of tokens past what the budget reported while
+        ``gc_budget``, which decides on this figure, freed nothing.
+        """
         if not self._instruction_budget:
             return
 
         history = self.get_history()
+        include_thought = self._wire_replays_reasoning()
         conversation_tokens = 0
         conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
         if conv_entry:
@@ -4471,54 +4558,10 @@ class JaatoSession:
             if msg.role == Role.USER:
                 current_turn += 1
 
-            # Count tokens for this message and detect content types.
-            # Use cached count when available — message content is immutable,
-            # so the token count for a given message_id never changes.
-            has_tool_result = False
-            has_text = False
-            text_content = ""
-            tool_names = []
-            mid = msg.message_id
-            cached = self._msg_token_cache.get(mid)
-            if cached is not None:
-                msg_tokens = cached
-                # Still need metadata (has_text, tool_names, etc.) for labelling
-                for part in msg.parts:
-                    if hasattr(part, 'text') and part.text:
-                        has_text = True
-                        text_content += part.text
-                    elif hasattr(part, 'function_response') and part.function_response:
-                        has_tool_result = True
-                        if part.function_response.name:
-                            tool_names.append(part.function_response.name)
-            else:
-                msg_tokens = 0
-                for part in msg.parts:
-                    if hasattr(part, 'text') and part.text:
-                        msg_tokens += self._count_tokens(part.text)
-                        has_text = True
-                        text_content += part.text
-                    elif hasattr(part, 'function_response') and part.function_response:
-                        # Tool results (function_response is a ToolResult)
-                        tr = part.function_response
-                        result_text = str(tr.result) if tr.result else ''
-                        msg_tokens += self._count_tokens(result_text)
-                        has_tool_result = True
-                        if tr.name:
-                            tool_names.append(tr.name)
-                # Binary payload (audio, images, PDFs) was counted as
-                # nothing at all until #850, which is what made a 600 KB
-                # utterance invisible to every GC threshold: the tokenizer
-                # has no opinion about bytes, so the denominator simply
-                # omitted them.  Summed outside the loop, not as another
-                # ``elif`` inside it, because this function is frozen near
-                # the top of the complexity baseline and one more branch
-                # would grow the ratchet.  The estimate is deliberately
-                # coarse (see MEDIA_BYTES_PER_TOKEN) — its job is to put
-                # the payload in the budget, not to reproduce a vendor's
-                # audio-token billing.
-                msg_tokens += message_media_tokens(msg)
-                self._msg_token_cache[mid] = msg_tokens
+            # Size (#1440: every string the wire carries, through the one
+            # per-part rule gc/utils shares) and labelling facts.
+            msg_tokens = self._message_budget_tokens(msg, include_thought)
+            has_tool_result, text_content, tool_names = _message_label_facts(msg)
 
             conversation_tokens += msg_tokens
 
@@ -11325,6 +11368,60 @@ NOTES
         observe = getattr(self, '_observe_binding_usage', None)
         if observe is not None:
             observe(response)
+        # #1440: the one per-response point at which the provider says how
+        # large the request it just answered was.  Resolved like the
+        # observer above, for the same duck-typed-self reason.
+        calibrate = getattr(self, '_calibrate_budget_against_provider', None)
+        if calibrate is not None:
+            calibrate(response.usage)
+
+    def _calibrate_budget_against_provider(self, usage: TokenUsage) -> None:
+        """Compare the budget's estimate with the provider's prompt size (#1440).
+
+        The provider's prompt size is ``prompt_tokens`` (the uncached
+        input, #758) plus ``cache_read_tokens`` plus
+        ``cache_creation_tokens``; an absent cache count adds nothing.  A
+        response whose usage was not reported (``usage.reported is False``,
+        #688) is not a measurement and is skipped, as is a reported prompt
+        of zero, which no real request has.
+
+        :meth:`InstructionBudget.calibrate` records the figure and, beyond
+        its margin, makes the GC threshold judge the LARGER of the two.
+        A difference beyond the margin in either direction is logged at
+        WARNING once per session, naming both figures -- a budget that
+        disagrees with the wire by that much is missing (or double-counting)
+        something, and the gap is the evidence.
+
+        Never raises: calibration is an observation about a turn, and must
+        not be able to fail one that otherwise succeeded.
+        """
+        # getattr: sessions built with ``__new__`` (duck-typed tests of
+        # the accumulator) never ran ``__init__``.
+        budget = getattr(self, '_instruction_budget', None)
+        if budget is None or not getattr(usage, 'reported', True):
+            return
+        try:
+            reported = (
+                int(usage.prompt_tokens or 0)
+                + int(usage.cache_read_tokens or 0)
+                + int(usage.cache_creation_tokens or 0)
+            )
+            estimate = budget.total_tokens()
+            ratio = budget.calibrate(reported)
+        except Exception:  # noqa: BLE001 - reporting must not fail a turn
+            logger.debug("budget calibration failed", exc_info=True)
+            return
+        if ratio is None or getattr(self, '_budget_drift_warned', False):
+            return
+        if abs(ratio - 1.0) <= budget.CALIBRATION_MARGIN:
+            return
+        self._budget_drift_warned = True
+        logger.warning(
+            "[session:%s] instruction budget estimate %d tokens differs from "
+            "the provider's reported prompt %d tokens (%.0f%%); the GC "
+            "threshold uses the larger figure (#1440)",
+            self._agent_id, estimate, reported, (ratio - 1.0) * 100,
+        )
 
     def _observe_binding_usage(self, response: ProviderResponse) -> None:
         """Fold one response into the per-binding consumption ledger.
@@ -13198,6 +13295,12 @@ NOTES
         This includes system instructions, plugin schemas, enrichment, and conversation
         tokens - providing accurate context usage from startup through all turns.
 
+        ``total_tokens`` is the budget's EFFECTIVE total: its own estimate,
+        scaled up when the provider's last reported prompt was larger by
+        more than ``InstructionBudget.CALIBRATION_MARGIN`` (#1440).
+        ``tokens_source`` says which (``estimate`` / ``calibrated``), and
+        ``estimate_tokens`` / ``provider_prompt_tokens`` carry both sides.
+
         Reports one figure that is NOT a token count: ``media_bytes``, the
         binary payload the history carries.  It is the denominator
         ``media_pressure_reason`` compares against
@@ -13206,17 +13309,27 @@ NOTES
         megabytes of audio, which is the state GC could not see (#850).
         """
         # Use InstructionBudget as the single source of truth
-        if self._instruction_budget:
-            total_tokens = self._instruction_budget.total_tokens()
-            context_limit = self._instruction_budget.context_limit
-            percent_used = self._instruction_budget.utilization_percent()
-            tokens_remaining = self._instruction_budget.available_tokens()
+        budget = self._instruction_budget
+        if budget:
+            # The EFFECTIVE total (#1440): the budget's estimate, scaled up
+            # when the provider last reported a larger prompt.  It is what
+            # the GC threshold is judged on, so it is what is reported.
+            total_tokens = budget.effective_total_tokens()
+            context_limit = budget.context_limit
+            percent_used = budget.utilization_percent()
+            tokens_remaining = budget.available_tokens()
+            tokens_source = "calibrated" if budget.is_calibrated() else "estimate"
+            estimate_tokens = budget.total_tokens()
+            provider_prompt = budget.provider_prompt_tokens
         else:
             # Fallback if budget not initialized
             total_tokens = 0
             context_limit = self.get_context_limit()
             percent_used = 0.0
             tokens_remaining = context_limit
+            tokens_source = None
+            estimate_tokens = 0
+            provider_prompt = None
 
         # Get turn count from turn_accounting for backward compatibility
         turn_accounting = self.get_turn_accounting()
@@ -13237,6 +13350,15 @@ NOTES
             # reads this key; a strategy that never looks at it behaves
             # precisely as it did before.
             'media_bytes': history_media_bytes(self.get_history()),
+            # Where ``total_tokens`` came from (#1440): ``estimate`` is the
+            # budget's own count, ``calibrated`` that count scaled to the
+            # provider's last reported prompt; ``None`` when there is no
+            # budget.  ``estimate_tokens`` is the unscaled count and
+            # ``provider_prompt_tokens`` the last reported prompt (uncached
+            # + cache read + cache write), ``None`` until one was reported.
+            'tokens_source': tokens_source,
+            'estimate_tokens': estimate_tokens,
+            'provider_prompt_tokens': provider_prompt,
         }
 
     def _log_gc_denominator(self, label: str, provider_total: int = 0) -> None:
@@ -13320,6 +13442,11 @@ NOTES
         self._consumption = ConsumptionLedger()
         if not history:
             self._msg_token_cache.clear()
+            # A calibration measured the conversation that no longer
+            # exists; the next response re-measures (#1440).
+            if self._instruction_budget is not None:
+                self._instruction_budget.calibration_factor = 1.0
+                self._instruction_budget.provider_prompt_tokens = None
             # On true fresh reset, clear pinned references and remove their
             # content from the system instruction.  GC resets (history provided)
             # preserve pinned references — they stay in the system instruction.

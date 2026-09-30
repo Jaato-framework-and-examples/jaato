@@ -1134,6 +1134,9 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           percentUsed: (ev.percent_used as number | null | undefined) ?? prev?.percentUsed ?? null,
           tokensRemaining: (ev.tokens_remaining as number | null | undefined) ?? prev?.tokensRemaining ?? null,
           turns: (ev.turns as number | null | undefined) ?? prev?.turns ?? null,
+          // Per event, never carried over: a figure from one source must not
+          // be labelled with the previous event's source.
+          source: (ev.source as string | null | undefined) ?? null,
         },
       };
       break;
@@ -1157,6 +1160,9 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         [agentOf(ev)]: {
           contextLimit: (snap.context_limit as number | null | undefined) ?? null,
           totalTokens: (snap.total_tokens as number | null | undefined) ?? null,
+          effectiveTotalTokens: (snap.effective_total_tokens as number | null | undefined) ?? null,
+          totalSource: (snap.total_source as string | null | undefined) ?? null,
+          providerPromptTokens: (snap.provider_prompt_tokens as number | null | undefined) ?? null,
           utilizationPercent: (snap.utilization_percent as number | null | undefined) ?? null,
           lockedTokens: (snap.locked_tokens as number | null | undefined) ?? null,
           gcEligibleTokens: (snap.gc_eligible_tokens as number | null | undefined) ?? null,

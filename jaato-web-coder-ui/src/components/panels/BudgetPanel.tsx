@@ -162,6 +162,21 @@ function BudgetTable({ budget, expanded, onToggle }: {
   );
 }
 
+/**
+ * Where a Context figure came from (#1440).  The daemon emits the readout
+ * from two measurements -- its own budget after a turn, the provider's
+ * usage during one -- and an unlabelled readout alternating between them
+ * looked like context vanishing and reappearing.
+ */
+const CONTEXT_SOURCE_LABEL: Record<string, string> = {
+  budget: "jaato estimate",
+  provider: "provider-reported",
+};
+const CONTEXT_SOURCE_EXPLAINED: Record<string, string> = {
+  budget: "jaato's own accounting of the context, what GC decides on (scaled to the provider's figure when that was larger)",
+  provider: "what the provider reported for the last request, cache reads and writes included",
+};
+
 /** Re-render on a slow tick so "12 min ago" stays true without an event. */
 function useNow(periodMs = 30_000): number {
   const [now, setNow] = useState(() => Date.now());
@@ -232,6 +247,18 @@ export function BudgetPanel({ agentId }: { agentId: string }) {
         <span className="display text-[16px]">Instructions</span>
         <span className="font-mono text-[11px] text-text-muted">
           {budget ? `${fmt(budget.totalTokens)} tracked` : ""}
+          {budget?.totalSource === "calibrated" && (
+            <span
+              className="text-warning"
+              data-testid="budget-calibrated"
+              title={
+                `The provider reported a ${fmt(budget.providerPromptTokens)} prompt, more than jaato's estimate. ` +
+                "GC judges the larger figure."
+              }
+            >
+              {` · GC judges ${fmt(budget.effectiveTotalTokens)}`}
+            </span>
+          )}
         </span>
       </div>
       <GcSummary agentId={agentId} />
@@ -253,7 +280,14 @@ export function BudgetPanel({ agentId }: { agentId: string }) {
 
       <div className="flex items-baseline justify-between mt-4 mb-1.5">
         <span className="display text-[16px]">Context</span>
-        <span className="font-mono text-[11px] text-text-muted">{pct != null ? `${pct.toFixed(1)}%` : ""}</span>
+        <span className="font-mono text-[11px] text-text-muted">
+          {ctx?.source && (
+            <span data-testid="context-source" title={CONTEXT_SOURCE_EXPLAINED[ctx.source] ?? undefined}>
+              {`${CONTEXT_SOURCE_LABEL[ctx.source] ?? ctx.source} · `}
+            </span>
+          )}
+          {pct != null ? `${pct.toFixed(1)}%` : ""}
+        </span>
       </div>
       <div className="bar mb-3">
         <span

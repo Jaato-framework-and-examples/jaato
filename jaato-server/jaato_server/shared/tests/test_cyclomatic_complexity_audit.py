@@ -244,7 +244,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 29,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
-    "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,
+    "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 23,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession.activate_discovered_tools": 21,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession.configure": 76,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession.resolve_fork_point": 17,

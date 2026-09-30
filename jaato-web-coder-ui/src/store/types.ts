@@ -262,6 +262,14 @@ export interface ContextState {
   percentUsed?: number | null;
   tokensRemaining?: number | null;
   turns?: number | null;
+  /**
+   * Where ``usage`` / ``percentUsed`` came from (#1440): ``"budget"`` is the
+   * daemon's own accounting (what GC decides on), ``"provider"`` is what the
+   * upstream reported for the last request.  The daemon emits both, so the
+   * readout must say which it is showing.  ``null`` from a daemon that does
+   * not say.
+   */
+  source?: string | null;
   lastTurn?: {
     turnNumber?: number | null;
     durationSeconds?: number | null;
@@ -311,6 +319,15 @@ export interface BudgetEntry {
 export interface BudgetState {
   contextLimit?: number | null;
   totalTokens?: number | null;
+  /**
+   * #1440: the total GC is judged on -- ``totalTokens`` (the estimate)
+   * scaled to the provider's last reported prompt when that was larger.
+   * ``totalSource`` is ``"estimate"`` or ``"calibrated"``; both are absent
+   * from a daemon that predates the calibration.
+   */
+  effectiveTotalTokens?: number | null;
+  totalSource?: string | null;
+  providerPromptTokens?: number | null;
   utilizationPercent?: number | null;
   lockedTokens?: number | null;
   gcEligibleTokens?: number | null;
