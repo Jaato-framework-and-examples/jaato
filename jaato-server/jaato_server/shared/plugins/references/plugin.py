@@ -109,6 +109,7 @@ from jaato_sdk.plugins.base import (
     CommandCompletion,
     HelpLines,
     PromptEnrichmentResult,
+    RESOLVED_MENTIONS_METADATA_KEY,
     ToolResultEnrichmentResult,
 )
 
@@ -5882,7 +5883,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
         """Common enrichment logic for prompts and tool results.
 
         Detection passes:
-        1.  @reference-id patterns — expands with full reference instructions.
+        1.  @reference-id patterns — expands with full reference instructions,
+            and reports every known id mentioned under
+            ``RESOLVED_MENTIONS_METADATA_KEY`` so the session removes the
+            ``@`` from those mentions (and only those; #1429).
         2.  Tag word matching — scans content for words matching tags on
             unselected selectable sources and appends lightweight reference ID
             hints so the model knows to call selectReferences.
@@ -5914,6 +5918,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if mentioned_ids:
             self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
             mentioned_sources = [s for s in self._sources if s.id in mentioned_ids]
+            # Every mention of a known id is resolved (its path authorized
+            # below) whether or not its instruction block is re-injected, so
+            # every one is reported; the session removes the @ from exactly
+            # these and from no other @word in the prompt (#1429).
+            all_metadata[RESOLVED_MENTIONS_METADATA_KEY] = sorted(set(mentioned_ids))
 
             # Paths are authorized on every mention so new references gain
             # access even when their instruction block is suppressed below.

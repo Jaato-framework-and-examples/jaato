@@ -168,8 +168,9 @@ from jaato_sdk.framework_note import (
     strip_framework_note_marker,
 )
 
-# Pattern to match @references in prompts
-AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
+# The @ of a prompt mention is removed only when an enricher reports it
+# resolved it (#1429); there is deliberately no session-wide @ pattern.
+from .prompt_mentions import resolved_mentions, strip_resolved_mentions
 
 # Rewind-with-hint budget.  How many consecutive rewinds we allow
 # per logical operation before giving up and surfacing the failure
@@ -5862,7 +5863,12 @@ NOTES
         )
 
     def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
-        """Run prompt through enrichment pipeline and strip @references.
+        """Run prompt through enrichment pipeline and strip resolved @mentions.
+
+        Only the mentions a prompt enricher reported resolving (under
+        ``RESOLVED_MENTIONS_METADATA_KEY``) lose their ``@``; every other
+        ``@`` — an npm scope, an email, a decorator — reaches the model
+        byte-for-byte (#1429).  See ``shared/prompt_mentions.py``.
 
         Args:
             prompt: The user prompt to enrich.
@@ -5871,11 +5877,13 @@ NOTES
                 enrichment metadata are forwarded as span events.
         """
         enriched_prompt = prompt
+        resolved: List[str] = []
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
+            resolved = resolved_mentions(result.metadata)
 
             # Forward enrichment telemetry as span events on the turn span
             if turn_span and result.metadata:
@@ -5888,8 +5896,8 @@ NOTES
                                 telem,
                             )
 
-        # Strip @references
-        return AT_REFERENCE_PATTERN.sub(r'\1', enriched_prompt)
+        # Strip the @ from the mentions an enricher resolved, and only those
+        return strip_resolved_mentions(enriched_prompt, resolved)
 
     # -- TurnResult helpers -----------------------------------------------
     #

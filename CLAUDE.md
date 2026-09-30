@@ -3953,6 +3953,39 @@ built without it unless an allow-list names it with a reason; the enrichment
 producers may not contain `MANDATORY`, `MUST`, `ACTION REQUIRED`, `CRITICAL`,
 `you must` or `IMPORTANT:`; the marker inside untrusted content is defanged.
 
+### An @ Is Removed Only Where an Enricher Used It (#1429)
+
+`_enrich_and_clean_prompt` used to end every prompt with a blanket
+`re.sub(r'@([\w./\-]+...)', r'\1', ...)`. It was meant for the
+`@photo.png` / `@ref-id` mentions the multimodal and references plugins
+resolve, and it removed the `@` from every word: `@jaato/sdk` reached the
+model as `jaato/sdk`, `dani@example.com` as `daniexample.com`,
+`@dataclass` as `dataclass`. A completion-gated release judge spent its
+budget because its processor required a package name the model was never
+shown.
+
+**The rule: a mention loses its `@` only when a prompt enricher reports it
+resolved it.** An enricher lists the tokens (without `@`) under
+`metadata[RESOLVED_MENTIONS_METADATA_KEY]` (`"resolved_mentions"`,
+`jaato_sdk/plugins/base.py`); the session collects them and removes the `@`
+from exactly those (`shared/prompt_mentions.py`). Every other `@` reaches
+the model byte-for-byte.
+
+| Reporter | Reports |
+|---|---|
+| `multimodal` | each `@<file>.<image ext>` that resolved to an existing file |
+| `references` | each `@<id>` naming a known source, whether or not its instruction block is re-injected |
+
+A token is stripped only where its `@` does not follow a word character (so
+the `@` of an email is never a mention) and the token is not continued by
+further mention characters (resolving `ref` leaves `@ref-id` alone). An
+enricher that resolves a mention and does not report it leaves the `@`,
+the safe direction. No other in-tree prompt enricher reads `@` mentions.
+
+Guard: `jaato_server/shared/tests/test_a_prompt_keeps_its_at_signs_1429.py`,
+four reversions (the blanket strip restored, either reporter silenced, and
+the token boundary dropped).
+
 ### What an Enrichment Plugin Found, Told to the Client (protocol 1.31)
 
 Enrichment rewrites the result the MODEL reads. A client saw none of it
