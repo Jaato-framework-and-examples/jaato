@@ -740,6 +740,20 @@ class JaatoSession:
         # second meaning layered onto that one.
         self._completion_nudges_total: int = 0
         self._completion_nudge_budget: Optional[int] = None
+        # Why the next completion nudge must be REFUSED, or ``None`` (#1433).
+        # A nudge re-prompts; a stop means the operator said stop, so the two
+        # cannot both be honoured and the stop wins.  Set by
+        # :meth:`request_stop` (every stop verb reaches it: ``session.stop``,
+        # ``session.end``, ``stop()``, a cascade cancel, a cancelled RPC) --
+        # even with no turn running, because a stop can land between a
+        # turn's end and the daemon's nudge dispatch -- and by
+        # :meth:`_note_turn_cancellation` for a turn whose cancel token was
+        # tripped by anything else.  Read ONLY by :meth:`try_completion_nudge`,
+        # the one gate every nudge site passes through.  Cleared by
+        # :meth:`_begin_turn_completion_state`: the next turn is
+        # caller-originated (a suppressed nudge starts none), and a caller
+        # sending again is the operator saying go.
+        self._nudge_suppressed_reason: Optional[str] = None
         # Set in configure() when introspection's tools are dropped because there
         # is nothing deferred to discover — read by introspection's
         # get_system_instructions to suppress the now-mismatched discovery
@@ -2044,6 +2058,14 @@ class JaatoSession:
         don't need to do it.  Returns ``(False, current)`` otherwise
         (no counter change).
 
+        **A stopped loop is never nudged (#1433).**  When the loop that
+        just ended was cancelled -- any stop verb, or a tripped cancel
+        token -- this refuses before looking at anything else and spends
+        nothing (:meth:`_completion_nudge_suppressed`).  This method is the
+        ONE gate: the daemon's top-level guard (over the runner RPC), the
+        embedded lead and the subagent loop all call it, so the rule cannot
+        hold on one path and not another.
+
         **A True answer also latches ``_completion_nudge_turn_pending``**,
         which is what keeps the budget per TURN without making it
         refundable (#934).  The caller's next act is to re-prompt the
@@ -2082,6 +2104,10 @@ class JaatoSession:
         # raised it, rather than the framework default.  Recorded on every
         # call, refusals included, because a refusal knows the number too.
         self._completion_nudge_budget = max_nudges
+        # Through the class, not ``self``: callers and tests hand this
+        # method duck-typed stand-ins that carry only the state it reads.
+        if JaatoSession._completion_nudge_suppressed(self):
+            return False, getattr(self, "_completion_nudges_fired", 0)
         if (
             not getattr(self, "_signal_completion_called", False)
             # A session an ``abort`` rung stopped refuses every later turn
@@ -2098,6 +2124,50 @@ class JaatoSession:
             self._completion_nudge_turn_pending = True
             return True, self._completion_nudges_fired
         return False, getattr(self, "_completion_nudges_fired", 0)
+
+    def _completion_nudge_suppressed(self) -> bool:
+        """True when the loop that just ended was STOPPED, not abandoned.
+
+        The half of :meth:`try_completion_nudge` that #1433 added.  A loop
+        that ended because it was cancelled -- a stop verb, a tripped cancel
+        token, a turn that finished ``CANCELLED`` -- did not forget
+        ``signal_completion``; somebody told it to stop.  Nudging it re-drove
+        a session the client had just been told was terminated, and it ran to
+        completion with nobody attached (3 of 3, on all three stop verbs).
+
+        A suppression spends NOTHING: the counter is not bumped and
+        ``_completion_nudge_turn_pending`` is not latched, so the next
+        caller-originated turn begins with the full budget, exactly as it
+        would after a turn that signalled.  Traced and logged as
+        ``COMPLETION_NUDGE: suppressed (<reason>)`` so a refused nudge is
+        visible beside the stop that caused it.  Silent when the agent DID
+        signal, since no nudge was going to fire.
+        """
+        reason = getattr(self, "_nudge_suppressed_reason", None)
+        if reason is None:
+            return False
+        if not getattr(self, "_signal_completion_called", False):
+            self._trace(f"COMPLETION_NUDGE: suppressed ({reason})")
+            logger.info("COMPLETION_NUDGE: suppressed (%s)", reason)
+        return True
+
+    def _note_turn_cancellation(self) -> None:
+        """Latch nudge suppression when this turn's cancel token was tripped.
+
+        Called at the end of both chat loops, beside ``_record_turn_ran``.
+        :meth:`request_stop` already latches for every stop verb; this
+        covers a token tripped by anything else (a subagent cancel, a
+        budget ``abort`` rung) so the rule is "the loop was cancelled", not
+        "the loop was cancelled through one particular method".  A
+        ``mid_turn_interrupt`` is not a stop -- the loop replaces that token
+        and carries on -- so it never reaches here cancelled.
+        """
+        token = getattr(self, "_cancel_token", None)
+        if token is not None and token.is_cancelled:
+            reason = getattr(token, "cancel_reason", None)
+            if reason != "mid_turn_interrupt":
+                self._nudge_suppressed_reason = (
+                    self._nudge_suppressed_reason or "cancelled")
 
     def offer_message(
         self,
@@ -2787,7 +2857,15 @@ class JaatoSession:
         Note:
             Cancellation is cooperative - it may not be immediate.
             The current streaming chunk will complete before stopping.
+
+        Every call also latches ``_nudge_suppressed_reason``, running turn
+        or not, so the completion nudge cannot re-drive what was just
+        stopped (#1433).  Unconditionally, because the daemon dispatches
+        the nudge AFTER the turn has wound down: a stop arriving in that
+        window finds nothing running and must still count.  The next
+        caller-originated turn clears it.
         """
+        self._nudge_suppressed_reason = "cancelled"
         if self._cancel_token and self._is_running:
             # PROBE (cancel-leak prod-vs-isolation diagnostic):
             # Log cancel_token id() at the source of cancel() — pairs
@@ -7063,6 +7141,10 @@ NOTES
         self._signal_completion_called = False
         self._session_quiescent_emitted = False
         self._truncation_recovery_count = 0
+        # A stop suppressed the nudge of the loop that ended; this turn was
+        # started by a caller (a suppressed nudge starts no turn), so it is
+        # nudged normally again (#1433).
+        self._nudge_suppressed_reason = None
         # WHO started this turn decides whether the nudge budget is refilled.
         # The latch is consumed either way, so a nudge that never became a
         # turn cannot ration the turn after it.
@@ -7667,6 +7749,7 @@ NOTES
             self._budget_observe_turn(turn_data)
 
             self._record_turn_ran(turn_data)
+            self._note_turn_cancellation()
 
             # Update instruction budget with conversation tokens
             self._update_conversation_budget()
@@ -14162,6 +14245,7 @@ NOTES
             self._budget_observe_turn(turn_data)
 
             self._record_turn_ran(turn_data)
+            self._note_turn_cancellation()
 
     # ==================== Context Garbage Collection ====================
 

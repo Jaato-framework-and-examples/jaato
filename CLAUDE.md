@@ -694,6 +694,36 @@ caller-originated and starts with a full budget. Consequences:
 - **Nothing is persisted**, so a revived session begins with a full budget —
   the same answer the reset gives its first caller-originated turn.
 
+### A Stop the Nudge Undid (#1433)
+
+On a completion-gated profile, `session.stop` (#812), `session.end` and
+`stop()` each cancelled the in-flight turn, and the first two emitted
+`SessionTerminatedEvent`. About 0.3 s later the daemon asked
+`try_completion_nudge`, which answered "the agent ended its loop without
+`signal_completion`" and re-prompted it. The session then ran to completion
+with no client attached, 3 runs out of 3. The gate asked whether the agent
+signalled and whether budget was left, never why the loop ended; the cancel
+token that could have said so is cleared at turn end, before the daemon asks.
+
+**A loop that ended because it was cancelled is never nudged.** The rule
+lives in `JaatoSession.try_completion_nudge`, the one gate the daemon's
+guard (over the runner RPC), the embedded lead and the subagent loop all
+call, so it cannot hold on one path and not another.
+
+| Piece | Where |
+|---|---|
+| `request_stop` latches `_nudge_suppressed_reason`, running turn or not | every stop verb reaches it through `JaatoServer.stop()`; unconditional because the nudge is dispatched after the turn winds down, so a stop in that window finds nothing running |
+| `_note_turn_cancellation` latches it at the end of both chat loops | a token tripped by anything else (a subagent cancel, a budget `abort`); `mid_turn_interrupt` is not a stop |
+| `_completion_nudge_suppressed` refuses first, spends nothing | the counter is not bumped and `_completion_nudge_turn_pending` is not set; traced as `COMPLETION_NUDGE: suppressed (cancelled)` |
+| `_begin_turn_completion_state` clears it | a suppressed nudge starts no turn, so the next turn is caller-originated: a person sending again means go, and that turn is nudged as before (#767, #934 unchanged) |
+
+After `stop()` the cancelled turn ends there; the session stays loaded and
+idle. Not covered: a continuation stashed daemon-side before a stop is still
+drained as a caller-originated turn. Guard:
+`jaato_server/shared/tests/test_a_stopped_session_is_not_nudged_1433.py`,
+four reversions, driving a real session through the real `stop_session`,
+`JaatoServer.stop` and runner handlers.
+
 ### A Tier Binds (provider, model), and Half of It Did Not Take
 
 Reported as *"two tiers of the same profile do not share history; each
