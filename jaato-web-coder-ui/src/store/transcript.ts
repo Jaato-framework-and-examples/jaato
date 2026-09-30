@@ -14,6 +14,7 @@
 import type { OutputBlock, ToolBlock } from "./types";
 import { resolveToolClass, type ToolClass } from "@/protocol/toolClass";
 import { COLLAPSED_SOURCES } from "@/protocol/agentNotes";
+import { isUnknownToolCall, misfireLabel } from "@/protocol/toolMisfire";
 
 export interface UserMessageItem {
   kind: "userMessage";
@@ -59,15 +60,20 @@ export interface AssistantTextItem {
  *   line rather than a red row followed by a green one.  ``calls`` is
  *   ``[failed, recovered]``, in that order; only a failure that never
  *   recovers keeps its own red row.
+ * - ``"misfire"`` -- one call to a tool that does not exist
+ *   (``protocol/toolMisfire.ts``), shown as one muted line whether or not
+ *   a later call recovers: the model reads the refusal and picks another
+ *   tool, usually after some text, so no pairing could find the recovery.
+ *   ``calls`` is the one refused call.
  */
 export interface ToolGroupItem {
   kind: "toolGroup";
   id: string;
   agentId: string;
-  mode: "row" | "fold" | "recovered";
+  mode: "row" | "fold" | "recovered" | "misfire";
   toolClass: ToolClass;
   calls: ToolBlock[];
-  /** the fold's summary line, or the recovered line's caption. */
+  /** the fold's summary line, or the recovered / misfire line's caption. */
   label?: string;
 }
 
@@ -127,8 +133,8 @@ export type ThinkingClock = Map<string, number>;
  * (nearest, chronologically first) recovery rather than one recovery
  * covering both.
  */
-function pairRecoveries(run: readonly ToolBlock[], names: readonly string[]): Array<[number, number]> {
-  const claimed = new Set<number>();
+function pairRecoveries(run: readonly ToolBlock[], names: readonly string[], skip: ReadonlySet<number> = new Set()): Array<[number, number]> {
+  const claimed = new Set<number>(skip);
   const pairs: Array<[number, number]> = [];
   for (let i = 0; i < run.length; i += 1) {
     if (claimed.has(i) || run[i]!.status !== "error") continue;
@@ -173,17 +179,31 @@ function flushToolRun(run: ToolBlock[], names: string[], agentId: string): ToolG
   // falling back to the client table for a call an older daemon reported
   // with no ``tool_class`` at all.
   const classes = run.map((c, i) => resolveToolClass(names[i]!, c.toolClass));
-  const recoveries = pairRecoveries(run, names);
+  // A call to a tool that does not exist is its own muted line, and takes
+  // no part in the recovery pairing or the housekeeping fold.
+  const misfires = new Set(run.map((c, i) => (isUnknownToolCall(c) ? i : -1)).filter((i) => i >= 0));
+  const recoveries = pairRecoveries(run, names, misfires);
   const failedIdx = new Set(recoveries.map(([f]) => f));
   const recoveredAt = new Map(recoveries.map(([f, r]) => [r, f]));
 
-  const firstHousekeeping = run.findIndex((_c, i) => !failedIdx.has(i) && !recoveredAt.has(i) && classes[i] === "housekeeping");
-  const housekeepingIdx = run
-    .map((_c, i) => i)
-    .filter((i) => !failedIdx.has(i) && !recoveredAt.has(i) && classes[i] === "housekeeping");
+  const folds = (i: number) => !misfires.has(i) && !failedIdx.has(i) && !recoveredAt.has(i) && classes[i] === "housekeeping";
+  const firstHousekeeping = run.findIndex((_c, i) => folds(i));
+  const housekeepingIdx = run.map((_c, i) => i).filter(folds);
 
   const items: ToolGroupItem[] = [];
   for (let i = 0; i < run.length; i += 1) {
+    if (misfires.has(i)) {
+      items.push({
+        kind: "toolGroup",
+        id: `misfire:${run[i]!.id}`,
+        agentId,
+        mode: "misfire",
+        toolClass: classes[i]!,
+        calls: [run[i]!],
+        label: misfireLabel(names[i]!),
+      });
+      continue;
+    }
     if (failedIdx.has(i)) continue; // represented by its recovery, below
     const failedI = recoveredAt.get(i);
     if (failedI !== undefined) {

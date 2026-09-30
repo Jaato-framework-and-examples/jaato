@@ -109,6 +109,7 @@ function contextText(agentId: string): string {
     `  output tokens:  ${u.output_tokens ?? "–"}`,
     `  total tokens:   ${u.total_tokens ?? "–"}`,
     `  limit:          ${ctx.contextLimit ?? "–"}`,
+    ...(ctx.reservedOutput ? [`  reserved out:   ${ctx.reservedOutput} (not available to input)`] : []),
     `  percent used:   ${ctx.percentUsed != null ? ctx.percentUsed.toFixed(1) + "%" : "–"}`,
     `  turns:          ${ctx.turns ?? "–"}`,
   ].join("\n");

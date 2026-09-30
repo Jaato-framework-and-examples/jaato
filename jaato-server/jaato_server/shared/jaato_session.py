@@ -93,12 +93,15 @@ from .plugins.gc.utils import (
     estimate_history_tokens,
     evict_consumed_media,
     history_media_bytes,
+    message_media_bytes,
     message_media_tokens,
+    message_wire_texts,
 )
 from .history_invariant import repair_history
 from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from .instruction_budget import (
     InstructionBudget,
+    effective_input_limit,
     InstructionSource,
     estimate_tokens,
     SystemChildType,
@@ -168,8 +171,9 @@ from jaato_sdk.framework_note import (
     strip_framework_note_marker,
 )
 
-# Pattern to match @references in prompts
-AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
+# The @ of a prompt mention is removed only when an enricher reports it
+# resolved it (#1429); there is deliberately no session-wide @ pattern.
+from .prompt_mentions import resolved_mentions, strip_resolved_mentions
 
 # Rewind-with-hint budget.  How many consecutive rewinds we allow
 # per logical operation before giving up and surfacing the failure
@@ -530,6 +534,29 @@ def _reasoning_count(usage: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _message_label_facts(msg: Message) -> Tuple[bool, str, List[str]]:
+    """What the budget's per-message label is derived from.
+
+    Returns ``(has_tool_result, text_content, tool_names)``: whether the
+    message carries a tool result, its concatenated text (read for
+    framework-enrichment markers), and the names of the tools whose
+    results it carries.  Labelling only -- the SIZE of a message is
+    ``JaatoSession._message_budget_tokens``.
+    """
+    has_tool_result = False
+    text_content = ""
+    tool_names: List[str] = []
+    for part in msg.parts:
+        if part.text:
+            text_content += part.text
+        elif part.function_response:
+            has_tool_result = True
+            if part.function_response.name:
+                tool_names.append(part.function_response.name)
+    return has_tool_result, text_content, tool_names
+
 
 class JaatoSession:
     """Per-agent conversation session.
@@ -1083,7 +1110,11 @@ class JaatoSession:
         # Maps message_id -> token count. Since message content is immutable
         # once added to history, cached counts never go stale. This avoids
         # O(N) network API calls to count_tokens on every budget rebuild.
-        self._msg_token_cache: Dict[str, int] = {}
+        # message_id -> (fingerprint, tokens); see _message_budget_tokens.
+        self._msg_token_cache: Dict[str, Tuple[Any, int]] = {}
+        # One WARNING per session when the budget and the provider's
+        # reported prompt disagree beyond the margin (#1440).
+        self._budget_drift_warned = False
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
         # GC LIFECYCLE observer: (phase, payload) for about_to_run /
         # started / completed.  Distinct from _gc_threshold_callback
@@ -4142,6 +4173,7 @@ class JaatoSession:
             agent_type=self._agent_type,
             context_limit=context_limit,
         )
+        self._instruction_budget.reserved_output = self._reserved_output_tokens()
 
         # --- Collect phase: gather all texts that need counting ---
         # Pass the override and suppress-base flag so the budget
@@ -4434,12 +4466,70 @@ class JaatoSession:
 
         return enrichments
 
+    def _wire_replays_reasoning(self) -> bool:
+        """Whether this session's ``Part.thought`` parts reach the wire.
+
+        True when the active provider opts into reasoning replay
+        (``replay_reasoning is True`` -- MiniMax, Kimi, MiMo), and when no
+        provider exists yet: a revived history holding thought parts was
+        written by a replaying wire, and the first request will send them.
+        The same ``is True`` test ``_add_model_response_to_history`` uses to
+        decide whether to KEEP thought parts, so a mock provider (whose
+        attribute is a truthy mock) is read as non-replaying.
+        """
+        if self._provider is None:
+            return True
+        return getattr(self._provider, "replay_reasoning", False) is True
+
+    def _message_budget_tokens(self, msg: Message, include_thought: bool) -> int:
+        """Token count of one history message as the wire carries it (#1440).
+
+        Every string :func:`gc.utils.message_wire_texts` names -- text,
+        replayed reasoning (when ``include_thought``), tool-call names and
+        arguments, tool results, code parts -- counted with the session's
+        tokenizer, plus the binary payload estimate (#850, #989).  The part
+        rule is shared with ``estimate_message_tokens``, so the budget that
+        decides a GC pass and the estimate that reports its result agree
+        about what a message carries.
+
+        Cached per ``message_id`` with a fingerprint of what was counted
+        (whether reasoning was included, the part count, the lengths of
+        every string, the media bytes).  A message whose parts change in
+        place -- a part added, media evicted, a tier switch that stops
+        replaying reasoning -- is recounted rather than keeping its old
+        figure.  Computing the fingerprint costs a walk of the strings; the
+        tokenizer call it saves is the expensive part.
+        """
+        texts = message_wire_texts(msg, include_thought=include_thought)
+        media_bytes = message_media_bytes(msg)
+        fingerprint = (
+            include_thought, len(msg.parts or []),
+            tuple(len(t) for t in texts), media_bytes,
+        )
+        cached = self._msg_token_cache.get(msg.message_id)
+        if isinstance(cached, tuple) and cached[0] == fingerprint:
+            return cached[1]
+        tokens = sum(self._count_tokens(t) for t in texts)
+        tokens += message_media_tokens(msg)
+        self._msg_token_cache[msg.message_id] = (fingerprint, tokens)
+        return tokens
+
     def _update_conversation_budget(self) -> None:
-        """Update CONVERSATION entry in instruction budget from current history."""
+        """Update CONVERSATION entry in instruction budget from current history.
+
+        Each message is sized by :meth:`_message_budget_tokens` -- every
+        part the wire carries, including tool-call arguments and (on a
+        ``replay_reasoning`` provider) the reasoning replayed as
+        ``reasoning_content`` (#1440).  Before that fix only text, tool
+        results and media were counted, and a session could sit hundreds of
+        thousands of tokens past what the budget reported while
+        ``gc_budget``, which decides on this figure, freed nothing.
+        """
         if not self._instruction_budget:
             return
 
         history = self.get_history()
+        include_thought = self._wire_replays_reasoning()
         conversation_tokens = 0
         conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
         if conv_entry:
@@ -4471,54 +4561,10 @@ class JaatoSession:
             if msg.role == Role.USER:
                 current_turn += 1
 
-            # Count tokens for this message and detect content types.
-            # Use cached count when available — message content is immutable,
-            # so the token count for a given message_id never changes.
-            has_tool_result = False
-            has_text = False
-            text_content = ""
-            tool_names = []
-            mid = msg.message_id
-            cached = self._msg_token_cache.get(mid)
-            if cached is not None:
-                msg_tokens = cached
-                # Still need metadata (has_text, tool_names, etc.) for labelling
-                for part in msg.parts:
-                    if hasattr(part, 'text') and part.text:
-                        has_text = True
-                        text_content += part.text
-                    elif hasattr(part, 'function_response') and part.function_response:
-                        has_tool_result = True
-                        if part.function_response.name:
-                            tool_names.append(part.function_response.name)
-            else:
-                msg_tokens = 0
-                for part in msg.parts:
-                    if hasattr(part, 'text') and part.text:
-                        msg_tokens += self._count_tokens(part.text)
-                        has_text = True
-                        text_content += part.text
-                    elif hasattr(part, 'function_response') and part.function_response:
-                        # Tool results (function_response is a ToolResult)
-                        tr = part.function_response
-                        result_text = str(tr.result) if tr.result else ''
-                        msg_tokens += self._count_tokens(result_text)
-                        has_tool_result = True
-                        if tr.name:
-                            tool_names.append(tr.name)
-                # Binary payload (audio, images, PDFs) was counted as
-                # nothing at all until #850, which is what made a 600 KB
-                # utterance invisible to every GC threshold: the tokenizer
-                # has no opinion about bytes, so the denominator simply
-                # omitted them.  Summed outside the loop, not as another
-                # ``elif`` inside it, because this function is frozen near
-                # the top of the complexity baseline and one more branch
-                # would grow the ratchet.  The estimate is deliberately
-                # coarse (see MEDIA_BYTES_PER_TOKEN) — its job is to put
-                # the payload in the budget, not to reproduce a vendor's
-                # audio-token billing.
-                msg_tokens += message_media_tokens(msg)
-                self._msg_token_cache[mid] = msg_tokens
+            # Size (#1440: every string the wire carries, through the one
+            # per-part rule gc/utils shares) and labelling facts.
+            msg_tokens = self._message_budget_tokens(msg, include_thought)
+            has_tool_result, text_content, tool_names = _message_label_facts(msg)
 
             conversation_tokens += msg_tokens
 
@@ -4596,12 +4642,14 @@ class JaatoSession:
         - ``budget.context_limit`` is ``0`` (honest-unknown limit — the
           framework does not invent a window it wasn't told)
 
-        The gate uses ``budget.total_tokens()`` (post-GC) compared
-        against ``budget.context_limit``.  When the provider exposes a
-        ``get_max_output_tokens()`` method (vllm, openrouter,
-        tensorrt_llm at time of writing), the comparison includes that
-        cap; otherwise it fires only when the prompt ALONE exceeds the
-        limit.
+        The gate compares ``budget.total_tokens()`` (post-GC) against
+        ``budget.effective_input_limit()``: the window minus the output
+        cap the provider reports through ``get_max_output_tokens()``
+        (re-read here, so it is the cap this request carries).  A
+        provider that reports none leaves the whole window, so the gate
+        fires only when the prompt ALONE exceeds it.  Every provider that
+        puts a cap on the request reports it (#1444; MiniMax-M3 reserves
+        131k of its 1M window).
 
         Rationale: vLLM 0.22 rejects any request where ``prompt +
         max_tokens > max_model_len`` with the misleading template
@@ -4621,43 +4669,24 @@ class JaatoSession:
 
         total = self._instruction_budget.total_tokens()
 
-        # Provider-side per-request output cap, if exposed.  Three
-        # providers expose this today (vllm / openrouter /
-        # tensorrt_llm); others inherit no method and the gate
-        # degrades to prompt-only.
-        max_tokens: Optional[int] = None
-        get_max = getattr(self._provider, 'get_max_output_tokens', None)
-        if callable(get_max):
-            try:
-                value = get_max()
-            except Exception:
-                value = None
-            if isinstance(value, int) and value > 0:
-                max_tokens = value
-
-        if max_tokens is not None:
-            projected = total + max_tokens
-            if projected > limit:
-                self._trace(
-                    f"REFUSE_SEND: total={total} + max_tokens={max_tokens} "
-                    f"= {projected} > context_limit={limit}"
-                )
-                raise PayloadExceedsContextError(
-                    total_tokens=total,
-                    max_output_tokens=max_tokens,
-                    context_limit=limit,
-                )
-        else:
-            if total > limit:
-                self._trace(
-                    f"REFUSE_SEND: total={total} > context_limit={limit} "
-                    f"(provider exposes no max_tokens; gate on prompt alone)"
-                )
-                raise PayloadExceedsContextError(
-                    total_tokens=total,
-                    max_output_tokens=None,
-                    context_limit=limit,
-                )
+        # Re-read the reservation: the guard compares against the cap the
+        # request is about to carry, not the one stamped at the last
+        # tier connect.  ``effective_input_limit`` is the one definition
+        # GC and the readout also use (#1444).
+        reserved = self._reserved_output_tokens()
+        self._instruction_budget.reserved_output = reserved
+        effective = effective_input_limit(limit, reserved)
+        if total <= effective:
+            return
+        self._trace(
+            f"REFUSE_SEND: total={total} > effective_input_limit={effective} "
+            f"(context_limit={limit} - reserved_output={reserved})"
+        )
+        raise PayloadExceedsContextError(
+            total_tokens=total,
+            max_output_tokens=reserved or None,
+            context_limit=limit,
+        )
 
     def _update_thinking_budget(self, thinking_tokens: int) -> None:
         """Update THINKING entry in instruction budget with cumulative thinking tokens."""
@@ -5508,7 +5537,9 @@ NOTES
                     pass
             # Check if threshold crossed
             if not self._gc_threshold_crossed and usage.total_tokens > 0:
-                context_limit = self.get_context_limit()
+                # Against the effective input limit, not the raw window:
+                # the output a request reserves is not room (#1444).
+                context_limit = self.get_effective_input_limit()
                 if context_limit > 0:
                     percent_used = (usage.total_tokens / context_limit) * 100
                     threshold = self._gc_config.threshold_percent if self._gc_config else 80.0
@@ -5862,7 +5893,12 @@ NOTES
         )
 
     def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
-        """Run prompt through enrichment pipeline and strip @references.
+        """Run prompt through enrichment pipeline and strip resolved @mentions.
+
+        Only the mentions a prompt enricher reported resolving (under
+        ``RESOLVED_MENTIONS_METADATA_KEY``) lose their ``@``; every other
+        ``@`` — an npm scope, an email, a decorator — reaches the model
+        byte-for-byte (#1429).  See ``shared/prompt_mentions.py``.
 
         Args:
             prompt: The user prompt to enrich.
@@ -5871,11 +5907,13 @@ NOTES
                 enrichment metadata are forwarded as span events.
         """
         enriched_prompt = prompt
+        resolved: List[str] = []
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
+            resolved = resolved_mentions(result.metadata)
 
             # Forward enrichment telemetry as span events on the turn span
             if turn_span and result.metadata:
@@ -5888,8 +5926,8 @@ NOTES
                                 telem,
                             )
 
-        # Strip @references
-        return AT_REFERENCE_PATTERN.sub(r'\1', enriched_prompt)
+        # Strip the @ from the mentions an enricher resolved, and only those
+        return strip_resolved_mentions(enriched_prompt, resolved)
 
     # -- TurnResult helpers -----------------------------------------------
     #
@@ -11325,6 +11363,60 @@ NOTES
         observe = getattr(self, '_observe_binding_usage', None)
         if observe is not None:
             observe(response)
+        # #1440: the one per-response point at which the provider says how
+        # large the request it just answered was.  Resolved like the
+        # observer above, for the same duck-typed-self reason.
+        calibrate = getattr(self, '_calibrate_budget_against_provider', None)
+        if calibrate is not None:
+            calibrate(response.usage)
+
+    def _calibrate_budget_against_provider(self, usage: TokenUsage) -> None:
+        """Compare the budget's estimate with the provider's prompt size (#1440).
+
+        The provider's prompt size is ``prompt_tokens`` (the uncached
+        input, #758) plus ``cache_read_tokens`` plus
+        ``cache_creation_tokens``; an absent cache count adds nothing.  A
+        response whose usage was not reported (``usage.reported is False``,
+        #688) is not a measurement and is skipped, as is a reported prompt
+        of zero, which no real request has.
+
+        :meth:`InstructionBudget.calibrate` records the figure and, beyond
+        its margin, makes the GC threshold judge the LARGER of the two.
+        A difference beyond the margin in either direction is logged at
+        WARNING once per session, naming both figures -- a budget that
+        disagrees with the wire by that much is missing (or double-counting)
+        something, and the gap is the evidence.
+
+        Never raises: calibration is an observation about a turn, and must
+        not be able to fail one that otherwise succeeded.
+        """
+        # getattr: sessions built with ``__new__`` (duck-typed tests of
+        # the accumulator) never ran ``__init__``.
+        budget = getattr(self, '_instruction_budget', None)
+        if budget is None or not getattr(usage, 'reported', True):
+            return
+        try:
+            reported = (
+                int(usage.prompt_tokens or 0)
+                + int(usage.cache_read_tokens or 0)
+                + int(usage.cache_creation_tokens or 0)
+            )
+            estimate = budget.total_tokens()
+            ratio = budget.calibrate(reported)
+        except Exception:  # noqa: BLE001 - reporting must not fail a turn
+            logger.debug("budget calibration failed", exc_info=True)
+            return
+        if ratio is None or getattr(self, '_budget_drift_warned', False):
+            return
+        if abs(ratio - 1.0) <= budget.CALIBRATION_MARGIN:
+            return
+        self._budget_drift_warned = True
+        logger.warning(
+            "[session:%s] instruction budget estimate %d tokens differs from "
+            "the provider's reported prompt %d tokens (%.0f%%); the GC "
+            "threshold uses the larger figure (#1440)",
+            self._agent_id, estimate, reported, (ratio - 1.0) * 100,
+        )
 
     def _observe_binding_usage(self, response: ProviderResponse) -> None:
         """Fold one response into the per-binding consumption ledger.
@@ -13191,12 +13283,32 @@ NOTES
             return 0
         return self._provider.get_context_limit()
 
+    def get_effective_input_limit(self) -> int:
+        """``get_context_limit()`` minus the output each request reserves.
+
+        :func:`~jaato_server.shared.instruction_budget.effective_input_limit`
+        is the definition; this answers it for callers that measure a
+        provider-reported total without going through the budget (the
+        proactive streaming GC check, the subagent plugin's per-chunk
+        readout).  ``0`` = unknown window.
+        """
+        if self._instruction_budget is not None:
+            return self._instruction_budget.effective_input_limit()
+        return effective_input_limit(
+            self.get_context_limit(), self._reserved_output_tokens())
+
     def get_context_usage(self) -> Dict[str, Any]:
         """Get context window usage statistics.
 
         Uses InstructionBudget as the single source of truth for token accounting.
         This includes system instructions, plugin schemas, enrichment, and conversation
         tokens - providing accurate context usage from startup through all turns.
+
+        ``total_tokens`` is the budget's EFFECTIVE total: its own estimate,
+        scaled up when the provider's last reported prompt was larger by
+        more than ``InstructionBudget.CALIBRATION_MARGIN`` (#1440).
+        ``tokens_source`` says which (``estimate`` / ``calibrated``), and
+        ``estimate_tokens`` / ``provider_prompt_tokens`` carry both sides.
 
         Reports one figure that is NOT a token count: ``media_bytes``, the
         binary payload the history carries.  It is the denominator
@@ -13206,17 +13318,31 @@ NOTES
         megabytes of audio, which is the state GC could not see (#850).
         """
         # Use InstructionBudget as the single source of truth
-        if self._instruction_budget:
-            total_tokens = self._instruction_budget.total_tokens()
-            context_limit = self._instruction_budget.context_limit
-            percent_used = self._instruction_budget.utilization_percent()
-            tokens_remaining = self._instruction_budget.available_tokens()
+        budget = self._instruction_budget
+        if budget:
+            # The EFFECTIVE total (#1440): the budget's estimate, scaled up
+            # when the provider last reported a larger prompt.  It is what
+            # the GC threshold is judged on, so it is what is reported.
+            total_tokens = budget.effective_total_tokens()
+            context_limit = budget.context_limit
+            reserved_output = budget.reserved_output
+            effective_limit = budget.effective_input_limit()
+            percent_used = budget.utilization_percent()
+            tokens_remaining = budget.available_tokens()
+            tokens_source = "calibrated" if budget.is_calibrated() else "estimate"
+            estimate_tokens = budget.total_tokens()
+            provider_prompt = budget.provider_prompt_tokens
         else:
             # Fallback if budget not initialized
             total_tokens = 0
             context_limit = self.get_context_limit()
+            reserved_output = self._reserved_output_tokens()
+            effective_limit = self.get_effective_input_limit()
             percent_used = 0.0
-            tokens_remaining = context_limit
+            tokens_remaining = effective_limit
+            tokens_source = None
+            estimate_tokens = 0
+            provider_prompt = None
 
         # Get turn count from turn_accounting for backward compatibility
         turn_accounting = self.get_turn_accounting()
@@ -13228,8 +13354,13 @@ NOTES
             'prompt_tokens': total_tokens,  # InstructionBudget tracks total, not split
             'output_tokens': 0,  # Output tokens are included in conversation total
             'turns': len(turn_accounting),
+            # ``percent_used`` / ``tokens_remaining`` are measured against
+            # ``context_limit - reserved_output_tokens`` (#1444): the output
+            # cap every request carries is not room for input.
             'percent_used': percent_used,
             'tokens_remaining': tokens_remaining,
+            'reserved_output_tokens': reserved_output,
+            'effective_input_limit': effective_limit,
             # The second denominator, reported in BYTES (#850).  Every other
             # figure here is a token count against a token budget, and that
             # is exactly why media went unseen: the payload that dominates a
@@ -13237,6 +13368,15 @@ NOTES
             # reads this key; a strategy that never looks at it behaves
             # precisely as it did before.
             'media_bytes': history_media_bytes(self.get_history()),
+            # Where ``total_tokens`` came from (#1440): ``estimate`` is the
+            # budget's own count, ``calibrated`` that count scaled to the
+            # provider's last reported prompt; ``None`` when there is no
+            # budget.  ``estimate_tokens`` is the unscaled count and
+            # ``provider_prompt_tokens`` the last reported prompt (uncached
+            # + cache read + cache write), ``None`` until one was reported.
+            'tokens_source': tokens_source,
+            'estimate_tokens': estimate_tokens,
+            'provider_prompt_tokens': provider_prompt,
         }
 
     def _log_gc_denominator(self, label: str, provider_total: int = 0) -> None:
@@ -13320,6 +13460,11 @@ NOTES
         self._consumption = ConsumptionLedger()
         if not history:
             self._msg_token_cache.clear()
+            # A calibration measured the conversation that no longer
+            # exists; the next response re-measures (#1440).
+            if self._instruction_budget is not None:
+                self._instruction_budget.calibration_factor = 1.0
+                self._instruction_budget.provider_prompt_tokens = None
             # On true fresh reset, clear pinned references and remove their
             # content from the system instruction.  GC resets (history provided)
             # preserve pinned references — they stay in the system instruction.
@@ -14951,6 +15096,31 @@ NOTES
         self._instruction_budget.context_limit = (
             self._provider.get_context_limit()
         )
+        # The output cap is part of the (provider, model) binding too: a
+        # tier that enters MiniMax-M3 reserves 131k of the window (#1444).
+        self._instruction_budget.reserved_output = self._reserved_output_tokens()
+
+    def _reserved_output_tokens(self) -> int:
+        """The output cap the active provider puts on every request.
+
+        Reads ``provider.get_max_output_tokens()``, which each provider
+        that sends a cap implements to return exactly the value it sends
+        (#1444).  ``0`` when there is no provider, the provider has no
+        such method, returns ``None`` (sends no cap, or its vendor does
+        not count output against the window), or raises: an unreadable
+        reservation must not take the session down, and ``0`` is what
+        every figure measured before this existed.
+        """
+        get_max = getattr(self._provider, 'get_max_output_tokens', None)
+        if not callable(get_max):
+            return 0
+        try:
+            value = get_max()
+        except Exception:
+            return 0
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 0
 
     def _retarget_reliability_model(self, model: str) -> None:
         """Tell the reliability plugin which model is now running.

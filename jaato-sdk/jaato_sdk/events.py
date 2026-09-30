@@ -1986,6 +1986,14 @@ class ContextUpdatedEvent(Event):
 
     GC configuration moved to ``GCConfigEvent`` in v1.0 — query that
     event (or read it from session init) for status-bar display.
+
+    ``reserved_output_tokens`` is the output cap every request carries
+    (the provider's ``get_max_output_tokens()``; 0 when none is sent or
+    the vendor does not count it).  A vendor that counts it refuses a
+    prompt over ``context_limit - reserved_output_tokens``, so
+    ``percent_used`` and ``tokens_remaining`` are measured against that
+    effective input limit (#1444).  Additive: an older daemon omits it
+    and a client reads 0, which is what every figure meant before.
     """
     type: EventType = Field(default=EventType.CONTEXT_UPDATED)
     agent_id: str = ""
@@ -1993,7 +2001,25 @@ class ContextUpdatedEvent(Event):
     context_limit: int = 0
     percent_used: float = 0.0
     tokens_remaining: int = 0
+    reserved_output_tokens: int = 0
     turns: int = 0
+    #: Where ``usage`` and ``percent_used`` come from (#1440), because the
+    #: daemon emits this event from two different measurements and a
+    #: readout that alternates between them unlabelled looks like context
+    #: appearing and vanishing:
+    #:
+    #: * ``"budget"`` -- jaato's own accounting (``get_context_usage``):
+    #:   the ``InstructionBudget`` estimate, scaled to the provider's last
+    #:   reported prompt when that was larger (the instruction-budget
+    #:   snapshot's ``total_source`` says whether it was).  What GC decides
+    #:   on.  Cache figures on such an event, when present, are the last
+    #:   response's, for reference; the total is not their sum.
+    #: * ``"provider"`` -- the usage the upstream reported for the request
+    #:   it just answered, cache reads and writes included.
+    #:
+    #: ``None`` from a daemon that predates the field: not stated, never
+    #: read as either.  Additive and optional, so no protocol bump.
+    source: Optional[str] = None
 
 
 class InstructionBudgetEvent(Event):
@@ -2007,6 +2033,11 @@ class InstructionBudgetEvent(Event):
     - context_limit, total_tokens, utilization_percent: Overall usage
     - gc_eligible_tokens, locked_tokens, preservable_tokens: GC info
     - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
+    - effective_total_tokens, total_source, calibration_factor,
+      provider_prompt_tokens (#1440): the total GC is judged on, whether it
+      is the estimate (``"estimate"``) or the estimate scaled to the
+      provider's last reported prompt (``"calibrated"``), the scale, and
+      that reported prompt (``None`` until one was reported)
     """
     type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_UPDATED)
     agent_id: str = ""

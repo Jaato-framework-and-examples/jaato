@@ -352,7 +352,14 @@ class ContextUpdatedPayload(TypedDict):
     context_limit: int
     percent_used: float
     tokens_remaining: int
+    # Output cap every request reserves (#1444); ``percent_used`` and
+    # ``tokens_remaining`` are net of it.  NotRequired: an older daemon
+    # omits it, which means no reservation.
+    reserved_output_tokens: NotRequired[int]
     turns: int
+    # ``"budget"`` or ``"provider"`` -- which measurement ``usage`` is
+    # (#1440).  NotRequired: absent from a daemon that does not say.
+    source: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

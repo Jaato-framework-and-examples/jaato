@@ -767,7 +767,7 @@ test("workspace mode: a new workspace clones its repositories before the session
   await plate.getByPlaceholder("owner/repo").fill("acme/claims-service");
   await plate.getByPlaceholder("owner/repo").press("Enter");
   await plate.getByPlaceholder("owner/repo").fill("acme/fails");
-  await plate.getByRole("button", { name: "+ Add acme/fails" }).click();
+  await plate.getByRole("option", { name: "+ Add acme/fails" }).click();
   await expect(plate.getByTestId("picked-repo")).toHaveCount(2);
   await expect(plate).toContainText("→ claims-refactor/claims-service");
   await plate.getByLabel("Branch of acme/claims-service").fill("main");
@@ -810,10 +810,14 @@ test("new workspace with a GitHub backend: search the listed repositories, pick 
   await page.goto("/");
   const plate = page.getByTestId("new-workspace");
   await expect(plate).toContainText("Find repositories on GitHub @d-alonso");
+  await expect(plate.getByRole("listbox")).toHaveCount(0);
   await plate.getByPlaceholder("owner/repo").fill("acme");
-  await expect(plate.getByRole("checkbox")).toHaveCount(2);
-  await plate.getByRole("checkbox", { name: /acme\/email-templates/ }).click();
-  await expect(plate.getByRole("checkbox", { name: /acme\/email-templates/ })).toHaveAttribute("aria-checked", "true");
+  // Nothing is listed until something is typed; then only the matches.
+  await expect(plate.getByRole("option")).toHaveCount(2);
+  await plate.getByRole("option", { name: /acme\/email-templates/ }).click();
+  await expect(plate.getByTestId("picked-repo")).toHaveCount(1);
+  await expect(plate.getByPlaceholder("owner/repo")).toHaveValue("");
+  await expect(plate.getByRole("listbox")).toHaveCount(0);
   // The branch list arrives from the backend; the default branch is preselected.
   const branch = plate.getByLabel("Branch of acme/email-templates");
   await expect(branch.locator("option")).toHaveCount(2);
@@ -2077,4 +2081,21 @@ test("minimap rail: draws the transcript, tap and drag scrub with a turn label, 
     await expect(page.getByText("question number 1", { exact: true })).toBeVisible({ timeout: 300 });
   }).toPass({ timeout: 20_000 });
   await expect(page.getByTestId("minimap-more")).toHaveCount(0);
+});
+
+test("a call to a tool that does not exist is one muted line, and opens to the refusal", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please misfire");
+  await composer(page).press("Enter");
+  await expect(page.getByText("That tool is not in my list; using the right one.")).toBeVisible();
+  const line = page.getByRole("button", { name: /called a tool that does not exist: t_7ab511ea/ });
+  await expect(line).toBeVisible();
+  await expect(line).toHaveAttribute("aria-expanded", "false");
+  // No red row and no refusal text until asked for; the real call that
+  // followed (plan housekeeping) folds as it always does.
+  await expect(page.getByLabel("failed")).toHaveCount(0);
+  await expect(page.getByText(/No executor registered/)).toHaveCount(0);
+  await expect(page.getByText("1 internal call · setStepStatus")).toBeVisible();
+  await line.click();
+  await expect(page.getByText(/No executor registered for t_7ab511ea/)).toBeVisible();
 });

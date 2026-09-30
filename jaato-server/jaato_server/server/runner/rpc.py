@@ -128,6 +128,21 @@ __all__ = [
 _thread_local = threading.local()
 
 
+def _reserved_output_of(session: Any) -> int:
+    """The output cap a runner-side session's requests reserve (#1444).
+
+    Read from the session's instruction budget, which stamps it wherever
+    the window is stamped and before every send, rather than asking the
+    provider from a notification thread.  ``0`` when there is no budget
+    or the value is not a positive int (a duck-typed session).
+    """
+    budget = getattr(session, "instruction_budget", None)
+    value = getattr(budget, "reserved_output", 0)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 0
+
+
 def get_current_cancel_token() -> Optional[CancelToken]:
     """Return the cancel token for the currently-executing tool call.
 
@@ -4608,6 +4623,7 @@ class RunnerRPC:
                 # locally from the runner-side session so the daemon
                 # handler doesn't need to call back into the runner.
                 context_limit = 0
+                reserved = 0
                 turns = 0
                 try:
                     host = rpc._session_host
@@ -4616,6 +4632,7 @@ class RunnerRPC:
                         getter = getattr(sess, "get_context_limit", None)
                         if callable(getter):
                             context_limit = int(getter() or 0)
+                        reserved = _reserved_output_of(sess)
                         accounting = getattr(sess, "_turn_accounting", None)
                         if accounting is None:
                             accounting_getter = getattr(
@@ -4645,6 +4662,10 @@ class RunnerRPC:
                     "cost_usd": getattr(usage, "cost_usd", None),
                     # Path E batched values:
                     "context_limit": context_limit,
+                    # The output cap each request reserves (#1444); the
+                    # daemon measures percent/remaining against
+                    # ``context_limit - reserved_output_tokens``.
+                    "reserved_output_tokens": reserved,
                     "turns": turns,
                 }
                 rpc.emit_notification(

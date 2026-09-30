@@ -347,8 +347,10 @@ class ToolPlugin(Protocol):
         The plugin can inspect and modify the prompt.
 
         IMPORTANT: Plugins should NOT remove @references from the prompt.
-        The framework handles @reference cleanup after all plugins have
-        processed the prompt.
+        A plugin that resolved an @mention lists it (without the @) under
+        metadata["resolved_mentions"] (RESOLVED_MENTIONS_METADATA_KEY); after
+        all plugins have run, the framework removes the @ from exactly those
+        mentions and leaves every other @ intact (#1429).
 
         Args:
             prompt: The user's original prompt text.

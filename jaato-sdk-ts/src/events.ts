@@ -6249,7 +6249,9 @@ export type SpendCacheCreationTokens = number | null;
 export type ContextLimit = number;
 export type PercentUsed = number;
 export type TokensRemaining = number;
+export type ReservedOutputTokens = number;
 export type Turns = number;
+export type Source1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -8507,7 +8509,7 @@ export type RequestId20 = string;
 export type Ok = boolean;
 export type Error5 = string;
 export type Category = string;
-export type Source1 = string;
+export type Source2 = string;
 export type MayCurate = boolean | null;
 /**
  * All event types in the protocol.
@@ -8681,7 +8683,7 @@ export type MemoryId = string;
 export type Ok1 = boolean;
 export type Error6 = string;
 export type Category1 = string;
-export type Source2 = string;
+export type Source3 = string;
 export type Memory = {
   [k: string]: unknown;
 } | null;
@@ -8857,7 +8859,7 @@ export type MemoryId1 = string;
 export type Ok2 = boolean;
 export type Error7 = string;
 export type Category2 = string;
-export type Source3 = string;
+export type Source4 = string;
 export type Memory1 = {
   [k: string]: unknown;
 } | null;
@@ -9033,7 +9035,7 @@ export type MemoryId2 = string;
 export type Ok3 = boolean;
 export type Error8 = string;
 export type Category3 = string;
-export type Source4 = string;
+export type Source5 = string;
 /**
  * All event types in the protocol.
  */
@@ -22460,7 +22462,7 @@ export type SessionId128 = string;
 export type RequestId54 = string;
 export type RemoteAgentId1 = string;
 export type Text6 = string;
-export type Source5 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -24865,7 +24867,7 @@ export type EventType142 =
 export type Timestamp142 = string;
 export type SessionId142 = string;
 export type WakeRef1 = string;
-export type Source6 = string;
+export type Source7 = string;
 /**
  * All event types in the protocol.
  */
@@ -28544,6 +28546,14 @@ export interface PlanClearedEvent {
  *
  * GC configuration moved to ``GCConfigEvent`` in v1.0 — query that
  * event (or read it from session init) for status-bar display.
+ *
+ * ``reserved_output_tokens`` is the output cap every request carries
+ * (the provider's ``get_max_output_tokens()``; 0 when none is sent or
+ * the vendor does not count it).  A vendor that counts it refuses a
+ * prompt over ``context_limit - reserved_output_tokens``, so
+ * ``percent_used`` and ``tokens_remaining`` are measured against that
+ * effective input limit (#1444).  Additive: an older daemon omits it
+ * and a client reads 0, which is what every figure meant before.
  */
 export interface ContextUpdatedEvent {
   type?: EventType34;
@@ -28554,7 +28564,9 @@ export interface ContextUpdatedEvent {
   context_limit?: ContextLimit;
   percent_used?: PercentUsed;
   tokens_remaining?: TokensRemaining;
+  reserved_output_tokens?: ReservedOutputTokens;
   turns?: Turns;
+  source?: Source1;
 }
 /**
  * Provider-agnostic per-turn usage shape carried by Context/Turn events.
@@ -28620,6 +28632,11 @@ export interface GCConfigEvent {
  * - context_limit, total_tokens, utilization_percent: Overall usage
  * - gc_eligible_tokens, locked_tokens, preservable_tokens: GC info
  * - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
+ * - effective_total_tokens, total_source, calibration_factor,
+ *   provider_prompt_tokens (#1440): the total GC is judged on, whether it
+ *   is the estimate (``"estimate"``) or the estimate scaled to the
+ *   provider's last reported prompt (``"calibrated"``), the scale, and
+ *   that reported prompt (``None`` until one was reported)
  */
 export interface InstructionBudgetEvent {
   type?: EventType36;
@@ -28929,7 +28946,7 @@ export interface MemoryListEvent {
   ok?: Ok;
   error?: Error5;
   category?: Category;
-  source?: Source1;
+  source?: Source2;
   may_curate?: MayCurate;
 }
 /**
@@ -28948,7 +28965,7 @@ export interface MemoryGetResultEvent {
   ok?: Ok1;
   error?: Error6;
   category?: Category1;
-  source?: Source2;
+  source?: Source3;
   memory?: Memory;
 }
 /**
@@ -28968,7 +28985,7 @@ export interface MemoryUpdateResultEvent {
   ok?: Ok2;
   error?: Error7;
   category?: Category2;
-  source?: Source3;
+  source?: Source4;
   memory?: Memory1;
 }
 /**
@@ -28983,7 +29000,7 @@ export interface MemoryDeleteResultEvent {
   ok?: Ok3;
   error?: Error8;
   category?: Category3;
-  source?: Source4;
+  source?: Source5;
 }
 /**
  * Answer to :class:`DiagnosticsRequest` (#1294, 1.25): the caller's
@@ -30826,7 +30843,7 @@ export interface PeerAgentOutputEvent {
   request_id?: RequestId54;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
-  source?: Source5;
+  source?: Source6;
 }
 /**
  * Signal that a remote subagent has finished execution.
@@ -31148,7 +31165,7 @@ export interface SessionWokenEvent {
   timestamp?: Timestamp142;
   session_id?: SessionId142;
   wake_ref?: WakeRef1;
-  source?: Source6;
+  source?: Source7;
 }
 /**
  * Add tools / patterns to the session's permission whitelist.

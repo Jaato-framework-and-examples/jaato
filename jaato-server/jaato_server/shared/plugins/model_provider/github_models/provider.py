@@ -1108,6 +1108,13 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # Rough estimate: ~4 characters per token
         return len(content) // 4
 
+    def get_max_output_tokens(self) -> Optional[int]:
+        """The profile's ``api_params.max_tokens``, which every request
+        path sends as ``max_tokens`` when set; ``None`` when no cap is
+        sent.  ``JaatoSession`` reserves it against the window (#1444).
+        """
+        return self._max_tokens_override
+
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 

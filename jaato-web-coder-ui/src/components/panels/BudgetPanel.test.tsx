@@ -121,6 +121,25 @@ describe("the panel", () => {
     expect(screen.getByText("remaining")).toBeTruthy();
   });
 
+  it("names the output each request reserves, and only when there is one (#1444)", () => {
+    useJaato.getState().dispatch([
+      budgetEvent(),
+      ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 750_000 },
+           context_limit: 1_000_000, percent_used: 86.3, tokens_remaining: 118_928,
+           reserved_output_tokens: 131_072 }),
+    ]);
+    const { unmount } = render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByText("reserved for output")).toBeTruthy();
+    unmount();
+
+    useJaato.getState().dispatch([
+      ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 10 },
+           context_limit: 1000, percent_used: 1, reserved_output_tokens: 0 }),
+    ]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.queryByText("reserved for output")).toBeNull();
+  });
+
   it("says WHICH readout is missing when the daemon has reported no budget", () => {
     useJaato.getState().dispatch([
       ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 10 }, context_limit: 1000, percent_used: 1 }),
@@ -171,5 +190,48 @@ describe("the GC line (#1190)", () => {
     const text = screen.getByTestId("gc-summary").textContent ?? "";
     expect(text).toContain("no GC pass reported yet");
     expect(text).not.toContain("GC:");
+  });
+});
+
+describe("which measurement a figure is (#1440)", () => {
+  it("labels the Context readout with the source the daemon named, per event", () => {
+    useJaato.getState().dispatch([
+      ev({ type: "context.updated", agent_id: "main", source: "provider",
+           usage: { total_tokens: 861_800 }, context_limit: 1_000_000, percent_used: 86.2 }),
+    ]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("context-source").textContent).toContain("provider-reported");
+    cleanup();
+    // The next event names the other source; the label follows it rather
+    // than keeping the previous one.
+    useJaato.getState().dispatch([
+      ev({ type: "context.updated", agent_id: "main", source: "budget",
+           usage: { total_tokens: 513_000 }, context_limit: 1_000_000, percent_used: 51.3 }),
+    ]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("context-source").textContent).toContain("jaato estimate");
+  });
+
+  it("says nothing about the source when the daemon did not say", () => {
+    useJaato.getState().dispatch([
+      ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 1 },
+           context_limit: 100, percent_used: 1 }),
+    ]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.queryByTestId("context-source")).toBeNull();
+  });
+
+  it("shows the figure GC judges when the budget was calibrated to the provider", () => {
+    useJaato.getState().dispatch([
+      budgetEvent({ total_source: "calibrated", effective_total_tokens: 861_800, provider_prompt_tokens: 861_538 }),
+    ]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("budget-calibrated").textContent).toContain("GC judges");
+  });
+
+  it("the control: an uncalibrated budget shows only what it tracked", () => {
+    useJaato.getState().dispatch([budgetEvent({ total_source: "estimate" })]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.queryByTestId("budget-calibrated")).toBeNull();
   });
 });
