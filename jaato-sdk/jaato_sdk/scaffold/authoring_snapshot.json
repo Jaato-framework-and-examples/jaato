@@ -593,7 +593,7 @@
    "default": null
   },
   "ZHIPUAI_API_KEY": {
-   "category": "provider:zhipuai",
+   "category": "provider:zhipuai_openai",
    "default": null
   },
   "ZHIPUAI_BASE_URL": {
@@ -605,7 +605,7 @@
    "default": null
   },
   "ZHIPUAI_ENABLE_THINKING": {
-   "category": "provider:zhipuai",
+   "category": "provider:zhipuai_openai",
    "default": ""
   },
   "ZHIPUAI_MODEL": {
@@ -625,11 +625,11 @@
    "default": null
   },
   "ZHIPUAI_THINKING_BUDGET": {
-   "category": "provider:zhipuai",
+   "category": "provider:zhipuai_openai",
    "default": null
   }
  },
- "jaato_server_version": "1.2.0",
+ "jaato_server_version": "1.3.0",
  "profiles": {
   "derived_keys": {
    "apparmor_fragments_source": "derived from which profile in the inherits: chain declared `apparmor_fragments`",
