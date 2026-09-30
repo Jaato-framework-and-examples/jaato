@@ -593,7 +593,7 @@
    "default": null
   },
   "ZHIPUAI_API_KEY": {
-   "category": "provider:zhipuai_openai",
+   "category": "provider:zhipuai",
    "default": null
   },
   "ZHIPUAI_BASE_URL": {
@@ -605,7 +605,7 @@
    "default": null
   },
   "ZHIPUAI_ENABLE_THINKING": {
-   "category": "provider:zhipuai_openai",
+   "category": "provider:zhipuai",
    "default": ""
   },
   "ZHIPUAI_MODEL": {
@@ -625,7 +625,7 @@
    "default": null
   },
   "ZHIPUAI_THINKING_BUDGET": {
-   "category": "provider:zhipuai_openai",
+   "category": "provider:zhipuai",
    "default": null
   }
  },

@@ -1420,7 +1420,13 @@ def _scan_env_vars() -> Dict[str, EnvVar]:
         root = _SERVER_ROOT / d
         if not root.is_dir():
             continue
-        for py in root.rglob("*.py"):
+        # Sorted: a var read in several files takes its category, default
+        # and description from the FIRST file reached, and rglob's order is
+        # the filesystem's, which differs between machines.  Unsorted, the
+        # authoring snapshot built from this scan depended on the machine
+        # that wrote it (ZHIPUAI_* flipped between provider:zhipuai and
+        # provider:zhipuai_openai).
+        for py in sorted(root.rglob("*.py")):
             if "__pycache__" in py.parts or "/tests/" in str(py):
                 continue
             try:
