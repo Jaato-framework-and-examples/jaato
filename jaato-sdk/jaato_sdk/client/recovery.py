@@ -359,7 +359,8 @@ class IPCRecoveryClient:
                                                  on_status_change=print) as s:
                 print(await s.ask("Long task…"))
 
-        See ``docs/design/sdk-convenience-layer.md``.
+        ``session_timeout`` is forwarded as ``create_session(timeout=)``, as
+        on :meth:`IPCClient.session`.  See ``docs/design/sdk-convenience-layer.md``.
         """
         from .convenience import open_session
         return open_session(cls, **kwargs)

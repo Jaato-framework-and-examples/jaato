@@ -39,6 +39,7 @@ except ImportError:
 
 from jaato_server.shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
 from .core import JaatoServer
+from . import session_new_timing
 from .ws_tickets import (
     AppCredentialStore,
     BoundIdentity,
@@ -198,7 +199,20 @@ def _report_confined_spawn_failure(
     refuses.  A genuinely-unconfined session keeps the in-process fallback it
     always had.  Extracted from ``_apparmor_pre_init_hook`` so the hook does
     not grow past its complexity baseline (the #812 / #1167 / #1179 move).
+
+    #1168: a :class:`~server.runner_user.RunnerUserRefused` is refused
+    whatever the confinement posture -- the runner uid policy asked for the
+    session to run as a user, and the in-process fallback would run it in
+    the root daemon.
     """
+    from jaato_server.server.runner_user import RunnerUserRefused
+    if isinstance(exc, RunnerUserRefused):
+        logger.warning(
+            "runner uid drop refused for session %s — REFUSING the session "
+            "rather than running it in the root daemon: %s", session_id, exc,
+        )
+        _record_bootstrap_refusal(server, str(exc))
+        return
     if confinement_required:
         logger.warning(
             "AppArmor pre-init: runner spawn failed for session %s "
@@ -2721,6 +2735,9 @@ class JaatoWSServer:
                 await self._send_error(client_id, f"Unknown message type: {msg_type}")
             return
 
+        # #1452: start the phase clock of a session.new where it was read.
+        session_new_timing.note_request(event)
+
         # --- Workspace management (transport-level, all modes) ---
         # Workspace negotiation is a transport concern, not a command concern.
         # These events are handled by the WS server regardless of whether a
@@ -3622,6 +3639,9 @@ class JaatoWSServer:
                     await client.websocket.send(serialize_event(event))
                 except Exception as e:
                     logger.error(f"Send error to {client_id}: {e}")
+                    return
+                # #1452: a session.new answer is timed to the socket.
+                session_new_timing.note_written(event, "websocket")
 
     async def _send_error(self, client_id: str, error: str) -> None:
         """Send an error event to a client."""

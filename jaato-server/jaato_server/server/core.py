@@ -7852,8 +7852,8 @@ class JaatoServer:
         by the same field as the daemon everyone else runs.
 
         This method does not raise.  It is called once per loaded session
-        per listing, from a path that already holds the ``SessionManager``
-        lock, and a listing that dies because one session's relay was being
+        per listing (after the listing has released the ``SessionManager``
+        lock, #1452), and a listing that dies because one session's relay was being
         torn down concurrently would be a worse failure than the one it
         reports on -- so every holder is reached through ``getattr`` and a
         collaborator that answers nothing simply contributes no candidate.

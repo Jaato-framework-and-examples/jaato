@@ -44,6 +44,9 @@ from jaato_server.shared.apparmor_label import (
     profile_name_ignoring_mode,
 )
 from jaato_server.shared.session_envelope import SessionInitEnvelope
+from jaato_server.shared.privilege_drop import (
+    PrivilegeDropError, RunnerUser, apply_user_env, drop_to,
+)
 from jaato_server.shared.private_tmp import (
     PRIVATE_TMP_TARGETS, PrivateTmpError, enter_private_tmp,
 )
@@ -808,6 +811,61 @@ def _enter_private_tmp(envelope: SessionInitEnvelope) -> None:
             "runner-session bootstrap: private /tmp in effect (%s bound over "
             "%s)", tmp_dir, ", ".join(PRIVATE_TMP_TARGETS),
         )
+
+
+def _drop_to_runner_user(envelope: SessionInitEnvelope) -> None:
+    """Become the session's user, between the private /tmp and confining (#1168).
+
+    Step 1b3 of :func:`bootstrap_session`.  The order is the one the issue
+    measured on an enforcing host ("Order A"):
+
+    1. 1b2 private ``/tmp`` -- ``unshare`` + ``mount`` need
+       ``CAP_SYS_ADMIN``, which the drop takes away;
+    2. **this step** -- supplementary groups, gid, uid, irreversibly
+       (``shared.privilege_drop.drop_to`` proves ``setuid(0)`` fails);
+    3. 1c ``aa_change_profile`` -- from ``unconfined`` it needs no
+       capability, so the confined runner holds none and cannot drop
+       itself back to root; then ``verify_thread_confinement``.
+
+    Paths:
+
+    - **cold spawn**: the forked child already dropped before ``exec``
+      (``runner_spawner._drop_privileges_in_child``), so ``drop_to`` finds
+      the process already that user and does nothing;
+    - **virgin pool slot**: still root (forked from the template), drops
+      here;
+    - **reused pool slot**: its ``SlotKey`` carries the uid, so it only
+      serves the uid it already is -- nothing to do.
+
+    The credential change is process-wide (glibc's ``setxid`` broadcast),
+    so a slot's existing worker threads follow it -- unlike the AppArmor
+    label, which is per task (#1023).  ``HOME`` / ``USER`` / ``LOGNAME``
+    are pointed at the user for the runner process; a subprocess the model
+    drives still gets the workspace HOME where #1225 applies.
+
+    ``None`` (the default policy, an older daemon) is a no-op.
+
+    Raises:
+        BootstrapError: stage ``privilege_drop`` -- a runner told to become
+            a user must never carry on as root.
+    """
+    try:
+        user = RunnerUser.from_dict(getattr(envelope, "runner_user", None))
+        if user is None:
+            return
+        changed = drop_to(user)
+    except PrivilegeDropError as exc:
+        raise BootstrapError(
+            "privilege_drop",
+            f"{exc}.  Refusing to run the session as the daemon's uid "
+            f"instead (#1168)",
+        ) from exc
+    apply_user_env(user, os.environ)
+    logger.info(
+        "runner-session bootstrap: running as %s (policy=%s, %s)",
+        user.describe(), user.source or "?",
+        "dropped here" if changed else "already dropped before exec",
+    )
 
 
 def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
@@ -1596,6 +1654,13 @@ def bootstrap_session(
     # happen.  Refuses the bootstrap when the profile expects it and it
     # cannot be set up.
     _enter_private_tmp(envelope)
+
+    # ---- 1b3. Drop to the session's user (#1168) ----
+    # After the private /tmp (needs CAP_SYS_ADMIN) and BEFORE confining:
+    # a transition from ``unconfined`` needs no capability, so the confined
+    # runner keeps none and cannot become root again.  No-op unless the
+    # daemon's runner uid policy named a user for this session.
+    _drop_to_runner_user(envelope)
 
     # ---- 1c. Per-slot AppArmor self-confine (pool PR 5a) ----
     # Pool slots fork from the (unconfined) template — they need to

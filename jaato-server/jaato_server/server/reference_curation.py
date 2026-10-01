@@ -92,6 +92,7 @@ from jaato_server.shared.plugins.references.claims import (
     is_claim,
     link_warnings,
     pending_claim_ids,
+    rendered_stamp_now,
     valid_id,
 )
 from jaato_server.shared.plugins.references.config_loader import discover_references
@@ -246,6 +247,7 @@ def _read_claim(root: str, claim_id: str) -> "tuple[Optional[str], Any, str, str
 def promoted_origin(
     claim: Dict[str, Any], *, root: str, user_id: Optional[str],
     creator_in_workspace: Callable[[str, str], Optional[str]], at: str,
+    entry: Optional[Dict[str, Any]] = None,
 ) -> ReferenceOrigin:
     """The origin a promoted entry carries (step 3 of the module docstring).
 
@@ -254,7 +256,8 @@ def promoted_origin(
     ``generated_by`` and ``witnessed_by`` are carried AS RECORDED: the
     daemon holds no record to check either against, and the curator
     promoting the claim has read both; ``curated_by`` is the stamp this
-    step makes itself.
+    step makes itself.  ``rendered_from`` is carried with its
+    ``edited_after_render`` re-decided against ``entry``'s file now.
     """
     recorded = ReferenceOrigin.from_dict(claim.get("origin"))
     generated_by = recorded.generated_by if recorded else None
@@ -267,6 +270,8 @@ def promoted_origin(
         created_by=created_by, claim_id=claim["claim_id"],
         curated_by=curator_stamp(user_id),
         witnessed_by=recorded.witnessed_by if recorded else None,
+        rendered_from=rendered_stamp_now(root, entry or {}, recorded.rendered_from)
+        if recorded else None,
     )
 
 
@@ -306,7 +311,7 @@ def _promote(
         return _fail(outcome, "invalid_claim", "; ".join(errors))
     origin = promoted_origin(claim, root=root, user_id=user_id,
                              creator_in_workspace=creator_in_workspace,
-                             at=datetime.now(timezone.utc).isoformat())
+                             at=datetime.now(timezone.utc).isoformat(), entry=entry)
     data = json.dumps(_catalog_entry(entry, root, origin, dest_rel), indent=2,
                       ensure_ascii=False)
     try:
@@ -503,6 +508,7 @@ def claim_row(
         row["content"] = ref["content"][:INLINE_CLAIM_MAX_CHARS]
     origin = ReferenceOrigin.from_dict(claim.get("origin"))
     if origin is not None:
+        origin.rendered_from = rendered_stamp_now(root, ref, origin.rendered_from)
         row["origin"] = origin.to_dict()
     entry, problems = build_proposed_reference(claim_as_args(claim), workspace=root,
                                                catalog_ids=ids)

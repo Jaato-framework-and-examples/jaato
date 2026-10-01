@@ -266,7 +266,7 @@ from jaato_server.shared.tests.reversion import (  # noqa: E402
 REVERSIONS = [
     Reversion(
         target="jaato-server/pyproject.toml",
-        find='    "jaato-sdk>=0.29.0.dev0",  # SDK protocol: base plugin',
+        find='    "jaato-sdk>=0.30.0.dev0",  # SDK protocol: base plugin',
         replace='    "jaato-sdk",  # SDK protocol: base plugin',
         because=(
             "a bare jaato-sdk requirement is #1055 itself: the resolver "
@@ -278,7 +278,7 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-tui/pyproject.toml",
-        find='"jaato-sdk>=0.29.0.dev0",  # SDK protocol: IPC client',
+        find='"jaato-sdk>=0.30.0.dev0",  # SDK protocol: IPC client',
         replace='"jaato-sdk>=0.19.0",  # SDK protocol: IPC client',
         because=(
             "a floor left behind at an older SDK is the same defect "
@@ -289,12 +289,12 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-eval/pyproject.toml",
-        find='    "jaato-sdk>=0.29.0.dev0",',
-        replace='    "jaato-sdk>=0.29.0",',
+        find='    "jaato-sdk>=0.30.0.dev0",',
+        replace='    "jaato-sdk>=0.30.0",',
         because=(
             "a floor at the cut's FINAL is #1153 itself: every TestPyPI "
-            "staging build is a pre-release and PEP 440 puts 0.29.0rc1 "
-            "below 0.29.0, so the floor excludes the only SDK on that "
+            "staging build is a pre-release and PEP 440 puts 0.30.0rc1 "
+            "below 0.30.0, so the floor excludes the only SDK on that "
             "index and the staged pair cannot be installed together -- "
             "and it reads as correct, because the same pin is fine "
             "against PyPI proper"

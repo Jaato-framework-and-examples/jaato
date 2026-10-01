@@ -787,6 +787,9 @@ def _apply_transport(args, subs: Dict[str, str], socket: str) -> Optional[int]:
             "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
             f"        workspace_path=WORKSPACE,{ca_arg}{on_status_arg}\n"
             "        connect_timeout=120.0,        # cold daemon autostart ~30-60s\n"
+            "        session_timeout=60.0,         # session.new confirmation; raise on a busy/\n"
+            "                                      # shared daemon (cascade fan-out): expiry may\n"
+            "                                      # leave a session running (SessionNotConfirmed)\n"
             "        **spec,\n"
             "    )"
         )
@@ -864,6 +867,9 @@ def _apply_transport(args, subs: Dict[str, str], socket: str) -> Optional[int]:
             "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
             f"        workspace_path=WORKSPACE,{on_status_arg}\n"
             "        connect_timeout=120.0,        # cold daemon autostart ~30-60s\n"
+            "        session_timeout=60.0,         # session.new confirmation; raise on a busy/\n"
+            "                                      # shared daemon (cascade fan-out): expiry may\n"
+            "                                      # leave a session running (SessionNotConfirmed)\n"
             "        **spec,\n"
             "    )"
         )

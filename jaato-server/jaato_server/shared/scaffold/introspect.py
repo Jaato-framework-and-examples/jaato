@@ -107,6 +107,9 @@ class ToolInfo:
     #: ``None`` when the plugin's schema omitted it, which is distinct from
     #: ``{}`` -- a tool that genuinely takes no arguments.
     parameters: "Optional[Dict[str, Any]]" = None
+    #: The tool's declared traits (``TRAIT_FILE_WRITER``, ...), sorted.  A
+    #: list rather than a set so the record stays JSON-serializable.
+    traits: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -439,9 +442,9 @@ def client_timeouts() -> List[ClientTimeout]:
 
     # Can a facade caller set the session.new budget?  Asked of the
     # signature, never assumed.
-    create_via = ("both" if _accepts(open_session, "create_timeout")
-                  else "bare client only")
-    return [
+    facade_create = _accepts(open_session, "session_timeout")
+    create_via = "both" if facade_create else "bare client only"
+    rows = [
         ClientTimeout(
             name="connect_timeout",
             # Every ``where`` SPELLS its parameter, because that spelling is
@@ -478,6 +481,22 @@ def client_timeouts() -> List[ClientTimeout]:
             settable_via=create_via,
             on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
         ),
+    ]
+    if facade_create:
+        # The facade's spelling of the same clock (#1450).  Its own row,
+        # because ``session_timeout`` is what a facade author greps for;
+        # the default shown is create_session's, since unset forwards
+        # nothing and that default is what applies.  Copied from the row
+        # above rather than read a second time, so the two cannot disagree.
+        rows.append(ClientTimeout(
+            name="session_timeout",
+            where="jaato.session(session_timeout=)",
+            default=rows[-1].default,
+            bounds="the same `session.new` confirmation, from the facade",
+            settable_via="facade",
+            on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
+        ))
+    rows += [
         ClientTimeout(
             name="timeout",
             where="Session.ask / .complete / .stream(timeout=)",
@@ -487,6 +506,7 @@ def client_timeouts() -> List[ClientTimeout]:
             on_expiry="TurnTimeout — stops WAITING, not the session",
         ),
     ]
+    return rows
 
 
 # ------------------------------------------------------ session-level tools
@@ -1125,6 +1145,7 @@ def _describe_plugins(reg: Any) -> Dict[str, PluginInfo]:
                     # handed must not reshape the live plugin's schema.
                     parameters=(dict(_params) if isinstance(_params, dict)
                                 else None),
+                    traits=sorted(getattr(schema, "traits", None) or ()),
                 ))
         except Exception:
             info.dynamic = True
@@ -1399,7 +1420,13 @@ def _scan_env_vars() -> Dict[str, EnvVar]:
         root = _SERVER_ROOT / d
         if not root.is_dir():
             continue
-        for py in root.rglob("*.py"):
+        # Sorted: a var read in several files takes its category, default
+        # and description from the FIRST file reached, and rglob's order is
+        # the filesystem's, which differs between machines.  Unsorted, the
+        # authoring snapshot built from this scan depended on the machine
+        # that wrote it (ZHIPUAI_* flipped between provider:zhipuai and
+        # provider:zhipuai_openai).
+        for py in sorted(root.rglob("*.py")):
             if "__pycache__" in py.parts or "/tests/" in str(py):
                 continue
             try:

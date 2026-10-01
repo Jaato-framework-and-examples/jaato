@@ -202,6 +202,7 @@ def test_every_documented_timeout_default_is_the_live_one(clients_text):
         return hits[0].default
 
     assert reported("create_session") == live["create"]
+    assert reported("session_timeout=") == live["create"]
     assert reported("IPCClient.connect") == live["bare_connect"]
     assert reported("autostart_timeout") == live["autostart"]
     assert reported("connect_timeout") == live["facade_connect"]
@@ -222,7 +223,7 @@ def test_the_session_new_budget_says_where_it_is_settable():
     """
     from jaato_sdk.client.convenience import open_session
 
-    forwards = "create_timeout" in inspect.signature(open_session).parameters
+    forwards = "session_timeout" in inspect.signature(open_session).parameters
     row = next(t for t in introspect.client_timeouts()
                if t.where == "IPCClient.create_session(timeout=)")
     assert row.settable_via == ("both" if forwards else "bare client only")

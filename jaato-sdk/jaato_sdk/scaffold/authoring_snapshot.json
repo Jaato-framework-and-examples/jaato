@@ -629,7 +629,7 @@
    "default": null
   }
  },
- "jaato_server_version": "1.2.0",
+ "jaato_server_version": "1.3.0",
  "profiles": {
   "derived_keys": {
    "apparmor_fragments_source": "derived from which profile in the inherits: chain declared `apparmor_fragments`",

@@ -29,6 +29,7 @@ why the stamp promotion makes (``curated_by``) is the daemon's own.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -276,13 +277,96 @@ def build_proposed_reference(
     return (entry, []) if ok else (None, errors)
 
 
-def new_claim(entry: Dict[str, Any], session: Any) -> Dict[str, Any]:
-    """Wrap a proposed entry in a claim record with its stamped origin."""
+def new_claim(entry: Dict[str, Any], session: Any,
+              rendered: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Wrap a proposed entry in a claim record with its stamped origin.
+
+    ``rendered`` is :func:`rendered_from`'s answer for the entry's file.
+    """
     now = datetime.now(timezone.utc)
     claim_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     origin = proposing_origin(session, claim_id=claim_id, at=now.isoformat())
+    origin.rendered_from = rendered or None
     return {"claim_id": claim_id, "status": CLAIM_STATUS_PROPOSED,
             "reference": entry, "origin": origin.to_dict()}
+
+
+def file_digest(path: Path) -> Optional[str]:
+    """SHA-256 of ``path``'s bytes, or ``None`` when it cannot be read."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def rendered_from(
+    entry: Mapping[str, Any], workspace: str,
+    lookup: Optional[Any],
+) -> Optional[Dict[str, Any]]:
+    """The ``origin.rendered_from`` stamp for a proposed ``entry``, or ``None``.
+
+    ``lookup`` is the template plugin's ``render_record``: it answers what
+    catalog template this session rendered a file from.  Only a ``local``
+    entry (a ``path`` proposal) can have been rendered.  When the file no
+    longer matches the render the stamp still names the template, with
+    ``edited_after_render: true``, because the curator should know both
+    that it started from a template and that it was changed since.
+    """
+    if not callable(lookup) or entry.get("type") != "local":
+        return None
+    rel = entry.get("path")
+    if not isinstance(rel, str) or not rel:
+        return None
+    target = Path(workspace).resolve() / rel
+    try:
+        record = lookup(str(target))
+    except Exception:  # noqa: BLE001 -- a stamp must not fail a proposal
+        return None
+    if not isinstance(record, dict) or not record.get("digest"):
+        return None
+    stamp = {k: record[k] for k in ("template", "template_id", "digest", "at") if record.get(k)}
+    if file_digest(target) != record["digest"]:
+        stamp["edited_after_render"] = True
+    return stamp
+
+
+def rendered_stamp_now(root: str, entry: Mapping[str, Any],
+                       rendered: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """``rendered`` with ``edited_after_render`` re-decided from the file now.
+
+    The recorded flag says what the proposing session saw; a page edited
+    after the proposal would still read as unedited.  When the file can be
+    compared, the answer replaces the recorded one; when it cannot, the
+    recorded stamp is kept as it was.
+    """
+    if not rendered:
+        return None
+    stamp = dict(rendered)
+    changed = rendered_file_changed(root, entry, rendered)
+    if changed is True:
+        stamp["edited_after_render"] = True
+    elif changed is False:
+        stamp.pop("edited_after_render", None)
+    return stamp
+
+
+def rendered_file_changed(root: str, entry: Mapping[str, Any],
+                          rendered: Optional[Mapping[str, Any]]) -> Optional[bool]:
+    """Whether ``entry``'s file differs from the render its claim recorded.
+
+    ``None`` when there is nothing to compare: no ``rendered_from`` stamp
+    with a digest, not a ``local`` entry, or a file that cannot be read.
+    The daemon asks this when it lists and promotes a claim, so a page
+    edited after the proposal is flagged too.
+    """
+    digest = (rendered or {}).get("digest")
+    rel = entry.get("path")
+    if not isinstance(digest, str) or entry.get("type") != "local" or not isinstance(rel, str):
+        return None
+    now = file_digest(Path(root).resolve() / rel)
+    if now is None:
+        return None
+    return now != digest
 
 
 def write_claim(workspace: str, claim: Dict[str, Any]) -> Path:

@@ -202,6 +202,79 @@ def _check_plugin_configs_expose_tools(profile: Any, plugins, add) -> None:
             where=f"plugin_configs.{cfg_name}")
 
 
+#: Plugins that run a command or code the model supplies, and so can write
+#: any file the session can: a template-only profile must leave them out.
+_COMMAND_PLUGINS = ("cli", "interactive_shell", "notebook")
+
+
+def _file_writers(pinfo: Any, scope: Optional[List[str]]) -> List[str]:
+    """The ``TRAIT_FILE_WRITER`` tools of one plugin that the profile's
+    ``tools:[...]`` scope (``None`` = all) leaves on the wire, other than
+    ``renderTemplateToFile``."""
+    from jaato_sdk.plugins.model_provider.types import TRAIT_FILE_WRITER
+
+    tools = pinfo.tools if pinfo is not None else ()
+    return [t.name for t in tools
+            if TRAIT_FILE_WRITER in t.traits and t.name != "renderTemplateToFile"
+            and (scope is None or t.name in scope)]
+
+
+def _template_only_leaks(profile: Any, plugins, tpl_off: bool, page_off: bool) -> List[str]:
+    """The ways ``profile`` can still write a page without a catalog template.
+
+    A plugin in :data:`_COMMAND_PLUGINS`, any enabled tool declaring
+    ``TRAIT_FILE_WRITER`` other than ``renderTemplateToFile`` (a
+    ``tools:[...]`` scope that leaves it out closes it), and the half of the
+    gate left open: inline templates while only inline content is off, and
+    the reverse.
+    """
+    enabled = list(getattr(profile, "plugins", None) or ())
+    scopes = getattr(profile, "tool_scopes", None) or {}
+    leaks: List[str] = [p for p in enabled if p in _COMMAND_PLUGINS]
+    for plug in enabled:
+        leaks += [f"{plug}.{name}" for name in _file_writers(plugins.get(plug), scopes.get(plug))]
+    if page_off and not tpl_off and "template" in enabled:
+        leaks.append("renderTemplateToFile with an inline 'template' "
+                     "(template.allow_inline_template is not false)")
+    if tpl_off and not page_off and "references" in enabled:
+        leaks.append("proposeReference with inline 'content' "
+                     "(references.allow_inline_content is not false)")
+    return leaks
+
+
+def _check_template_only_gate(profile: Any, plugins, add) -> None:
+    """Warn when a profile turns inline templates or inline pages off and
+    still leaves another way to write a file.
+
+    ``template.allow_inline_template: false`` and
+    ``references.allow_inline_content: false`` close two parameters.  They
+    make catalog templates the only way to write a page only when the
+    profile also leaves out every free-form write tool, which the settings
+    cannot do themselves: tool gating is the profile's ``plugins:`` list
+    and ``tools:[...]`` scopes.  Without this warning, setting the knob
+    reads as enforcement while ``writeNewFile`` or ``cli`` is on the wire.
+    An MCP server that writes files is not visible offline and is not
+    reported.
+    """
+    cfgs = getattr(profile, "plugin_configs", None) or {}
+    tpl_off = (cfgs.get("template") or {}).get("allow_inline_template") is False
+    page_off = (cfgs.get("references") or {}).get("allow_inline_content") is False
+    if not (tpl_off or page_off):
+        return
+    leaks = _template_only_leaks(profile, plugins, tpl_off, page_off)
+    if not leaks:
+        return
+    which = " and ".join(
+        k for k, on in (("template.allow_inline_template", tpl_off),
+                        ("references.allow_inline_content", page_off)) if on)
+    add("warn", "template_only_gate_leaks",
+        f"{which} is false, so pages are meant to come from catalog templates, "
+        f"but the profile can still write a file another way: "
+        f"{', '.join(leaks)}.  Leave those plugins out, or scope them with "
+        f"'<plugin>(tools:[...])' (e.g. 'file_edit(tools:[readFile])').",
+        where="plugins")
+
+
 #: A tool name this shape belongs to an MCP server, whose inventory comes from
 #: the servers a LIVE session connects to — never from anything installed here.
 #: ``mcp/plugin.py`` normalizes every exposed name to ``mcp__<server>__<tool>``,
@@ -612,6 +685,7 @@ def validate_profile(
 
     # --- plugin_configs knobs (the silent-ignore class) ------------------
     _check_plugin_configs_expose_tools(profile, plugins, add)
+    _check_template_only_gate(profile, plugins, add)
     plugin_configs = getattr(profile, "plugin_configs", None) or {}
     for cfg_name, cfg in plugin_configs.items():
         cfg_provider = introspect.resolve_provider(cfg_name)

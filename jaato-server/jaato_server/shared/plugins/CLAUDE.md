@@ -507,6 +507,27 @@ follow for a plugin author:
   out of `plugins:` — the config applies, but nothing the plugin offers is on
   the wire.
 
+## A Setting That Must Hold for One Session
+
+`initialize(config)` sets instance state, and the instance is shared with
+in-process subagents, so an instance value says what the LAST configured
+session asked for. For a setting that must hold for the session that
+declared it (a gate), read it at call time:
+
+```python
+from jaato_server.shared.session_context import session_plugin_setting
+
+allowed = session_plugin_setting("template", "allow_inline_template",
+                                 self._allow_inline_template) is not False
+```
+
+It answers the calling session's own `plugin_configs.<plugin>.<key>` when
+that session declared it, else the fallback you pass. If the setting
+refuses a tool parameter, also implement `narrow_tool_schema(schema)` and
+return a copy without it (a foreign schema unchanged), so the model is not
+offered what the executor refuses. `tool_visibility` applies it to the
+wire and to the deferred-tool catalog alike.
+
 ## Critical: Model-Supplied Paths Go Through `path_safety`
 
 A plugin that reads or writes a path the **model** chose must not use the

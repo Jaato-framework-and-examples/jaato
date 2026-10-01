@@ -32,6 +32,9 @@ from typing import Any, Callable, Dict, Optional
 # Imported at module scope, never in the forked child: an import after
 # fork() in a threaded daemon can block on a lock another thread held.
 from jaato_server.shared.private_tmp import PrivateTmpError, enter_private_tmp
+from jaato_server.shared.privilege_drop import (
+    PrivilegeDropError, RunnerUser, drop_to,
+)
 from jaato_server.server.confinement_id import (
     confinement_id_from_profile_name, session_tmpdir,
 )
@@ -108,6 +111,37 @@ def _enter_private_tmp_in_child(private_tmp_dir: Optional[str]) -> None:
             os._exit(PRIVATE_TMP_EXIT_CODE)
 
 
+#: Exit status of a forked child that could not drop to its runner user
+#: (#1168).  Distinct from 126 and the generic 127 so the cause is
+#: attributable from the status alone.  A child that was told to drop and
+#: could not must never exec a root runner instead.
+PRIVILEGE_DROP_EXIT_CODE = 125
+
+
+def _drop_privileges_in_child(runner_user: Optional[RunnerUser]) -> None:
+    """Become the session's user in a forked child, or exit (#1168).
+
+    Runs after the cgroup attach and the private ``/tmp`` (both need root:
+    the delegated cgroup subtree is the service user's, and ``unshare`` /
+    ``mount`` need ``CAP_SYS_ADMIN``) and BEFORE ``exec`` — so before
+    ``runner/__main__`` confines itself.  That is Order A: a transition from
+    ``unconfined`` needs no capability, so the confined runner keeps none
+    and cannot become root again.  No-op for ``None``.
+    """
+    if runner_user is None:
+        return
+    try:
+        drop_to(runner_user)
+    except PrivilegeDropError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to start -- could not drop to "
+                f"{runner_user.describe()}: {exc} (#1168)\n"
+            ).encode())
+        finally:
+            os._exit(PRIVILEGE_DROP_EXIT_CODE)
+
+
 class RunnerSpawner:
     """Forks ``python -m server.runner`` once per top-level session.
 
@@ -135,6 +169,7 @@ class RunnerSpawner:
         disable_confine: bool = False,
         cgroup_attach: Optional[Callable[[], None]] = None,
         private_tmp_dir: Optional[str] = None,
+        runner_user: Optional[RunnerUser] = None,
     ) -> SpawnedRunner:
         """Fork+exec a runner; return the daemon-side handle.
 
@@ -174,6 +209,13 @@ class RunnerSpawner:
                 its stderr, so the runner never starts under a ``/tmp``
                 grant that would reach the host's ``/tmp``.  ``None`` = no
                 private ``/tmp``.
+            runner_user: #1168 -- the account the runner runs as.  The
+                child drops to it after the cgroup attach and the private
+                ``/tmp`` (both need root) and after opening its log, and
+                before ``exec``; a child that cannot drop exits with
+                :data:`PRIVILEGE_DROP_EXIT_CODE`.  ``None`` = keep the
+                daemon's uid.  Resolved and made fork-safe daemon-side
+                (``server.runner_user``); the child does no NSS lookup.
 
         Raises:
             DaemonConfinementError: daemon thread is confined at the
@@ -249,7 +291,8 @@ class RunnerSpawner:
                 if cgroup_attach is not None:
                     cgroup_attach()
                 _enter_private_tmp_in_child(private_tmp_dir)
-                self._exec_runner(child_sock, parent_sock, log_path, env)
+                self._exec_runner(
+                    child_sock, parent_sock, log_path, env, runner_user)
             except BaseException:  # noqa: BLE001 — child must never return
                 # Any failure pre-exec lands us here.  os._exit(127) so
                 # the parent sees a non-zero status it can attribute.
@@ -393,9 +436,15 @@ class RunnerSpawner:
         parent_sock: socket.socket,
         log_path: Optional[str],
         env: Dict[str, str],
+        runner_user: Optional[RunnerUser] = None,
     ) -> None:
         """Child-side: dup socket → fd 3, optionally redirect 1+2 to log,
-        close inherited fds, exec the runner.
+        close inherited fds, drop to *runner_user* (#1168), exec the runner.
+
+        The log is opened BEFORE the drop so the runner never loses it to a
+        directory the target cannot enter (the daemon hands a fresh log to
+        the target beforehand, ``runner_user.prepare_runner_owned_paths``;
+        an older root-owned one still opens here, as root).
 
         Never returns — exec replaces the process.  Any pre-exec
         failure raises and the caller (``spawn``'s child branch)
@@ -440,6 +489,9 @@ class RunnerSpawner:
         except (AttributeError, OSError, ValueError):
             soft_limit = 1024
         os.closerange(4, max(int(soft_limit), 4))
+
+        # #1168: last thing before exec, after every root-only step above.
+        _drop_privileges_in_child(runner_user)
 
         os.execvpe(
             self._python_executable,

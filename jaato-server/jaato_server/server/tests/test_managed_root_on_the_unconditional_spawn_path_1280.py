@@ -59,11 +59,11 @@ REVERSIONS = [
         find=(
             "                cascade_driver_id=cascade_driver_id,\n"
             "                managed_workspace_root=managed_workspace_root,\n"
-            "            )"
+            "                # #1168"
         ),
         replace=(
             "                cascade_driver_id=cascade_driver_id,\n"
-            "            )"
+            "                # #1168"
         ),
         test="test_unconditional_spawn_creates_the_workspace_home",
         because=(

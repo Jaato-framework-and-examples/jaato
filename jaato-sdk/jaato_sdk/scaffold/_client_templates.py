@@ -9,6 +9,9 @@ hour of trial-and-error:
   roots), so headless completion works.
 - ``connect_timeout=120.0`` — a COLD daemon autostart takes ~30-60s; the SDK
   default (5s) is too low.
+- ``session_timeout=60.0`` beside it (daemon transports) — the ``session.new``
+  confirmation budget, a separate clock; raise it for a busy or shared daemon,
+  since an expiry may leave a session running (#1450).
 - ``env_file`` is always a real path — ``env_file=None`` crashes the IPC
   handshake with an opaque ``os.PathLike`` TypeError.
 

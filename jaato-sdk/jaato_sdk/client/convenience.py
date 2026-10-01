@@ -53,6 +53,7 @@ See ``docs/design/sdk-convenience-layer.md`` and
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import (Any, AsyncIterator, Callable, Collection, Dict,
                     Optional)
 
@@ -921,12 +922,71 @@ class _SessionContext:
         return False
 
 
+def _check_session_timeout(session_timeout: Any) -> float:
+    """Validate a facade ``session_timeout``; return it as a float.
+
+    Refused at the point the facade is BUILT, not when ``session.new`` is
+    sent: a budget that cannot work should fail before a daemon is
+    connected (and possibly autostarted) on its behalf.  A bool is refused
+    although Python counts it as an int -- ``session_timeout=True`` is a
+    typo for something, and reading it as one second is not it.
+
+    Raises:
+        TypeError: not a real number.
+        ValueError: zero, negative, or not finite.  There is no "wait
+            forever" spelling on purpose: an unbounded wait on a
+            confirmation that may never come is the hang the timeout
+            exists to prevent.
+    """
+    if isinstance(session_timeout, bool) or not isinstance(
+            session_timeout, (int, float)):
+        raise TypeError(
+            "session_timeout must be a number of seconds, got "
+            f"{type(session_timeout).__name__}")
+    if not math.isfinite(session_timeout) or session_timeout <= 0:
+        raise ValueError(
+            "session_timeout must be a positive, finite number of seconds "
+            f"(got {session_timeout!r}); leave it unset for create_session's "
+            "own default")
+    return float(session_timeout)
+
+
+def facade_create_kwargs(*, profile=None, agent=None, agent_params=None,
+                         cascade_driver_id=None,
+                         session_timeout: Optional[float] = None
+                         ) -> Dict[str, Any]:
+    """The ``create_session`` kwargs every facade entry point forwards.
+
+    ONE builder for ``open_session`` (``IPCClient.session`` /
+    ``IPCRecoveryClient.session``) and both WS ``session`` overrides, so the
+    set of forwarded knobs cannot differ by transport.  It did: the facade
+    forwarded ``profile`` / ``agent`` / ``agent_params`` /
+    ``cascade_driver_id`` and nothing else, so ``create_session``'s
+    ``timeout`` -- the ``session.new`` confirmation budget -- was fixed at
+    its default for every facade caller (jaato #899, #1129, #1450), and the
+    WS overrides, which swallow unknown kwargs, would have dropped a new one
+    silently.
+
+    ``session_timeout`` is forwarded as ``timeout`` ONLY when set.  Unset
+    means the key is absent, so ``create_session``'s own default (60s)
+    applies exactly as before -- not a copy of that number here that could
+    drift from it.
+    """
+    kwargs: Dict[str, Any] = dict(profile=profile, agent=agent,
+                                  agent_params=agent_params,
+                                  cascade_driver_id=cascade_driver_id)
+    if session_timeout is not None:
+        kwargs["timeout"] = _check_session_timeout(session_timeout)
+    return kwargs
+
+
 def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
                  cascade_driver_id=None, on_permission=None, client_tools=None,
                  socket_path=None, env_file: str = ".env",
                  workspace_path=None, auto_start: bool = True,
                  client_type: ClientType = ClientType.API,
                  connect_timeout: float = 120.0,
+                 session_timeout: Optional[float] = None,
                  config_root=None, apparmor=None,
                  on_status_change=None, presentation=None,
                  min_protocol_version=None) -> _SessionContext:
@@ -939,6 +999,18 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     host-tool specs, same shape as :meth:`register_client_tools`) is registered
     after connect but before create_session, so host-tool clients can use the
     facade instead of the low-level connect/register/create dance.
+
+    Two clocks, and they bound different things:
+
+    * ``connect_timeout`` (120s) -- reaching, or autostarting, the daemon.
+      Expiry raises ``ConnectionError``; nothing was created.
+    * ``session_timeout`` (unset = ``create_session``'s own 60s) -- waiting
+      for the daemon to CONFIRM ``session.new``, provider initialisation
+      included.  Raise it for a busy or shared daemon: a cascade opening
+      several sessions close together measured 19.4s for one confirmation
+      that takes 2-4s alone (#1450).  Expiry raises ``SessionNotConfirmed``
+      and a session MAY exist, so a larger budget is cheaper than a retry.
+      Must be positive and finite; forwarded as ``create_session(timeout=)``.
     ``config_root`` (read-only-config root override) and ``apparmor`` (opt-in
     per-session AppArmor confinement) are accepted by BOTH client classes.
     They were ``IPCClient``-only until 2026-08-23, and this docstring used to
@@ -978,8 +1050,11 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
         ctor_kwargs["min_protocol_version"] = min_protocol_version
     client = (client_cls(socket_path, **ctor_kwargs) if socket_path is not None
               else client_cls(**ctor_kwargs))
-    create_kwargs = dict(profile=profile, agent=agent, agent_params=agent_params,
-                         cascade_driver_id=cascade_driver_id)
+    # Built (and session_timeout validated) BEFORE the client exists, so a
+    # budget that cannot work never costs a connection.
+    create_kwargs = facade_create_kwargs(
+        profile=profile, agent=agent, agent_params=agent_params,
+        cascade_driver_id=cascade_driver_id, session_timeout=session_timeout)
     return _SessionContext(client, create_kwargs, on_permission, connect_timeout,
                            client_tools=client_tools)
 

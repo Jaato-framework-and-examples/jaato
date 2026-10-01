@@ -16,6 +16,15 @@ Before #1345 only the first asked, so a hidden tool was still listed by
 calls discovering tools the wire then withheld.  Both surfaces now call
 :func:`filter_visible_tool_schemas`, so they cannot disagree.
 
+A plugin MAY also implement ``narrow_tool_schema(schema) -> schema`` to
+return a narrower copy of one of its own schemas for the current session:
+a parameter the session's settings refuse is removed rather than offered
+and then refused (``renderTemplateToFile``'s inline ``template`` under
+``allow_inline_template: false``).  It is asked about every visible
+schema and returns a foreign one unchanged, like ``is_tool_visible``.  It
+must only narrow: the filter never adds a tool, and a hook that raises
+leaves the schema as it was.
+
 The predicates answer for "the current session" (#1195), so the caller
 must have set the session ContextVar for the session it is serving before
 calling this.  ``_get_tools_for_provider`` sets it explicitly; a tool
@@ -30,7 +39,8 @@ def filter_visible_tool_schemas(
     schemas: List[Any],
     on_error: Optional[Callable[[str, str, Exception], None]] = None,
 ) -> List[Any]:
-    """Drop the schemas some exposed plugin's ``is_tool_visible`` hides.
+    """Drop the schemas some exposed plugin's ``is_tool_visible`` hides,
+    then apply every ``narrow_tool_schema`` hook to what is left.
 
     Every exposed plugin that implements the predicate is asked about
     every tool name (a predicate returns ``True`` for names it does not
@@ -53,17 +63,41 @@ def filter_visible_tool_schemas(
         exposed_names = registry.list_exposed()
     except Exception:
         return schemas
-    filters = []
+    filters, narrowers = [], []
     for name in exposed_names:
         plugin = registry.get_plugin(name)
         if plugin is not None and hasattr(plugin, 'is_tool_visible'):
             filters.append(plugin)
-    if not filters:
+        if plugin is not None and hasattr(plugin, 'narrow_tool_schema'):
+            narrowers.append(plugin)
+    if not filters and not narrowers:
         return schemas
-    return [
+    visible = [
         schema for schema in schemas
         if _is_visible(schema.name, filters, on_error)
     ]
+    if not narrowers:
+        return visible
+    return [_narrowed(schema, narrowers, on_error) for schema in visible]
+
+
+def _narrowed(
+    schema: Any,
+    narrowers: List[Any],
+    on_error: Optional[Callable[[str, str, Exception], None]],
+) -> Any:
+    """``schema`` after every ``narrow_tool_schema`` hook; a hook that
+    raises or returns nothing leaves it as it was."""
+    for plugin in narrowers:
+        try:
+            narrowed = plugin.narrow_tool_schema(schema)
+        except Exception as exc:
+            if on_error is not None:
+                on_error(schema.name, getattr(plugin, 'name', '?'), exc)
+            continue
+        if narrowed is not None:
+            schema = narrowed
+    return schema
 
 
 def _is_visible(

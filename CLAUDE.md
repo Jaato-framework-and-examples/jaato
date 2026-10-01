@@ -694,6 +694,36 @@ caller-originated and starts with a full budget. Consequences:
 - **Nothing is persisted**, so a revived session begins with a full budget —
   the same answer the reset gives its first caller-originated turn.
 
+### A Stop the Nudge Undid (#1433)
+
+On a completion-gated profile, `session.stop` (#812), `session.end` and
+`stop()` each cancelled the in-flight turn, and the first two emitted
+`SessionTerminatedEvent`. About 0.3 s later the daemon asked
+`try_completion_nudge`, which answered "the agent ended its loop without
+`signal_completion`" and re-prompted it. The session then ran to completion
+with no client attached, 3 runs out of 3. The gate asked whether the agent
+signalled and whether budget was left, never why the loop ended; the cancel
+token that could have said so is cleared at turn end, before the daemon asks.
+
+**A loop that ended because it was cancelled is never nudged.** The rule
+lives in `JaatoSession.try_completion_nudge`, the one gate the daemon's
+guard (over the runner RPC), the embedded lead and the subagent loop all
+call, so it cannot hold on one path and not another.
+
+| Piece | Where |
+|---|---|
+| `request_stop` latches `_nudge_suppressed_reason`, running turn or not | every stop verb reaches it through `JaatoServer.stop()`; unconditional because the nudge is dispatched after the turn winds down, so a stop in that window finds nothing running |
+| `_note_turn_cancellation` latches it at the end of both chat loops | a token tripped by anything else (a subagent cancel, a budget `abort`); `mid_turn_interrupt` is not a stop |
+| `_completion_nudge_suppressed` refuses first, spends nothing | the counter is not bumped and `_completion_nudge_turn_pending` is not set; traced as `COMPLETION_NUDGE: suppressed (cancelled)` |
+| `_begin_turn_completion_state` clears it | a suppressed nudge starts no turn, so the next turn is caller-originated: a person sending again means go, and that turn is nudged as before (#767, #934 unchanged) |
+
+After `stop()` the cancelled turn ends there; the session stays loaded and
+idle. Not covered: a continuation stashed daemon-side before a stop is still
+drained as a caller-originated turn. Guard:
+`jaato_server/shared/tests/test_a_stopped_session_is_not_nudged_1433.py`,
+four reversions, driving a real session through the real `stop_session`,
+`JaatoServer.stop` and runner handlers.
+
 ### A Tier Binds (provider, model), and Half of It Did Not Take
 
 Reported as *"two tiers of the same profile do not share history; each
@@ -1510,10 +1540,11 @@ what is newest**:
 | `jaato-scaffold explain releases` | every channel's answer per package, with the commands that install each |
 
 **Each channel carries a `pip` and a `uv` command, and the second is not a
-rename of the first.** Both renderers loop over `Channel.install_commands`
-rather than naming the installers, so they cannot document different sets.
-The candidate channel is where the translation is load-bearing — measured
-2026-09-18, with `jaato-sdk` 0.22.0 on PyPI and 0.23.0rc4 on TestPyPI:
+rename of the first.** Both renderers loop over
+`Channel.install_commands(packages)` rather than naming the installers, so
+they cannot document different sets. The candidate channel is where the
+translation is load-bearing — measured 2026-09-18, with `jaato-sdk` 0.22.0 on
+PyPI and 0.23.0rc4 on TestPyPI:
 
 ```
 uv pip install -U --prerelease allow \
@@ -1523,16 +1554,44 @@ uv pip install -U --prerelease allow \
 ```
 
 It runs cleanly and installs the wrong package, which is the worst shape a
-documented command can have. Two flags differ, not one: `--pre` is
-`--prerelease allow`, and uv gives `--extra-index-url` priority **over**
+documented command can have. uv gives `--extra-index-url` priority **over**
 `--index-url` (pip's precedence is the reverse) while defaulting to
 `--index-strategy first-index`, so the first index holding the name wins
 outright. `--index-strategy unsafe-best-match` restores pip's rule —
-consider every index, take the best version — and with it both commands
-resolve `jaato-sdk==0.23.0rc4` and the same seven packages. The flags are
-therefore spelled out per channel rather than derived from the pip string:
-they are not a transformation of it, and a helper that pretended otherwise
-would re-introduce exactly that wrong-package failure.
+consider every index, take the best version. The flags are therefore
+spelled out per channel rather than derived from the pip string: they are
+not a transformation of it, and a helper that pretended otherwise would
+re-introduce exactly that wrong-package failure.
+
+**The candidate command pins the candidate and carries no global
+pre-release flag (#1455).** `--pre` / `--prerelease allow` admit a
+pre-release of *every* package, and jaato-sdk's `pydantic>=2.0,<3` admitted
+`2.14.0b2`, which is what a fresh resolve installed. A specifier naming a
+pre-release admits pre-releases for that requirement only (PEP 440), so the
+command is rendered with the exact version the report found, one command for
+every stale package of the channel:
+
+```
+pip install -U --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"
+uv pip install -U --prerelease if-necessary-or-explicit \
+    --index-strategy unsafe-best-match \
+    --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "jaato-sdk==0.30.0rc1" "jaato-server==1.3.0rc1"
+```
+
+Measured 2026-09-30 (pip 24.0, uv 0.8.17, Python 3.12, fresh venv): both
+resolve the two candidates, pydantic 2.13.5 and the same 60 packages with no
+other pre-release; the old forms resolve pydantic 2.14.0b2. Without
+`unsafe-best-match` the pinned uv command fails to resolve rather than
+installing the stable, so the flag stays. A package whose version is unknown
+or not PEP 440 gets **no** candidate command, and the renderers name it
+(`Channel.unpinnable`): an unpinned one would need the global flag back. The
+production channel is unchanged (`pip install -U <dist>`, unpinned). Guard:
+`jaato_server/shared/tests/test_candidate_command_pins_the_candidate_1455.py`,
+three reversions.
 
 **The index's own `latest` is the wrong answer, on the channel that matters.**
 PyPI pins a project's "latest" to the newest **stable** version whenever one
@@ -4538,6 +4597,47 @@ Guard:
 `shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,
 five reversions.
 
+### Pages Only From Catalog Templates
+
+A profile gates tools (`plugins:`, `tools:[...]` scopes), and that is the
+enforcement point for "reference pages are written from templates": give a
+page-writing profile `template` and `references` and no free-form write
+tool. Two PARAMETERS of allowed tools got around it, and tool gating cannot
+reach a parameter, so each gained a setting (both default `true`):
+
+| Setting | When `false` |
+|---|---|
+| `plugin_configs.template.allow_inline_template` | `renderTemplateToFile` refuses an inline `template`; only a catalog `template_id` renders |
+| `plugin_configs.references.allow_inline_content` | `proposeReference` refuses `content`; a proposal names a workspace file (`path`) |
+
+```yaml
+plugins:
+  - references
+  - template(tools:[listAvailableTemplates, listTemplateVariables, renderTemplateToFile])
+  - file_edit(tools:[readFile])
+plugin_configs:
+  template:   {allow_inline_template: false}
+  references: {allow_inline_content: false}
+```
+
+| Rule | Why |
+|---|---|
+| **the refused parameter is removed from the schema**, not only refused | a plugin may implement `narrow_tool_schema(schema)`, asked by `tool_visibility.filter_visible_tool_schemas`, which serves both the wire and the deferred-tool catalog, so the model is never offered what the executor refuses |
+| **read per session** (`session_context.session_plugin_setting`) | the plugin instance is shared with in-process subagents and re-initialized by whichever session configured it last; the calling session's own block (`JaatoSession.declared_plugin_config`) wins, else the instance's value |
+| **the claim says which template** | `renderTemplateToFile` records each catalog render in memory (path, template, digest); `proposeReference` stamps it as `origin.rendered_from`, with `edited_after_render: true` when the file no longer matches. The daemon re-compares the file when it lists or promotes the claim, and the Proposals panel shows `from template X` (warning tone when edited). In memory on purpose: a record under `template_extracts` would be writable by the model's own tools |
+| **`validate` says when the gate leaks** | `template_only_gate_leaks` (warn): either setting is `false` and the profile can still write a file another way: `cli`, `interactive_shell`, `notebook`, any enabled `TRAIT_FILE_WRITER` tool other than `renderTemplateToFile` (a `tools:[...]` scope that leaves it out closes it), or the other half of the gate still open |
+
+Stated limits: an MCP server that writes files is not visible offline and
+is not reported; a render record does not survive a runner restart, so a
+page rendered in one session and proposed after a restart carries no
+`rendered_from`. No page templates ship with the framework; a workspace
+authors its own in the template catalog (`<config_root>/templates/`). No
+AppArmor change: the catalog is read-only as before, the render record is
+in memory, and claims are written where they always were.
+
+Guard: `shared/tests/test_pages_come_from_catalog_templates.py`, seven
+reversions.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
@@ -7080,6 +7180,11 @@ between `fork()` and `exec()`, which needs a privileged daemon and a
 uid-keyed slot pool — a uid is a property the next session cannot change, so
 `SlotKey` would have to carry it by that class's own stated rule. That is a
 decision about the process model; this is what makes the current one honest.
+Since #1168 step 3 a root daemon can make it: `--runner-uid-policy peer`
+drops each IPC session's runner to exactly this `SO_PEERCRED` uid, with
+`SlotKey.runner_uid` carrying it (see [A Root Daemon Writes Root-Owned
+Files](#a-root-daemon-writes-root-owned-files-and-nothing-said-so-1168)).
+The default is still the daemon's uid.
 
 Unchanged for everyone else, by construction: a WS deployment (no peer to
 read), a Windows pipe, and any connection from the daemon's own account.
@@ -7239,24 +7344,85 @@ Four properties, each attached to a way it could go wrong:
   `JAATO_UMASK` is not persisted — the restarted daemon re-reads it from its
   own environment, as every other env knob here behaves.
 
-**Deliberately NOT done here: privilege dropping.** The issue measures it on
-an enforcing AppArmor host and finds an order that works (drop, *then*
-`aa_change_profile` — which needs nothing added to the template, so the
-confined runner keeps zero capabilities and cannot `setuid` afterwards). It
-is still its own change: `SlotKey` must carry the uid (a slot that has
-dropped is permanently that uid — #1033's own generating rule), *which* uid
-needs a policy, and **WS has no answer at all**, since `get_client_peer`
-returns `None` there by design (#1074). Two unknowns are also recorded
-unmeasured: the result was taken with
-`kernel.apparmor_restrict_unprivileged_unconfined = 0`, and an unprivileged
-*already-confined* re-transition — what a reused pool slot does — was not
-probed. Also not done, and for a stated reason: **chowning after write**. It
-cannot be made complete (it misses the intermediate directories, every file a
-subprocess writes, and anything an out-of-tree plugin writes), which is #735's
-shape — a mechanism handed to each write site where one path forgets — whereas
-a umask is applied once and inherited by everything downstream.
+**Step 3: the runner runs as a user (`--runner-uid-policy`).** A umask
+cannot widen a file created with an explicit mode (`curated.jsonl` is
+`0600`) or one written by `mkstemp` + `os.replace`. On the issue, an app
+owning its workspace as uid 1001 could not delete its own
+`.jaato/memories`, `.jaato/references` and `knowledge/`. Only running the
+runner as that user fixes ownership at the source.
 
-Daemon-tier artifacts stay root-owned under either mitigation, deliberately:
+| Policy (`--runner-uid-policy` / `JAATO_RUNNER_UID_POLICY`, host-scoped, persisted by `--restart`) | The runner runs as |
+|---|---|
+| `daemon` (default) | the daemon's uid, as before, byte for byte |
+| `peer` | the IPC connection's `SO_PEERCRED` uid |
+| `workspace-owner` | the uid owning the session's workspace directory |
+
+| Piece | Where |
+|---|---|
+| who: policy, resolution, the reachability refusal, the paths handed over | `server/runner_user.py` |
+| the drop: `setgroups` → `setresgid` → `setresuid`, then `setuid(0)` must fail | `shared/privilege_drop.py` (stdlib only; the one module that changes credentials, asserted by `TestTheDropHasOneDoor`) |
+| cold spawn: in the forked child, after the cgroup attach and the private `/tmp`, after the log fd is opened, just before `exec` (exit `125` on failure) | `runner_spawner._drop_privileges_in_child` |
+| pool slot: bootstrap step **1b3**, after 1b2 (private `/tmp`) and before 1c (`aa_change_profile`) | `runner/session._drop_to_runner_user` |
+| the wire: `SessionInitEnvelope.runner_user` (no version bump: absent = keep the daemon's uid) | `runner_spawn.build_session_envelope` |
+| the pool: `SlotKey.runner_uid`; a virgin slot fits any uid, a served slot only its own; `pool_uid_mismatch_skips_total` | `runner_pool.py` |
+
+Rules the implementation holds to:
+
+- **Order A, as measured.** Drop, then confine. A transition from
+  `unconfined` needs no capability, so the confined runner holds none and
+  cannot become root again. No template gains `capability setuid, setgid,`.
+- **Never fail open to a guessed uid.** A WS connection under `peer` (no
+  OS principal, #1074), a non-root daemon, a root target (a root peer, a
+  workspace the daemon provisioned) and a target equal to the daemon's uid
+  all keep the daemon's uid, announced once per reason.
+- **A user who cannot run a runner is refused, not handed one.** If the
+  target cannot read the interpreter, the jaato packages, the stdlib or
+  the workspace (`path_reachable_by`; ACLs not read, so stricter than the
+  kernel), the spawn raises `RunnerUserRefused` and both transports refuse
+  the session through `initialize_or_refuse`. The in-process fallback
+  would run the model's tools in the root daemon.
+- **Nothing NSS-shaped in the forked child.** Groups, home and name are
+  resolved daemon-side into a `RunnerUser`; the child only makes syscalls.
+  The credential change is process-wide (glibc's setxid broadcast), so a
+  slot's worker threads follow it, unlike an AppArmor label (#1023).
+- **What the daemon makes for the runner is handed over before the
+  spawn; nothing else is taken.** The session tmpdir, `<ws>/.tmp`,
+  `<ws>/.home`, `.jaato/logs` (+ the runner log, created `0600`) and
+  `.jaato/sessions/<id>`: each directory the daemon creates is chowned to
+  the target, and an existing one only when the daemon uid owns it. Never
+  recursive, never a file another user owns.
+- **`HOME` / `USER` / `LOGNAME`** are the target's in the runner process;
+  a subprocess still gets the workspace HOME where #1225 applies.
+
+Stated costs and limits:
+
+- **Existing root-owned trees are not migrated.** A workspace whose
+  `.jaato/` or `knowledge/` a root runner already created needs
+  `chown -R <user>: <ws>` once. A root-owned `.jaato/` blocks the
+  dropped runner from creating `memories/` inside it.
+- **The daemon's stored credentials are out of reach.** A dropped runner's
+  `~` is the target's, so a provider falling back to the daemon's
+  `~/.jaato/<provider>_auth.json` finds none; the daemon WARNs once when
+  such files exist. Put the key in the workspace `.env` / profile `env:`
+  (resolved daemon-side, shipped on the envelope) or the user's own
+  `~/.jaato`. Nothing is copied where the target could read it.
+- **Cross-uid slot reuse is refused**, so a multi-user daemon cold-spawns
+  more. Pooled sessions with a cgroup were already routed to cold spawn.
+- **No SDK or daemon verb deletes references or claims** (only
+  `delete_memory` exists), so an app still cannot clear its knowledge
+  through the daemon; tracked separately.
+- **Not verified on an enforcing AppArmor kernel.** Order A was measured
+  there, with `kernel.apparmor_restrict_unprivileged_unconfined = 0`; the
+  sysctl at `1`, and an unprivileged already-confined re-transition on a
+  reused slot, were not. The PR carries the probes. A real cold spawn to
+  `nobody` was run here (unconfined): the runner served RPC as uid 65534
+  and its log and `.jaato/logs` were owned by it.
+
+Chowning after write stays rejected: it cannot be made complete (it misses
+the intermediate directories, every file a subprocess writes, and anything
+an out-of-tree plugin writes), which is #735's shape.
+
+Daemon-tier artifacts stay root-owned under every policy, deliberately:
 session records, `~/.jaato/session_workspace_index.json` and the daemon log
 are written by the daemon process and are not the agent's output.
 
@@ -7269,6 +7435,11 @@ root container a never-firing one sails through the warning cases. The two
 call-site tests are the load-bearing ones: everything else exercises
 `process_posture` directly, which says the mechanism works and says nothing
 about whether anything invokes it — the #1133 shape exactly.
+
+Step 3's guard is `jaato_server/server/tests/test_runner_privilege_drop_1168.py`,
+nine reversions, each on a case that runs without root (the drop's syscalls
+are substituted, the chown recorded). The cases that fork a child and drop
+to `nobody` for real run where the suite is root and skip elsewhere.
 
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
@@ -10190,6 +10361,51 @@ Stated limits:
 - Not addressed: #693 (SIGTERM skips `SessionManager`) and #1061 (the
   shutdown triple captured without a lock).
 
+### A Lock Held Across the Loop (#1452)
+
+The daemon loop stopped for 121 s inside `SessionManager._emit_to_session`,
+on `with self._lock:`, routing a runner's streamed output, and two
+`session.new` confirmations missed their callers' 60 s budget. The holder
+was a session listing. `list_sessions` held `_lock` while it built each
+loaded session's row, and `turn_count` is `len(server.get_history())`: a
+`session_get_history_threadsafe` round-trip through the loop that was
+waiting for the lock. Each fetch broke only when its 15 s outer timeout
+expired, which is the eight `DaemonLoopTimeout`s in the incident. #1355
+moved listings off the loop thread, which turned a refused call into this
+deadlock. `session.new`'s own confirmation builds a listing too
+(`_build_session_info_event`).
+
+**The rule: never hold `SessionManager._lock` across a `*_threadsafe`
+call or a sync entry point that reaches one.** Snapshot under the lock,
+ask the runner after releasing it. Two sites broke it: `list_sessions`
+(now snapshots the loaded set) and `get_or_create_default` (attached under
+the lock, then ran `emit_current_state` and the info event inside it; now
+emits after releasing, as `attach_session` does). The #1355 entry-point
+list gained `emit_current_state` and `_build_session_info_event`.
+
+What the instrumentation now says, so the next stall names its cause:
+
+| Piece | Where |
+|---|---|
+| `SessionManager._lock` is a `ProfiledRLock`: RLock semantics (Condition protocol included), records owner, start and acquiring site; a hold past `JAATO_LOCK_HOLD_WARN_MS` (default 500, `0` off) logs `LOCK_HELD_LONG` with its stack on release | `server/lock_profile.py` |
+| every `LOOP_STALL` line names each held profiled lock's owner and its current stack | `LoopWatchdog._lock_owners` |
+| a thread in `threading.Condition.wait` (every future, event or queue wait) is a holder candidate, not "blocked acquiring a lock"; the incident's holder was misfiled there. Blocked threads are printed with their stacks, grouped when identical | `LoopWatchdog._is_a_condition_wait`, `_render` |
+| `session.new` logs `SESSION_NEW_PHASE` per phase with elapsed ms: `received` (transport read), `handler_started`, `runner_ready`, `bootstrap_acked`, `server_initialized`, `session_created`, `answer_queued`, `answer_written` (the frame reached the socket), keyed by `request_id` | `server/session_new_timing.py`, both transports |
+| loop lag as a fixed-bucket histogram, `LoopWatchdog.get_telemetry()` (the shape of the pool's), logged as `LOOP_LAG` every 10 min when there are new samples | `loop_watchdog.py` |
+
+Not done: per-client emit-to-write latency per event type (ask 4). It
+would change the IPC queue's item type under its lossy-eviction policy,
+and wants its own change. Only `_lock` is profiled; the three smaller
+`SessionManager` locks are not. The holder is identified by reading the
+code and reproducing the shape against a real `RunnerRPCClient`; it was
+not captured on the incident's host.
+
+Guard: `jaato_server/server/tests/test_a_lock_held_across_the_loop_1452.py`,
+seven reversions. It drives the listing on a worker thread against a real
+client and runner while the loop takes the lock at the moment the history
+fetch reaches it, and carries an AST check that no `with self._lock:`
+block in `session_manager.py` calls a runner-blocking entry point.
+
 ### A Failure While Reporting a Failure, Discarded (#1077)
 
 The daemon's model thread wound its turn down inside a `finally` holding
@@ -10359,6 +10575,19 @@ fail on the parent commit) and
 `jaato-server/jaato_server/shared/tests/test_one_settle_rule_1007.py` (an AST guard that no
 verb decides a terminus outside `_TurnWatch`, and that the watch still wires
 all four settle events — dropping `ERROR` restores the hang exactly).
+
+**The facade can set the `session.new` budget (#1450, #899).** Every
+facade entry point (`IPCClient.session`, `IPCRecoveryClient.session`, both
+WS `session` overrides) takes `session_timeout`, forwarded as
+`create_session(timeout=)` through one builder,
+`convenience.facade_create_kwargs`. Unset forwards nothing, so the 60 s
+default is `create_session`'s own. It bounds the daemon's confirmation
+(provider init included), not `connect_timeout`'s connect/autostart;
+non-positive or non-finite values are refused before connecting. `explain
+clients` lists it and `new cascade` emits it beside `connect_timeout`.
+Guard: `jaato_server/shared/tests/test_facade_forwards_session_timeout_1450.py`,
+five reversions. Still open (#1129): recovering a session that was created
+after `SessionNotConfirmed` fired.
 
 ### A Request the Daemon Wrote and the Runner Does Not Have (#856)
 
@@ -12253,7 +12482,9 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_TRUST_PEER_PATHS` | Switch OFF the IPC peer-entitlement check, so the daemon acts on whatever `workspace_path` / `config_root` a client names. Host-scoped: it is a property of the SOCKET, and a session must not be able to widen the transport's own trust posture. Announced at WARNING the first time it applies. See [Two Principals on One Socket](#two-principals-on-one-socket). |
+| `JAATO_RUNNER_UID_POLICY` | Which uid a ROOT daemon runs each session's runner as: `daemon` (default, no drop), `peer` (the IPC `SO_PEERCRED` uid) or `workspace-owner`. Host-scoped: which accounts a runner may become is the operator's decision, never a profile's. CLI twin `--runner-uid-policy`, which outranks it; persisted by `--restart`. A session the policy cannot name a user for keeps the daemon's uid, announced once. See [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-1168). |
 | `JAATO_UMASK` | Octal umask for the daemon PROCESS, inherited by the pre-warm template, every pool slot forked from it and every runner — so it governs the mode of every file the agent writes into a workspace. Unset (the default) leaves the umask the daemon inherited, which is what every existing deployment gets. Host-scoped because `os.umask` is a process attribute and the daemon serves all of its sessions from one process: a per-session value could not be applied without racing whatever turn is already running, and would in any case miss the files the *daemon* puts in a workspace (session records, `.jaato/logs`, the provisioned tree). CLI twin `--umask`, which outranks it; a malformed value is refused at ERROR and the inherited umask is kept rather than an invented one applied. See [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-1168). |
+| `JAATO_LOCK_HOLD_WARN_MS` | Milliseconds `SessionManager._lock` may be held before its release is logged at WARNING (`LOCK_HELD_LONG`) with the holder's stack (default 500; `0` disables). Host-scoped: the lock belongs to the daemon process. An unparseable or negative value falls back to the default. See [A Lock Held Across the Loop](#a-lock-held-across-the-loop-1452). |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
 | `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |
