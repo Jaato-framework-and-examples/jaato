@@ -293,6 +293,20 @@ _SESSION_NEW_VALUE_FLAGS: Dict[str, str] = {
     "--provider": "provider_override",
 }
 
+def _lend_peer_lookup(session_manager: Any, sink: Any) -> None:
+    """Give the manager a way to ask a connection's OS account (#1168).
+
+    The ``peer`` runner uid policy needs the IPC ``SO_PEERCRED`` credential
+    at spawn time, and the manager cannot ask a transport itself.  A
+    manager predating ``set_client_peer_resolver`` (a test double) is
+    tolerated: its runners keep the daemon's uid, which the policy
+    announces.
+    """
+    lend = getattr(session_manager, "set_client_peer_resolver", None)
+    if lend is not None:
+        lend(lambda client_id: client_peer(sink, client_id))
+
+
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
 
@@ -354,6 +368,7 @@ class CommandRouter:
                 type(session_manager).__name__)
         else:
             lend(self._sessions_visible_to)
+        _lend_peer_lookup(session_manager, self._event_sink)
 
         # Pending workspace mismatch requests: client_id -> {request_id, session_id, ...}
         self._pending_workspace_mismatch: dict = {}

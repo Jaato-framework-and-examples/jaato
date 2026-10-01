@@ -355,6 +355,13 @@ CATALOG: Dict[str, EnvClass] = {
         "daemon hands the runner its session id"),
     "JAATO_RUNNER_WORKSPACE": EnvClass(INTERNAL, None,
         "daemon hands the runner its workspace path"),
+    "JAATO_RUNNER_UID_POLICY": EnvClass(HOST, None,
+        "which uid a ROOT daemon runs each session's runner as (#1168): "
+        "daemon (default, no drop), peer (the IPC SO_PEERCRED uid) or "
+        "workspace-owner.  A property of the daemon, never of a session: "
+        "which accounts a runner may become is the operator's decision "
+        "about the host, and a profile author must not be able to pick a "
+        "uid.  Its CLI twin is `--runner-uid-policy`, which outranks it"),
     "JAATO_SESSION_LOG_DIR": EnvClass(SESSION, None,
         "a per-session path with no typed key -- same shape as "
         "the trace incident"),
@@ -607,6 +614,9 @@ CATALOG: Dict[str, EnvClass] = {
     "TODO_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.todo.reporter_config.auth_token",
         "config.get(auth_token) or os.environ -- the knob already WINS and "
         "the env var is its fallback"),
+    "LOGNAME": EnvClass(AMBIENT, None,
+        "the login name; set, not configured, on a runner dropped to a "
+        "session's user so it names that user (#1168)"),
     "USER": EnvClass(AMBIENT, None,
         "expanded as a ${USER} template variable in profiles/personas"),
     "VISUAL": EnvClass(AMBIENT, None,

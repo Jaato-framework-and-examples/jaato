@@ -72,11 +72,12 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/server/runner_pool.py",
-        find=("        if not slot.has_served:\n"
-              "            return True\n"
-              "        return (slot.profile_name or None) "
-              "== self.profile_name"),
-        replace="        return True",
+        # #1168 added the uid clause beside it; the reversion drops the
+        # profile half and keeps the uid half, so only the profile is
+        # ignored and only this test can notice.
+        find=("            (slot.profile_name or None) == self.profile_name\n"
+              "            and self.uid_fits(slot)\n"),
+        replace="            self.uid_fits(slot)\n",
         test=("TestReuseKey::"
               "test_a_pure_idle_slot_is_not_handed_across_profiles"),
         because=("the unaffined acquire path handing out a slot that is "
@@ -391,6 +392,8 @@ class TestReuseKey:
             "config_root",
             "workspace_root",
             "profile_name",
+            # #1168 step 3: a slot that dropped is that uid for life.
+            "runner_uid",
         }
 
     def test_paths_are_compared_canonically(self, tmp_path) -> None:

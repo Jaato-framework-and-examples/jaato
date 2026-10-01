@@ -79,10 +79,11 @@ REVERSIONS = [
         target=_POOL,
         find=("        if not slot.has_served:\n"
               "            return True\n"
-              "        return (slot.profile_name or None) "
-              "== self.profile_name"),
-        replace=("        return not slot.profile_name or "
-                 "slot.profile_name == self.profile_name"),
+              "        return (\n"
+              "            (slot.profile_name or None) == self.profile_name\n"),
+        replace=("        return (\n"
+                 "            (not slot.profile_name\n"
+                 "             or slot.profile_name == self.profile_name)\n"),
         test=("TestAdmission::"
               "test_a_slot_that_served_unconfined_is_not_offered_a_profile"),
         because=("the gate reading a falsy profile_name as 'virgin' again, "
@@ -91,9 +92,9 @@ REVERSIONS = [
     ),
     Reversion(
         target=_POOL,
-        find=("        slot.profile_name = self.profile_name\n"
+        find=("        slot.runner_uid = self.runner_uid\n"
               "        slot.has_served = True"),
-        replace="        slot.profile_name = self.profile_name",
+        replace="        slot.runner_uid = self.runner_uid",
         test=("TestAdmission::"
               "test_a_slot_that_served_unconfined_is_not_offered_a_profile"),
         because=("the claim never being recorded, which leaves every slot "

@@ -472,6 +472,17 @@ class SessionInitEnvelope:
     # private ``/tmp`` -- also what an older daemon's envelope means (and
     # an older daemon renders no ``/tmp`` grant), so no schema_version bump.
     private_tmp_dir: Optional[str] = None
+    # #1168 step 3: the OS account this runner runs as --
+    # ``shared.privilege_drop.RunnerUser.to_dict()`` (uid, gid, groups,
+    # username, home, source), resolved daemon-side by the runner uid
+    # policy.  A pool slot drops to it at bootstrap step 1b3, AFTER the
+    # private /tmp (1b2, needs CAP_SYS_ADMIN) and BEFORE it confines (1c);
+    # a cold-spawned runner dropped in its forked child before exec, so
+    # the step finds nothing to do but set HOME/USER/LOGNAME.  ``None`` =
+    # keep the daemon's uid -- the default policy, and what an older
+    # daemon's envelope means (an older daemon never asked for a drop), so
+    # no schema_version bump.
+    runner_user: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -556,6 +567,9 @@ class SessionInitEnvelope:
             "granted_env_names": list(self.granted_env_names),
             "confinement_grants": self.confinement_grants,
             "private_tmp_dir": self.private_tmp_dir,
+            "runner_user": (
+                dict(self.runner_user) if self.runner_user else None
+            ),
         }
 
     @classmethod
@@ -639,6 +653,7 @@ class SessionInitEnvelope:
             granted_env_names=env_name_list(d.get("granted_env_names")),
             confinement_grants=_optional_dict(d.get("confinement_grants")),
             private_tmp_dir=_optional_str(d.get("private_tmp_dir")),
+            runner_user=_optional_dict(d.get("runner_user")),
         )
 
 

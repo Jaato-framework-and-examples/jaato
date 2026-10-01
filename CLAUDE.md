@@ -7180,6 +7180,11 @@ between `fork()` and `exec()`, which needs a privileged daemon and a
 uid-keyed slot pool — a uid is a property the next session cannot change, so
 `SlotKey` would have to carry it by that class's own stated rule. That is a
 decision about the process model; this is what makes the current one honest.
+Since #1168 step 3 a root daemon can make it: `--runner-uid-policy peer`
+drops each IPC session's runner to exactly this `SO_PEERCRED` uid, with
+`SlotKey.runner_uid` carrying it (see [A Root Daemon Writes Root-Owned
+Files](#a-root-daemon-writes-root-owned-files-and-nothing-said-so-1168)).
+The default is still the daemon's uid.
 
 Unchanged for everyone else, by construction: a WS deployment (no peer to
 read), a Windows pipe, and any connection from the daemon's own account.
@@ -7339,24 +7344,85 @@ Four properties, each attached to a way it could go wrong:
   `JAATO_UMASK` is not persisted — the restarted daemon re-reads it from its
   own environment, as every other env knob here behaves.
 
-**Deliberately NOT done here: privilege dropping.** The issue measures it on
-an enforcing AppArmor host and finds an order that works (drop, *then*
-`aa_change_profile` — which needs nothing added to the template, so the
-confined runner keeps zero capabilities and cannot `setuid` afterwards). It
-is still its own change: `SlotKey` must carry the uid (a slot that has
-dropped is permanently that uid — #1033's own generating rule), *which* uid
-needs a policy, and **WS has no answer at all**, since `get_client_peer`
-returns `None` there by design (#1074). Two unknowns are also recorded
-unmeasured: the result was taken with
-`kernel.apparmor_restrict_unprivileged_unconfined = 0`, and an unprivileged
-*already-confined* re-transition — what a reused pool slot does — was not
-probed. Also not done, and for a stated reason: **chowning after write**. It
-cannot be made complete (it misses the intermediate directories, every file a
-subprocess writes, and anything an out-of-tree plugin writes), which is #735's
-shape — a mechanism handed to each write site where one path forgets — whereas
-a umask is applied once and inherited by everything downstream.
+**Step 3: the runner runs as a user (`--runner-uid-policy`).** A umask
+cannot widen a file created with an explicit mode (`curated.jsonl` is
+`0600`) or one written by `mkstemp` + `os.replace`. On the issue, an app
+owning its workspace as uid 1001 could not delete its own
+`.jaato/memories`, `.jaato/references` and `knowledge/`. Only running the
+runner as that user fixes ownership at the source.
 
-Daemon-tier artifacts stay root-owned under either mitigation, deliberately:
+| Policy (`--runner-uid-policy` / `JAATO_RUNNER_UID_POLICY`, host-scoped, persisted by `--restart`) | The runner runs as |
+|---|---|
+| `daemon` (default) | the daemon's uid, as before, byte for byte |
+| `peer` | the IPC connection's `SO_PEERCRED` uid |
+| `workspace-owner` | the uid owning the session's workspace directory |
+
+| Piece | Where |
+|---|---|
+| who: policy, resolution, the reachability refusal, the paths handed over | `server/runner_user.py` |
+| the drop: `setgroups` → `setresgid` → `setresuid`, then `setuid(0)` must fail | `shared/privilege_drop.py` (stdlib only; the one module that changes credentials, asserted by `TestTheDropHasOneDoor`) |
+| cold spawn: in the forked child, after the cgroup attach and the private `/tmp`, after the log fd is opened, just before `exec` (exit `125` on failure) | `runner_spawner._drop_privileges_in_child` |
+| pool slot: bootstrap step **1b3**, after 1b2 (private `/tmp`) and before 1c (`aa_change_profile`) | `runner/session._drop_to_runner_user` |
+| the wire: `SessionInitEnvelope.runner_user` (no version bump: absent = keep the daemon's uid) | `runner_spawn.build_session_envelope` |
+| the pool: `SlotKey.runner_uid`; a virgin slot fits any uid, a served slot only its own; `pool_uid_mismatch_skips_total` | `runner_pool.py` |
+
+Rules the implementation holds to:
+
+- **Order A, as measured.** Drop, then confine. A transition from
+  `unconfined` needs no capability, so the confined runner holds none and
+  cannot become root again. No template gains `capability setuid, setgid,`.
+- **Never fail open to a guessed uid.** A WS connection under `peer` (no
+  OS principal, #1074), a non-root daemon, a root target (a root peer, a
+  workspace the daemon provisioned) and a target equal to the daemon's uid
+  all keep the daemon's uid, announced once per reason.
+- **A user who cannot run a runner is refused, not handed one.** If the
+  target cannot read the interpreter, the jaato packages, the stdlib or
+  the workspace (`path_reachable_by`; ACLs not read, so stricter than the
+  kernel), the spawn raises `RunnerUserRefused` and both transports refuse
+  the session through `initialize_or_refuse`. The in-process fallback
+  would run the model's tools in the root daemon.
+- **Nothing NSS-shaped in the forked child.** Groups, home and name are
+  resolved daemon-side into a `RunnerUser`; the child only makes syscalls.
+  The credential change is process-wide (glibc's setxid broadcast), so a
+  slot's worker threads follow it, unlike an AppArmor label (#1023).
+- **What the daemon makes for the runner is handed over before the
+  spawn; nothing else is taken.** The session tmpdir, `<ws>/.tmp`,
+  `<ws>/.home`, `.jaato/logs` (+ the runner log, created `0600`) and
+  `.jaato/sessions/<id>`: each directory the daemon creates is chowned to
+  the target, and an existing one only when the daemon uid owns it. Never
+  recursive, never a file another user owns.
+- **`HOME` / `USER` / `LOGNAME`** are the target's in the runner process;
+  a subprocess still gets the workspace HOME where #1225 applies.
+
+Stated costs and limits:
+
+- **Existing root-owned trees are not migrated.** A workspace whose
+  `.jaato/` or `knowledge/` a root runner already created needs
+  `chown -R <user>: <ws>` once. A root-owned `.jaato/` blocks the
+  dropped runner from creating `memories/` inside it.
+- **The daemon's stored credentials are out of reach.** A dropped runner's
+  `~` is the target's, so a provider falling back to the daemon's
+  `~/.jaato/<provider>_auth.json` finds none; the daemon WARNs once when
+  such files exist. Put the key in the workspace `.env` / profile `env:`
+  (resolved daemon-side, shipped on the envelope) or the user's own
+  `~/.jaato`. Nothing is copied where the target could read it.
+- **Cross-uid slot reuse is refused**, so a multi-user daemon cold-spawns
+  more. Pooled sessions with a cgroup were already routed to cold spawn.
+- **No SDK or daemon verb deletes references or claims** (only
+  `delete_memory` exists), so an app still cannot clear its knowledge
+  through the daemon; tracked separately.
+- **Not verified on an enforcing AppArmor kernel.** Order A was measured
+  there, with `kernel.apparmor_restrict_unprivileged_unconfined = 0`; the
+  sysctl at `1`, and an unprivileged already-confined re-transition on a
+  reused slot, were not. The PR carries the probes. A real cold spawn to
+  `nobody` was run here (unconfined): the runner served RPC as uid 65534
+  and its log and `.jaato/logs` were owned by it.
+
+Chowning after write stays rejected: it cannot be made complete (it misses
+the intermediate directories, every file a subprocess writes, and anything
+an out-of-tree plugin writes), which is #735's shape.
+
+Daemon-tier artifacts stay root-owned under every policy, deliberately:
 session records, `~/.jaato/session_workspace_index.json` and the daemon log
 are written by the daemon process and are not the agent's output.
 
@@ -7369,6 +7435,11 @@ root container a never-firing one sails through the warning cases. The two
 call-site tests are the load-bearing ones: everything else exercises
 `process_posture` directly, which says the mechanism works and says nothing
 about whether anything invokes it — the #1133 shape exactly.
+
+Step 3's guard is `jaato_server/server/tests/test_runner_privilege_drop_1168.py`,
+nine reversions, each on a case that runs without root (the drop's syscalls
+are substituted, the chown recorded). The cases that fork a child and drop
+to `nobody` for real run where the suite is root and skip elsewhere.
 
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
@@ -12411,6 +12482,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_TRUST_PEER_PATHS` | Switch OFF the IPC peer-entitlement check, so the daemon acts on whatever `workspace_path` / `config_root` a client names. Host-scoped: it is a property of the SOCKET, and a session must not be able to widen the transport's own trust posture. Announced at WARNING the first time it applies. See [Two Principals on One Socket](#two-principals-on-one-socket). |
+| `JAATO_RUNNER_UID_POLICY` | Which uid a ROOT daemon runs each session's runner as: `daemon` (default, no drop), `peer` (the IPC `SO_PEERCRED` uid) or `workspace-owner`. Host-scoped: which accounts a runner may become is the operator's decision, never a profile's. CLI twin `--runner-uid-policy`, which outranks it; persisted by `--restart`. A session the policy cannot name a user for keeps the daemon's uid, announced once. See [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-1168). |
 | `JAATO_UMASK` | Octal umask for the daemon PROCESS, inherited by the pre-warm template, every pool slot forked from it and every runner — so it governs the mode of every file the agent writes into a workspace. Unset (the default) leaves the umask the daemon inherited, which is what every existing deployment gets. Host-scoped because `os.umask` is a process attribute and the daemon serves all of its sessions from one process: a per-session value could not be applied without racing whatever turn is already running, and would in any case miss the files the *daemon* puts in a workspace (session records, `.jaato/logs`, the provisioned tree). CLI twin `--umask`, which outranks it; a malformed value is refused at ERROR and the inherited umask is kept rather than an invented one applied. See [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-1168). |
 | `JAATO_LOCK_HOLD_WARN_MS` | Milliseconds `SessionManager._lock` may be held before its release is logged at WARNING (`LOCK_HELD_LONG`) with the holder's stack (default 500; `0` disables). Host-scoped: the lock belongs to the daemon process. An unparseable or negative value falls back to the default. See [A Lock Held Across the Loop](#a-lock-held-across-the-loop-1452). |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |

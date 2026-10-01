@@ -120,6 +120,12 @@ class PoolSlot:
     config_root: Optional[str] = None
     workspace_root: Optional[str] = None
     profile_name: Optional[str] = None
+    #: The uid this slot's process runs as once it has served (#1168):
+    #: ``None`` = the daemon's own uid (it never dropped).  A slot that
+    #: dropped cannot get root back — ``drop_to`` proves ``setuid(0)``
+    #: fails — so this is a property the next session cannot change and is
+    #: in the key for that reason.  Stamped by :meth:`SlotKey.stamp`.
+    runner_uid: Optional[int] = None
     last_session_end_ts: Optional[float] = None
     # Phase 3 cascade-sharing (server 0.6.146+): identifier of the
     # most recent session this slot served.  Set when the slot
@@ -201,7 +207,19 @@ class SlotKey:
                                             ``cgroup_attach is None``)
     session ``env:`` / secrets              not needed — overlaid per
                                             turn, never baked in
+    the uid the process runs as (#1168)     ``runner_uid`` — a dropped
+                                            slot can never become root
+                                            or anyone else again
     ======================================  ==========================
+
+    ``runner_uid`` (#1168 step 3): ``None`` is the daemon's own uid.  A
+    virgin slot is still root, so it fits any uid — it drops at
+    ``session.bootstrap`` step 1b3; a slot that has served fits only a
+    session wanting its uid, in BOTH acquire paths (path (1) compares the
+    whole key; path (2) goes through :meth:`accepts_unaffined`).  Cost,
+    stated: on a multi-user daemon a slot one user's session dropped is
+    never handed to another's, so that arrival cold-spawns — counted in
+    ``pool_uid_mismatch_skips_total``.
 
     The third row is the one that was missing, and it cost a P0: the key
     said "reusable" while the profile name (``jaato-ws-{session_id}``)
@@ -239,6 +257,7 @@ class SlotKey:
     config_root: Optional[str] = None
     workspace_root: Optional[str] = None
     profile_name: Optional[str] = None
+    runner_uid: Optional[int] = None
 
     @classmethod
     def build(
@@ -247,6 +266,7 @@ class SlotKey:
         config_root: Optional[str] = None,
         workspace_root: Optional[str] = None,
         profile_name: Optional[str] = None,
+        runner_uid: Optional[int] = None,
     ) -> "SlotKey":
         """Normalize the caller's values into a comparable key.
 
@@ -259,6 +279,7 @@ class SlotKey:
             config_root=_canonical_path(config_root),
             workspace_root=_canonical_path(workspace_root),
             profile_name=profile_name or None,
+            runner_uid=runner_uid,
         )
 
     @classmethod
@@ -269,6 +290,7 @@ class SlotKey:
             config_root=_canonical_path(slot.config_root),
             workspace_root=_canonical_path(slot.workspace_root),
             profile_name=slot.profile_name or None,
+            runner_uid=getattr(slot, "runner_uid", None),
         )
 
     def stamp(self, slot: "PoolSlot") -> None:
@@ -288,6 +310,7 @@ class SlotKey:
         slot.config_root = self.config_root
         slot.workspace_root = self.workspace_root
         slot.profile_name = self.profile_name
+        slot.runner_uid = self.runner_uid
         slot.has_served = True
 
     def accepts_unaffined(self, slot: "PoolSlot") -> bool:
@@ -351,7 +374,22 @@ class SlotKey:
         """
         if not slot.has_served:
             return True
-        return (slot.profile_name or None) == self.profile_name
+        return (
+            (slot.profile_name or None) == self.profile_name
+            and self.uid_fits(slot)
+        )
+
+    def uid_fits(self, slot: "PoolSlot") -> bool:
+        """Does *slot* run as the uid this key wants? (#1168)
+
+        A virgin slot is still the daemon's uid and has not dropped, so it
+        fits anyone — the drop happens at its first bootstrap.  A served
+        slot fits only its own uid: ``None`` (never dropped) is the daemon's
+        uid and a dropped slot cannot become another.
+        """
+        if not slot.has_served:
+            return True
+        return getattr(slot, "runner_uid", None) == self.runner_uid
 
 
 def _canonical_path(path: Optional[str]) -> Optional[str]:
@@ -644,6 +682,12 @@ class PoolManager:
             # the idle pool.  Nonzero means some session is being torn
             # down twice; the ERROR beside it names the slot.
             "pool_duplicate_return_refused_total": 0,
+            # #1168 step 3.  Served idle slots passed over because they
+            # run as another uid than the arriving session drops to.  Also
+            # counted in pool_profile_mismatch_skips_total (the skip
+            # branch does not care why the slot did not fit); this one
+            # says the uid was the reason.
+            "pool_uid_mismatch_skips_total": 0,
         }
         self._counters_lock = threading.Lock()
 
@@ -827,6 +871,7 @@ class PoolManager:
         config_root: Optional[str] = None,
         workspace_root: Optional[str] = None,
         profile_name: Optional[str] = None,
+        runner_uid: Optional[int] = None,
     ) -> Optional[PoolSlot]:
         """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
 
@@ -891,6 +936,10 @@ class PoolManager:
                 the key since #1033 — see :class:`SlotKey`.
             profile_name: The AppArmor profile this session's runner will
                 confine to, ``""``/``None`` for unconfined.
+            runner_uid: The uid this session's runner will drop to (#1168),
+                ``None`` for the daemon's own.  A served slot of another
+                uid is passed over and counted in
+                ``pool_uid_mismatch_skips_total``.
 
         Returns:
             A :class:`PoolSlot` carrying the requested key and a LIVE
@@ -901,8 +950,10 @@ class PoolManager:
             config_root=config_root,
             workspace_root=workspace_root,
             profile_name=profile_name,
+            runner_uid=runner_uid,
         )
         mismatch_skips = 0
+        uid_skips = 0
         with self._lock:
             # #1058: drop corpses BEFORE either affinity path walks the
             # list.  Here rather than inside each path because there are
@@ -938,10 +989,13 @@ class PoolManager:
                 if candidate.cascade_id is not None:
                     continue
                 if not key.accepts_unaffined(candidate):
+                    uid_skips += not key.uid_fits(candidate)
                     mismatch_skips += 1
                     continue
                 pure_idle_idx = i
                 break
+            if uid_skips:
+                self._incr("pool_uid_mismatch_skips_total", uid_skips)
             if pure_idle_idx is None:
                 self._incr("pool_acquire_miss_total")
                 if mismatch_skips:

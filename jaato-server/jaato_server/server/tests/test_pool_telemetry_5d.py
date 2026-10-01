@@ -71,6 +71,7 @@ def test_telemetry_starts_at_zero() -> None:
         # session torn down twice.
         "pool_dead_slot_evicted_total": 0,
         "pool_duplicate_return_refused_total": 0,
+        "pool_uid_mismatch_skips_total": 0,
     }
 
 

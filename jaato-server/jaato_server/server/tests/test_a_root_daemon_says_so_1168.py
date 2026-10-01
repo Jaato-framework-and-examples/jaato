@@ -14,10 +14,10 @@ the cheap mitigation — ``umask 002`` plus a setgid workspace, which makes
 those files group-writable without touching ownership — could not be
 expressed at all.
 
-WHAT IS **NOT** GUARDED HERE, because it is not implemented: privilege
-dropping (step 3 of the issue).  Nothing in this file asserts that any
-process changes uid, and the module under test says so in its own
-docstring.
+PRIVILEGE DROPPING (step 3 of the issue) is guarded in
+``test_runner_privilege_drop_1168.py``.  What stays here is the one
+structural claim about it: every credential-changing call lives in
+``shared/privilege_drop.py`` (:class:`TestTheDropHasOneDoor`).
 
 THE UID IS SUBSTITUTED IN BOTH DIRECTIONS, DELIBERATELY.  ``os.geteuid``
 is patched to 0 for the warning cases and to a non-zero uid for the
@@ -105,8 +105,8 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/server/__main__.py",
-        find="        apply_process_posture(self._umask)\n",
-        replace="        pass  # apply_process_posture(self._umask)\n",
+        find="        apply_process_posture(self._umask, self._runner_uid_policy)\n",
+        replace="        pass  # apply_process_posture(self._umask, self._runner_uid_policy)\n",
         test="TestTheCallSites::test_the_daemon_start_applies_the_posture",
         because="the mechanism existing and the daemon never invoking it "
                 "-- the #1133 shape, where a test that imports the helper "
@@ -430,24 +430,46 @@ class TestTheCallSites:
         assert "umask" in signature.parameters
 
 
-class TestWhatThisDeliberatelyDoesNotDo:
-    """Step 3 of #1168 is out of scope, and stays out of scope."""
+class TestTheDropHasOneDoor:
+    """Step 3 of #1168 shipped, in ONE module.
 
-    def test_nothing_here_drops_privileges(self):
-        """Privilege dropping needs a uid on ``SlotKey``, a policy for
-        which uid, and an answer for a transport that has no OS principal
-        to read.  A guard that quietly grew one would be shipping that
-        decision without it being made — so the absence is asserted.
-        """
-        from jaato_server.server import process_posture
+    Until step 3 this class asserted that ``process_posture.py`` contained
+    no ``setuid``-family call, because the decision it needs (a uid on
+    ``SlotKey``, a policy for which uid, an answer for WS) had not been
+    made.  It has now (``server/runner_user.py``, ``SlotKey.runner_uid``,
+    ``test_runner_privilege_drop_1168.py``), so the assertion is replaced
+    rather than deleted: every credential-changing call in the server
+    tree lives in ``shared/privilege_drop.py``, which proves the drop
+    irreversible.  A second door is how a drop that skips that proof, or
+    runs in the wrong order against ``aa_change_profile``, would arrive.
+    """
 
-        source = inspect.getsource(process_posture)
-        for call in ("setuid(", "setgid(", "seteuid(", "setegid(",
-                     "initgroups(", "setresuid("):
-            assert call not in source, (
-                f"{call} appeared in process_posture.py. Privilege "
-                f"dropping is step 3 of #1168 and is deliberately not "
-                f"implemented here; it belongs in its own change, with "
-                f"the SlotKey uid field and the WS uid policy that make "
-                f"it correct."
-            )
+    CALLS = ("setuid", "setgid", "seteuid", "setegid", "initgroups",
+             "setresuid", "setresgid", "setgroups", "setreuid", "setregid")
+
+    def test_only_privilege_drop_changes_credentials(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[2]
+        offenders = []
+        for path in root.rglob("*.py"):
+            if "tests" in path.parts:
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in self.CALLS):
+                    offenders.append(
+                        f"{path.relative_to(root)}:{node.lineno} "
+                        f"{node.func.attr}")
+        allowed = [o for o in offenders
+                   if o.startswith("shared/privilege_drop.py:")]
+        assert allowed, "the drop itself is gone from shared/privilege_drop.py"
+        assert sorted(set(offenders) - set(allowed)) == [], (
+            "a credential-changing call outside shared/privilege_drop.py: "
+            f"{sorted(set(offenders) - set(allowed))}.  Route it through "
+            "drop_to(), which proves setuid(0) fails afterwards.")

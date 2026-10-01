@@ -317,6 +317,7 @@ class JaatoDaemon:
         ws_app_credentials_file: Optional[str] = None,
         umask: Optional[str] = None,
         ws_max_message_size: Optional[str] = None,
+        runner_uid_policy: Optional[str] = None,
     ):
         """Initialize the daemon.
 
@@ -357,6 +358,12 @@ class JaatoDaemon:
                 Kept raw for ``_write_config`` for the same reason as
                 ``umask``; parsed by
                 :func:`server.websocket.parse_ws_max_message_size`.
+            runner_uid_policy: ``--runner-uid-policy``'s raw argument, or
+                ``None`` when the flag was not passed (then
+                ``JAATO_RUNNER_UID_POLICY`` is the only source).  Which
+                uid a root daemon runs each session's runner as (#1168
+                step 3; :mod:`server.runner_user`).  Kept raw for
+                ``_write_config`` for the same reason as ``umask``.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -374,6 +381,7 @@ class JaatoDaemon:
         self._ws_app_credentials = ws_app_credentials
         self._ws_app_credentials_file = ws_app_credentials_file
         self._umask = umask
+        self._runner_uid_policy = runner_uid_policy
         self._ws_max_message_size = ws_max_message_size
 
         # Components
@@ -476,7 +484,7 @@ class JaatoDaemon:
         # Step 0 (#1168).  One call, and deliberately one call: a
         # daemon that applied the umask and skipped the warning would
         # report a posture it had only half taken.
-        apply_process_posture(self._umask)
+        apply_process_posture(self._umask, self._runner_uid_policy)
 
         # FIRST, before any wiring: the loop-stall witness.  The daemon's
         # loop is known to stop running scheduled coroutines for 5-35s at a
@@ -951,6 +959,9 @@ class JaatoDaemon:
             # variable from its own environment, which is how every other
             # env knob in this process behaves.
             "umask": self._umask,
+            # Raw, like umask (#1168 step 3): which uid a runner runs as
+            # must not silently revert to root on --restart.
+            "runner_uid_policy": self._runner_uid_policy,
             # Raw, like umask: a limit that decided which files a client
             # can attach must not silently revert on --restart.
             "ws_max_message_size": self._ws_max_message_size,
@@ -2061,13 +2072,29 @@ Examples:
         help="Octal umask for the daemon process, inherited by every "
              "runner it forks and so by everything the agent writes "
              "(default: whatever the daemon inherits from its parent). "
-             "The runner executes as the DAEMON's uid -- nothing in this "
-             "tree drops privileges -- so on a root daemon every file "
+             "Under --runner-uid-policy daemon (the default) the runner "
+             "executes as the DAEMON's uid, so on a root daemon every file "
              "written into a workspace is root-owned and its owner needs "
-             "sudo to overwrite or delete it. Pass 002, with a setgid "
+             "sudo to overwrite or delete it; --runner-uid-policy is the "
+             "fix that changes the owner. Pass 002, with a setgid "
              "workspace directory, to keep those files group-writable; "
              "it does not change who owns them. Equivalent to "
              "JAATO_UMASK, which this flag outranks.",
+    )
+    parser.add_argument(
+        "--runner-uid-policy",
+        choices=("daemon", "peer", "workspace-owner"),
+        default=None,
+        help="Which uid a ROOT daemon runs each session's runner as "
+             "(#1168). 'daemon' (the default) keeps root, so every file "
+             "the agent writes is root-owned; 'peer' drops to the IPC "
+             "client's SO_PEERCRED uid; 'workspace-owner' drops to the "
+             "uid owning the session's workspace. A session the policy "
+             "cannot name a user for (a WebSocket connection under "
+             "'peer', a root-owned workspace) keeps the daemon's uid and "
+             "is announced once. Ignored, with a warning, on a non-root "
+             "daemon. Equivalent to JAATO_RUNNER_UID_POLICY, which this "
+             "flag outranks.",
     )
     parser.add_argument(
         "--ipc-trust-peer-paths",
@@ -2210,6 +2237,7 @@ Examples:
         # wrote, silently dropped by --restart, is the silent-posture-
         # change shape this tree announces rather than performs.
         args.umask = config.get("umask")
+        args.runner_uid_policy = config.get("runner_uid_policy")
         args.ws_max_message_size = config.get("ws_max_message_size")
 
         # Always restart as daemon
@@ -2307,6 +2335,7 @@ Examples:
         ws_app_credentials=ws_app_credentials,
         ws_app_credentials_file=args.ws_app_credentials,
         umask=args.umask,
+        runner_uid_policy=args.runner_uid_policy,
         ws_max_message_size=args.ws_max_message_size,
     )
 

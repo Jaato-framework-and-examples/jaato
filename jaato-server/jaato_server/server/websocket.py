@@ -170,7 +170,20 @@ def _report_confined_spawn_failure(
     refuses.  A genuinely-unconfined session keeps the in-process fallback it
     always had.  Extracted from ``_apparmor_pre_init_hook`` so the hook does
     not grow past its complexity baseline (the #812 / #1167 / #1179 move).
+
+    #1168: a :class:`~server.runner_user.RunnerUserRefused` is refused
+    whatever the confinement posture -- the runner uid policy asked for the
+    session to run as a user, and the in-process fallback would run it in
+    the root daemon.
     """
+    from jaato_server.server.runner_user import RunnerUserRefused
+    if isinstance(exc, RunnerUserRefused):
+        logger.warning(
+            "runner uid drop refused for session %s — REFUSING the session "
+            "rather than running it in the root daemon: %s", session_id, exc,
+        )
+        _record_bootstrap_refusal(server, str(exc))
+        return
     if confinement_required:
         logger.warning(
             "AppArmor pre-init: runner spawn failed for session %s "

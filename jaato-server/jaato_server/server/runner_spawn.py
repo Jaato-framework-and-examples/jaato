@@ -62,6 +62,15 @@ from jaato_server.shared.plugins.workspace_home import (
     ensure_workspace_home_dir, inject_workspace_home,
 )
 from jaato_server.shared.utils.errors import exc_message
+from jaato_server.shared.peer_identity import PeerCredentials
+from jaato_server.shared.privilege_drop import RunnerUser
+from jaato_server.server.runner_user import (
+    current_policy as current_runner_uid_policy,
+    prepare_runner_owned_paths,
+    resolve_runner_user,
+    runner_owned_paths,
+    runner_uid_of,
+)
 from jaato_server.shared.private_tmp import (
     ensure_private_tmp_dir, resolve_private_tmp,
 )
@@ -200,6 +209,7 @@ def spawn_session_runner(
     pool_manager: Any = None,
     cascade_driver_id: Optional[str] = None,
     managed_workspace_root: Optional[str] = None,
+    peer: Any = None,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
@@ -248,6 +258,15 @@ def spawn_session_runner(
             opt-in via ``plugin_configs.cli.workspace_home``.  Used only
             to create the home directory + its gitignore before spawn,
             as the session tmpdir is (#1171).
+        peer: The requesting connection's
+            :class:`~shared.peer_identity.PeerCredentials` (IPC), or
+            ``None`` (WS, or a caller with no connection).  Read only by
+            the ``peer`` runner uid policy (#1168 step 3,
+            :mod:`server.runner_user`): the runner then drops to that uid
+            (cold spawn: in the forked child after cgroup + private
+            ``/tmp``; pool slot: bootstrap step 1b3), the pool key carries
+            the uid, and the directories the daemon makes for the runner
+            are handed to it first.
         cascade_driver_id: Phase 2 cascade-sharing tenant ID.  When
             non-None, the pool acquire walks for a slot already
             affined to this cascade (warm plugin state, warm LSP
@@ -284,6 +303,10 @@ def spawn_session_runner(
             path.
 
     Raises:
+        RunnerUserRefused: the runner uid policy names a user who cannot
+            read the daemon's interpreter or jaato packages.  Both callers
+            REFUSE the session on it — never the in-process fallback, which
+            would run the model's tools in the root daemon.
         RuntimeError: when *daemon_loop* is None or the runner-RPC
             start times out.  Caller catches and downgrades to
             ``sandbox_mode = "soft"`` (or omits the field entirely
@@ -337,7 +360,7 @@ def spawn_session_runner(
     # helper, which no-ops for a falsy workspace / an off session -- so it is
     # called unconditionally (a guard here would only add a decision point to
     # a ratcheted function).
-    ensure_workspace_home_dir(
+    workspace_home = ensure_workspace_home_dir(
         getattr(server, "_profile", None),
         workspace_path,
         managed_workspace_root,
@@ -348,6 +371,16 @@ def spawn_session_runner(
     # has no private /tmp.  A failure is logged; the runner then refuses to
     # start, naming the missing directory.
     ensure_private_tmp_dir(session_private_tmp(server, profile_name))
+
+    # ----- Which uid the runner runs as, before either branch (#1168) -----
+    # Resolved once, stashed on the server (the cold spawn and the envelope
+    # both read it), and the directories above handed to that user before
+    # anything forks.  ``None`` = the daemon's uid, the default policy.
+    runner_user = _prepare_runner_user(
+        server, peer=peer, session_id=session_id,
+        workspace_path=workspace_path, profile_name=profile_name,
+        log_path=log_path, workspace_home=workspace_home,
+    )
 
     # ----- Pool routing (pool PR 4 + 5a) -----
     # Pool-served path is gated to sessions that:
@@ -381,6 +414,8 @@ def spawn_session_runner(
             # "unconfined" and "no workspace" each have one spelling.
             workspace_root=workspace_path,
             profile_name=profile_name,
+            # #1168: a slot that dropped is that uid for life.
+            runner_uid=runner_uid_of(runner_user),
         )
         if slot is not None:
             spawned = SpawnedRunner(
@@ -495,12 +530,14 @@ def spawn_session_runner(
     server.set_runner_rpc(rpc, spawned)
     logger.info(
         "runner spawned for session %s: pid=%d profile=%s log=%s "
-        "confined=%s pool_served=%s",
+        "confined=%s pool_served=%s runner_uid_policy=%s runs_as=%s",
         session_id, spawned.pid,
         profile_name or "(none)",
         log_path or "(inherited)",
         not disable_confine,
         pool_served,
+        current_runner_uid_policy(),
+        describe_runs_as(runner_user),
     )
     session_new_timing.mark(
         "runner_ready", session_id=session_id,
@@ -596,7 +633,71 @@ def _cold_spawn_runner(
         # #1381: entered in the forked child before exec, i.e. before
         # ``runner/__main__`` confines itself.
         private_tmp_dir=session_private_tmp(server, profile_name),
+        # #1168: dropped in the forked child after the private /tmp and
+        # before exec -- so before ``runner/__main__`` confines itself.
+        runner_user=stashed_runner_user(server),
     )
+
+
+def _prepare_runner_user(
+    server: Any,
+    *,
+    peer: Any,
+    session_id: str,
+    workspace_path: Optional[str],
+    profile_name: Optional[str],
+    log_path: Optional[str],
+    workspace_home: Optional[str],
+) -> Optional[RunnerUser]:
+    """Resolve this session's runner user, stash it, hand it its paths (#1168).
+
+    The resolution is :func:`server.runner_user.resolve_runner_user`
+    (``None`` under the default policy and every case the policy cannot
+    honour).  Stashed as ``server._runner_user`` so the cold spawn and
+    :func:`build_session_envelope` read the value decided here rather than
+    deciding again.  Then the directories the daemon creates FOR the
+    runner — session tmpdir, private ``/tmp``, workspace HOME,
+    ``.jaato/logs`` + the runner log, ``.jaato/sessions/<id>`` — are handed
+    to that user before anything forks, because a dropped runner could not
+    write into them otherwise.
+
+    Raises:
+        RunnerUserRefused: see :func:`server.runner_user.refuse_if_unreachable`.
+    """
+    user = resolve_runner_user(
+        peer=peer if isinstance(peer, PeerCredentials) else None,
+        workspace_path=workspace_path,
+    )
+    server._runner_user = user
+    dirs, files = runner_owned_paths(
+        session_id=session_id,
+        workspace_path=workspace_path,
+        session_tmp=session_tmpdir(
+            session_id, confinement_id_from_profile_name(profile_name or "")),
+        private_tmp=session_private_tmp(server, profile_name),
+        workspace_home=workspace_home,
+        log_path=log_path,
+    )
+    prepare_runner_owned_paths(user, dirs, files)
+    return user
+
+
+def stashed_runner_user(server: Any) -> Optional[RunnerUser]:
+    """The :class:`RunnerUser` :func:`_prepare_runner_user` stashed, or ``None``.
+
+    ``isinstance`` for the reason :func:`stashed_private_tmp` gives: a test
+    double's attribute is a mock, and only a real user may reach a drop.
+    """
+    value = getattr(server, "_runner_user", None)
+    return value if isinstance(value, RunnerUser) else None
+
+
+def describe_runs_as(user: Optional[RunnerUser]) -> str:
+    """``name(uid=..,gid=..)`` or ``daemon uid N`` for the per-session log."""
+    if user is not None:
+        return user.describe()
+    getuid = getattr(os, "getuid", None)
+    return f"daemon uid {getuid() if getuid else '?'}"
 
 
 def _revive_slot_rpc(rpc: Any, daemon_loop: Any) -> bool:
@@ -1325,7 +1426,16 @@ def build_session_envelope(
         confinement_grants=_confinement_grants_of(profile_name),
         # #1381: the <ws>/.tmp the profile's /tmp grant was rendered for.
         private_tmp_dir=session_private_tmp(server, profile_name),
+        # #1168: the user the runner drops to at step 1b3 (a pool slot) or
+        # already dropped to before exec (a cold spawn), or ``None``.
+        runner_user=_runner_user_wire(server),
     )
+
+
+def _runner_user_wire(server: Any) -> Optional[Dict[str, Any]]:
+    """``server._runner_user`` in its envelope form, or ``None``."""
+    user = stashed_runner_user(server)
+    return user.to_dict() if user is not None else None
 
 
 def _confinement_grants_of(profile_name: str) -> Optional[Dict[str, Any]]:
