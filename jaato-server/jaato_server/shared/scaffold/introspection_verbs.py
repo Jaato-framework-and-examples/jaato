@@ -192,6 +192,8 @@ _SCOPES = {
     "paths": ExplainScope(_explain.paths),
     "gh": ExplainScope(_explain.gh,
                        blurb="driving `gh` / `git` with a per-user token"),
+    "runner-user": ExplainScope(_explain.runner_user,
+                                blurb="which OS account a root daemon's runners run as"),
     "prefetch": ExplainScope(_explain.prefetch),
     "completion": ExplainScope(_explain.completion,
                                blurb="the OUTPUT-side hook"),
