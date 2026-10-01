@@ -7441,6 +7441,15 @@ nine reversions, each on a case that runs without root (the drop's syscalls
 are substituted, the chown recorded). The cases that fork a child and drop
 to `nobody` for real run where the suite is root and skip elsewhere.
 
+`jaato-scaffold explain runner-user` is the operator's view of all of the
+above: the three policies, every case that keeps the daemon's uid, the
+paths a target must be able to read, what is handed over, the credential
+caveat and the log line to verify. It reads `runner_user.py`
+(`POLICY_TARGETS`, the `REASON_*` constants, `runner_owned_paths`,
+`runner_import_paths`) rather than restating it. Guard:
+`jaato_server/shared/tests/test_explain_runner_user_1168.py`, three
+reversions.
+
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
 An OAuth refresh token **rotates**: the response replaces the token that

@@ -75,6 +75,25 @@ POLICY_PEER = "peer"
 POLICY_WORKSPACE_OWNER = "workspace-owner"
 POLICIES = (POLICY_DAEMON, POLICY_PEER, POLICY_WORKSPACE_OWNER)
 
+#: What each policy runs a session's runner as.  Read by
+#: ``jaato-scaffold explain runner-user``, so the topic cannot describe a
+#: policy differently from the code that resolves it.
+POLICY_TARGETS = {
+    POLICY_DAEMON: "the daemon's own uid (no drop) -- the default",
+    POLICY_PEER: "the uid of the OS account that opened the IPC socket "
+                 "(SO_PEERCRED)",
+    POLICY_WORKSPACE_OWNER: "the uid (and gid) owning the session's "
+                            "workspace directory",
+}
+
+#: Why a policy may fail to name a user.  Each keeps the daemon's uid and
+#: is announced once per daemon; :func:`_target_uid_gid` returns these.
+REASON_NO_PEER = (
+    "this connection carries no OS principal (a WebSocket connection -- "
+    "#1074 -- or a platform without SO_PEERCRED)")
+REASON_NO_WORKSPACE = "the session has no workspace"
+REASON_WORKSPACE_UNSTATABLE = "its workspace cannot be stat'd"
+
 _policy_lock = threading.Lock()
 _policy: str = POLICY_DAEMON
 _announced: set = set()
@@ -208,16 +227,14 @@ def _target_uid_gid(
     """``(uid, gid, why_not)`` the policy names, or ``(None, None, reason)``."""
     if policy == POLICY_PEER:
         if peer is None:
-            return None, None, (
-                "this connection carries no OS principal (a WebSocket "
-                "connection -- #1074 -- or a platform without SO_PEERCRED)")
+            return None, None, REASON_NO_PEER
         return peer.uid, peer.gid, ""
     if not workspace_path:
-        return None, None, "the session has no workspace"
+        return None, None, REASON_NO_WORKSPACE
     try:
         st = os.stat(workspace_path)
     except OSError as exc:
-        return None, None, f"its workspace cannot be stat'd ({exc})"
+        return None, None, f"{REASON_WORKSPACE_UNSTATABLE} ({exc})"
     return st.st_uid, st.st_gid, ""
 
 
