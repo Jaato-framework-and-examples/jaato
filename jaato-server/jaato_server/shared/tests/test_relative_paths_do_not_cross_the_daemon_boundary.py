@@ -256,6 +256,8 @@ def _apply_client_config(manager: _FakeManager, event: Any) -> None:
             manager, SessionManager))
     manager._CLIENT_CONFIG_PATH_FIELDS = (
         SessionManager._CLIENT_CONFIG_PATH_FIELDS)
+    manager._CLIENT_CONFIG_PATH_ACCESS = (
+        SessionManager._CLIENT_CONFIG_PATH_ACCESS)
     # The entitlement guard runs between the relativity check and the
     # apply, so it is bound too: with `peer=None` it answers "not
     # applicable" and changes nothing here, and binding it keeps this

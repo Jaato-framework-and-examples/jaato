@@ -76,6 +76,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import stat
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,23 @@ _UCRED_SIZE = struct.calcsize(_UCRED_FORMAT)
 READ = 0o4
 WRITE = 0o2
 SEARCH = 0o1
+
+#: What the daemon will do with a path on the peer's behalf.  It decides what
+#: the peer must hold on an existing leaf that is NOT a directory: a file the
+#: daemon only reads needs ``r``, one it appends to needs ``w``, and one it
+#: executes (the runner's interpreter, #1168) needs ``r-x``.  A directory is
+#: always opened as a tree and needs ``r-x`` whatever the access (#1464: the
+#: one rule used to be ``r-x`` on every leaf, so an ordinary ``0o664`` ``.env``
+#: was refused for lacking the execute bit).
+ACCESS_READ = "read"
+ACCESS_WRITE = "write"
+ACCESS_EXECUTE = "execute"
+
+_FILE_LEAF_WANTS = {
+    ACCESS_READ: READ,
+    ACCESS_WRITE: WRITE,
+    ACCESS_EXECUTE: READ | SEARCH,
+}
 
 
 @dataclass(frozen=True)
@@ -270,21 +288,28 @@ def _nearest_existing(path: Path) -> Optional[Path]:
 
 
 def path_reachable_by(
-    path: str, peer: PeerCredentials,
+    path: str, peer: PeerCredentials, access: str = ACCESS_READ,
 ) -> Optional[bool]:
     """Could *peer*, acting as themselves, reach *path*?
 
     The rule, and why each half is what it is:
 
     ========================  ==================================================
-    *path* exists             ``r-x`` on it -- the minimum to open the tree at
-                              all.  Deliberately NOT ``w``: a read-only tier is
+    *path* is an existing     ``r-x`` on it, whatever *access* says -- the
+    directory                 minimum to open the tree at all.  Deliberately NOT ``w``: a read-only tier is
                               a legitimate and desirable shape in exactly the
                               multi-user deployment this serves (an org-wide
                               ``config_root`` of shared profiles under
                               ``/opt``, readable by everyone and writable by
                               none of them), and requiring write would refuse
                               it.
+    *path* is an existing     only what the daemon will do with it: ``r`` for
+    non-directory             :data:`ACCESS_READ` (an ``env_file``), ``w`` for
+                              :data:`ACCESS_WRITE` (a trace log appended to),
+                              ``r-x`` for :data:`ACCESS_EXECUTE` (an
+                              interpreter).  Asking ``r-x`` of every leaf
+                              refused every ordinary file, which has no
+                              execute bit (#1464).
     *path* does not exist     ``-wx`` on the nearest existing ancestor -- the
                               minimum to create it.  The daemon provisions
                               workspaces, so this is the ordinary case for a
@@ -305,11 +330,19 @@ def path_reachable_by(
     world-writable directory is judged by what it points AT -- the same
     rule ``_start_unix_socket_server`` applies to the socket path itself.
 
+    The file/directory decision is made on the RESOLVED target, so a link
+    to a directory is judged as a directory.
+
     Args:
         path: An absolute path.  A relative one is refused by the #742
             guards before reaching here; it is treated as unknowable
             rather than resolved against the daemon's cwd.
         peer: The credential to evaluate against.
+        access: :data:`ACCESS_READ` (default), :data:`ACCESS_WRITE` or
+            :data:`ACCESS_EXECUTE` -- what the daemon will do with the path
+            if it is an existing non-directory.  Anything else raises
+            ``ValueError``: a caller that has not decided is a bug, not a
+            question this function may answer by guessing.
 
     Returns:
         ``True`` (reachable), ``False`` (demonstrably not), or ``None``
@@ -317,6 +350,8 @@ def path_reachable_by(
         or stat'd, or it is relative.  ``None`` is not a grant; see the
         module docstring.
     """
+    if access not in _FILE_LEAF_WANTS:
+        raise ValueError(f"unknown access {access!r}")
     if not path or not os.path.isabs(path):
         return None
     if peer.uid == 0:
@@ -335,8 +370,14 @@ def path_reachable_by(
         for ancestor in reversed(target.parents):
             if not _mode_permits(os.stat(ancestor), peer, groups, SEARCH):
                 return False
-        leaf_wants = READ | SEARCH if target == resolved else WRITE | SEARCH
-        return _mode_permits(os.stat(target), peer, groups, leaf_wants)
+        leaf = os.stat(target)
+        if target != resolved:
+            leaf_wants = WRITE | SEARCH
+        elif stat.S_ISDIR(leaf.st_mode):
+            leaf_wants = READ | SEARCH
+        else:
+            leaf_wants = _FILE_LEAF_WANTS[access]
+        return _mode_permits(leaf, peer, groups, leaf_wants)
     except OSError as exc:
         logger.debug("path_reachable_by: cannot stat under %s: %s", resolved, exc)
         return None
@@ -344,6 +385,7 @@ def path_reachable_by(
 
 def describe_unreachable_path(
     field: str, path: Optional[str], peer: PeerCredentials,
+    access: str = ACCESS_READ,
 ) -> Optional[str]:
     """A refusal message for *path*, or ``None`` when the peer may use it.
 
@@ -353,11 +395,12 @@ def describe_unreachable_path(
     caller into a single error rather than one round trip per field.
 
     An absent or empty *path* is not a violation -- the field is simply
-    not set, and a daemon-side default applies.
+    not set, and a daemon-side default applies.  *access* is passed to
+    :func:`path_reachable_by` unchanged.
     """
     if not path:
         return None
-    verdict = path_reachable_by(path, peer)
+    verdict = path_reachable_by(path, peer, access)
     if verdict is True:
         return None
     if verdict is False:
@@ -412,7 +455,7 @@ def path_checks_disabled() -> bool:
 
 
 def unreachable_client_paths(
-    fields: "list[tuple[str, Optional[str]]]",
+    fields: "list[tuple[str, Optional[str], str]]",
     peer: Optional[PeerCredentials],
 ) -> "list[str]":
     """The refusal messages for client-supplied paths *peer* may not use.
@@ -446,9 +489,12 @@ def unreachable_client_paths(
     is a control nobody has.
 
     Args:
-        fields: ``(field_name, value)`` pairs, reported in the order given.
-            A ``None`` or empty value is not a violation — the field is
-            simply unset and a daemon-side default applies.
+        fields: ``(field_name, value, access)`` triples, reported in the
+            order given.  *access* is what the daemon will do with that
+            field's path (:data:`ACCESS_READ` / :data:`ACCESS_WRITE`), stated
+            per field by the caller rather than guessed from the name.  A
+            ``None`` or empty value is not a violation — the field is simply
+            unset and a daemon-side default applies.
         peer: The connecting account, or ``None``.
 
     Returns:
@@ -460,8 +506,8 @@ def unreachable_client_paths(
     return [
         message
         for message in (
-            describe_unreachable_path(field, value, peer)
-            for field, value in fields
+            describe_unreachable_path(field, value, peer, access)
+            for field, value, access in fields
         )
         if message
     ]
