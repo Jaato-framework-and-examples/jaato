@@ -3794,6 +3794,7 @@ class SessionManager:
         # conditional because this builder sits on its complexity
         # baseline.
         from jaato_server.shared.plugins.subagent.config import _runtime_limits_to_dict
+        from jaato_server.server.runner_spawn import user_tier_snapshot
         _iso_limits = _isolated_limits(effective_runtime_limits, profile)
         _iso_width = getattr(_iso_limits, "max_parallel_tools", None)
         return SessionInitEnvelope(
@@ -3830,6 +3831,9 @@ class SessionManager:
                 getattr(profile, "completion_processors", []) or []
             ),
             created_by=created_by,
+            # #1465: an isolated sub-runner runs as the daemon's uid, so
+            # it reads the daemon's own user tier.
+            user_tier_files=user_tier_snapshot(None),
         )
 
     def _dispatch_isolated_session_bootstrap(

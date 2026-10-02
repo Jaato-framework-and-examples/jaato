@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from jaato_server.shared.user_tier import path as _user_tier_path
+
 # Import ThinkingConfig from provider types (single source of truth)
 from jaato_sdk.plugins.model_provider.types import ThinkingConfig
 
@@ -125,7 +127,7 @@ def load_config(config_path: Optional[str] = None) -> ThinkingPluginConfig:
     search_paths = [
         config_path,
         ".jaato/thinking.json",
-        os.path.expanduser("~/.jaato/thinking.json"),
+        str(_user_tier_path("thinking.json")),  # #1465
     ]
 
     for path in search_paths:

@@ -126,6 +126,18 @@ def _optional_positive_int(value: Any) -> Optional[int]:
     return parsed if parsed > 0 else None
 
 
+def _text_map(value: Any) -> Optional[Dict[str, str]]:
+    """*value* as ``{str: str}``, or ``None`` when it is not a dict.
+
+    Entries that are not text are dropped: the snapshot is files' text,
+    and an entry of another shape cannot be written as one.
+    """
+    if not isinstance(value, dict):
+        return None
+    return {k: v for k, v in value.items()
+            if isinstance(k, str) and isinstance(v, str)}
+
+
 def _optional_dict(value: Any) -> Optional[Dict[str, Any]]:
     """*value* when it is a dict, else ``None`` (a malformed field means absent)."""
     return value if isinstance(value, dict) else None
@@ -483,6 +495,13 @@ class SessionInitEnvelope:
     # daemon's envelope means (an older daemon never asked for a drop), so
     # no schema_version bump.
     runner_user: Optional[Dict[str, Any]] = None
+    # #1465: the user-global config tier the runner reads and is not
+    # granted (``~/.jaato/permissions.json``, ``instructions/``, ...), read
+    # daemon-side by ``shared.user_tier.collect``: relative path -> text.
+    # ``{}`` = the daemon looked and found nothing; ``None`` = an older
+    # daemon, and the runner reads disk as it always did, so no
+    # schema_version bump.  Never carries credentials.
+    user_tier_files: Optional[Dict[str, str]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -570,6 +589,10 @@ class SessionInitEnvelope:
             "runner_user": (
                 dict(self.runner_user) if self.runner_user else None
             ),
+            "user_tier_files": (
+                None if self.user_tier_files is None
+                else dict(self.user_tier_files)
+            ),
         }
 
     @classmethod
@@ -654,6 +677,7 @@ class SessionInitEnvelope:
             confinement_grants=_optional_dict(d.get("confinement_grants")),
             private_tmp_dir=_optional_str(d.get("private_tmp_dir")),
             runner_user=_optional_dict(d.get("runner_user")),
+            user_tier_files=_text_map(d.get("user_tier_files")),
         )
 
 

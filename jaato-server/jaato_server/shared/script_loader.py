@@ -56,6 +56,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
+from jaato_server.shared.user_tier import path as _user_tier_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -280,7 +282,7 @@ def resolve_script_path(
         if ws_path.is_file():
             return ws_path
 
-    home_path = Path.home() / ".jaato" / path
+    home_path = _user_tier_path(path)  # #1465: the daemon's snapshot
     if home_path.is_file():
         return home_path
 
