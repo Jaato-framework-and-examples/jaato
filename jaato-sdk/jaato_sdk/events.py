@@ -598,7 +598,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ignores it silently, and an empty answer would read as "no findings", so
 # both SDKs refuse below ``MIN_SCAFFOLD_VALIDATE_PROTOCOL``.
 #
-# 1.35 -- ``ReferenceBundleCreateRequest`` (or the typable
+# 1.35 -- ``PoolStatusRequest`` -> ``PoolStatusEvent``: read, and resize, the
+# daemon's pre-warm runner pool while it runs.  The pool's floor
+# (``JAATO_RUNNER_POOL_SIZE``) and ceiling (``JAATO_RUNNER_POOL_MAX_SIZE``)
+# were read once at startup, so adding warm runners meant a restart.  The
+# typable forms are ``pool.status`` and ``pool.resize <target> [<max>]``,
+# which also answer with a ``PoolStatusEvent``.  Daemon-level and
+# host-scoped: only an IPC connection whose kernel-reported uid is the
+# daemon's own, or root, is answered with the pool; every other connection
+# (WS, another local account) gets ``ok=False, category="not_authorized"``.
+# A NEW verb (the 1.7 rule): an older daemon never answers, and "resized"
+# would describe a pool nobody changed, so the SDK refuses below
+# ``MIN_POOL_ADMIN_PROTOCOL``.
+# 1.36 -- ``ReferenceBundleCreateRequest`` (or the typable
 # ``reference.bundle.create <name>``) -> ``ReferenceBundleCreateResultEvent``
 # (#1478): create a workspace-tier reference sub-bundle, UNINDEXED, so a
 # driver can set up the bundle it promotes into without a session or an
@@ -607,7 +619,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # carries the workspace's ``bundles`` after the create (the listing
 # ``ReferenceClaimsEvent.bundles`` already gives).  A NEW verb (the 1.7
 # rule): the SDKs refuse below ``MIN_REFERENCE_BUNDLE_PROTOCOL``.
-PROTOCOL_VERSION = "1.35"
+PROTOCOL_VERSION = "1.36"
 
 
 # =============================================================================
@@ -837,12 +849,14 @@ class EventType(str, Enum):
     REFERENCE_CATALOG_REQUEST = "reference.catalog.request"  # Client -> Server (1.33)
     REFERENCE_LINKS_UPDATE_REQUEST = "reference.links.request"  # Client -> Server (1.33)
     REFERENCE_LINKS_UPDATE_RESULT = "reference.links.result"  # Answer to ReferenceLinksUpdateRequest (1.33)
-    REFERENCE_BUNDLE_CREATE_REQUEST = "reference.bundle.create.request"  # Client -> Server (1.35)
-    REFERENCE_BUNDLE_CREATE_RESULT = "reference.bundle.create.result"  # Answer to ReferenceBundleCreateRequest (1.35)
+    REFERENCE_BUNDLE_CREATE_REQUEST = "reference.bundle.create.request"  # Client -> Server (1.36)
+    REFERENCE_BUNDLE_CREATE_RESULT = "reference.bundle.create.result"  # Answer to ReferenceBundleCreateRequest (1.36)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
     SCAFFOLD_VALIDATE_RESULT = "scaffold.validate.result"  # Answer to `scaffold.validate [set] [profile]` (1.34)
+    POOL_STATUS_REQUEST = "pool.status.request"  # Client -> Server: read / resize the runner pool (1.35)
+    POOL_STATUS = "pool.status"  # Answer to PoolStatusRequest and to `pool.status` / `pool.resize` (1.35)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -2964,6 +2978,85 @@ class ReferenceClaimsEvent(Event):
     bundles: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class PoolStatusRequest(Event):
+    """Read the daemon's pre-warm runner pool, or resize it (1.35).
+
+    Answered by one :class:`PoolStatusEvent` carrying this ``request_id``.
+    With both sizes ``None`` it only reads.  ``target_size`` is the floor
+    on UNRESERVED idle slots (0 disables the pool); ``max_size`` the
+    ceiling on all idle slots, reservations included.  ``max_size`` alone,
+    with no ``target_size``, keeps the current floor.
+
+    Only an IPC connection whose kernel-reported uid is the daemon's own,
+    or root, is answered with the pool: the pool is a property of the
+    daemon process, never of a session or a remote client.
+    """
+    type: EventType = Field(default=EventType.POOL_STATUS_REQUEST)
+    request_id: str = ""
+    target_size: Optional[int] = None
+    max_size: Optional[int] = None
+
+
+class PoolStatusEvent(Event):
+    """The daemon's pre-warm runner pool, after a read or a resize (1.35).
+
+    Fields:
+        request_id: The request's id, echoed; ``""`` for the typed
+            ``pool.status`` / ``pool.resize`` commands.
+        ok: Whether the request was carried out.  ``False`` with
+            ``category`` and ``error`` otherwise; the sizing fields are
+            then meaningless.
+        category: ``""`` on success, else ``not_authorized`` (the
+            connection is not the daemon's own account or root),
+            ``invalid_request`` (a size that is not a non-negative
+            integer) or ``no_pool`` (this daemon runs without a pool
+            manager).
+        error: Why not, when ``ok`` is ``False``.
+        changed: Whether this request resized the pool.
+        previous_target_size / previous_max_size: The sizes before a
+            resize; ``None`` on a read.
+        target_size / max_size: The sizes now.
+        max_size_explicit: Whether the ceiling was chosen (by the env var
+            or a resize) rather than derived as ``2 * target_size``.
+        idle / unreserved / reserved: Idle slots right now -- all of them,
+            those any session may take, and those held for one cascade.
+            A larger ``target_size`` fills in over the next moments, one
+            fork at a time; read again to watch it.
+        pending_teardown: Idle slots dropped (by a shrink, the ceiling or
+            a dead channel) not yet reaped.
+        replenishing: Whether the thread that forks and reaps slots runs.
+        template_alive: Whether the template slots are forked from is up.
+        routing_enabled: Whether sessions are routed to the pool at all
+            (``JAATO_RUNNER_POOL_ENABLED``); a pool that is filled but
+            not routed to serves nobody.
+        persisted: Whether ``--restart`` will start the daemon with these
+            sizes.  ``False`` when the daemon could not write its restart
+            config, which is then the one place the sizes are not kept.
+        telemetry: The pool's counters (``pool_acquire_miss_total`` and
+            friends), the numbers a resize is decided from.
+    """
+    type: EventType = Field(default=EventType.POOL_STATUS)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    changed: bool = False
+    previous_target_size: Optional[int] = None
+    previous_max_size: Optional[int] = None
+    target_size: int = 0
+    max_size: int = 0
+    max_size_explicit: bool = False
+    idle: int = 0
+    unreserved: int = 0
+    reserved: int = 0
+    pending_teardown: int = 0
+    replenishing: bool = False
+    template_alive: bool = False
+    routing_enabled: bool = False
+    persisted: bool = False
+    telemetry: Dict[str, int] = Field(default_factory=dict)
+
+
 class ReferenceClaimsRequest(Event):
     """List the reference claims in the caller's workspace (1.33).
 
@@ -3043,7 +3136,7 @@ class ReferenceLinksUpdateRequest(Event):
 
 
 class ReferenceBundleCreateRequest(Event):
-    """Create a workspace-tier reference sub-bundle (1.35, #1478).
+    """Create a workspace-tier reference sub-bundle (1.36, #1478).
 
     Answered by :class:`ReferenceBundleCreateResultEvent` carrying this
     ``request_id``.  ``name`` is one id token (the claim/reference id rule);
@@ -3056,7 +3149,7 @@ class ReferenceBundleCreateRequest(Event):
 
 
 class ReferenceBundleCreateResultEvent(Event):
-    """What one bundle create did (1.35, #1478).
+    """What one bundle create did (1.36, #1478).
 
     Fields:
         request_id: Echoed from the request (``""`` for the typed command).
@@ -5609,6 +5702,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SECRET_RELOAD_RESULT.value: SecretReloadResultEvent,
     EventType.WORKSPACE_APP_WRITE_REQUEST.value: WorkspaceAppWriteRequest,
     EventType.WORKSPACE_APP_WRITE_RESULT.value: WorkspaceAppWriteResultEvent,
+    # The runner pool (1.35).
+    EventType.POOL_STATUS_REQUEST.value: PoolStatusRequest,
+    EventType.POOL_STATUS.value: PoolStatusEvent,
 }
 
 

@@ -134,6 +134,11 @@ INTENTIONALLY_ABSENT = {
         "inner client's own _require_diagnostics_protocol raises when the "
         "daemon is too old to serve session.diagnostics -- same reasoning "
         "as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_POOL_ADMIN_PROTOCOL":
+        "class constant on IPCClient gating pool_status / resize_pool "
+        "(protocol 1.35); the recovery wrapper forwards both METHODS and "
+        "lets the inner client refuse a daemon too old to serve them -- "
+        "same reasoning as MIN_SESSION_STOP_PROTOCOL above",
     "MIN_MODEL_OVERRIDE_PROTOCOL":
         "class constant on IPCClient gating create_session(model=...) "
         "(protocol 1.27); the recovery wrapper forwards model/provider to "

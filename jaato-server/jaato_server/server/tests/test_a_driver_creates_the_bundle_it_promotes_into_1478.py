@@ -10,7 +10,7 @@ at all.
 
 Two fixes, guarded here:
 
-* ``ReferenceBundleCreateRequest`` (protocol 1.35) creates an UNINDEXED
+* ``ReferenceBundleCreateRequest`` (protocol 1.36) creates an UNINDEXED
   workspace sub-bundle, daemon-side and without a session, under the owner
   rule promotion uses.  Driven end to end over a real ``JaatoIPCServer`` and
   ``IPCClient`` with no session and no embedding provider anywhere.

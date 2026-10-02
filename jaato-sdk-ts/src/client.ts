@@ -202,11 +202,11 @@ export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
 export const MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34";
 
 /**
- * Floor for {@link JaatoClient.createReferenceBundle} (protocol 1.35, #1478).
+ * Floor for {@link JaatoClient.createReferenceBundle} (protocol 1.36, #1478).
  * A new verb (the 1.7 rule): an older daemon ignores it, and the caller would
  * wait out its timeout for a bundle nobody created.
  */
-export const MIN_REFERENCE_BUNDLE_PROTOCOL = "1.35";
+export const MIN_REFERENCE_BUNDLE_PROTOCOL = "1.36";
 
 /**
  * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
@@ -1354,7 +1354,7 @@ export class JaatoClient {
   }
 
   /**
-   * Create a workspace-tier reference sub-bundle, unindexed (protocol 1.35,
+   * Create a workspace-tier reference sub-bundle, unindexed (protocol 1.36,
    * #1478).  Needs no session and no embedding provider, so a driver can
    * create the bundle it then promotes into.  An existing bundle (or
    * directory) by that name answers ``category: "collision"`` with nothing

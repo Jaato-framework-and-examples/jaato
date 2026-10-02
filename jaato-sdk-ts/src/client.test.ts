@@ -713,13 +713,13 @@ describe("JaatoClient session management", () => {
     }
   });
 
-  test("createReferenceBundle correlates its answer, and is refused below 1.35", async () => {
+  test("createReferenceBundle correlates its answer, and is refused below 1.36", async () => {
     await client.close();
     installMockWebSocket();
     client = new JaatoClient({ url: "ws://localhost:8080" });
     await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
     if (lastInstance) lastInstance.sent = [];
-    await assert.rejects(() => client.createReferenceBundle("run-1"), /1\.35/);
+    await assert.rejects(() => client.createReferenceBundle("run-1"), /1\.36/);
     assert.equal(lastInstance!.sent.length, 0);
 
     await client.close();

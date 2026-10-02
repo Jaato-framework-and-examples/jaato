@@ -103,6 +103,7 @@ from jaato_sdk.events import (
     ToolsRegisterClientRequest,
     ToolExecuteResultEvent,
     ToolOutputEvent,
+    PoolStatusRequest,
 )
 from jaato_sdk.events import REFERENCE_CURATION_REQUEST_TYPES
 from .memory_verbs import MEMORY_REQUEST_TYPES
@@ -113,9 +114,12 @@ from . import session_new_timing
 #: session-less caller is a correlated ``no_session`` result rather than
 #: silence the SDK would wait out, and the reference-curation verbs (#1475),
 #: which resolve the caller's workspace from the connection and answer
-#: ``no_workspace`` themselves when there is none.
+#: ``no_workspace`` themselves when there is none.  ``PoolStatusRequest``
+#: (1.35) is about the daemon's runner pool and is sent by ``--pool-size``,
+#: which attaches to no session by design.
 _SESSIONLESS_REQUEST_TYPES = (
     CommandRequest, ClientConfigRequest, PostAuthSetupResponse,
+    PoolStatusRequest,
 ) + MEMORY_REQUEST_TYPES + REFERENCE_CURATION_REQUEST_TYPES
 
 

@@ -3037,7 +3037,8 @@ To connect to a specific server: jaato --connect /path/to/socket
         type=str,
         metavar="COMMAND",
         help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
-             "Requires --session."
+             "With --session it goes to that session; without it, only a daemon-level command "
+             "is sent (e.g., 'pool resize 6', 'session list') and no daemon is auto-started."
     )
     parser.add_argument(
         "--init",
@@ -3058,10 +3059,9 @@ To connect to a specific server: jaato --connect /path/to/socket
     from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH
     socket_path = args.connect or DEFAULT_SOCKET_PATH
 
-    # Validate --cmd requirements
-    if args.cmd:
-        if not args.session:
-            sys.exit("Error: --cmd requires --session to specify which session to send the command to")
+    # --cmd without --session sends a DAEMON-level command (e.g.
+    # 'pool resize 6', 'session list'); command_mode refuses anything that
+    # needs a session.
 
     # Validate headless mode requirements
     if args.headless:

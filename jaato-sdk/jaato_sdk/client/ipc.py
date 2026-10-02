@@ -93,6 +93,8 @@ from jaato_sdk.events import (
     PermissionSetDefaultRequest,
     PermissionPolicySnapshotRequest,
     MemoryListRequest,
+    PoolStatusEvent,
+    PoolStatusRequest,
     ReferenceClaimsEvent,
     ReferenceCatalogEvent,
     ReferenceCatalogRequest,
@@ -2338,15 +2340,15 @@ class IPCClient:
             ReferenceLinksUpdateRequest(reference_id=reference_id, links=list(links)),
             timeout, "refk")
 
-    #: Floor for :meth:`create_reference_bundle` (1.35, #1478).  A NEW verb
+    #: Floor for :meth:`create_reference_bundle` (1.36, #1478).  A NEW verb
     #: (the 1.7 rule): an older daemon ignores it, and the caller would wait
     #: out its timeout for a bundle nobody created.
-    MIN_REFERENCE_BUNDLE_PROTOCOL = "1.35"
+    MIN_REFERENCE_BUNDLE_PROTOCOL = "1.36"
 
     async def create_reference_bundle(
         self, name: str, *, timeout: float = 10.0,
     ) -> ReferenceBundleCreateResultEvent:
-        """Create a workspace-tier reference sub-bundle, unindexed (1.35, #1478).
+        """Create a workspace-tier reference sub-bundle, unindexed (1.36, #1478).
 
         Needs no session and no embedding provider: the daemon writes
         ``.jaato/references/<name>/bundle.json`` and nothing else, so a
@@ -2700,6 +2702,65 @@ class IPCClient:
             command="scaffold.validate",
             args=[profile_set or "", profile or ""],
         ))
+
+    # =========================================================================
+    # The runner pool (protocol 1.35)
+    # =========================================================================
+
+    MIN_POOL_ADMIN_PROTOCOL = "1.35"
+
+    async def pool_status(self, *, timeout: float = 10.0) -> PoolStatusEvent:
+        """Read the daemon's pre-warm runner pool (protocol 1.35).
+
+        See :meth:`resize_pool`; this is the same request with no sizes.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_POOL_ADMIN_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        return await self.resize_pool(timeout=timeout)
+
+    async def resize_pool(
+        self,
+        target_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+        *,
+        timeout: float = 10.0,
+    ) -> PoolStatusEvent:
+        """Resize the daemon's pre-warm runner pool while it runs (1.35).
+
+        ``target_size`` is the floor on unreserved idle slots (0 disables
+        the pool); ``max_size`` the ceiling on all idle slots.  ``None``
+        keeps a size as it is, so with neither this only reads.  A larger
+        floor fills in over the next moments, one fork at a time; a
+        smaller one drops idle slots only, never one serving a session.
+
+        The daemon answers only a connection whose kernel-reported uid is
+        its own or root: the answer is ``ok=False`` with
+        ``category="not_authorized"`` from any other account, and over WS.
+        ``persisted`` says whether ``--restart`` keeps the new sizes.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_POOL_ADMIN_PROTOCOL`, which would never answer,
+                so "resized" would describe a pool nobody changed.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_POOL_ADMIN_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"resize_pool: this daemon speaks protocol {spoken} and does "
+                f"not serve the pool verbs (needs >= "
+                f"{self.MIN_POOL_ADMIN_PROTOCOL}).  It would never answer.  "
+                f"Upgrade the daemon, or set JAATO_RUNNER_POOL_SIZE and "
+                f"restart it."
+            )
+        return await self._correlated_request(  # type: ignore[return-value]
+            "resize_pool",
+            PoolStatusRequest(target_size=target_size, max_size=max_size),
+            timeout, "pool")
 
     # =========================================================================
     # The memory verbs (#1232, protocol 1.22)

@@ -626,7 +626,7 @@ def curate_claim(
     return outcome
 
 
-#: The typable bundle verb (1.35, #1478).
+#: The typable bundle verb (1.36, #1478).
 BUNDLE_CREATE_COMMAND = "reference.bundle.create"
 
 #: Names a bundle may not take: the catalog root's spellings.
