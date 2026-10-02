@@ -537,6 +537,47 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
+### What the phase 2a kernel run found
+
+Run 2026-10-02 on Fedora 44 under WSL2 (`selinux-policy-targeted` 44.10,
+enforcing, MCS on), module at 5c12bc86, with
+`jaato-server/selinux/tools/probe_policy.py`. Of 25 probes, 22 passed
+and 3 failed. Two of the failures were the probe's own fault (a buffered
+write to `/proc/self/attr/*` raises only on close, after the verdict was
+printed); the kernel refused correctly (`setcurrent`, `setexec`). One was
+real:
+
+* **A pty the runner opens is unusable.** `term_use_all_ptys` grants
+  `ptynode`, but nothing relabels a new pty, so its slave end is
+  `devpts_t`, outside `ptynode`, and `openpty` fails with
+  `out of pty devices`. Static CI cannot see this: it checks allow rules,
+  not the label a new object is born with. This affects every host, not
+  only WSL, and probably `jaato_child_t` too (the probe now checks it).
+* **And the grant itself is too wide.** `ptynode` contains 21 types,
+  `user_devpts_t` and `sshd_devpts_t` among them: the ptys of login
+  terminals, created at `s0`. The MCS constraint on `chr_file` is
+  `h1 dom h2`, and a runner at `s0:c101,c102` dominates `s0`, so
+  `term_use_all_ptys` lets a runner read, write and `ioctl` an
+  administrator's terminal if it can name it. Found reading the linked
+  policy after the run, not exercised on a kernel. The fix for the pty
+  failure has to remove this grant, not add beside it.
+
+Two AVCs beside passing probes, traced on an AppArmor host with an audit
+hook and `strace -k` on the same import:
+
+* `node_bind` on `tcp ::1` comes from **urllib3's IPv6 capability probe**
+  (`urllib3/util/connection.py` `_has_ipv6`, at import). Denied, urllib3
+  sets `HAS_IPV6 = False` and resolves IPv4 only.
+* `search` on `/sys/fs/cgroup` comes from **cryptography's Rust core**
+  (`std::thread::available_parallelism` reading `/proc/self/cgroup` and
+  `cpu.max`, in `openssl::init`). Denied, Rust falls back to the affinity
+  mask.
+
+`dac_override` / `dac_read_search` came from running the probes as root;
+the probe gained `--as-uid` to check that a runner under #1168's
+`--runner-uid-policy` produces none. The rest were WSL host labelling
+(`/dev`, `/run`, `/mnt` never labelled by WSL's systemd), not the module.
+
 ### What phase 2a decided
 
 * **The module stops at the two domains phase 2b needs.** `jaato_isolated_t`

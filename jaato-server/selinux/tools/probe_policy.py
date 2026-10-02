@@ -11,10 +11,13 @@ kernel.  Prints one table and writes ``probe-results.json`` plus the AVC
 denials the run produced.
 
     python3 probe_policy.py [--root /srv/jaato-2a] [--venv /opt/jaato/venv]
+                            [--as-uid 1000]
 
 ``--venv`` adds one check: the runner domain imports
 ``jaato_server.server.runner`` from that venv (it must be labelled
-``lib_t``, design §9).
+``lib_t``, design §9).  ``--as-uid`` runs every probe as that uid, as a
+runner does under ``--runner-uid-policy`` (#1168), so the ``dac_override``
+denials a root probe causes do not appear.
 
 Every probe answers PASS / FAIL / SKIP with the observed value.  A FAIL is
 a finding, not a script error; send the whole output back.
@@ -35,6 +38,10 @@ from typing import List, Optional, Tuple
 L1 = "s0:c101,c102"
 L2 = "s0:c103,c104"
 RESULTS: List[dict] = []
+# --as-uid: the probes run as this uid, as runners do under #1168's
+# --runner-uid-policy.  None = root, which adds dac_override AVCs a
+# dropped runner would not produce.
+AS_UID: Optional[int] = None
 
 
 # ----------------------------------------------------------------------
@@ -65,8 +72,15 @@ def run_in(domain: str, level: str, argv: List[str], *, pass_fds=(),
     label = context(domain, level)
 
     def preexec():
-        with open("/proc/self/attr/exec", "w") as f:
-            f.write(label)
+        # Unbuffered: a buffered write raises at close, not at the call
+        # (phase 2a run, finding 3a).
+        fd = os.open("/proc/self/attr/exec", os.O_WRONLY)
+        os.write(fd, label.encode())
+        os.close(fd)
+        if AS_UID is not None:
+            os.setgroups([])
+            os.setresgid(AS_UID, AS_UID, AS_UID)
+            os.setresuid(AS_UID, AS_UID, AS_UID)
 
     return subprocess.run(argv, preexec_fn=preexec, pass_fds=pass_fds,
                           capture_output=True, text=True, timeout=timeout)
@@ -96,6 +110,15 @@ def expect_denied(name: str, p: subprocess.CompletedProcess) -> None:
 # that must fail succeeded.
 TRY = '''
 import os, sys
+def setattr_unbuffered(name, value):
+    # os.write, never open().write(): a buffered write to /proc/self/attr/*
+    # raises only when the file is finalised, after attempt() has already
+    # printed its verdict (phase 2a run, finding 3a).
+    fd = os.open("/proc/self/attr/" + name, os.O_WRONLY)
+    try:
+        os.write(fd, value.encode())
+    finally:
+        os.close(fd)
 def attempt(fn, must_fail):
     try:
         fn()
@@ -125,6 +148,11 @@ def setup(root: str) -> dict:
         open(f"{paths[key]}/.jaato/agents/a.md", "w").write("persona\n")
         shutil.copy("/usr/bin/true", f"{paths[key]}/bin/t")
     os.makedirs(paths["tmpA"], exist_ok=True)
+    if AS_UID is not None:
+        for key in ("wsA", "wsB", "wsU", "tmpA"):
+            for dirpath, dirnames, filenames in os.walk(paths[key]):
+                for name in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
+                    os.chown(name, AS_UID, AS_UID)
     # wsA: a managed workspace at L1; wsB: another workspace at L2;
     # wsU: a user's own checkout (not executable) at L1.
     chcon(paths["wsA"], "jaato_managed_ws_t", L1)
@@ -178,7 +206,7 @@ attempt(lambda: os.mkdir('{p['wsA']}/d'), False)"""))
     expect_denied("runner: /root is unreachable",
                   py_in(R, L1, TRY + "attempt(lambda: os.listdir('/root'), True)"))
     expect_denied("runner: cannot change its own domain",
-                  py_in(R, L1, TRY + f"attempt(lambda: open('/proc/self/attr/current','w').write('{context('unconfined_t', 's0')}'), True)"))
+                  py_in(R, L1, TRY + f"attempt(lambda: setattr_unbuffered('current', '{context('unconfined_t', 's0')}'), True)"))
 
     # The inherited socketpair: the daemon's RPC channel.
     for fd_use in ("on", "off"):
@@ -218,19 +246,31 @@ attempt(lambda: os.mkdir('{p['wsA']}/d'), False)"""))
     # //child, entered the way cli will enter it: from inside the runner.
     child_ctx = context(C, L1)
     spawn = f"""
-import subprocess
+import os, subprocess
 def pre():
-    open('/proc/self/attr/exec','w').write('{child_ctx}')
+    fd = os.open('/proc/self/attr/exec', os.O_WRONLY)
+    os.write(fd, b'{child_ctx}')
+    os.close(fd)
 p = subprocess.run(CMD, preexec_fn=pre, capture_output=True, text=True)
 print(p.stdout + p.stderr)
 """
     expect_ok("child: the runner execs /bin/sh into jaato_child_t",
               py_in(R, L1, spawn.replace("CMD", "['/bin/sh','-c','cat /proc/self/attr/current; echo; echo OK']")),
               want=f"{C}:{L1}")
+    def child_py(code: str) -> str:
+        # A Python probe run in the child, verdict from attempt(). Never a
+        # shell `cmd >/dev/null && echo LEAK || echo DENIED`: that reports
+        # DENIED when the redirect fails (phase 2a run, finding 3b).
+        return spawn.replace("CMD", repr([sys.executable, "-I", "-c", TRY + code]))
+
     expect_denied("child: cannot read the runner's /proc/<pid>/environ",
-                  py_in(R, L1, spawn.replace("CMD", "['/bin/sh','-c','cat /proc/$PPID/environ >/dev/null 2>&1 && echo LEAK || echo DENIED']")))
+                  py_in(R, L1, child_py(
+                      "attempt(lambda: open('/proc/%d/environ' % os.getppid(), 'rb').read(1), True)")))
     expect_denied("child: cannot set an exec context (cannot leave //child)",
-                  py_in(R, L1, spawn.replace("CMD", f"['{sys.executable}','-I','-c',\"open('/proc/self/attr/exec','w').write('x')\"]")))
+                  py_in(R, L1, child_py(
+                      f"attempt(lambda: setattr_unbuffered('exec', '{context('unconfined_t', 's0')}'), True)")))
+    expect_ok("child: opens a pty (interactive_shell's children)",
+              py_in(R, L1, child_py("attempt(lambda: os.openpty(), False)")))
     expect_denied("child: cannot write a reference claim",
                   py_in(R, L1, spawn.replace("CMD", f"['/bin/sh','-c','echo x > {p['wsA']}/.jaato/references-claims/f.json && echo LEAK || echo DENIED']")))
     expect_ok("child: runs a binary a managed workspace holds",
@@ -248,27 +288,80 @@ print(p.stdout + p.stderr)
         record("runner: imports jaato_server.server.runner from the venv", None, "--venv not given")
 
 
+def auditd_running() -> bool:
+    return subprocess.run(["pidof", "auditd"], capture_output=True).returncode == 0
+
+
+def kernel_avcs_since(marker: str) -> str:
+    """AVC lines the kernel logged after *marker* (written to /dev/kmsg).
+
+    The fallback when auditd is not running (WSL): the kernel then prints
+    AVCs to its ring buffer instead (phase 2a run, finding 3c).
+    """
+    lines = subprocess.run(["dmesg"], capture_output=True, text=True).stdout.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if marker in lines[i]:
+            lines = lines[i + 1:]
+            break
+    else:
+        print(f"WARNING: marker {marker!r} not in dmesg (ring buffer wrapped?); "
+              "AVCs below may predate this run", file=sys.stderr)
+    return "\n".join(l for l in lines if "avc:" in l) + "\n"
+
+
 def main() -> int:
+    global AS_UID
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/srv/jaato-2a")
     ap.add_argument("--venv")
+    ap.add_argument("--as-uid", type=int,
+                    help="run every probe as this uid (not 0), as a runner "
+                         "does under --runner-uid-policy (#1168)")
     args = ap.parse_args()
     if os.geteuid() != 0:
         print("run as root (chcon, setsebool)", file=sys.stderr)
         return 2
+    if args.as_uid == 0:
+        print("--as-uid 0 is the default; pass a non-root uid", file=sys.stderr)
+        return 2
+    AS_UID = args.as_uid
     enforce = open("/sys/fs/selinux/enforce").read().strip()
-    print(f"enforcing={enforce}  context={open('/proc/self/attr/current').read().strip(chr(0))}")
+    print(f"enforcing={enforce}  context={open('/proc/self/attr/current').read().strip(chr(0))}"
+          f"  as_uid={AS_UID if AS_UID is not None else 0}")
     start = time.strftime("%H:%M:%S")
-    paths = setup(args.root)
-    probes(paths, args.venv)
-    time.sleep(1)
-    avc = subprocess.run(["ausearch", "-m", "AVC,USER_AVC", "-ts", start, "-i"],
-                         capture_output=True, text=True).stdout
+    with_auditd = auditd_running()
+    marker = f"jaato-2a-probe start pid={os.getpid()} {time.time():.0f}"
+    ratelimit = None
+    if not with_auditd:
+        # Without auditd, the kernel rate-limits the AVCs it prints and
+        # most of a run's denials are suppressed (phase 2a run, finding 3c).
+        print("auditd is not running: collecting AVCs from dmesg, with "
+              "kernel.printk_ratelimit=0 for the run", file=sys.stderr)
+        ratelimit = open("/proc/sys/kernel/printk_ratelimit").read().strip()
+        open("/proc/sys/kernel/printk_ratelimit", "w").write("0")
+        open("/dev/kmsg", "w").write(marker + "\n")
+    try:
+        paths = setup(args.root)
+        probes(paths, args.venv)
+        time.sleep(1)
+    finally:
+        if ratelimit is not None:
+            open("/proc/sys/kernel/printk_ratelimit", "w").write(ratelimit)
+    if with_auditd:
+        avc = subprocess.run(["ausearch", "-m", "AVC,USER_AVC", "-ts", start, "-i"],
+                             capture_output=True, text=True).stdout
+        count = avc.count("type=AVC")
+    else:
+        avc = kernel_avcs_since(marker)
+        count = avc.count("avc:")
     open("probe-avc.txt", "w").write(avc)
-    json.dump({"enforcing": enforce, "results": RESULTS}, open("probe-results.json", "w"), indent=2)
+    json.dump({"enforcing": enforce, "as_uid": AS_UID, "avc_source":
+               "ausearch" if with_auditd else "dmesg", "results": RESULTS},
+              open("probe-results.json", "w"), indent=2)
     fails = [r for r in RESULTS if r["result"] == "FAIL"]
     print(f"\n{len(RESULTS) - len(fails)} of {len(RESULTS)} not failed; "
-          f"{len(fails)} FAIL; AVC records: {avc.count('type=AVC')} (probe-avc.txt)")
+          f"{len(fails)} FAIL; AVC lines: {count} (probe-avc.txt, from "
+          f"{'ausearch' if with_auditd else 'dmesg'})")
     return 1 if fails else 0
 
 

@@ -36,9 +36,35 @@ Write the results to `/root/jaato-phase2a/RESULTS.md` using the template in
 
 ## 1. Gate
 
-Same gate as phase 0 §1, and after a WSL restart the same manual steps
-(mount `securityfs` / `selinuxfs`, `load_policy -i`, relabel what was
-created unlabelled). Proceed only when:
+Same gate as phase 0 §1. **Under WSL, after any `wsl --shutdown`, bring
+SELinux up in this order** (the 2026-10-02 run lost the distro doing it any
+other way). `/etc/selinux/config` says `enforcing`, so `load_policy -i`
+loads straight into enforcing, and with WSL's `/init` and session plumbing
+confined in `kernel_t`, every exec fails, `sudo` included.
+
+```bash
+# 1. kernel_t / kernel_generic_helper_t permissive IN THE STORE (-N: no
+#    reload yet). Phase 0's cleanup removed them; check before every load.
+semanage permissive -l | grep -E 'kernel_t|kernel_generic_helper_t' || {
+  semanage permissive -N -a kernel_t
+  semanage permissive -N -a kernel_generic_helper_t; }
+# 2. the filesystems the policy loader needs
+mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security
+mountpoint -q /sys/fs/selinux     || mount -t selinuxfs  selinuxfs  /sys/fs/selinux
+# 3. load WITHOUT -i: the mode stays permissive
+load_policy
+# 4. relabel, then the parts WSL's systemd never labels (they skewed the
+#    first run: /dev/null and /dev/ptmx were device_t, resolv.conf tmpfs_t)
+restorecon -RF / -e /mnt -e /proc -e /sys -e /dev -e /run
+restorecon -R /dev /run/systemd/resolve; restorecon /mnt
+[ -e /mnt/wsl/resolv.conf ] && chcon -t net_conf_t /mnt/wsl/resolv.conf
+# 5. only now
+setenforce 1
+```
+
+`auditd` does not run under WSL (PID 1 stays in `kernel_t`), so AVCs go to
+`dmesg` only, rate-limited. The probe handles that itself (§4). Proceed
+only when:
 
 ```bash
 mkdir -p /root/jaato-phase2a && cd /root/jaato-phase2a
@@ -129,9 +155,20 @@ python3 /root/jaato/jaato-server/selinux/tools/probe_policy.py \
   --root /srv/jaato-2a --venv /opt/jaato/venv | tee probe.txt
 ```
 
-It writes `probe.txt`, `probe-results.json` and `probe-avc.txt` (the AVCs
-the run produced). It toggles the `domain_fd_use` boolean off and back on
-for one probe; check it is back:
+Then run it again as a non-root uid, which is how a runner runs under
+`--runner-uid-policy` (#1168). The `dac_override` denials of a root run
+should disappear:
+
+```bash
+mkdir -p uid && cd uid && python3 /root/jaato/jaato-server/selinux/tools/probe_policy.py \
+  --root /srv/jaato-2a --venv /opt/jaato/venv --as-uid 1000 | tee probe.txt; cd ..
+```
+
+Each run writes `probe.txt`, `probe-results.json` and `probe-avc.txt` (the
+AVCs the run produced: from `ausearch` when `auditd` runs, otherwise from
+`dmesg` after a marker the probe writes, with `kernel.printk_ratelimit`
+set to 0 for the run and restored). It toggles the `domain_fd_use` boolean
+off and back on for one probe; check it is back:
 
 ```bash
 getsebool domain_fd_use            # on
@@ -153,6 +190,7 @@ What each line means, and why it is there:
 | DNS + outbound TCP | §4.3 | SKIP when offline |
 | runner execs `/bin/sh` into `jaato_child_t` | §7.3 | `setexec` + `transition` + `entrypoint` on `shell_exec_t` |
 | child cannot read runner's `environ`, set an exec context, write claims | §4.3, §4.4 | |
+| child opens a pty | §4.3 | the children `interactive_shell` starts own the pty's slave end |
 | child runs a managed workspace's binary, not a user checkout's | §4.2 | |
 | runner imports `jaato_server.server.runner` from `/opt/jaato/venv` | §9 | the venv's labels; `pyvenv.cfg` |
 
