@@ -15,6 +15,8 @@
 # /root is listed separately because it is not a HOME_DIR. Everything
 # else under ~/.jaato (credentials, instructions/, permissions.json) keeps
 # the home's type, which the jaato domains cannot read.
+HOME_DIR/\.jaato	-d	gen_context(system_u:object_r:jaato_user_dir_t,s0)
+/root/\.jaato	-d	gen_context(system_u:object_r:jaato_user_dir_t,s0)
 HOME_DIR/\.jaato/(agents|profiles|references|services)(/.*)?	gen_context(system_u:object_r:jaato_user_config_t,s0)
 HOME_DIR/\.jaato/gc\.json	--	gen_context(system_u:object_r:jaato_user_config_t,s0)
 HOME_DIR/\.jaato/memories\.jsonl	--	gen_context(system_u:object_r:jaato_user_config_t,s0)

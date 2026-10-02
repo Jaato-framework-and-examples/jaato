@@ -589,6 +589,35 @@ with `--as-uid 1000`, with no pty, `::1` or cgroup denial and no
 `dac_*` denial in either run. So the uid drop removes none the probe
 causes; whether a real runner causes any is a 2b question.
 
+### What the phase 2b kernel run found
+
+Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
+
+* **Probe: 34 of 34, as root and as uid 1000**, including the new binds
+  (port 80 refused by `name_bind` on `http_port_t`) and the user tier
+  (persona writes refused on `jaato_user_config_t`, `*_auth.json` and home
+  listing refused).
+* **The live session was refused**: the daemon created the session tmpdir
+  with a bare `makedirs`, so it was `user_tmp_t`, and
+  `prepare_session_tmpdir` had no caller. Fixed in bf978cfe (provision
+  labels it, a failure refuses the session). With the directory labelled
+  by hand, every live check passed: runner in `jaato_runner_t:s0:c195,c418`,
+  the command in `jaato_child_t` at the same level, `sandbox_mode: selinux`,
+  the workspace, authored config and created files labelled at the level.
+* **A root runner's child could walk into other homes.** Search on every
+  `user_home_t` directory (1.2.0) let a child stat
+  `/home/<user>/...`; only missing DAC capabilities stopped it at a 0700
+  home. 1.3.0 gives `~/.jaato` its own type (`jaato_user_dir_t`) and drops
+  search on `user_home_t` directories; `/root`'s subdirectories stay
+  traversable by name (all `admin_home_t`), stated in `jaato.te`.
+* **The runner listed `~/.jaato` at bootstrap**, most likely the #1215
+  redactor's `*_auth.json` scan (the earliest AVC of the run, at step 1b).
+  A confined runner no longer scans its home: it cannot read those files
+  under either LSM. The next run's trace confirms or names another caller.
+* **An `execute` on `ldconfig`** from a child the runner forked
+  (`ctypes.util.find_library`, three runner-side callers). No evidence yet
+  which; `live_session.py --trace-subprocess` records it.
+
 ### What phase 2b decided
 
 * **Parity with AppArmor, measured, where the two differ by construction.**

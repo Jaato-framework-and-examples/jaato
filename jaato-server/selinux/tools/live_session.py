@@ -20,8 +20,9 @@ confinement, drives one ``echo``-provider turn whose tool call runs
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
 children are that user, not root.  ``--trace-subprocess`` drops a
 ``sitecustomize.py`` into the venv for the run that writes a stack for every
-subprocess the runner starts into its log (``<ws>/.jaato/logs/runner-*.log``),
-to name the code behind an ``execute`` AVC; it is removed afterwards.
+subprocess the runner starts, and for every listing of a ``.jaato``
+directory, into its log (``<ws>/.jaato/logs/runner-*.log``), to name the
+code behind an ``execute`` or ``read`` AVC; it is removed afterwards.
 
 Prints one PASS / FAIL line per check, then the daemon's SELinux log lines
 and the AVCs the run produced.  Writes ``live-session.json`` beside it.
@@ -158,6 +159,8 @@ import sys, traceback
 def _jaato_2b_trace(event, args):
     if event == "subprocess.Popen":
         sys.stderr.write("JAATO-2B-SUBPROCESS %r\\n%s" % (args[1], "".join(traceback.format_stack()[-12:])))
+    elif event in ("os.scandir", "os.listdir") and str(args[0]).rstrip("/").endswith("/.jaato"):
+        sys.stderr.write("JAATO-2B-LISTDIR %r\\n%s" % (args[0], "".join(traceback.format_stack()[-12:])))
 sys.addaudithook(_jaato_2b_trace)
 '''
 

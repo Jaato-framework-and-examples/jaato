@@ -756,6 +756,9 @@ def _configure_output_redaction(
     """
     from jaato_server.shared.secret_redaction import configure_redaction_sources
 
+    # Outside the try: a descriptor the runner cannot use refuses the
+    # bootstrap here as it would at step 1c, never as a redactor error.
+    confined, _ = _runner_boundary(envelope)
     try:
         configure_redaction_sources(
             session_env,
@@ -763,6 +766,7 @@ def _configure_output_redaction(
             provider_name=envelope.provider_name,
             workspace_path=envelope.workspace_path,
             config_root=envelope.config_root,
+            confined=confined,
         )
     except Exception:  # noqa: BLE001 -- boundary, reported
         logger.exception(

@@ -1,4 +1,4 @@
-policy_module(jaato, 1.2.0)
+policy_module(jaato, 1.3.0)
 
 ########################################
 #
@@ -77,6 +77,15 @@ files_tmp_file(jaato_tmp_t)
 ## terminal (phase 2a run, design §12).
 type jaato_devpts_t;
 term_pty(jaato_devpts_t)
+
+## ~/.jaato itself: traversed, never listed (phase 2b kernel run). A type
+## of its own so a runner reaches its user tier without search on every
+## user_home_t directory, which let a ROOT runner's child walk into other
+## users' home trees, stopped only by DAC at a 0700 home. A file created
+## directly in it (a stored *_auth.json) takes this type, which grants
+## nothing on files.
+type jaato_user_dir_t;
+userdom_user_home_content(jaato_user_dir_t)
 
 ## The user-global tier, ~/.jaato: the subtrees the plugins grant under
 ## AppArmor (their get_apparmor_rules), and nothing else. Labelled by
@@ -305,10 +314,14 @@ fs_dontaudit_search_cgroup_dirs(jaato_child_t)
 #
 userdom_search_user_home_dirs(jaato_runner_t)
 userdom_search_user_home_dirs(jaato_child_t)
-userdom_search_user_home_content(jaato_runner_t)
-userdom_search_user_home_content(jaato_child_t)
 userdom_search_admin_dir(jaato_runner_t)
 userdom_search_admin_dir(jaato_child_t)
+allow { jaato_runner_t jaato_child_t } jaato_user_dir_t:dir search_dir_perms;
+#
+# Deliberately absent: userdom_search_user_home_content (search on every
+# user_home_t directory). /root is admin_home_t throughout, so a runner can
+# still traverse /root's own subdirectories by name (no listing, no file
+# getattr); separating /root from its children needs a type of their own.
 list_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)
 read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)
 read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)

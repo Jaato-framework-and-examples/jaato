@@ -58,7 +58,7 @@ cd /root/jaato && git fetch origin && git checkout claude/awesome-lovelace-bbca8
   && git pull --ff-only && git log --oneline -1
 cd jaato-server/selinux && make -f /usr/share/selinux/devel/Makefile jaato.pp \
   && semodule -i jaato.pp
-seinfo -t | grep -c '^ *jaato_'          # 11 types (1.2.0)
+seinfo -t | grep -c '^ *jaato_'          # 12 types (1.3.0)
 ```
 
 **A venv the runner can read, outside `/root`** (labelled `lib_t`, design
@@ -79,7 +79,8 @@ create them itself, because it has no `add_name` in `~/.jaato`.
 ```bash
 mkdir -p /root/.jaato/{agents,profiles,references,services,memories,prompts,skills}
 restorecon -R /root/.jaato
-ls -Zd /root/.jaato/agents /root/.jaato/memories   # jaato_user_config_t / jaato_user_data_t
+ls -Zd /root/.jaato /root/.jaato/agents /root/.jaato/memories
+# jaato_user_dir_t / jaato_user_config_t / jaato_user_data_t
 ```
 
 ## 3. Readiness, from the venv
@@ -131,7 +132,15 @@ cp /srv/jaato-2b/live-session.json live-root.json; cp -r /srv/jaato-2b/ws/.jaato
 /opt/jaato/venv/bin/python $L --root /srv/jaato-2b --as-uid 1000 --trace-subprocess | tee live-uid.txt
 cp /srv/jaato-2b/live-session.json live-uid.json; cp -r /srv/jaato-2b/ws/.jaato/logs live-uid-logs
 grep -A14 JAATO-2B-SUBPROCESS live-uid-logs/runner-*.log | head -60
+grep -A14 JAATO-2B-LISTDIR live-uid-logs/runner-*.log | head -30
 ```
+
+Since bf978cfe the runner no longer scans `~/.jaato` for stored
+credentials when it is confined, and since module 1.3.0 `~/.jaato` has a
+type of its own and no other home subdirectory is searchable. Expected on
+this run, and both are evidence for the change rather than assumptions:
+no `read` AVC on `.jaato`, and no `JAATO-2B-LISTDIR` line. If either
+appears, the stack names the code that lists it.
 
 The tool now records a refused session as a FAIL with the daemon's reason
 instead of crashing, reads the daemon's log from its stdout (`d.out`: a

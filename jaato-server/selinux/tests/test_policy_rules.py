@@ -327,6 +327,23 @@ RULES: Tuple[Rule, ...] = (
          "at the workspace's level another workspace could not read it, and "
          "the global memory tier would split per workspace",
          find="range_transition { jaato_runner_t jaato_child_t } jaato_user_data_t:{ file dir lnk_file } s0;\n"),
+    Rule("both may traverse ~/.jaato itself",
+         lambda p: all(granted(p, d, "jaato_user_dir_t", "dir",
+                               frozenset({"search"}), conditional=False) == {"search"}
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "the user tier's subtrees sit under it",
+         find="allow { jaato_runner_t jaato_child_t } jaato_user_dir_t:dir search_dir_perms;\n"),
+    Rule("no other directory in a user's home can be traversed",
+         lambda p: all(not granted(p, d, "user_home_t", "dir", frozenset({"search"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "a root runner's child walked into /home/<user>/... with only DAC "
+         "stopping it (phase 2b kernel run)",
+         append="userdom_search_user_home_content(jaato_child_t)\n"),
+    Rule("~/.jaato itself cannot be listed",
+         lambda p: all(not granted(p, d, "jaato_user_dir_t", "dir", frozenset({"read"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "listing it would enumerate the stored credentials' names",
+         append="allow jaato_runner_t jaato_user_dir_t:dir list_dir_perms;\n"),
     Rule("nothing else in a home is readable",
          lambda p: all(not granted(p, d, t, "file", frozenset({"read", "open"}))
                        for d in ("jaato_runner_t", "jaato_child_t")
