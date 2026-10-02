@@ -574,10 +574,15 @@ hook and `strace -k` on the same import:
   `cpu.max`, in `openssl::init`). Denied, Rust falls back to the affinity
   mask.
 
-`dac_override` / `dac_read_search` came from running the probes as root;
-the probe gained `--as-uid` to check that a runner under #1168's
-`--runner-uid-policy` produces none. The rest were WSL host labelling
-(`/dev`, `/run`, `/mnt` never labelled by WSL's systemd), not the module.
+`dac_override` came from the probe itself: Python's `open(..., 'w')` on
+`/proc/self/attr/*` adds `O_CREAT`, which asks for write on the read-only
+directory. The rest were WSL host labelling (`/dev`, `/run`, `/mnt` never
+labelled by WSL's systemd), not the module.
+
+**Rerun at cf410bcf (module 1.1.0)**: 26 of 26 probes passed, as root and
+with `--as-uid 1000`, with no pty, `::1` or cgroup denial and no
+`dac_*` denial in either run. So the uid drop removes none the probe
+causes; whether a real runner causes any is a 2b question.
 
 ### What phase 2a decided
 

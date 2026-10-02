@@ -91,7 +91,7 @@ cd jaato-server/selinux
 make -f /usr/share/selinux/devel/Makefile jaato.pp
 semodule -i jaato.pp
 semodule -l | grep '^jaato'                       # jaato  1.0.0
-seinfo -t | grep -c '^ *jaato_'                   # 8 types
+seinfo -t | grep -c '^ *jaato_'                   # 9 types
 ```
 
 Record the `make` output if it warns. If `semodule -i` fails, stop: every

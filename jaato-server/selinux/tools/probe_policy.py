@@ -67,6 +67,7 @@ def chcon(path: str, ftype: str, level: str, recursive: bool = True) -> None:
 
 
 def run_in(domain: str, level: str, argv: List[str], *, pass_fds=(),
+           cwd: Optional[str] = None,
            timeout: float = 30.0) -> subprocess.CompletedProcess:
     """Exec *argv* in *domain*:*level*: setexeccon in the child, then exec."""
     label = context(domain, level)
@@ -82,7 +83,7 @@ def run_in(domain: str, level: str, argv: List[str], *, pass_fds=(),
             os.setresgid(AS_UID, AS_UID, AS_UID)
             os.setresuid(AS_UID, AS_UID, AS_UID)
 
-    return subprocess.run(argv, preexec_fn=preexec, pass_fds=pass_fds,
+    return subprocess.run(argv, preexec_fn=preexec, pass_fds=pass_fds, cwd=cwd,
                           capture_output=True, text=True, timeout=timeout)
 
 
@@ -282,8 +283,12 @@ print(p.stdout + p.stderr)
 
     if venv:
         expect_ok("runner: imports jaato_server.server.runner from the venv",
+                  # From the workspace, as a runner starts: from the
+                  # probe's own cwd (under /root) the import scanned it
+                  # and logged admin_home_t denials (cf410bcf run).
                   run_in(R, L1, [f"{venv}/bin/python", "-c",
-                                 "import jaato_server.server.runner as m; print('OK', m.__file__)"]))
+                                 "import jaato_server.server.runner as m; print('OK', m.__file__)"],
+                         cwd=p["wsA"]))
     else:
         record("runner: imports jaato_server.server.runner from the venv", None, "--venv not given")
 
