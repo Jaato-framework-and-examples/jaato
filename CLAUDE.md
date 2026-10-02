@@ -576,6 +576,7 @@ await client.create_session(profile="researcher")
 - `session.orphans` — list LOADED sessions with no client attached
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
+- `pool.status` / `pool.resize <target> [<max>]` — read or resize the daemon's pre-warm runner pool (→ `PoolStatusEvent`; protocol 1.35, the daemon's own account or root only, see [Resizing the Pool Without a Restart](#resizing-the-pool-without-a-restart-protocol-135)). The correlated form is `PoolStatusRequest`
 - `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 - `reference.promote <claim_id> [--bundle <name>]` / `reference.dismiss <claim_id>` — turn an agent's reference claim into a catalog entry (optionally in a named bundle, whose vector index is then reconciled), or drop it (→ `ReferenceCurationResultEvent`; protocol 1.33, see [A Person Promotes the Claim](#a-person-promotes-the-claim-the-daemon-writes-the-catalog-protocol-133)). The correlated forms are `ReferenceCurationRequest`, and `ReferenceClaimsRequest` → `ReferenceClaimsEvent` lists the claims
@@ -2138,6 +2139,7 @@ Architecture: daemon spawns a **template subprocess** at startup that imports al
 - Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
 - Pool size via `JAATO_RUNNER_POOL_SIZE` (default 2).
 - Ceiling via `JAATO_RUNNER_POOL_MAX_SIZE` (default `2 x` the pool size) — see below.
+- Both can be changed on a running daemon, without a restart — see [Resizing the Pool Without a Restart](#resizing-the-pool-without-a-restart-protocol-135).
 
 **A reservation is not capacity (#898).** Slots carry a `cascade_id` and
 cross-cascade reuse is forbidden by design (warm plugin state belongs to the
@@ -2177,6 +2179,38 @@ and `max_size` refused) — nonzero on a multi-tenant daemon means raise
 `JAATO_RUNNER_POOL_MAX_SIZE`.
 
 **Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible — but **not** because the slot re-confines itself per session; see the next section for what actually makes that true.
+
+### Resizing the Pool Without a Restart (protocol 1.35)
+
+`JAATO_RUNNER_POOL_SIZE` / `_MAX_SIZE` were read once at startup, so adding
+warm runners meant a restart, which unloads every session. The replenish
+loop already re-reads `target_size` and `max_size` on every pass, so
+`PoolManager.resize(target, max_size=None)` sets them and wakes the loop.
+
+| Entry point | Sends |
+|---|---|
+| `python -m jaato_server --pool-size N [--pool-max M]` | `PoolStatusRequest` over the IPC socket; never starts a daemon; exit 1 on a refusal. `--status` also prints a `pool:` line |
+| `IPCClient.resize_pool(target, max)` / `pool_status()` (and the recovery client) | `PoolStatusRequest`, correlated by `request_id`; refused below `MIN_POOL_ADMIN_PROTOCOL` (the 1.7 rule) |
+| `pool resize 6` / `pool` at the TUI prompt, or `rich_client.py --cmd "pool resize 6"` | `CommandRequest` `pool.resize` / `pool.status`; answered with `PoolStatusEvent` plus a `SystemMessageEvent` line |
+
+All three reach `server/pool_admin.py::PoolAdmin.answer`, so they share one rule:
+
+| Rule | Why |
+|---|---|
+| **only the daemon's own uid or root**, read from the transport's `SO_PEERCRED` peer, never from the request | the pool is host-scoped (memory, every session); those accounts could already restart the daemon with another env. No peer (WS, Windows) is `not_authorized`, never permission |
+| **growing wakes the loop** (`_replenish_wake`; every pause goes through `PoolManager._pause`) | otherwise a full pool sleeps a whole interval before the first fork |
+| **shrinking drops idle slots only**: unreserved above the floor first (newest first), then the stalest reservations while over the ceiling | an acquired slot is not in `_idle_slots` and finishes its session; a reservation is one cascade's warm state |
+| **dropped slots are queued on `_pending_teardown`**, and the replenish thread is started for them even at target 0 (`_start_replenish_thread`, which skips the startup gate) | `_teardown_slot` blocks on the daemon loop; a shrink to 0 on a daemon booted with a disabled pool would otherwise never be reaped |
+| **a derived ceiling follows the floor, a chosen one is kept** (clamped up) | the same reading as startup |
+| **`--restart` keeps it**: `pool_size` / `pool_max_size` in the restart config (`None` max = derived), passed back to `JaatoDaemon` and outranking the env vars; `PoolStatusEvent.persisted` says when that write failed | a resize the next restart dropped would be a silent revert |
+
+`--cmd` without `--session` now sends a daemon-level command (no attach,
+no auto-start, refuses a plain message); the IPC transport routes
+`PoolStatusRequest` for a client attached to no session
+(`_SESSIONLESS_REQUEST_TYPES`). Not done: autoscaling from the miss
+counters, and refreshing the template (new plugins) without a restart.
+
+Guard: `server/tests/test_pool_resize_without_restart.py`, six reversions.
 
 ### A Slot the Pool Kept Offering After Its Channel Died (#1058)
 

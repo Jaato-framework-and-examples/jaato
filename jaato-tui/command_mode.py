@@ -6,46 +6,63 @@ Allows controlling headless sessions from another terminal:
     python rich_client.py --connect /tmp/jaato.sock --session <id> --cmd "permissions default deny"
     python rich_client.py --connect /tmp/jaato.sock --session <id> --cmd "please summarize"
 
+And sending a DAEMON-level command, which needs no session:
+    python rich_client.py --connect /tmp/jaato.sock --cmd "pool resize 6"
+    python rich_client.py --connect /tmp/jaato.sock --cmd "session list"
+
+Without ``--session`` the client attaches to nothing, never starts a daemon
+(a command for the daemon is meaningless to a daemon started to receive
+it), and accepts only server commands: a plain message has no session to
+go to, and ``stop`` / ``exit`` / ``history`` name the session it does not
+have.
+
 Commands are processed using the same routing logic as the TUI.
 """
 
 import asyncio
 import sys
+from typing import Optional
 
 from dotenv import load_dotenv
 
 
 async def run_command_mode(
     socket_path: str,
-    session_id: str,
+    session_id: Optional[str],
     command: str,
     auto_start: bool = True,
     env_file: str = ".env",
 ):
-    """Connect to a session and send a command/message.
+    """Connect to a session (or only to the daemon) and send a command/message.
 
     Uses shared command parsing logic from shared.client_commands.
 
     Args:
         socket_path: Path to the Unix domain socket.
-        session_id: Session ID to attach to.
+        session_id: Session ID to attach to, or ``None`` for a daemon-level
+            command (see the module docstring): then nothing is attached,
+            ``auto_start`` is ignored, and only a server command is sent.
         command: Command or message to send.
         auto_start: Whether to auto-start the server if not running.
         env_file: Path to .env file for auto-started server.
     """
     load_dotenv(env_file)
+    from client_commands import parse_user_input, CommandAction
+    if session_id is None:
+        if parse_user_input(command).action != CommandAction.SERVER_COMMAND:
+            print(f"Error: {command!r} needs a session; pass --session <id>, "
+                  f"or send a daemon command such as 'pool status' or "
+                  f"'session list'", file=sys.stderr)
+            return
+        auto_start = False
 
     from jaato_sdk.client.recovery import IPCRecoveryClient
     from jaato_sdk.events import (
         SystemMessageEvent,
         ErrorEvent,
-        ToolStatusEvent,
-        HelpTextEvent,
-        SessionListEvent,
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
     )
-    from client_commands import parse_user_input, CommandAction
 
     from jaato_sdk.events import ClientType
     client = IPCRecoveryClient(
@@ -59,6 +76,13 @@ async def run_command_mode(
         connected = await client.connect()
         if not connected:
             print(f"Error: Failed to connect to server at {socket_path}", file=sys.stderr)
+            return
+
+        # A daemon-level command attaches to nothing.
+        if session_id is None:
+            parsed = parse_user_input(command)
+            await client.execute_command(parsed.command, parsed.args or [])
+            await _print_response(client)
             return
 
         # Attach to the specified session
@@ -141,40 +165,7 @@ async def run_command_mode(
 
         # Wait for response events if needed (only for commands that return data)
         if wait_for_response:
-            timeout = 5.0
-            start_time = asyncio.get_event_loop().time()
-
-            async for event in client.events():
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed > timeout:
-                    break
-
-                if isinstance(event, SystemMessageEvent):
-                    print(event.message)
-                    break
-
-                elif isinstance(event, ErrorEvent):
-                    print(f"Error: {event.error}", file=sys.stderr)
-                    if event.error_type:
-                        print(f"Type: {event.error_type}", file=sys.stderr)
-                    break
-
-                elif isinstance(event, ToolStatusEvent):
-                    if event.message:
-                        print(event.message)
-                    break
-
-                elif isinstance(event, HelpTextEvent):
-                    for line, style in event.lines:
-                        print(line)
-                    break
-
-                elif isinstance(event, SessionListEvent):
-                    print("Available sessions:")
-                    for s in event.sessions:
-                        status = "loaded" if s.get("is_loaded") else "saved"
-                        print(f"  {s.get('id', '?')} - {s.get('name', '')} [{status}]")
-                    break
+            await _print_response(client)
 
     except ConnectionError as e:
         print(f"Connection error: {e}", file=sys.stderr)
@@ -184,3 +175,51 @@ async def run_command_mode(
 
     finally:
         await client.disconnect()
+
+
+async def _print_response(client, timeout: float = 5.0) -> None:
+    """Print the first answer the daemon sends, then return.
+
+    A ``PoolStatusEvent`` is skipped rather than printed: the daemon sends
+    the readable ``SystemMessageEvent`` line right behind it, for a person.
+    """
+    from jaato_sdk.events import (
+        ErrorEvent,
+        HelpTextEvent,
+        SessionListEvent,
+        SystemMessageEvent,
+        ToolStatusEvent,
+    )
+    start_time = asyncio.get_event_loop().time()
+
+    async for event in client.events():
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > timeout:
+            break
+
+        if isinstance(event, SystemMessageEvent):
+            print(event.message)
+            break
+
+        elif isinstance(event, ErrorEvent):
+            print(f"Error: {event.error}", file=sys.stderr)
+            if event.error_type:
+                print(f"Type: {event.error_type}", file=sys.stderr)
+            break
+
+        elif isinstance(event, ToolStatusEvent):
+            if event.message:
+                print(event.message)
+            break
+
+        elif isinstance(event, HelpTextEvent):
+            for line, style in event.lines:
+                print(line)
+            break
+
+        elif isinstance(event, SessionListEvent):
+            print("Available sessions:")
+            for s in event.sessions:
+                status = "loaded" if s.get("is_loaded") else "saved"
+                print(f"  {s.get('id', '?')} - {s.get('name', '')} [{status}]")
+            break

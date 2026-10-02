@@ -414,6 +414,19 @@ def _canonical_path(path: Optional[str]) -> Optional[str]:
 SlotHandle = PoolSlot
 
 
+def _non_negative_int(name: str, value: Any) -> int:
+    """``value`` as a non-negative ``int``, or ``ValueError`` naming it.
+
+    ``bool`` is refused although it is an ``int``: ``resize(True)`` is a
+    caller bug, not a request for one slot.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got {value}")
+    return value
+
+
 def slot_rpc_death(slot: PoolSlot) -> Optional[str]:
     """Positive evidence that *slot*'s RPC client is dead, else ``None``.
 
@@ -580,6 +593,11 @@ class PoolManager:
             max(self.target_size, int(max_size))
             if max_size is not None else self.target_size * 2
         )
+        #: Whether ``max_size`` was chosen by somebody rather than derived
+        #: as ``2 * target_size``.  Decides what :meth:`resize` does with
+        #: the ceiling when only the floor is given: a derived ceiling
+        #: follows the floor, a chosen one is kept (clamped up).
+        self._max_size_explicit = max_size is not None
         #: Slots dropped by the capacity check, awaiting teardown by the
         #: replenish thread.  They are already out of ``_idle_slots``, so
         #: the pool count is bounded the moment a slot is queued here.
@@ -589,6 +607,10 @@ class PoolManager:
         # Pool PR 4 replenishment thread state.
         self._replenish_interval = float(replenish_interval)
         self._replenish_stop = threading.Event()
+        #: Set to cut a replenish-loop pause short without stopping the
+        #: loop -- :meth:`resize` uses it so a larger target starts
+        #: forking now rather than after the next interval.
+        self._replenish_wake = threading.Event()
         self._replenish_thread: Optional[threading.Thread] = None
         # Phase 2 cascade-sharing idle timeout.
         self._cascade_idle_timeout = float(cascade_idle_timeout_seconds)
@@ -1329,6 +1351,137 @@ class PoolManager:
                 len(slots),
             )
 
+    # --------------------- runtime sizing ----------------------------
+
+    def resize(
+        self, target_size: int, max_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Change the pool's floor and ceiling on a running daemon.
+
+        ``target_size`` and ``max_size`` were read once, at daemon
+        startup, from ``JAATO_RUNNER_POOL_SIZE`` /
+        ``JAATO_RUNNER_POOL_MAX_SIZE``, so adding warm runners meant a
+        restart.  The replenish loop already reads both fields on every
+        pass, so a resize is: set them, queue whatever no longer fits,
+        and wake the loop.
+
+        Growing: the loop forks the missing unreserved slots one per
+        pass, with no pause between forks while it is short.
+
+        Shrinking: only IDLE slots are touched -- an acquired slot is
+        not in ``_idle_slots`` and finishes its session undisturbed.
+        Unreserved slots above the new floor go first; then, if the
+        pool is still over the new ceiling, the stalest reservations
+        (the order :meth:`_pick_capacity_victim` uses).  Dropped slots
+        are queued on ``_pending_teardown`` rather than torn down here,
+        because ``_teardown_slot`` blocks on the daemon loop and the
+        caller of this method usually IS the daemon loop.  The replenish
+        thread drains the queue, and is started for that purpose if it
+        was not running (a daemon booted with a disabled pool).
+
+        The ceiling: an explicit ``max_size`` replaces it (clamped up to
+        ``target_size``, as at startup).  When none is given, a ceiling
+        that was derived (``2 * target_size``) follows the new floor and
+        a ceiling somebody chose is kept, clamped up to the new floor.
+
+        Args:
+            target_size: New floor on unreserved idle slots.  0 disables
+                the pool (sessions cold-spawn).
+            max_size: New ceiling on total idle slots, or ``None``.
+
+        Returns:
+            ``{"previous": {...}, "current": {...}, "queued_for_teardown":
+            n}``.  Both sizing dicts carry ``target_size`` and
+            ``max_size``; ``current`` also carries ``max_size_explicit``.
+
+        Raises:
+            ValueError: A negative size, or a non-integer.
+        """
+        target = _non_negative_int("target_size", target_size)
+        ceiling = (None if max_size is None
+                   else _non_negative_int("max_size", max_size))
+        with self._lock:
+            previous = {"target_size": self.target_size,
+                        "max_size": self.max_size}
+            self.target_size = target
+            if ceiling is not None:
+                self.max_size = max(target, ceiling)
+                self._max_size_explicit = True
+            elif self._max_size_explicit:
+                self.max_size = max(target, self.max_size)
+            else:
+                self.max_size = target * 2
+            dropped = self._select_over_size_locked()
+            for slot in dropped:
+                slot.teardown_reason = "pool-resize"
+                self._pending_teardown.append(slot)
+            current = {"target_size": self.target_size,
+                       "max_size": self.max_size,
+                       "max_size_explicit": self._max_size_explicit}
+        logger.info(
+            "PoolManager.resize: target_size %d -> %d, max_size %d -> %d; "
+            "%d idle slot(s) queued for teardown",
+            previous["target_size"], current["target_size"],
+            previous["max_size"], current["max_size"], len(dropped),
+        )
+        self._start_replenish_thread()
+        self._replenish_wake.set()
+        return {"previous": previous, "current": current,
+                "queued_for_teardown": len(dropped)}
+
+    def _select_over_size_locked(self) -> List[PoolSlot]:
+        """Remove and return the idle slots the current sizes do not keep.
+
+        Caller holds ``self._lock``.  First the unreserved slots above
+        ``target_size`` (newest first, so the longest-warm ones stay),
+        then -- while the pool is still above ``max_size`` -- the victims
+        :meth:`_pick_capacity_victim` names, which prefers the stalest
+        reservation.
+        """
+        dropped: List[PoolSlot] = []
+        unreserved = [s for s in self._idle_slots if s.cascade_id is None]
+        for slot in reversed(unreserved[self.target_size:]):
+            self._idle_slots.remove(slot)
+            dropped.append(slot)
+        while len(self._idle_slots) > self.max_size:
+            victim = self._pick_capacity_victim()
+            if victim is None:
+                break
+            dropped.append(self._idle_slots.pop(victim))
+        return dropped
+
+    def snapshot(self) -> Dict[str, Any]:
+        """The pool's sizing and state, for ``pool.status`` and logs.
+
+        Keys: ``target_size``, ``max_size``, ``max_size_explicit``,
+        ``idle`` (all idle slots), ``unreserved``, ``reserved``,
+        ``pending_teardown``, ``replenishing`` (the replenish thread is
+        alive), ``template_alive`` and ``telemetry`` (the
+        :meth:`get_telemetry` counters).
+        """
+        with self._lock:
+            idle = len(self._idle_slots)
+            unreserved = sum(1 for s in self._idle_slots if s.cascade_id is None)
+            pending = len(self._pending_teardown)
+            sizes = (self.target_size, self.max_size, self._max_size_explicit)
+        thread = self._replenish_thread
+        try:
+            template_alive = bool(self._template_manager.is_alive())
+        except Exception:  # noqa: BLE001 — a status read must not raise
+            template_alive = False
+        return {
+            "target_size": sizes[0],
+            "max_size": sizes[1],
+            "max_size_explicit": sizes[2],
+            "idle": idle,
+            "unreserved": unreserved,
+            "reserved": idle - unreserved,
+            "pending_teardown": pending,
+            "replenishing": bool(thread is not None and thread.is_alive()),
+            "template_alive": template_alive,
+            "telemetry": self.get_telemetry(),
+        }
+
     # --------------------- replenishment thread ----------------------
 
     def start_replenishment(self) -> None:
@@ -1361,8 +1514,23 @@ class PoolManager:
                 "PoolManager.start_replenishment: already running; ignoring",
             )
             return
+        self._start_replenish_thread()
 
+    def _start_replenish_thread(self) -> None:
+        """Start the replenish thread, with no ``target_size`` gate.
+
+        :meth:`start_replenishment` refuses a disabled pool (it is the
+        startup path, and a daemon started with ``target_size=0`` asked
+        for no pool).  :meth:`resize` needs the thread whatever the new
+        target is: it is the only thread allowed to tear slots down
+        (``_teardown_slot`` must run off the daemon loop), so a shrink to
+        0 has to reach it too.  At target 0 the loop's capacity check is
+        always satisfied, so a running thread forks nothing.
+        """
+        if self._replenish_thread is not None and self._replenish_thread.is_alive():
+            return
         self._replenish_stop.clear()
+        self._replenish_wake.clear()
         self._replenish_thread = threading.Thread(
             target=self._replenish_loop,
             name="jaato-pool-replenish",
@@ -1383,6 +1551,7 @@ class PoolManager:
         if self._replenish_thread is None:
             return
         self._replenish_stop.set()
+        self._replenish_wake.set()
         self._replenish_thread.join(timeout=timeout)
         if self._replenish_thread.is_alive():
             logger.warning(
@@ -1390,6 +1559,16 @@ class PoolManager:
                 "within %.1fs; leaking as daemon thread", timeout,
             )
         self._replenish_thread = None
+
+    def _pause(self) -> None:
+        """Sleep one replenish interval, cut short by a wake or a stop.
+
+        Every pause in the loop goes through here, so :meth:`resize` and
+        :meth:`stop_replenishment` (which set ``_replenish_wake``) end it
+        at once.  The loop re-checks ``_replenish_stop`` at its top.
+        """
+        self._replenish_wake.wait(self._replenish_interval)
+        self._replenish_wake.clear()
 
     def _replenish_loop(self) -> None:
         """Background loop body — wakes every ``_replenish_interval``,
@@ -1455,7 +1634,7 @@ class PoolManager:
                 # None.  Nothing to run on, and nothing in the system
                 # that would ever create one, until B released.
                 if self.unreserved_idle_count() >= self.target_size:
-                    self._replenish_stop.wait(self._replenish_interval)
+                    self._pause()
                     continue
                 # ... but reservations still occupy memory, so the
                 # total is what the ceiling bounds.  Hitting it is the
@@ -1464,7 +1643,7 @@ class PoolManager:
                 # by cold-spawn while reservations hold the ceiling.
                 if self.idle_count() >= self.max_size:
                     self._incr("pool_replenish_ceiling_blocked_total")
-                    self._replenish_stop.wait(self._replenish_interval)
+                    self._pause()
                     continue
                 raw = self._template_manager.request_fork_slot()
                 if raw is None:
@@ -1472,7 +1651,7 @@ class PoolManager:
                     # off briefly so we don't tight-loop on a flaky
                     # template.
                     self._incr("pool_replenish_failures_total")
-                    self._replenish_stop.wait(self._replenish_interval)
+                    self._pause()
                     continue
                 pid, sock = raw
                 new_slot = PoolSlot(pid=pid, sock=sock)
@@ -1490,7 +1669,7 @@ class PoolManager:
                     "PoolManager replenish: unhandled error; sleeping "
                     "and continuing",
                 )
-                self._replenish_stop.wait(self._replenish_interval)
+                self._pause()
 
     def _teardown_slot(self, slot: PoolSlot, *, reason: str) -> None:
         """Close one idle slot's transport and reap its process.

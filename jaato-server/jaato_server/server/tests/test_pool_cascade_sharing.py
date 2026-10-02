@@ -608,13 +608,13 @@ def _run_one_replenish_iteration(pool: PoolManager) -> None:
     """Run exactly one pass of the replenish loop body.
 
     The loop is ``while not stop``, so it is driven here by arming the
-    stop event at BOTH of the body's exits -- the backoff wait and a
+    stop event at BOTH of the body's exits -- the backoff pause and a
     successful fork.  Without the second, a loop that forks does not
-    wait, so it would keep going until the pool reached target and the
+    pause, so it would keep going until the pool reached target and the
     test would be measuring several iterations while claiming one.
-    There is no sleeping and no thread.
+    Every pause goes through ``PoolManager._pause``, so that is what is
+    replaced.  There is no sleeping and no thread.
     """
-    real_wait = pool._replenish_stop.wait
     real_fork = pool._template_manager.request_fork_slot
 
     def _stop_then(fn):
@@ -623,12 +623,11 @@ def _run_one_replenish_iteration(pool: PoolManager) -> None:
             return fn(*args, **kwargs)
         return _wrapped
 
-    pool._replenish_stop.wait = _stop_then(  # type: ignore[assignment]
-        lambda timeout=None: True)
+    pool._pause = _stop_then(lambda: None)  # type: ignore[method-assign]
     pool._template_manager.request_fork_slot = _stop_then(real_fork)
     try:
         pool._replenish_loop()
     finally:
-        pool._replenish_stop.wait = real_wait  # type: ignore[assignment]
+        del pool._pause
         pool._template_manager.request_fork_slot = real_fork
         pool._replenish_stop.clear()

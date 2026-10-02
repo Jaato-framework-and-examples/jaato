@@ -242,7 +242,9 @@ def _client(spoken):
 
 
 def test_the_client_sends_both_positions(sent):
-    assert IPCClient.MIN_SCAFFOLD_VALIDATE_PROTOCOL == PROTOCOL_VERSION == "1.34"
+    assert IPCClient.MIN_SCAFFOLD_VALIDATE_PROTOCOL == "1.34"
+    # The daemon serves the verb: its protocol is at or past the floor.
+    assert tuple(map(int, PROTOCOL_VERSION.split("."))) >= (1, 34)
     asyncio.run(_client("1.34").validate_workspace(profile="w"))
     assert [(e.command, e.args) for e in sent] == [
         ("scaffold.validate", ["", "w"])]

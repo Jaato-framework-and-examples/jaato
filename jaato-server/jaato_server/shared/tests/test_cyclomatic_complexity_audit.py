@@ -517,7 +517,7 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/agent_tab_bar.py::AgentTabBar.render_pane_aligned": 18,
     "jaato-tui/client_commands.py::parse_user_input": 24,
     "jaato-tui/color_picker.py::HexColorInput.handle_key": 19,
-    "jaato-tui/command_mode.py::run_command_mode": 34,
+    "jaato-tui/command_mode.py::run_command_mode": 26,
     "jaato-tui/editor_utils.py::format_for_editing": 19,
     "jaato-tui/editor_utils.py::parse_edited_content": 17,
     "jaato-tui/file_completer.py::AtFileCompleter.get_completions": 16,
@@ -548,7 +548,6 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/pt_display.py::StyledOutputProcessor.apply_transformation": 22,
     "jaato-tui/renderers/headless.py::HeadlessFileRenderer.on_plan_updated": 18,
     "jaato-tui/rich_client.py::handle_screenshot_command_ipc": 39,
-    "jaato-tui/rich_client.py::main": 16,
     "jaato-tui/rich_client.py::run_ipc_mode.command_completion_provider": 24,
     # 216 -> 213 by #704, which lifted the clarification input-mode branch
     # into jaato-tui/clarification_batch.py so the batch flow could join it
