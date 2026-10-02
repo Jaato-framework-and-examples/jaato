@@ -577,7 +577,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
-| 3 | **implemented; one kernel run (64020ec9), fixes not yet re-run**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
+| 3 | **implemented; three kernel runs (the last at 573f1470: probe 61/61, live 8/8 per mode as root), the uid fix not yet re-run**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
@@ -748,6 +748,24 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   probe them. Every such caller tolerates the refusal (no warning, no
   functional loss in the run's logs), but each probe is an AVC: 111 to
   472 per live run, most of them `search` on `~/.jaato`.
+
+### The third phase 3 kernel run (573f1470)
+
+* **Probe 61/61** at both uids. **As root, both live modes pass 8/8**:
+  the sub-runner bootstraps, GC comes from the envelope, the read-write
+  domain writes `iso-probe.txt` and the read-only one is refused by the
+  kernel.
+* **Under `--as-uid 1000` the sub-runner ran as root.** The parent runner
+  dropped to the workspace owner (#1168), and the isolated spawn path
+  applied no uid policy at all: its spawn line had no `runs_as`, and its
+  write into the owner's workspace was refused for `dac_override`, which
+  the isolated domains withhold.
+* **Fixed:** the sub-runner inherits its parent's resolved `RunnerUser`
+  (re-resolving the policy cannot work under `peer`: a sub-runner has no
+  IPC peer). The daemon hands it the session tmpdir, the session storage
+  directory and its log before the spawn, the spawner drops to it, and the
+  envelope carries it with that user's user tier. The spawn line now names
+  `runs_as` for every runner.
 
 ### What phase 3 decided
 

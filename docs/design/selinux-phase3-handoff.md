@@ -18,6 +18,13 @@ The module is now **1.6.0** (marker `jaato_policy_v3_t`), and the daemon
 refuses an older one. A workspace labelled under an older module is
 relabelled once, because the label stamp carries the policy version.
 
+**Fourth run (after the uid fix).** The third run passed everything as
+root; under `--as-uid 1000` the isolated sub-runner ran as root and could
+not write the owner's workspace. It now runs as its parent's user. No
+policy change (still 1.6.0). Expect the uid-1000 live runs to pass like
+the root ones, and the sub-runner's spawn line in `d.out` to say
+`runs_as=` the parent's user (root runs say `runs_as=daemon uid`).
+
 **Third run (after a1d59347).** The second run passed the probe 61/61
 and got past the spawn, then every sub-runner crashed in bootstrap
 probing `.jaato/instructions`, which its boundary denies. Fixed: the

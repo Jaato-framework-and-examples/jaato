@@ -834,6 +834,8 @@ class SubRunnerHandle:
             was spawned into (``sub_apparmor_profile`` is then empty), or
             ``None`` under AppArmor.  Nothing to tear down: labels persist
             with the workspace.
+        runner_user: The parent runner's :class:`RunnerUser` (#1168), which
+            the sub-runner runs as too, or ``None`` = the daemon's uid.
     """
     parent_session_id: str
     subagent_id: str
@@ -846,6 +848,7 @@ class SubRunnerHandle:
         default_factory=lambda: datetime.now(timezone.utc),
     )
     confinement: Optional[Any] = None
+    runner_user: Optional[Any] = None
 
 
 @dataclass
@@ -1146,6 +1149,36 @@ def _isolated_gc(profile: Any, workspace_path: str) -> tuple:
     except (OSError, ValueError) as exc:
         logger.warning("isolated subagent: %s not used: %s", path, exc)
         return None, None
+
+
+def _runner_user_wire(runner_user: Any) -> Optional[Dict[str, Any]]:
+    """A :class:`RunnerUser` in its envelope form, or ``None``."""
+    return runner_user.to_dict() if runner_user is not None else None
+
+
+def _hand_over_isolated_paths(
+    runner_user: Any, isolated_session_id: str, workspace_path: str,
+    log_path: Optional[str], sub_apparmor_profile: str, confinement: Any,
+) -> None:
+    """Hand the sub-runner's daemon-made paths to its user (#1168).
+
+    The same set the main spawn hands over (``runner_owned_paths``): its
+    session tmpdir, ``.jaato/sessions/<id>``, ``.jaato/logs`` and its log.
+    A ``None`` user is a no-op, as there.
+    """
+    from jaato_server.server.confinement_id import session_tmpdir
+    from jaato_server.server.runner_spawn import _confinement_id_of
+    from jaato_server.server.runner_user import (
+        prepare_runner_owned_paths, runner_owned_paths,
+    )
+
+    dirs, files = runner_owned_paths(
+        session_id=isolated_session_id, workspace_path=workspace_path,
+        session_tmp=session_tmpdir(
+            isolated_session_id,
+            _confinement_id_of(sub_apparmor_profile, confinement)),
+        private_tmp=None, workspace_home=None, log_path=log_path)
+    prepare_runner_owned_paths(runner_user, dirs, files)
 
 
 def _rollback_note(cgroup_path: str, sub_profile_name: str) -> str:
@@ -3495,6 +3528,7 @@ class SessionManager:
                 confinement=isolated_confinement,
                 effective_runtime_limits=effective_runtime_limits,
                 agent_params=agent_params,
+                runner_user=self._parent_runner_user(parent_session_id),
             )
         except Exception as spawn_exc:  # noqa: BLE001 — boundary
             logger.warning(
@@ -3554,6 +3588,7 @@ class SessionManager:
             workspace_path=workspace_path,
             sub_apparmor_profile=sub_profile_name,
             confinement=sub_handle.confinement,
+            runner_user=sub_handle.runner_user,
             agent_params=agent_params,
             # #859: a subagent acts for the user who owns its parent.
             created_by=self._creator_of(parent_session_id),
@@ -3768,9 +3803,14 @@ class SessionManager:
         effective_runtime_limits: RuntimeLimits,
         agent_params: Optional[Dict[str, Any]],
         confinement: Optional[Any] = None,
+        runner_user: Optional[Any] = None,
     ) -> SubRunnerHandle:
         """Spawn the sub-runner subprocess + initialize its RPC
         channel (Phase 4 §4.3.6a).
+
+        ``runner_user`` is the parent runner's (#1168): the sub-runner runs
+        as that account, and the paths the daemon creates for it are handed
+        over first.  ``None`` keeps the daemon's uid, as for the parent.
 
         Mirrors ``runner_spawn.spawn_session_runner`` but for the
         isolated-subagent path: the daemon doesn't have a full
@@ -3804,6 +3844,9 @@ class SessionManager:
                 # of its own type; a failure refuses the spawn, as a
                 # session tmpdir that cannot be labelled does.
                 self._selinux_backend.prepare_runner_log(confinement, log_path)
+        _hand_over_isolated_paths(
+            runner_user, isolated_session_id, workspace_path, log_path,
+            sub_apparmor_profile, confinement)
 
         # Cgroup attach: when §4.3.5 provisioned a sub-cgroup, build
         # the preexec_fn that migrates the forked child in.  When no
@@ -3834,6 +3877,7 @@ class SessionManager:
             disable_confine=False,  # Always confined for §4.3.6.
             cgroup_attach=cgroup_attach,
             confinement=confinement,
+            runner_user=runner_user,
         )
 
         rpc = RunnerRPCClient(
@@ -3853,7 +3897,24 @@ class SessionManager:
             sub_apparmor_profile=sub_apparmor_profile,
             cgroup_path=cgroup_path,
             confinement=confinement,
+            runner_user=runner_user,
         )
+
+    def _parent_runner_user(self, parent_session_id: str) -> Optional[Any]:
+        """The parent session's runner user (#1168), or ``None``.
+
+        An isolated sub-runner runs as its parent's runner.  Re-resolving
+        the policy for it would answer wrongly under ``peer`` (a sub-runner
+        has no IPC peer), and the phase 3 kernel run showed the omission: a
+        parent dropped to the workspace owner spawned a ROOT sub-runner that
+        could not write that owner's workspace without ``dac_override``.
+        """
+        from jaato_server.server.runner_spawn import stashed_runner_user
+
+        with self._lock:
+            session = self._sessions.get(parent_session_id)
+        server = getattr(session, "server", None)
+        return stashed_runner_user(server) if server is not None else None
 
     def _creator_of(self, session_id: str) -> Optional[str]:
         """The authenticated user a loaded session was created for, or
@@ -3897,9 +3958,14 @@ class SessionManager:
         created_by: Optional[str] = None,
         confinement: Optional[Any] = None,
         effective_runtime_limits: Optional[RuntimeLimits] = None,
+        runner_user: Optional[Any] = None,
     ) -> Any:
         """Build a :class:`SessionInitEnvelope` for an isolated
         subagent's runner-side bootstrap (Phase 4 §4.3.6c).
+
+        ``runner_user`` is the parent runner's (#1168): carried as the
+        envelope's ``runner_user`` and used to pick whose ``~/.jaato`` the
+        user-tier snapshot is read from, as the main envelope does.
 
         ``created_by`` is the parent session's authenticated user; it is
         ferried so the isolated runner's telemetry and ledger name the
@@ -4063,9 +4129,11 @@ class SessionManager:
             # v8: the one writer of the descriptor, so the sub-runner's
             # ``lsm_confine.resolve`` reads the shape the main runner does.
             confinement=_isolated_descriptor(confinement, sub_apparmor_profile),
-            # #1465: an isolated sub-runner runs as the daemon's uid, so
-            # it reads the daemon's own user tier.
-            user_tier_files=user_tier_snapshot(None),
+            # #1168: the sub-runner runs as its parent's runner user, so it
+            # carries that user and that user's tier (#1465), like the
+            # main envelope; ``None`` = the daemon's uid and user tier.
+            runner_user=_runner_user_wire(runner_user),
+            user_tier_files=user_tier_snapshot(runner_user),
         )
 
     def _dispatch_isolated_session_bootstrap(
