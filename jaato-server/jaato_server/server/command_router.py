@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.events import Event
+from jaato_server.server import pool_admin
 from jaato_server.server.event_sink import EventSink, client_peer
 from jaato_server.server.session_manager import SessionManager, session_picker_fields
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
@@ -51,6 +52,8 @@ _ROUTED_REQUEST_HANDLERS = {
     # The curator's view of the catalog and its typed links (1.33).
     "ReferenceCatalogRequest": "_handle_reference_catalog_request",
     "ReferenceLinksUpdateRequest": "_handle_reference_links_request",
+    # The runner pool (1.35): read or resize it on a running daemon.
+    "PoolStatusRequest": "_handle_pool_status_request",
 }
 
 
@@ -376,6 +379,9 @@ class CommandRouter:
         # Pending post-auth setup requests: client_id -> {request_id, provider_name}
         self._pending_post_auth: dict = {}
 
+        # The daemon's PoolAdmin (1.35), wired by ``set_pool_admin``.
+        self._pool_admin: Any = None
+
     def handle_client_disconnect(self, client_id: str) -> None:
         """Notify the router that a transport client has disconnected.
 
@@ -635,10 +641,12 @@ class CommandRouter:
             ReferenceClaimsRequest,
             ReferenceCurationRequest,
             ReferenceLinksUpdateRequest,
+            PoolStatusRequest,
         )
         if isinstance(event, (HistoryRequest, HistoryPageRequest,
                               ReferenceClaimsRequest, ReferenceCurationRequest,
-                              ReferenceCatalogRequest, ReferenceLinksUpdateRequest)):
+                              ReferenceCatalogRequest, ReferenceLinksUpdateRequest,
+                              PoolStatusRequest)):
             getattr(self, _ROUTED_REQUEST_HANDLERS[type(event).__name__])(
                 client_id, event, session_id)
             return
@@ -739,7 +747,78 @@ class CommandRouter:
             self._handle_reference_curation(
                 client_id, cmd, args, workspace_path, session_id=session_id)
             return True
+        if cmd in (pool_admin.VERB_STATUS, pool_admin.VERB_RESIZE):
+            self._handle_pool_command(client_id, cmd, args)
+            return True
         return False
+
+    # ------------------------------------------------------------------
+    # The runner pool (1.35)
+    # ------------------------------------------------------------------
+
+    def set_pool_admin(self, pool_admin: Any) -> None:
+        """Wire the daemon's :class:`server.pool_admin.PoolAdmin`.
+
+        Set by ``JaatoDaemon.start`` once the router exists.  Unset (an
+        embedding process, a test router), the pool verbs answer
+        ``no_pool`` rather than raising.
+        """
+        self._pool_admin = pool_admin
+
+    def _answer_pool(
+        self, client_id: str, *, request_id: str = "",
+        target_size: Optional[int] = None, max_size: Optional[int] = None,
+    ) -> Any:
+        """Ask the pool admin, as the transport's peer for ``client_id``.
+
+        The peer is read from the transport and nothing else (see
+        :mod:`server.pool_admin`), so the event body cannot claim one.
+        """
+        from jaato_sdk.events import PoolStatusEvent
+        from jaato_server.server.pool_admin import NO_POOL
+        admin = getattr(self, "_pool_admin", None)
+        if admin is None:
+            return PoolStatusEvent(
+                request_id=request_id, ok=False, category=NO_POOL,
+                error="this daemon runs without a runner pool")
+        return admin.answer(
+            client_peer(self._event_sink, client_id),
+            request_id=request_id, target_size=target_size,
+            max_size=max_size)
+
+    def _handle_pool_status_request(
+        self, client_id: str, event: Any, session_id: Optional[str],
+    ) -> None:
+        """Answer a :class:`PoolStatusRequest` with one ``PoolStatusEvent``."""
+        self._event_sink.send_event(client_id, self._answer_pool(
+            client_id, request_id=event.request_id,
+            target_size=event.target_size, max_size=event.max_size))
+
+    def _handle_pool_command(self, client_id: str, cmd: str, args: list) -> None:
+        """Handle the typed ``pool.status`` / ``pool.resize <t> [<m>]``.
+
+        Answers with the same ``PoolStatusEvent`` the request form gets,
+        plus a ``SystemMessageEvent`` line, because a person typed it: the
+        TUI renders that line, and ``--cmd`` prints it.
+        """
+        from jaato_sdk.events import PoolStatusEvent, SystemMessageEvent
+        from jaato_server.server.pool_admin import (
+            INVALID_REQUEST, describe, parse_resize_args,
+        )
+        if cmd == pool_admin.VERB_RESIZE:
+            try:
+                target, ceiling = parse_resize_args(args)
+            except ValueError as exc:
+                answer = PoolStatusEvent(
+                    ok=False, category=INVALID_REQUEST, error=str(exc))
+            else:
+                answer = self._answer_pool(
+                    client_id, target_size=target, max_size=ceiling)
+        else:
+            answer = self._answer_pool(client_id)
+        self._event_sink.send_event(client_id, answer)
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=describe(answer), style="system"))
 
     def resolve_caller_workspace(
         self, client_id: str, client_workspace: Optional[str],

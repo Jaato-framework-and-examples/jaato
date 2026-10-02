@@ -998,6 +998,22 @@ class IPCRecoveryClient:
             raise ConnectionError(f"{method}: not connected")
         return self._client
 
+    async def pool_status(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.pool_status`."""
+        return await self._memory_client("pool_status").pool_status(
+            timeout=timeout)
+
+    async def resize_pool(
+        self,
+        target_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+        *,
+        timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.resize_pool`."""
+        return await self._memory_client("resize_pool").resize_pool(
+            target_size, max_size, timeout=timeout)
+
     async def list_memories(self, *, timeout: float = 10.0):
         """See :meth:`IPCClient.list_memories`."""
         return await self._memory_client("list_memories").list_memories(

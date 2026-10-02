@@ -28,6 +28,9 @@ Usage:
 
     # Restart with same parameters (useful during development)
     python -m jaato_server --restart
+
+    # Resize the running daemon's pre-warm runner pool (no restart)
+    python -m jaato_server --pool-size 6
 """
 
 import argparse
@@ -318,6 +321,8 @@ class JaatoDaemon:
         umask: Optional[str] = None,
         ws_max_message_size: Optional[str] = None,
         runner_uid_policy: Optional[str] = None,
+        pool_size: Optional[int] = None,
+        pool_max_size: Optional[int] = None,
     ):
         """Initialize the daemon.
 
@@ -364,6 +369,13 @@ class JaatoDaemon:
                 uid a root daemon runs each session's runner as (#1168
                 step 3; :mod:`server.runner_user`).  Kept raw for
                 ``_write_config`` for the same reason as ``umask``.
+            pool_size: The runner pool's floor as last set by a runtime
+                resize (``pool.resize`` / ``--pool-size``), carried by
+                ``--restart``.  Outranks ``JAATO_RUNNER_POOL_SIZE``;
+                ``None`` leaves the env var in charge.
+            pool_max_size: The ceiling a runtime resize CHOSE, carried by
+                ``--restart``; ``None`` leaves ``JAATO_RUNNER_POOL_MAX_SIZE``
+                (or ``2 * pool size``) in charge.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -383,6 +395,10 @@ class JaatoDaemon:
         self._umask = umask
         self._runner_uid_policy = runner_uid_policy
         self._ws_max_message_size = ws_max_message_size
+        # Sizes a runtime resize set (protocol 1.35), persisted for
+        # --restart.  ``None`` until then: the env vars decide.
+        self._pool_size_override = pool_size
+        self._pool_max_size_override = pool_max_size
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -447,6 +463,11 @@ class JaatoDaemon:
                     "defaulting to 2 * JAATO_RUNNER_POOL_SIZE",
                     _pool_max_raw,
                 )
+        # A size a runtime resize set before a --restart outranks the env
+        # vars: the operator asked for it after the env was written.
+        if pool_size is not None:
+            _pool_size = pool_size
+            _pool_max = pool_max_size
         self._pool_manager: PoolManager = PoolManager(
             self._template_manager, target_size=_pool_size,
             max_size=_pool_max,
@@ -670,6 +691,9 @@ class JaatoDaemon:
             event_sink=composite_sink,
             daemon_plugins=self._daemon_plugins,
         )
+        from jaato_server.server.pool_admin import PoolAdmin
+        self._command_router.set_pool_admin(PoolAdmin(
+            self._pool_manager, on_resized=self._record_pool_size))
 
         # Wire router into transports
         if self._ipc_server:
@@ -942,8 +966,8 @@ class JaatoDaemon:
         except Exception as e:
             logger.warning(f"Could not remove PID file: {e}")
 
-    def _write_config(self) -> None:
-        """Write startup config for restart support.
+    def _write_config(self) -> bool:
+        """Write startup config for restart support; ``True`` when written.
 
         Only references that don't leak secrets are persisted:
         ``ws_token_file`` (a path) yes, plaintext ``ws_token`` no, and
@@ -974,12 +998,34 @@ class JaatoDaemon:
             # Raw, like umask: a limit that decided which files a client
             # can attach must not silently revert on --restart.
             "ws_max_message_size": self._ws_max_message_size,
+            # Sizes a runtime resize set (1.35): a resize --restart dropped
+            # would be the silent revert the fields above exist to prevent.
+            "pool_size": self._pool_size_override,
+            "pool_max_size": self._pool_max_size_override,
         }
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(config, f)
         except Exception as e:
             logger.warning(f"Could not write config file: {e}")
+            return False
+        return True
+
+    def _record_pool_size(self, target_size: int,
+                          max_size: Optional[int]) -> bool:
+        """Keep a runtime resize for ``--restart``; ``PoolAdmin.on_resized``.
+
+        Args:
+            target_size: The pool's new floor.
+            max_size: The ceiling, when one was chosen; ``None`` when it is
+                derived, so the restarted daemon derives it again.
+
+        Returns:
+            Whether the restart config was written.
+        """
+        self._pool_size_override = target_size
+        self._pool_max_size_override = max_size
+        return self._write_config()
 
     def _remove_config(self) -> None:
         """Remove config file."""
@@ -1684,6 +1730,74 @@ def _reap_orphan_descendants(pids: List[int]) -> int:
     return killed
 
 
+async def _pool_request(
+    socket_path: str,
+    target_size: Optional[int] = None,
+    max_size: Optional[int] = None,
+    timeout: float = 10.0,
+):
+    """Ask the RUNNING daemon for its pool, resizing it when sizes are given.
+
+    The client half of ``--pool-size`` / ``--pool-max`` and the pool line
+    of ``--status``.  ``auto_start=False``: a pool resize sent when nothing
+    runs must say so, never start a daemon in order to resize it.
+
+    Returns:
+        The :class:`PoolStatusEvent` the daemon answered with.
+
+    Raises:
+        ConnectionError: No daemon answers on ``socket_path``.
+        ValueError: The daemon is too old to serve the pool verbs.
+        TimeoutError: The daemon did not answer.
+    """
+    from jaato_sdk.client.ipc import IPCClient
+    from jaato_sdk.events import ClientType
+
+    client = IPCClient(socket_path, client_type=ClientType.API,
+                       auto_start=False)
+    if not await client.connect():
+        raise ConnectionError(f"no jaato daemon answers on {socket_path}")
+    try:
+        return await client.resize_pool(target_size, max_size,
+                                        timeout=timeout)
+    finally:
+        await client.disconnect()
+
+
+def _pool_cli_line(args: argparse.Namespace) -> str:
+    """One ``pool: ...`` line for ``--status``; never raises."""
+    from jaato_server.server.pool_admin import describe
+    socket_path = args.ipc_socket or DEFAULT_SOCKET_PATH
+    try:
+        return describe(asyncio.run(_pool_request(socket_path, timeout=5.0)))
+    except Exception as exc:  # noqa: BLE001 — a status line, not a check
+        reason = str(exc) or type(exc).__name__
+        return f"pool: unavailable ({reason})"
+
+
+def _exit_on_pool_flags(args: argparse.Namespace) -> None:
+    """``--pool-size`` / ``--pool-max``: resize, print, and exit.
+
+    Returns without doing anything when neither flag was given.  Exits 0
+    when the daemon resized the pool; 1 when it refused (another account,
+    a bad size) or nothing answers.
+    """
+    if args.pool_size is None and args.pool_max is None:
+        return
+    from jaato_server.server.pool_admin import describe
+    socket_path = args.ipc_socket or DEFAULT_SOCKET_PATH
+    try:
+        answer = asyncio.run(
+            _pool_request(socket_path, args.pool_size, args.pool_max))
+    except Exception as exc:  # noqa: BLE001 — reported, then exit 1
+        reason = str(exc) or type(exc).__name__
+        print(f"Error: could not resize the runner pool: {reason}",
+              file=sys.stderr)
+        sys.exit(1)
+    print(describe(answer))
+    sys.exit(0 if answer.ok else 1)
+
+
 def stop_server(
     pid_file: str = DEFAULT_PID_FILE,
     ipc_socket: Optional[str] = None,
@@ -2029,6 +2143,9 @@ Examples:
 
   # Restart with same parameters (development)
   python -m jaato_server --restart
+
+  # Resize the running daemon's runner pool (no restart)
+  python -m jaato_server --pool-size 6
         """,
     )
 
@@ -2183,6 +2300,31 @@ Examples:
         action="store_true",
         help="Restart the daemon with same parameters",
     )
+    from jaato_server.server.pool_admin import CLI_MAX_FLAG, CLI_SIZE_FLAG
+    parser.add_argument(
+        CLI_SIZE_FLAG,
+        dest="pool_size",
+        metavar="N",
+        type=int,
+        default=None,
+        help="Resize the RUNNING daemon's pre-warm runner pool to N "
+             "unreserved idle runners (0 disables it), without a restart, "
+             "and print the pool.  Talks to the daemon over its IPC socket "
+             "and never starts one.  Run it as the account that runs the "
+             "daemon, or root; anyone else is refused.  --restart keeps "
+             "the new size.  Outranks JAATO_RUNNER_POOL_SIZE from then on.",
+    )
+    parser.add_argument(
+        CLI_MAX_FLAG,
+        dest="pool_max",
+        metavar="M",
+        type=int,
+        default=None,
+        help="With or without --pool-size: set the RUNNING daemon's ceiling "
+             "on total idle runners (reservations included).  Without it, a "
+             "derived ceiling (2 x pool size) follows --pool-size and a "
+             "chosen one is kept.",
+    )
 
     # Configuration
     parser.add_argument(
@@ -2220,6 +2362,10 @@ Examples:
             daemon_env = read_proc_environ(pid)
             if daemon_env:
                 print(f"  {format_overrides(daemon_env)}")
+            # The pool, asked over the socket.  Best-effort: --status
+            # answered "running" from the pid alone, and a refusal (another
+            # account) or an older daemon only costs this one line.
+            print(f"  {_pool_cli_line(args)}")
             sys.exit(0)
         else:
             print("Jaato server is not running")
@@ -2233,6 +2379,9 @@ Examples:
         else:
             print("Jaato server is not running")
             sys.exit(1)
+
+    # Handle --pool-size / --pool-max: resize the RUNNING daemon's pool.
+    _exit_on_pool_flags(args)
 
     # Handle --restart
     if args.restart:
@@ -2275,6 +2424,9 @@ Examples:
         args.umask = config.get("umask")
         args.runner_uid_policy = config.get("runner_uid_policy")
         args.ws_max_message_size = config.get("ws_max_message_size")
+        # A runtime pool resize (1.35) survives the restart.
+        args.restart_pool_size = config.get("pool_size")
+        args.restart_pool_max_size = config.get("pool_max_size")
 
         # Always restart as daemon
         args.daemon = True
@@ -2373,6 +2525,8 @@ Examples:
         umask=args.umask,
         runner_uid_policy=args.runner_uid_policy,
         ws_max_message_size=args.ws_max_message_size,
+        pool_size=getattr(args, "restart_pool_size", None),
+        pool_max_size=getattr(args, "restart_pool_max_size", None),
     )
 
     try:

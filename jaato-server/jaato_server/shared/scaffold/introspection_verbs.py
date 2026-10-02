@@ -194,6 +194,8 @@ _SCOPES = {
                        blurb="driving `gh` / `git` with a per-user token"),
     "runner-user": ExplainScope(_explain.runner_user,
                                 blurb="which OS account a root daemon's runners run as"),
+    "pool": ExplainScope(_explain.pool,
+                         blurb="the pre-warm runner pool, resized live"),
     "prefetch": ExplainScope(_explain.prefetch),
     "completion": ExplainScope(_explain.completion,
                                blurb="the OUTPUT-side hook"),
