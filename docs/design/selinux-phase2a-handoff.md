@@ -114,7 +114,7 @@ ls -Zd /opt/jaato/venv /opt/jaato/venv/bin/python
 
 ## 3. The branch's own checks
 
-The policy tests should give the same answer here as in CI (62 passed).
+The policy tests should give the same answer here as in CI (78 passed).
 **Never run them on this host directly**: each case links a module with
 `semodule -N -i`, which writes the host's module store (it only skips the
 reload). Run them in a container if Docker is available; otherwise skip

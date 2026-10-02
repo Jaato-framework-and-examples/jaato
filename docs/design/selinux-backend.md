@@ -234,6 +234,7 @@ empty output with exit status 0 (phase 0).
 | `jaato_authored_t` | `.jaato/{agents,profiles,scripts,services/*/,instructions,references,templates,plans,completion_schemas,spawn_schemas}` and `reactors.json`, `template_routing.yaml` | read, search | read, search |
 | `jaato_claims_t` | `.jaato/references-claims/` | read, write | read only (template v43's `//child` deny) |
 | `jaato_tmp_t` | session tmpdir and private `/tmp` | read, write, create | same |
+| `jaato_devpts_t` | a pty either domain opens (`type_transition` from `devpts_t`) | read, write, ioctl, setattr | same |
 
 The authored set is the one `jaato_sdk/scaffold/gitignore.py` `AUTHORED`
 already declares and `test_gitignore_authored_set_tracks_apparmor.py`
@@ -259,7 +260,7 @@ workspace.
 | `change_profile -> unconfined` | **nothing.** See 4.4 |
 | `audit deny /proc/*/environ …` (other processes) | no `file read` on other domains' `/proc` entries; `jaato_child_t` gets no read on `jaato_runner_t:file`, so a subprocess cannot read the runner's environ, mem, cmdline |
 | `/proc/self/** r`, `owner /proc/*/limits r` | `allow jaato_runner_t self:file read`, `self:dir search` |
-| `/dev/null rw`, `/dev/urandom r`, `/dev/pts/* rw` | `dev_rw_null`, `dev_read_urand`, `term_use_all_ptys` (for `interactive_shell`) |
+| `/dev/null rw`, `/dev/urandom r`, `/dev/pts/* rw` | `dev_rw_null`, `dev_read_urand`; ptys through a type of jaato's own, `jaato_devpts_t` (`term_create_pty`), never `term_use_all_ptys`, which reaches login terminals (§12, the 2a kernel run) |
 
 Home directories (`user_home_t`), `/etc/shadow`, other services' data and
 other workspaces are unreachable by type or by level without any rule
@@ -531,7 +532,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 0 | **done** on Fedora 44 under WSL2 ([runbook](selinux-phase0-handoff.md), findings below): exec transition from `unconfined_service_t`, MCS on files and `/proc`, relabel cost, `/dev/shm` `context=` mount, threaded `setcon` | none |
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
-| 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 31 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
+| 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
@@ -579,6 +580,18 @@ the probe gained `--as-uid` to check that a runner under #1168's
 (`/dev`, `/run`, `/mnt` never labelled by WSL's systemd), not the module.
 
 ### What phase 2a decided
+
+* **ptys get a type of jaato's own** (`jaato_devpts_t`, through
+  `term_create_pty` for both domains), and `term_use_all_ptys` is gone.
+  Granting `devpts_t` instead was two lines shorter and would have left
+  every other domain's unrelabelled pty at `s0` reachable. CI now checks
+  the `type_transition` itself, which allow rules alone could not show.
+* **The two import AVCs are `dontaudit`, not grants**: urllib3 resolves
+  IPv4 only inside a runner, and cryptography sizes its pool from the
+  affinity mask. The bind is silenced for the runner only, because a child
+  that binds (a test server, `npm run dev`) is refused by the same missing
+  grant and that denial must stay visible. Whether a child may bind
+  loopback ports is open for 2b.
 
 * **The module stops at the two domains phase 2b needs.** `jaato_isolated_t`
   (phase 3) and `jaato_template_t` (phase 4) are not declared; declaring

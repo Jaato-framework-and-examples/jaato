@@ -1,4 +1,4 @@
-policy_module(jaato, 1.0.0)
+policy_module(jaato, 1.1.0)
 
 ########################################
 #
@@ -71,6 +71,12 @@ files_type(jaato_claims_t)
 ## The session tmpdir and the private /tmp mount (#1171, #1381).
 type jaato_tmp_t;
 files_tmp_file(jaato_tmp_t)
+
+## A pty a runner or child opens (interactive_shell, notebook kernels).
+## Its own type, so the jaato domains need no access to anyone else's
+## terminal (phase 2a run, design §12).
+type jaato_devpts_t;
+term_pty(jaato_devpts_t)
 
 # A session keeps the daemon's SELinux user and role (setexeccon sets
 # type and level only), so both roles the daemon runs under are
@@ -207,16 +213,28 @@ miscfiles_read_localization(jaato_child_t)
 miscfiles_read_generic_certs(jaato_runner_t)
 miscfiles_read_generic_certs(jaato_child_t)
 
-# /dev/null rw, /dev/urandom r, /dev/pts/* rw
+# /dev/null rw, /dev/urandom r
 dev_rw_null(jaato_runner_t)
 dev_rw_null(jaato_child_t)
 dev_read_urand(jaato_runner_t)
 dev_read_urand(jaato_child_t)
 dev_read_rand(jaato_runner_t)
 dev_read_rand(jaato_child_t)
-term_use_all_ptys(jaato_runner_t)
-term_use_all_ptys(jaato_child_t)
-term_use_ptmx(jaato_runner_t)
+
+# ptys: opening /dev/ptmx gives a slave the kernel labels devpts_t unless a
+# type_transition says otherwise; term_create_pty is that transition, to
+# jaato_devpts_t. The phase 2a kernel run found the runner without it:
+# its new pty was devpts_t and unusable.
+term_create_pty(jaato_runner_t, jaato_devpts_t)
+term_create_pty(jaato_child_t, jaato_devpts_t)
+allow { jaato_runner_t jaato_child_t } jaato_devpts_t:chr_file { rw_term_perms setattr };
+#
+# Deliberately absent: term_use_all_ptys (the ptynode attribute). It
+# covers user_devpts_t and sshd_devpts_t, login terminals created at s0,
+# and a runner's level dominates s0, so it would let a runner read, write
+# and ioctl an administrator's terminal. Also absent: devpts_t itself
+# (term_use_generic_ptys), the ptys of every domain that never relabels
+# its own.
 
 ########################################
 #
@@ -233,6 +251,19 @@ allow jaato_child_t self:tcp_socket create_stream_socket_perms;
 allow jaato_child_t self:udp_socket create_socket_perms;
 corenet_tcp_connect_all_ports(jaato_child_t)
 sysnet_dns_name_resolve(jaato_child_t)
+
+# Not granted, not logged (phase 2a run, traced on the import):
+# - urllib3 binds a TCP socket to ::1 at import to test for IPv6
+#   (urllib3/util/connection.py _has_ipv6). Refused, it resolves IPv4 only.
+# - cryptography's Rust core reads /proc/self/cgroup and cpu.max to size
+#   its thread pool (available_parallelism). Refused at the cgroup
+#   directory search, it uses the affinity mask.
+# The bind is silenced for the runner only: a child that binds (a test
+# server, `npm run dev`) is refused too, and that denial must stay visible
+# until 2b decides what a child may bind.
+corenet_dontaudit_tcp_bind_generic_node(jaato_runner_t)
+fs_dontaudit_search_cgroup_dirs(jaato_runner_t)
+fs_dontaudit_search_cgroup_dirs(jaato_child_t)
 
 # Deliberately absent: rawip_socket, packet_socket, netlink_route_socket
 # write; every capability (sys_admin, net_admin, sys_ptrace, ...); ptrace;

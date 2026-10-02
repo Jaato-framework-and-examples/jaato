@@ -202,6 +202,26 @@ class Rule:
     append: Optional[str] = None
 
 
+def born_as(policy, source: str, parent: str, tclass: str) -> FrozenSet[str]:
+    """The types a *tclass* object *source* creates under *parent* is given."""
+    return frozenset(
+        str(rule.default) for rule in setools.TERuleQuery(
+            policy, ruletype=[setools.TERuletype.type_transition],
+            source=source, target=parent, tclass=[tclass]).results())
+
+
+def silenced(policy, source: str, target: str, tclass: str,
+             perms: FrozenSet[str]) -> bool:
+    """*perms* are dontaudit-ed for *source* on *target*:*tclass*."""
+    got = set()
+    for rule in setools.TERuleQuery(
+            policy, ruletype=[setools.TERuletype.dontaudit], source=source,
+            target=target, tclass=[tclass], source_indirect=True,
+            target_indirect=True).results():
+        got |= set(rule.perms)
+    return frozenset(perms) <= got
+
+
 def _allows(src, tgt, cls, perms):
     perms = frozenset(perms)
     return lambda p: granted(p, src, tgt, cls, perms, conditional=False) == perms
@@ -212,7 +232,56 @@ def _forbids(src, tgt, cls, perms):
     return lambda p: not granted(p, src, tgt, cls, perms)
 
 
+PTY_USE = {"read", "write", "ioctl", "open"}
+LOGIN_PTYS = ("user_devpts_t", "sshd_devpts_t")
+
 RULES: Tuple[Rule, ...] = (
+    # --- ptys (phase 2a kernel run) -------------------------------------
+    Rule("a pty the runner opens is born jaato_devpts_t",
+         lambda p: born_as(p, "jaato_runner_t", "devpts_t", "chr_file") == {"jaato_devpts_t"},
+         "without the transition the slave is devpts_t and openpty fails "
+         "(the 2026-10-02 kernel run); allow rules alone cannot show this",
+         find="term_create_pty(jaato_runner_t, jaato_devpts_t)\n"),
+    Rule("a pty a child opens is born jaato_devpts_t",
+         lambda p: born_as(p, "jaato_child_t", "devpts_t", "chr_file") == {"jaato_devpts_t"},
+         "a child running script, expect or ssh -t opens its own",
+         find="term_create_pty(jaato_child_t, jaato_devpts_t)\n"),
+    Rule("the runner may use a jaato pty",
+         _allows("jaato_runner_t", "jaato_devpts_t", "chr_file", PTY_USE),
+         "interactive_shell holds the master and talks to the slave",
+         find="allow { jaato_runner_t jaato_child_t } jaato_devpts_t:chr_file { rw_term_perms setattr };\n",
+         replace="allow jaato_child_t jaato_devpts_t:chr_file { rw_term_perms setattr };\n"),
+    Rule("a child may use a jaato pty",
+         _allows("jaato_child_t", "jaato_devpts_t", "chr_file", PTY_USE),
+         "the shell interactive_shell starts has the slave as its stdio",
+         find="allow { jaato_runner_t jaato_child_t } jaato_devpts_t:chr_file { rw_term_perms setattr };\n",
+         replace="allow jaato_runner_t jaato_devpts_t:chr_file { rw_term_perms setattr };\n"),
+    Rule("neither domain may touch a login terminal",
+         lambda p: all(not granted(p, d, t, "chr_file", frozenset(PTY_USE))
+                       for d in ("jaato_runner_t", "jaato_child_t") for t in LOGIN_PTYS),
+         "login ptys sit at s0, which a runner's level dominates: "
+         "term_use_all_ptys would let it write an admin's terminal",
+         append="term_use_all_ptys(jaato_runner_t)\n"),
+    Rule("neither domain may use other domains' unrelabelled ptys",
+         lambda p: all(not granted(p, d, "devpts_t", "chr_file", frozenset(PTY_USE))
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "devpts_t is the pty of every domain without its own type",
+         append="term_use_generic_ptys(jaato_child_t)\n"),
+
+    # --- refused quietly (phase 2a kernel run, traced on the import) ----
+    Rule("urllib3's ::1 bind probe is refused without an AVC",
+         lambda p: (silenced(p, "jaato_runner_t", "node_t", "tcp_socket", {"node_bind"})
+                    and not granted(p, "jaato_runner_t", "node_t", "tcp_socket",
+                                    frozenset({"node_bind"}))),
+         "urllib3 binds ::1 at import to test for IPv6; refused, it uses IPv4",
+         find="corenet_dontaudit_tcp_bind_generic_node(jaato_runner_t)\n"),
+    Rule("cryptography's cgroup read is refused without an AVC",
+         lambda p: all(silenced(p, d, "cgroup_t", "dir", {"search"})
+                       and not granted(p, d, "cgroup_t", "dir", frozenset({"search"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "its thread pool falls back to the affinity mask",
+         find="fs_dontaudit_search_cgroup_dirs(jaato_runner_t)\n"),
+
     # --- the version marker the readiness check probes -----------------
     Rule("marker type jaato_policy_v1_t exists",
          lambda p: type_exists(p, "jaato_policy_v1_t"),
