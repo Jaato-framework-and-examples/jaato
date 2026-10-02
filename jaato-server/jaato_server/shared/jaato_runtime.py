@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from .app_identity import FRAMEWORK_IDENTITY, AppIdentity, resolve_app_identity
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
+from . import user_tier
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     DISCOVERABILITY_EAGER,
@@ -695,7 +696,8 @@ class JaatoRuntime:
             workspace_instructions = base / ".jaato" / "instructions"
         search_dirs = [
             workspace_instructions,
-            Path.home() / ".jaato" / "instructions",
+            # #1465: the daemon's snapshot when the runner has one.
+            user_tier.path("instructions"),
         ]
 
         for instructions_dir in search_dirs:
@@ -722,7 +724,7 @@ class JaatoRuntime:
             legacy_workspace = base / ".jaato" / "system_instructions.md"
         legacy_paths = [
             legacy_workspace,
-            Path.home() / ".jaato" / "system_instructions.md",
+            user_tier.path("system_instructions.md"),
         ]
 
         for path in legacy_paths:

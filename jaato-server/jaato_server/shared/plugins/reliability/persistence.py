@@ -262,12 +262,18 @@ class ReliabilityPersistence:
         if self._user_data is not None:
             return self._user_data
 
-        if self._user_path.exists():
+        # #1465: read the daemon's snapshot when the runner has one; a save
+        # still goes to the real home (``_user_path``) and fails there as
+        # before when the runner is not granted it.
+        from jaato_server.shared.user_tier import path as user_tier_path
+
+        read_path = user_tier_path("reliability.json")
+        if read_path.exists():
             try:
-                data = json.loads(self._user_path.read_text(encoding="utf-8"))
+                data = json.loads(read_path.read_text(encoding="utf-8"))
                 data = self._migrate_if_needed(data)
                 self._user_data = UserReliabilityData.from_dict(data)
-                logger.debug(f"Loaded user reliability data from {self._user_path}")
+                logger.debug(f"Loaded user reliability data from {read_path}")
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Failed to load user reliability data: {e}")
                 self._user_data = UserReliabilityData()

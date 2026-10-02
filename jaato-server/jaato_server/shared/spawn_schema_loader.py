@@ -33,6 +33,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from jaato_server.shared.user_tier import path as _user_tier_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -144,7 +146,7 @@ def _resolve_schema_path(
         if ws_path.is_file():
             return ws_path
 
-    home_path_explicit = Path.home() / ".jaato" / path
+    home_path_explicit = _user_tier_path(path)
     if home_path_explicit.is_file():
         return home_path_explicit
 
@@ -170,7 +172,7 @@ def _resolve_schema_path(
             )
             return ws_legacy
 
-    home_path_legacy = Path.home() / ".jaato" / SPAWN_SCHEMAS_SUBDIR / path
+    home_path_legacy = _user_tier_path(SPAWN_SCHEMAS_SUBDIR) / path
     if home_path_legacy.is_file():
         logger.info(
             "spawn_payload_schema %r resolved via legacy auto-prefix "

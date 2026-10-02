@@ -1429,7 +1429,26 @@ def build_session_envelope(
         # #1168: the user the runner drops to at step 1b3 (a pool slot) or
         # already dropped to before exec (a cold spawn), or ``None``.
         runner_user=_runner_user_wire(server),
+        # #1465: the user tier the runner reads and is not granted.
+        user_tier_files=user_tier_snapshot(stashed_runner_user(server)),
     )
+
+
+def user_tier_snapshot(user: Optional[RunnerUser]) -> Optional[Dict[str, str]]:
+    """The ``~/.jaato`` snapshot for a runner that runs as *user* (#1465).
+
+    The runner reads the user tier of the home it runs with: the daemon's
+    own, or, once #1168 dropped it to *user*, that user's passwd home.  A
+    target with no home has no user tier, which is ``{}`` (looked, found
+    nothing), never the daemon's.
+    """
+    from jaato_server.shared import user_tier
+
+    if user is not None:
+        if not user.home:
+            return {}
+        return user_tier.collect(os.path.join(user.home, ".jaato"))
+    return user_tier.collect(os.path.expanduser("~/.jaato"))
 
 
 def _runner_user_wire(server: Any) -> Optional[Dict[str, Any]]:
