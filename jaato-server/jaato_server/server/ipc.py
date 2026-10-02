@@ -104,16 +104,19 @@ from jaato_sdk.events import (
     ToolExecuteResultEvent,
     ToolOutputEvent,
 )
+from jaato_sdk.events import REFERENCE_CURATION_REQUEST_TYPES
 from .memory_verbs import MEMORY_REQUEST_TYPES
 from . import session_new_timing
 
 #: Requests routed even when the client is attached to no session: the
-#: daemon-level verbs, and the memory verbs (#1232), whose answer to a
+#: daemon-level verbs, the memory verbs (#1232), whose answer to a
 #: session-less caller is a correlated ``no_session`` result rather than
-#: silence the SDK would wait out.
+#: silence the SDK would wait out, and the reference-curation verbs (#1475),
+#: which resolve the caller's workspace from the connection and answer
+#: ``no_workspace`` themselves when there is none.
 _SESSIONLESS_REQUEST_TYPES = (
     CommandRequest, ClientConfigRequest, PostAuthSetupResponse,
-) + MEMORY_REQUEST_TYPES
+) + MEMORY_REQUEST_TYPES + REFERENCE_CURATION_REQUEST_TYPES
 
 
 logger = logging.getLogger(__name__)
@@ -943,10 +946,7 @@ class JaatoIPCServer:
                                         "deferred-wake drive on no-tools attach "
                                         "failed for %s", _sid)
             else:
-                await self._send_error(
-                    client_id,
-                    "No session selected. Use session.create or session.attach first."
-                )
+                await self._refuse_without_session(client_id, event)
 
     async def _send_to_client(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client."""
@@ -962,6 +962,28 @@ class JaatoIPCServer:
             return
         # #1452: a session.new answer is timed to the socket, not the queue.
         session_new_timing.note_written(event, "ipc")
+
+    async def _refuse_without_session(self, client_id: str, event: Event) -> None:
+        """Answer a request that needs a session from a client attached to none.
+
+        A request carrying a ``request_id`` is awaited by a correlated SDK
+        call, which discards anything that does not echo it -- so the
+        refusal echoes it, and the caller fails at once with the reason
+        instead of waiting out its timeout (#1475).  Logged at WARNING,
+        naming the request type, so the daemon is no longer silent.
+        """
+        request_id = getattr(event, "request_id", None) or None
+        request_type = type(event).__name__
+        logger.warning(
+            "IPC %s refused: %s needs an attached session (request_id=%s)",
+            client_id, request_type, request_id or "-")
+        await self._send_to_client(client_id, ErrorEvent(
+            error=f"{request_type}: no session selected. "
+                  "Use session.create or session.attach first.",
+            error_type="RequestError",
+            request_id=request_id,
+            details={"category": "no_session", "request_type": request_type},
+        ))
 
     async def _send_error(self, client_id: str, error: str) -> None:
         """Send an error event to a client."""

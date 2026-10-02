@@ -19,6 +19,7 @@
 import {
   ConnectionClosedError,
   RequestInterruptedError,
+  RequestRefusedError,
   ConnectionError,
   IncompatibleServerError,
   ReconnectingError,
@@ -1724,9 +1725,29 @@ export class JaatoClient {
       };
       this._closeWaiters.add(onClose);
       const unsub = this.subscribeAll((raw) => {
-        const event = raw as { type?: string; request_id?: string };
-        if (event.type !== resultType) return;
+        const event = raw as {
+          type?: string;
+          request_id?: string;
+          error?: string;
+          error_type?: string;
+          details?: Record<string, unknown> | null;
+        };
         if (event.request_id !== requestId) return;
+        if (event.type === EventTypeValue.ERROR) {
+          // A correlated refusal (#1475): the daemon refused the request
+          // before any handler answered it, and echoed its id so the call
+          // fails now instead of waiting out its timeout.
+          done();
+          reject(
+            new RequestRefusedError(method, event.error ?? "", {
+              errorType: event.error_type ?? "",
+              requestId,
+              details: event.details ?? undefined,
+            }),
+          );
+          return;
+        }
+        if (event.type !== resultType) return;
         done();
         resolve(raw as unknown as T);
       });
