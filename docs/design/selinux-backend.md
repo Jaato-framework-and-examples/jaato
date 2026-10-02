@@ -472,7 +472,12 @@ restorecon -R /srv/jaato/workspaces
 # venv outside /home so jaato_runner_t can read site-packages:
 semanage fcontext -a -t lib_t '/opt/jaato/venv(/.*)?'
 restorecon -R /opt/jaato/venv
-JAATO_REQUIRE_CONFINEMENT=1 /opt/jaato/venv/bin/python -m jaato_server ...
+# the user tier a runner may use (jaato.fc labels these; a runner can
+# never create them, since it has no add_name in ~/.jaato):
+mkdir -p ~/.jaato/{agents,profiles,references,services,memories,prompts,skills}
+restorecon -R ~/.jaato
+JAATO_CONFINEMENT=selinux JAATO_REQUIRE_CONFINEMENT=1 \
+  /opt/jaato/venv/bin/python -m jaato_server ...
 ```
 
 The last step is the only per-host runtime requirement; the daemon needs
@@ -533,7 +538,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
-| 2b | `SELinuxBackend`: cold spawn only, `//child`, private `/tmp`, labelling, doctor check, `--require-confinement` | RHEL hosts get a kernel boundary; confined sessions skip the pool |
+| 2b | **implemented, not yet run on a kernel**: user-tier types and binds in the module (1.2.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. A kernel run follows ([handoff](selinux-phase2b-handoff.md)); the doctor check is still to do | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
@@ -583,6 +588,48 @@ labelled by WSL's systemd), not the module.
 with `--as-uid 1000`, with no pty, `::1` or cgroup denial and no
 `dac_*` denial in either run. So the uid drop removes none the probe
 causes; whether a real runner causes any is a 2b question.
+
+### What phase 2b decided
+
+* **Parity with AppArmor, measured, where the two differ by construction.**
+  Binds: any address, ports 1024 and up, both domains (AppArmor's
+  `network inet stream` allows them; checked on an enforcing kernel). The
+  user tier: exactly the `~/.jaato` subtrees the plugins grant under
+  AppArmor, as `jaato_user_config_t` (read) and `jaato_user_data_t`
+  (write, born at `s0` so the global memory tier stays one tier).
+* **The handle is passed, not stashed.** The provisioned
+  `ConfinementHandle` travels as an explicit `confinement=` argument
+  through `spawn_session_runner`, `RunnerSpawner.spawn`,
+  `build_session_envelope` and `dispatch_bootstrap_envelope`; an AppArmor
+  boundary still rides `profile_name` alone, so every existing caller is
+  unchanged. A stash read by each builder would fail open on the one path
+  that forgot to read it (#735).
+* **Selection happens once, at daemon start** (`_select_confinement_backend`),
+  before the PID file. Only an SELinux choice is stored; AppArmor keeps its
+  per-transport managers. An unknown `JAATO_CONFINEMENT`, or a required
+  backend that is unavailable, exits with the reason.
+* **SELinux sessions are cold spawned.** `_pool_may_serve` refuses them a
+  slot; the child writes the runner's context to `/proc/self/attr/exec`
+  after the privilege drop (#1168) and before `execve`, and the runner
+  confirms it (step 1c and the cold-spawn entry point) rather than
+  transitioning. Pool support is phase 4.
+* **The daemon labels everything the runner cannot create**: the
+  workspace tree once (stamped in `~/.jaato/selinux_levels.json`, outside
+  the workspace), the private `<ws>/.tmp`, and the session tmpdir under
+  `/tmp`, keyed on the boundary's id, which the envelope descriptor now
+  carries because SELinux has no profile name to read it from.
+* **Found on the way, fixed here:** `AppArmorBackend` looked its grant
+  record up by the bare confinement id while the record is keyed by
+  profile name, so `handle.grants` was always empty. **Found, fixed
+  separately:** the runner reads `~/.jaato` files no profile grants, so a
+  present `permissions.json` refused every confined session (#1465,
+  PR #1466); and that file's policy is never applied (raised on #1466).
+* **Not done in 2b**: the isolated sub-runner stays AppArmor-only and
+  refuses (phase 3); denial hints and the diagnostics grant view are
+  AppArmor-only; and a runner may still CREATE `.jaato/reactors.json` or
+  `template_routing.yaml` when the file is absent (AppArmor denies the path
+  whether or not it exists; SELinux would need a `.jaato` type with
+  filename transitions), an open item.
 
 ### What phase 2a decided
 
