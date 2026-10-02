@@ -11,12 +11,18 @@ that and does the three per-LSM things a runner does:
 - check that every thread of the process wears the label
   (:func:`verify_threads`, #1023).
 
-Only AppArmor is implemented, and each AppArmor branch delegates to the
-functions the runner has always called, looked up on their modules at call
-time so a test patching ``bootstrap.confine_to_profile`` still reaches
-them.  An envelope naming any other backend is REFUSED by :func:`resolve`,
-before anything is entered: a runner that cannot enter the label it was
-given must not run the session unconfined.
+Each AppArmor branch delegates to the functions the runner has always
+called, looked up on their modules at call time so a test patching
+``bootstrap.confine_to_profile`` still reaches them.
+
+SELinux (phase 2b) differs in one way that decides the rest: the runner
+does not enter its domain, the daemon's exec does (``setexeccon`` before
+``execve``, design §7.1).  So :func:`self_confine` only CONFIRMS the
+process already wears the label, and refuses when it does not: a pool slot
+cannot ``setcon`` a threaded process (phase 0), and SELinux sessions are
+routed away from the pool.  An envelope naming any other backend is
+REFUSED by :func:`resolve`, before anything is entered: a runner that
+cannot enter the label it was given must not run the session unconfined.
 """
 
 from __future__ import annotations
@@ -24,12 +30,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
+import os
+
 from jaato_server.server.confinement.apparmor import child_label_for
-from jaato_server.shared.lsm_label import BACKEND_APPARMOR
+from jaato_server.shared.lsm_label import BACKEND_APPARMOR, BACKEND_SELINUX
 
 #: The backends this runner can enter.  A daemon naming any other one is
 #: refused at bootstrap (``BootstrapError`` stage ``confine``).
-SUPPORTED_BACKENDS = frozenset({BACKEND_APPARMOR})
+SUPPORTED_BACKENDS = frozenset({BACKEND_APPARMOR, BACKEND_SELINUX})
+
+#: Where a task reads its own label and sets its children's.
+_ATTR_CURRENT = "/proc/self/attr/current"
+_ATTR_EXEC = "/proc/self/attr/exec"
 
 
 @dataclass(frozen=True)
@@ -37,8 +49,9 @@ class RunnerConfinement:
     """What the envelope says this runner must wear.
 
     Attributes:
-        backend: ``"apparmor"`` (the only one this runner enters).
-        label: The runner's own label (an AppArmor profile name).
+        backend: ``"apparmor"`` or ``"selinux"``.
+        label: The runner's own label: an AppArmor profile name, or an
+            SELinux context (``user:role:jaato_runner_t:s0:cA,cB``).
         child_label: What model-driven subprocesses exec into.
     """
 
@@ -91,35 +104,110 @@ def resolve(envelope: Any) -> Optional[RunnerConfinement]:
         raise _refuse(
             f"envelope.confinement.label {label!r} disagrees with "
             f"envelope.profile_name {profile!r}; refusing to pick one")
+    if backend == BACKEND_SELINUX:
+        return _resolve_selinux(label, profile, descriptor)
     if not label:
         return None
     child = str(descriptor.get("child_label") or child_label_for(label))
     return RunnerConfinement(backend=backend, label=label, child_label=child)
 
 
+def _resolve_selinux(label: str, profile: str,
+                     descriptor: Mapping[str, Any]) -> RunnerConfinement:
+    """An SELinux descriptor: both labels named, no AppArmor profile."""
+    child = str(descriptor.get("child_label") or "")
+    if profile:
+        raise _refuse(
+            f"envelope names an SELinux boundary and the AppArmor profile "
+            f"{profile!r}; one kernel runs one LSM, refusing to pick one")
+    if not label or not child:
+        raise _refuse(
+            "envelope.confinement names SELinux without both label and "
+            "child_label; refusing to guess the domains")
+    return RunnerConfinement(backend=BACKEND_SELINUX, label=label, child_label=child)
+
+
+def _own_selinux_label() -> str:
+    with open(_ATTR_CURRENT, encoding="utf-8") as fh:
+        return fh.read().replace("\x00", "").strip()
+
+
 def self_confine(backend: str, label: str) -> None:
-    """Enter *label* on the calling thread (bootstrap step 1c)."""
+    """Enter *label* on the calling thread (bootstrap step 1c).
+
+    SELinux: confirm instead.  The domain was entered by the exec that
+    started this process; a runner not already in it was not started by a
+    transition and cannot be moved into one now.
+    """
     if backend == BACKEND_APPARMOR:
         from jaato_server.server.runner import bootstrap
 
         bootstrap.confine_to_profile(label)
         return
+    if backend == BACKEND_SELINUX:
+        try:
+            actual = _own_selinux_label()
+        except OSError as exc:
+            raise _refuse(f"cannot read {_ATTR_CURRENT} ({exc}) to confirm "
+                          f"the SELinux domain {label!r}") from exc
+        if actual != label:
+            raise _refuse(
+                f"this runner is {actual!r}, the session's boundary is "
+                f"{label!r}.  An SELinux runner enters its domain by the "
+                "exec transition the daemon sets before spawning it "
+                "(selinux-backend.md §7.1); a runner started any other way, "
+                "such as a pre-warm pool slot, cannot be confined.")
+        return
     raise _refuse(f"cannot self-confine under backend {backend!r}")
 
 
-def child_transition_callback(backend: str, label: str) -> Callable[[], None]:
+def child_transition_callback(
+    backend: str, label: str, child_label: str = "",
+) -> Callable[[], None]:
     """The ``preexec_fn`` that moves a subprocess into *label*'s child."""
     if backend == BACKEND_APPARMOR:
         from jaato_server.server import apparmor
 
         return apparmor.make_child_transition_callback(label)
+    if backend == BACKEND_SELINUX:
+        if not child_label:
+            raise _refuse("no SELinux child label to transition subprocesses into")
+        return _selinux_exec_transition(child_label)
     raise _refuse(f"no child transition for backend {backend!r}")
+
+
+def _selinux_exec_transition(child_label: str) -> Callable[[], None]:
+    """``setexeccon(child_label)`` between fork and exec.
+
+    A write that fails raises in the forked child, so the spawn fails and
+    nothing runs in the runner's own domain (fail closed, as AppArmor's
+    ``//child`` callback does).  Unbuffered: a buffered write reports its
+    error only on close.
+    """
+    payload = child_label.encode("utf-8")
+
+    def preexec() -> None:
+        fd = os.open(_ATTR_EXEC, os.O_WRONLY)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+
+    return preexec
 
 
 def verify_threads(backend: str, label: str) -> Any:
     """Check every thread wears *label* (#1023); returns the scan."""
-    if backend == BACKEND_APPARMOR:
-        from jaato_server.server.runner import bootstrap
+    from jaato_server.server.runner import bootstrap
 
+    if backend == BACKEND_APPARMOR:
         return bootstrap.verify_thread_confinement(label)
+    if backend == BACKEND_SELINUX:
+        return bootstrap.verify_thread_confinement(
+            label, matcher=_same_selinux_context)
     raise _refuse(f"cannot verify threads under backend {backend!r}")
+
+
+def _same_selinux_context(label: str, expected: str) -> bool:
+    """SELinux threads of a confined runner wear exactly its context."""
+    return label.replace("\x00", "").strip() == expected

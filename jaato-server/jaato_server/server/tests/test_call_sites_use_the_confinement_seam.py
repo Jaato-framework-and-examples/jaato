@@ -12,7 +12,9 @@ what is pinned here is that nothing a session gets changed on the way:
 * an IPC session in complain mode is still recorded as such (#1014);
 * the envelope carries a descriptor that agrees with ``profile_name``, and
   the runner refuses one it cannot enter, BEFORE the empty-``profile_name``
-  no-op could read an SELinux boundary as "unconfined".
+  no-op could read an SELinux boundary as "unconfined" (since 2b the runner
+  can enter SELinux, so the refusal is for a runner NOT in the domain; see
+  ``test_selinux_runner_2b.py``).
 """
 
 from typing import Any, List, Optional
@@ -59,8 +61,10 @@ REVERSIONS = [
     ),
     Reversion(
         target=_RUNNER,
-        find="    confinement = lsm_confine.resolve(envelope)\n",
-        replace="    confinement = None\n",
+        find="    confinement = lsm_confine.resolve(envelope)\n"
+             "    backend = confinement.backend if confinement else \"\"\n",
+        replace="    confinement = None\n"
+                "    backend = confinement.backend if confinement else \"\"\n",
         test="test_an_selinux_boundary_is_refused_not_run_unconfined",
         because="an envelope naming an SELinux boundary carries an empty "
                 "profile_name, which the runner would read as an operator "
@@ -189,7 +193,7 @@ def test_resolve_reads_a_legacy_envelope_as_apparmor() -> None:
 
 @pytest.mark.parametrize("descriptor, words", [
     ({"backend": "selinux", "label": "system_u:system_r:jaato_runner_t:s0:c1,c2",
-      "child_label": "system_u:system_r:jaato_child_t:s0:c1,c2"}, "'selinux'"),
+      "child_label": "system_u:system_r:jaato_child_t:s0:c1,c2"}, "one LSM"),
     ({"backend": "apparmor", "label": "jaato-ws-other"}, "disagrees"),
     ("apparmor", "not a mapping"),
     ({"label": "jaato-ws-x"}, "(unnamed)"),

@@ -1071,6 +1071,9 @@ def _maybe_self_confine(
     from . import lsm_confine
     confinement = lsm_confine.resolve(envelope)
     backend = confinement.backend if confinement else ""
+    if backend == lsm_confine.BACKEND_SELINUX:
+        _confirm_selinux_domain(confinement, recycle_pools)
+        return
     target_profile = envelope.profile_name or ""
     if not target_profile:
         if getattr(envelope, "confinement_required", False):
@@ -1238,9 +1241,29 @@ def _announce_unenforced_profile(
     )
 
 
+def _confirm_selinux_domain(
+    confinement: Any, recycle_pools: Optional[Callable[[str], Any]],
+) -> None:
+    """Step 1c under SELinux: confirm the exec landed in the domain.
+
+    The daemon set the exec context before spawning this runner, so every
+    thread was born in the domain; :func:`lsm_confine.self_confine` refuses
+    a runner that is not in it.  The #1023 check still runs: it costs one
+    walk, and it is the evidence the session record's claim rests on.
+    """
+    from . import lsm_confine
+
+    lsm_confine.self_confine(confinement.backend, confinement.label)
+    logger.info("runner-session bootstrap: running in SELinux domain %s",
+                confinement.label)
+    _retire_and_verify_threads(confinement.label, recycle_pools,
+                               backend=confinement.backend)
+
+
 def _retire_and_verify_threads(
     target_profile: str,
     recycle_pools: Optional[Callable[[str], Any]],
+    backend: str = "apparmor",
 ) -> None:
     """Retire pre-transition worker threads, then verify every thread (#1023).
 
@@ -1294,15 +1317,13 @@ def _retire_and_verify_threads(
         return
 
     try:
-        scan = lsm_confine.verify_threads(
-            lsm_confine.BACKEND_APPARMOR, target_profile,
-        )
+        scan = lsm_confine.verify_threads(backend, target_profile)
     except ThreadConfinementDivergence as exc:
         raise BootstrapError(
             "confine",
             f"{exc}  The runner refuses this session rather than report "
-            f"sandbox_mode=apparmor for a process carrying threads "
-            f"outside the profile.",
+            f"sandbox_mode={backend} for a process carrying threads "
+            f"outside the boundary.",
         ) from exc
 
     if scan.unreadable:
@@ -1369,13 +1390,17 @@ def _prearm_child_callback(
     Returns:
         The callback, or ``None`` when this session installs none.
     """
-    runner_profile = (envelope.profile_name or "").strip()
+    from . import lsm_confine
+    try:
+        confinement = lsm_confine.resolve(envelope)
+    except BootstrapError:
+        return None  # step 1c already refused this envelope
+    runner_profile = confinement.label if confinement else ""
     if not runner_profile or "//" in runner_profile:
         return None
     try:
-        from . import lsm_confine
         child_cb = lsm_confine.child_transition_callback(
-            lsm_confine.BACKEND_APPARMOR, runner_profile,
+            confinement.backend, confinement.label, confinement.child_label,
         )
         registry = getattr(runtime, "_registry", None)
         for name in (registry.list_exposed() if registry else ()):
@@ -1455,7 +1480,9 @@ def _maybe_install_child_callback(
             ``set_apparmor_child_transition_callback`` OR the setter
             raised.  Bubbles up unchanged through ``bootstrap_session``.
     """
-    runner_profile = (envelope.profile_name or "").strip()
+    from . import lsm_confine
+    confinement = lsm_confine.resolve(envelope)
+    runner_profile = confinement.label if confinement else ""
     if not runner_profile:
         logger.info(
             "runner-session bootstrap: envelope.profile_name empty; "
@@ -1479,9 +1506,8 @@ def _maybe_install_child_callback(
     # Case 3: main runner, install required + audibly failing.
     try:
         if child_cb is None:
-            from . import lsm_confine
             child_cb = lsm_confine.child_transition_callback(
-                lsm_confine.BACKEND_APPARMOR, runner_profile,
+                confinement.backend, confinement.label, confinement.child_label,
             )
         executor = getattr(session, "_executor", None)
         if executor is None or not hasattr(
