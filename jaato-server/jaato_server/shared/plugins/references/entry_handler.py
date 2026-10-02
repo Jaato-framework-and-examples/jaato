@@ -230,6 +230,9 @@ class ReferencesEntryHandler(BundleEntryHandler):
         """
         from .reconcile import reconcile_bundle as _reconcile_bundle  # local
 
+        ensure = getattr(self._plugin, "_ensure_embedding_provider", None)
+        if ensure is not None:
+            ensure()  # the provider may be deferred at bootstrap (#1482)
         result = _reconcile_bundle(
             bundle, self._plugin._sources, self._plugin._embedding_provider,
         )
