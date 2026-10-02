@@ -68,8 +68,8 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/server/runner_spawner.py",
-        find='env["TMPDIR"] = self._session_tmpdir(session_id, profile_name)',
-        replace='env["TMPDIR"] = self._session_tmpdir(session_id)',
+        find='env["TMPDIR"] = tmpdir or self._session_tmpdir(session_id, profile_name)',
+        replace='env["TMPDIR"] = tmpdir or self._session_tmpdir(session_id)',
         test="TestTheTwoSidesAgree::test_build_env_hands_the_runner_a_granted_path",
         because=(
             "the spawner ignoring the profile it was handed, so the "
