@@ -564,7 +564,7 @@ export interface ReferenceClaimRow {
   problems: string[];
   /**
    * The typed edges the claim declares (``depends-on`` / ``elaborates`` /
-   * ``supersedes`` / ``contradicts``), taking effect only once promoted.
+   * ``see-also`` / ``supersedes`` / ``contradicts``), taking effect only once promoted.
    */
   links?: ReferenceClaimLink[];
   /** What the curator should know that does NOT block Promote (a dangling edge). */

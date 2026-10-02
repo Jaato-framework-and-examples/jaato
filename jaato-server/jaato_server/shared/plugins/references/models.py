@@ -397,7 +397,8 @@ class ReferenceSource:
     origin: Optional[ReferenceOrigin] = None
 
     # Declared, typed edges to other references (``links.py``): what a
-    # selection expands (``depends-on``), hints (``elaborates``), routes
+    # selection expands (``depends-on``), hints (``elaborates`` /
+    # ``see-also``), routes
     # (``supersedes``) or only lists (``contradicts``).  Empty = none
     # declared; the mentions in the body are still walked.
     links: List[ReferenceLink] = field(default_factory=list)

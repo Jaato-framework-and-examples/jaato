@@ -28,12 +28,14 @@ import { getClient, isConnected } from "@/sdk/connection";
 import type { ReferenceCatalogRow, ReferenceCatalogState, ReferenceClaimLink } from "@/store/types";
 
 /** The relations a link may declare, in the order the editor offers them. */
-export const LINK_RELS = ["depends-on", "elaborates", "supersedes", "contradicts"] as const;
+// Mirrors links.LINK_RELS (jaato-server references plugin); the daemon refuses any other.
+export const LINK_RELS = ["depends-on", "elaborates", "see-also", "supersedes", "contradicts"] as const;
 
 /** What each relation does, for the editor's hint. */
 export const REL_EFFECT: Record<(typeof LINK_RELS)[number], string> = {
   "depends-on": "selecting this one also brings in the target",
   elaborates: "the target is offered beside this one",
+  "see-also": "the target is offered beside this one (a neighbouring concern)",
   supersedes: "requests for the target get this one instead",
   contradicts: "listed only",
 };

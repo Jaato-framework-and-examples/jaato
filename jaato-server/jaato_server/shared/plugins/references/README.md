@@ -290,6 +290,7 @@ A reference may declare edges to others beside its tags:
 |---|---|
 | `depends-on` | the target is selected with the source |
 | `elaborates` | not selected; returned as a `related` hint |
+| `see-also` | not selected; returned as a `related` hint (a neighbouring concern: a coexisting alternative, the other side of one topic) |
 | `supersedes` | a request for the target gets this reference instead (`superseded` says so) |
 | `contradicts` | listed only |
 

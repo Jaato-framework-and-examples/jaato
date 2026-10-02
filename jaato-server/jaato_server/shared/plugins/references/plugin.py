@@ -39,6 +39,7 @@ from .links import (
     FRONTIER_RANKING,
     FRONTIER_RANKING_SIMILARITY,
     LINK_RELS,
+    rel_summary,
     LinkIndex,
     expansion_neighbours,
     rank_frontier,
@@ -176,8 +177,8 @@ def _selection_link_fields(
     """What a selection reports about declared edges.
 
     ``superseded``: requested references routed to the one that supersedes
-    them.  ``related``: ``elaborates`` targets of the selection it does not
-    hold -- offered, never expanded.  ``contradicts`` is deliberately not
+    them.  ``related``: ``elaborates`` / ``see-also`` targets of the
+    selection it does not hold -- offered, never expanded.  ``contradicts`` is deliberately not
     here: it is for a curator (``listReferences``), not a working agent.
     """
     fields: Dict[str, Any] = {}
@@ -2546,11 +2547,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                                 "or pages you are proposing too (their ids; an edge to "
                                 "one not promoted yet is kept and takes effect when it "
                                 "is). "
-                                "'depends-on': a reader needs the target too (selected "
-                                "with it). 'elaborates': the target goes deeper (offered, "
-                                "not selected). 'supersedes': this replaces the target "
-                                "(a request for the target gets this one, once promoted). "
-                                "'contradicts': this disagrees with the target."
+                                + rel_summary()
                             ),
                             "items": {
                                 "type": "object",
