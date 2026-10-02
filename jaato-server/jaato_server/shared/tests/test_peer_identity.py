@@ -33,6 +33,9 @@ from typing import Any
 import pytest
 
 from jaato_server.shared.peer_identity import (
+    ACCESS_EXECUTE,
+    ACCESS_READ,
+    ACCESS_WRITE,
     PeerCredentials,
     daemon_uid,
     describe_unreachable_path,
@@ -43,6 +46,37 @@ from jaato_server.shared.peer_identity import (
     peer_is_the_daemon,
     unreachable_client_paths,
 )
+from jaato_server.shared.tests.reversion import Reversion
+
+_PEER_IDENTITY = "jaato-server/jaato_server/shared/peer_identity.py"
+
+REVERSIONS = [
+    Reversion(
+        target=_PEER_IDENTITY,
+        find="            leaf_wants = _FILE_LEAF_WANTS[access]\n",
+        replace="            leaf_wants = READ | SEARCH\n",
+        test="test_an_ordinary_readable_file_is_reachable",
+        because="#1464: asking r-x of every existing leaf refused every "
+                "ordinary file (an env_file has no execute bit), so a "
+                "non-root peer's whole client config was dropped",
+    ),
+    Reversion(
+        target=_PEER_IDENTITY,
+        find="    ACCESS_WRITE: WRITE,\n",
+        replace="    ACCESS_WRITE: READ,\n",
+        test="test_a_file_written_on_the_peers_behalf_needs_write",
+        because="a trace log the peer can read and not write being "
+                "accepted, so the daemon appends to it on their behalf",
+    ),
+    Reversion(
+        target=_PEER_IDENTITY,
+        find="            leaf_wants = READ | SEARCH\n        else:\n",
+        replace="            leaf_wants = _FILE_LEAF_WANTS[access]\n        else:\n",
+        test="test_a_directory_still_needs_search",
+        because="the file rule applied to a directory: an r-- tree the "
+                "peer cannot enter being accepted as a workspace",
+    ),
+]
 
 #: An account this process is not and root is not.  ``nobody`` on most
 #: systems; the number is what matters, not whether it resolves.
@@ -239,6 +273,105 @@ def test_symlinks_are_resolved_before_judging(open_dir: Path) -> None:
 
 
 # ----------------------------------------------------------------------
+# path_reachable_by on FILES (#1464)
+#
+# A directory is opened as a tree and needs ``r-x``; a file needs only what
+# the daemon will do with it.  The modes below are on the OTHER class, since
+# the peer is neither the file's owner nor in its group, so the case runs
+# the same as root or not.  Each deny is the same call one chmod apart from
+# an allow.
+# ----------------------------------------------------------------------
+
+
+def _file(open_dir: Path, mode: int, name: str = ".env") -> Path:
+    path = open_dir / name
+    path.write_text("JAATO_PROVIDER=echo\n")
+    os.chmod(path, mode)
+    return path
+
+
+def test_an_ordinary_readable_file_is_reachable(open_dir: Path) -> None:
+    """The #1464 case: ``rw-rw-r--``, no execute bit, under searchable
+    directories.  It used to be refused for lacking ``x``."""
+    env = _file(open_dir, 0o664)
+    assert path_reachable_by(str(env), _other_peer(), ACCESS_READ) is True
+
+
+def test_an_unreadable_file_is_refused(open_dir: Path) -> None:
+    env = _file(open_dir, 0o660)
+    assert path_reachable_by(str(env), _other_peer(), ACCESS_READ) is False
+    os.chmod(env, 0o664)
+    assert path_reachable_by(str(env), _other_peer(), ACCESS_READ) is True
+
+
+def test_read_is_the_default_access(open_dir: Path) -> None:
+    env = _file(open_dir, 0o664)
+    assert path_reachable_by(str(env), _other_peer()) is True
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="chown to another uid needs root")
+def test_a_file_the_peer_owns_follows_the_owner_bits(open_dir: Path) -> None:
+    """The exact shape reported: the peer owns ``.env``.  ``0o664`` is
+    reachable, ``0o000`` is not."""
+    env = _file(open_dir, 0o664)
+    os.chown(env, OTHER_UID, OTHER_UID)
+    assert path_reachable_by(str(env), _other_peer()) is True
+    os.chmod(env, 0o000)
+    assert path_reachable_by(str(env), _other_peer()) is False
+
+
+def test_a_file_written_on_the_peers_behalf_needs_write(open_dir: Path) -> None:
+    """A trace log the daemon appends to: readable is not enough."""
+    log = _file(open_dir, 0o664, "trace.log")
+    assert path_reachable_by(str(log), _other_peer(), ACCESS_WRITE) is False
+    os.chmod(log, 0o666)
+    assert path_reachable_by(str(log), _other_peer(), ACCESS_WRITE) is True
+
+
+def test_an_executed_file_still_needs_read_and_execute(open_dir: Path) -> None:
+    """The runner's interpreter (#1168) keeps the old ``r-x`` rule."""
+    exe = _file(open_dir, 0o664, "python")
+    assert path_reachable_by(str(exe), _other_peer(), ACCESS_EXECUTE) is False
+    os.chmod(exe, 0o775)
+    assert path_reachable_by(str(exe), _other_peer(), ACCESS_EXECUTE) is True
+
+
+def test_a_directory_still_needs_search(open_dir: Path) -> None:
+    """``r--`` on a directory lists names and enters nothing: refused for
+    every access, and the same tree with ``x`` back is allowed."""
+    tree = open_dir / "tree"
+    tree.mkdir()
+    for access in (ACCESS_READ, ACCESS_WRITE):
+        os.chmod(tree, 0o774)
+        assert path_reachable_by(str(tree), _other_peer(), access) is False
+        os.chmod(tree, 0o775)
+        assert path_reachable_by(str(tree), _other_peer(), access) is True
+
+
+def test_a_link_to_a_file_is_judged_as_the_file(open_dir: Path) -> None:
+    """The file/directory decision is made on the resolved target."""
+    env = _file(open_dir, 0o660)
+    link = open_dir / "link.env"
+    link.symlink_to(env)
+    assert path_reachable_by(str(link), _other_peer()) is False
+    os.chmod(env, 0o664)
+    assert path_reachable_by(str(link), _other_peer()) is True
+
+
+def test_a_missing_file_still_asks_about_creating_it(open_dir: Path) -> None:
+    """Unchanged: ``-wx`` on the nearest existing ancestor."""
+    target = open_dir / "new.log"
+    assert path_reachable_by(str(target), _other_peer(), ACCESS_WRITE) is False
+    os.chmod(open_dir, 0o777)
+    assert path_reachable_by(str(target), _other_peer(), ACCESS_WRITE) is True
+
+
+def test_an_undecided_access_is_a_bug_not_a_guess(open_dir: Path) -> None:
+    with pytest.raises(ValueError):
+        path_reachable_by(str(open_dir), _other_peer(), "append")
+
+
+# ----------------------------------------------------------------------
 # describe_unreachable_path / unreachable_client_paths
 # ----------------------------------------------------------------------
 
@@ -271,7 +404,7 @@ def test_no_peer_means_the_check_does_not_apply(open_dir: Path) -> None:
     """WS, Windows pipes, non-Linux sockets: that transport's own access
     control is what applies, and this must not become a denial."""
     os.chmod(open_dir, 0o700)
-    assert unreachable_client_paths([("workspace", str(open_dir))], None) == []
+    assert unreachable_client_paths([("workspace", str(open_dir), ACCESS_READ)], None) == []
 
 
 def test_the_daemons_own_account_skips_the_check(open_dir: Path) -> None:
@@ -280,7 +413,7 @@ def test_the_daemons_own_account_skips_the_check(open_dir: Path) -> None:
     CONNECTION: the same daemon still checks every other account."""
     os.chmod(open_dir, 0o700)
     assert unreachable_client_paths(
-        [("workspace", str(open_dir))], _self_peer(),
+        [("workspace", str(open_dir), ACCESS_READ)], _self_peer(),
     ) == []
 
 
@@ -289,7 +422,7 @@ def test_a_shared_socket_arms_the_check_with_no_knob(open_dir: Path) -> None:
     control nobody has."""
     os.chmod(open_dir, 0o700)
     violations = unreachable_client_paths(
-        [("workspace", str(open_dir))], _other_peer(),
+        [("workspace", str(open_dir), ACCESS_READ)], _other_peer(),
     )
     assert len(violations) == 1
 
@@ -304,7 +437,7 @@ def test_every_offending_field_is_reported_at_once(open_dir: Path) -> None:
     os.chmod(a, 0o700)
     os.chmod(b, 0o700)
     violations = unreachable_client_paths(
-        [("workspace", str(a)), ("config_root", str(b))], _other_peer(),
+        [("workspace", str(a), ACCESS_READ), ("config_root", str(b), ACCESS_READ)], _other_peer(),
     )
     assert len(violations) == 2
 
@@ -321,7 +454,7 @@ def test_the_operator_opt_out_disables_it_and_is_announced(
     monkeypatch.setenv("JAATO_IPC_TRUST_PEER_PATHS", "1")
     with caplog.at_level("WARNING"):
         assert unreachable_client_paths(
-            [("workspace", str(open_dir))], _other_peer(),
+            [("workspace", str(open_dir), ACCESS_READ)], _other_peer(),
         ) == []
     assert any(
         "JAATO_IPC_TRUST_PEER_PATHS" in record.message for record in caplog.records

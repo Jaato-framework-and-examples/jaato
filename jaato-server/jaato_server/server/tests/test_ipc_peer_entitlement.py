@@ -30,6 +30,29 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from jaato_server.shared.peer_identity import PeerCredentials
+from jaato_server.shared.tests.reversion import Reversion
+
+_SESSION_MANAGER = "jaato-server/jaato_server/server/session_manager.py"
+
+REVERSIONS = [
+    Reversion(
+        target=_SESSION_MANAGER,
+        find='        "trace_log_path": "write",\n',
+        replace='        "trace_log_path": "read",\n',
+        test="test_an_existing_trace_log_the_peer_cannot_write_is_refused",
+        because="a trace log the peer can read and not write accepted on "
+                "the handshake, so the daemon appends to it on their behalf",
+    ),
+    Reversion(
+        target=_SESSION_MANAGER,
+        find='        "env_file": "read",\n',
+        replace='        "env_file": "execute",\n',
+        test="test_an_ordinary_env_file_is_accepted_on_the_handshake",
+        because="#1464: an env_file judged by the r-x rule, so every "
+                "non-root peer naming an ordinary .env had its whole client "
+                "config dropped",
+    ),
+]
 
 OTHER_UID = 65534
 
@@ -328,3 +351,85 @@ def test_no_peer_leaves_the_handshake_alone(open_dir: Path) -> None:
         "ipc_1", _config(working_dir=str(open_dir)), None,
     ) is False
     assert manager._emitted == []
+
+
+# ----------------------------------------------------------------------
+# 4. files on the handshake (#1464)
+# ----------------------------------------------------------------------
+
+
+def _file(open_dir: Path, name: str, mode: int) -> Path:
+    path = open_dir / name
+    path.write_text("x\n")
+    os.chmod(path, mode)
+    return path
+
+
+def test_an_ordinary_env_file_is_accepted_on_the_handshake(
+    open_dir: Path,
+) -> None:
+    """``rw-rw-r--`` under searchable directories: the reported shape, which
+    was refused 329 times on one daemon for lacking the execute bit."""
+    env = _file(open_dir, ".env", 0o664)
+    manager = _manager()
+    refused = manager._reject_unentitled_client_paths(
+        "ipc_1",
+        _config(working_dir=str(open_dir), env_file=str(env)),
+        _other_peer(),
+    )
+    assert refused is False
+    assert manager._emitted == []
+
+
+def test_an_unreadable_env_file_is_refused_on_the_handshake(
+    open_dir: Path,
+) -> None:
+    """The pair: the same file one chmod apart."""
+    env = _file(open_dir, ".env", 0o660)
+    manager = _manager()
+    refused = manager._reject_unentitled_client_paths(
+        "ipc_1", _config(env_file=str(env)), _other_peer(),
+    )
+    assert refused is True
+    assert "env_file" in manager._emitted[0].error
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="chown to another uid needs root")
+def test_a_peer_owned_env_file_follows_the_owner_bits(open_dir: Path) -> None:
+    env = _file(open_dir, ".env", 0o664)
+    os.chown(env, OTHER_UID, OTHER_UID)
+    assert _manager()._reject_unentitled_client_paths(
+        "ipc_1", _config(env_file=str(env)), _other_peer(),
+    ) is False
+    os.chmod(env, 0o000)
+    assert _manager()._reject_unentitled_client_paths(
+        "ipc_1", _config(env_file=str(env)), _other_peer(),
+    ) is True
+
+
+def test_an_existing_trace_log_the_peer_cannot_write_is_refused(
+    open_dir: Path,
+) -> None:
+    """The daemon appends to a trace log, so readable is not enough."""
+    log = _file(open_dir, "trace.log", 0o664)
+    manager = _manager()
+    assert manager._reject_unentitled_client_paths(
+        "ipc_1", _config(trace_log_path=str(log)), _other_peer(),
+    ) is True
+    assert "trace_log_path" in manager._emitted[0].error
+
+    os.chmod(log, 0o666)
+    assert _manager()._reject_unentitled_client_paths(
+        "ipc_1", _config(trace_log_path=str(log)), _other_peer(),
+    ) is False
+
+
+def test_every_handshake_path_field_states_its_access() -> None:
+    """Keyed per field, so a field added to the checked set without an
+    access is caught here rather than as a ``KeyError`` on a handshake."""
+    from jaato_server.server.session_manager import SessionManager
+    from jaato_server.shared.peer_identity import ACCESS_READ, ACCESS_WRITE
+
+    access = SessionManager._CLIENT_CONFIG_PATH_ACCESS
+    assert set(access) == set(SessionManager._CLIENT_CONFIG_PATH_FIELDS)
+    assert set(access.values()) <= {ACCESS_READ, ACCESS_WRITE}

@@ -23,7 +23,10 @@ from jaato_server.server.session_manager import SessionManager, session_picker_f
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
 from jaato_server.shared.path_utils import describe_relative_path
 from jaato_server.shared.session_id import is_safe_session_id
-from jaato_server.shared.peer_identity import unreachable_client_paths
+from jaato_server.shared.peer_identity import (
+    ACCESS_READ,
+    unreachable_client_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +494,7 @@ class CommandRouter:
             ))
             return
         refusals = unreachable_client_paths(
-            [("workspace", workspace_path)],
+            [("workspace", workspace_path, ACCESS_READ)],
             # Through the shared tolerance, not a direct attribute read: a
             # sink predating ``get_client_peer`` must contribute "no peer"
             # rather than raise, exactly as it does inside the composite.

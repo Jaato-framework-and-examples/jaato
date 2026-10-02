@@ -7277,6 +7277,22 @@ class SessionManager:
         "provider_trace_log",
     )
 
+    #: What the daemon does with each client-config path on the peer's
+    #: behalf, which decides what the peer must hold on an existing FILE
+    #: there (#1464).  ``working_dir`` / ``config_root`` are trees and get
+    #: ``r-x`` as directories whatever this says; ``env_file`` is read; the
+    #: two trace paths are appended to.  Keyed per field, never derived from
+    #: the name, and every field in :attr:`_CLIENT_CONFIG_PATH_FIELDS` must
+    #: be here (a missing one is a ``KeyError`` on the handshake, not a
+    #: silent default).
+    _CLIENT_CONFIG_PATH_ACCESS = {
+        "working_dir": "read",
+        "config_root": "read",
+        "env_file": "read",
+        "trace_log_path": "write",
+        "provider_trace_log": "write",
+    }
+
     def _reject_relative_client_paths(
         self, client_id: str, event: 'ClientConfigRequest',
     ) -> bool:
@@ -7381,7 +7397,11 @@ class SessionManager:
 
         violations = unreachable_client_paths(
             [
-                (field, getattr(event, field, None) or "")
+                (
+                    field,
+                    getattr(event, field, None) or "",
+                    self._CLIENT_CONFIG_PATH_ACCESS[field],
+                )
                 for field in self._CLIENT_CONFIG_PATH_FIELDS
             ],
             peer,

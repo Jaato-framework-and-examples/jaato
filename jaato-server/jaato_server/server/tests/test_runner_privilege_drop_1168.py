@@ -81,8 +81,8 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/server/runner_user.py",
-        find="    return [p for p in paths if path_reachable_by(p, peer) is not True]\n",
-        replace="    return []\n",
+        find="        if path_reachable_by(p, peer, ACCESS_EXECUTE) is not True\n",
+        replace="        if False\n",
         test="TestThePolicy::test_an_unreachable_install_refuses_the_session",
         because="a user who cannot read the interpreter being handed a "
                 "runner that dies on its first lazy import, several layers "

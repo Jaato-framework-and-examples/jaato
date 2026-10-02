@@ -61,7 +61,11 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
-from jaato_server.shared.peer_identity import PeerCredentials, path_reachable_by
+from jaato_server.shared.peer_identity import (
+    ACCESS_EXECUTE,
+    PeerCredentials,
+    path_reachable_by,
+)
 from jaato_server.shared.privilege_drop import RunnerUser
 
 logger = logging.getLogger(__name__)
@@ -309,11 +313,18 @@ def unreachable_for(user: RunnerUser, paths: Iterable[str]) -> List[str]:
     as unreachable here, because the cost of a wrong "yes" is a runner that
     crashes on import and the cost of a wrong "no" is a refusal naming the
     path.
+
+    ``ACCESS_EXECUTE``: the list holds the interpreter, which the target
+    must be able to exec (``r-x``), beside directories, which need ``r-x``
+    whatever the access.
     """
     peer = PeerCredentials(
         uid=user.uid, gid=user.gid, username=user.username,
     )
-    return [p for p in paths if path_reachable_by(p, peer) is not True]
+    return [
+        p for p in paths
+        if path_reachable_by(p, peer, ACCESS_EXECUTE) is not True
+    ]
 
 
 def refuse_if_unreachable(user: RunnerUser, workspace_path: Optional[str]) -> None:

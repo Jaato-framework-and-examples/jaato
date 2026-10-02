@@ -7279,10 +7279,14 @@ plugin discovery and so the answer cannot be derived twice.
 | attribution | `SO_PEERCRED` → `PeerCredentials`, rendered by `get_client_user`. `Session.created_by`, the ledger's `response` / `permission-check` `user_id` and the telemetry `user.id` populate on IPC for the first time — everything above `EventSink` is transport-agnostic, so #859's plumbing lights up with no further change |
 | entitlement | `unreachable_client_paths` refuses a `workspace_path` / `config_root` / `env_file` / trace path the connecting account could not reach, at `_handle_set_workspace` and `_reject_unentitled_client_paths` (beside #742's relative-path guard, and all-or-nothing for the same reason: a half-applied handshake is its own silent-wrong-directory bug) |
 
-**The reachability rule, and why each half is what it is.** An existing path
-needs `r-x` — deliberately NOT `w`, because an org-wide `config_root` of
+**The reachability rule, and why each half is what it is.** An existing
+directory needs `r-x` — deliberately NOT `w`, because an org-wide `config_root` of
 shared profiles under `/opt`, readable by everyone and writable by none of
-them, is a legitimate and desirable shape in exactly this deployment. A path
+them, is a legitimate and desirable shape in exactly this deployment. An
+existing file needs only what the daemon will do with it, stated per field by
+the caller: `r` for `env_file`, `w` for the two trace-log paths (until #1464
+every leaf needed `r-x`, so an ordinary `.env` was refused and the peer's whole
+client config dropped). The decision uses the resolved target. A path
 that does not exist needs `-wx` on the nearest existing ancestor, since the
 daemon provisions workspaces and refusing every not-yet-created directory
 would refuse the normal case. Every ancestor needs `--x`, which is what makes
