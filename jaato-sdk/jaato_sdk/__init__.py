@@ -29,6 +29,7 @@ from jaato_sdk.client.convenience import (
 # against the BUILTIN, which the SDK's same-named class does not subclass.  An
 # exception nobody can conveniently import is one nobody catches.
 from jaato_sdk.client.errors import (
+    RequestRefused,
     SessionCreateFailed,
     SessionNotConfirmed,
     SessionNotSent,
@@ -92,6 +93,7 @@ __all__ = [
     "Terminus",
     "TurnTimeout",
     "truncation_reason",
+    "RequestRefused",
     "SessionCreateFailed",
     "SessionNotConfirmed",
     "SessionNotSent",

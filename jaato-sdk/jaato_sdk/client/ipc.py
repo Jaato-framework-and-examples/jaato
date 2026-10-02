@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
 from jaato_sdk.client.errors import (
+    RequestRefused,
     SessionCreateFailed,
     SessionNotConfirmed,
     SessionNotSent,
@@ -2708,6 +2709,11 @@ class IPCClient:
 
         The mechanics :meth:`_memory_request` documents, without the
         protocol gate (each caller checks its own floor first).
+
+        Raises:
+            RequestRefused: The answer echoing ``request_id`` is an
+                ``ErrorEvent`` (e.g. the IPC session gate, #1475).
+            TimeoutError / ConnectionError: No answer arrived.
         """
         request_id = f"{prefix}_{uuid.uuid4().hex[:16]}"
         event.request_id = request_id  # type: ignore[attr-defined]
@@ -2737,6 +2743,12 @@ class IPCClient:
         if answer is None:
             raise ConnectionError(
                 f"{method}: the connection closed before the daemon answered")
+        if isinstance(answer, ErrorEvent):
+            # A correlated refusal (#1475): the daemon refused the request
+            # before any handler produced the request's own result event.
+            raise RequestRefused(
+                method, answer.error, error_type=answer.error_type,
+                request_id=request_id, details=answer.details)
         return answer
 
     async def list_memories(self, *, timeout: float = 10.0) -> MemoryListEvent:

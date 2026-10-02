@@ -4528,6 +4528,21 @@ reversions), `server/tests/test_a_curator_lists_reference_claims.py`
 (five) and `shared/tests/test_a_proposal_names_who_approved_it.py`
 (seven).
 
+**No session needed (#1475).** The four reference requests are
+session-less on IPC (`REFERENCE_CURATION_REQUEST_TYPES` in
+`jaato_sdk/events.py`, part of the IPC gate's `_SESSIONLESS_REQUEST_TYPES`
+beside the memory verbs): a client that declared a workspace and attached
+to nothing gets the handler's answer, `no_workspace` when it declared none.
+WS daemon mode never gated them. And a correlated request the IPC gate
+still refuses (one that needs a session) is answered with an `ErrorEvent`
+echoing its `request_id` (`details.category: "no_session"`, logged at
+WARNING); `IPCClient._correlated_request` raises `RequestRefused` and the
+TS `_quietRequest` rejects with `RequestRefusedError`, where before the
+uncorrelated refusal was discarded and the call waited out its timeout
+(180 s for promote). Guard:
+`server/tests/test_reference_curation_without_a_session_1475.py`, three
+reversions, over a real `JaatoIPCServer` and `IPCClient`.
+
 ### Typed Links Between References (wikiLLM Seam 3)
 
 The only edge between references was a MENTION: an id or path that happens

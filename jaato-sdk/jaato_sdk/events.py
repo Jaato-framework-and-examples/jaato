@@ -3030,6 +3030,18 @@ class ReferenceLinksUpdateRequest(Event):
     links: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+#: The reference-curation requests (1.33).  Daemon-level: each handler
+#: resolves the caller's workspace from the CONNECTION and answers a
+#: session-less caller with a correlated result (``no_workspace`` when it has
+#: none), so a transport must route them without an attached session (#1475).
+REFERENCE_CURATION_REQUEST_TYPES = (
+    ReferenceClaimsRequest,
+    ReferenceCurationRequest,
+    ReferenceCatalogRequest,
+    ReferenceLinksUpdateRequest,
+)
+
+
 class ReferenceLinksUpdateResultEvent(Event):
     """What one links update did (1.33).
 
