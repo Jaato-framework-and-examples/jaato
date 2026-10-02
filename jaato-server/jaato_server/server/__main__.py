@@ -1013,15 +1013,9 @@ class JaatoDaemon:
                 backend that is unavailable.  Raised rather than returned
                 so the daemon exits with the reason, before its PID file.
         """
-        from jaato_server.server.apparmor import AppArmorManager
-        from jaato_server.server.confinement import select_backend
-        from jaato_server.server.confinement.apparmor import AppArmorBackend
-        from jaato_server.server.confinement.selinux import SELinuxBackend
+        from jaato_server.server.confinement import select_daemon_backend
 
-        choice = select_backend(
-            apparmor=lambda: AppArmorBackend(AppArmorManager(workspace_root=str(Path.home()))),
-            selinux=SELinuxBackend,
-        )
+        choice = select_daemon_backend()
         if choice.refuse:
             logger.error("refusing to start: %s", choice.describe())
             raise SystemExit(f"jaato_server: refusing to start: {choice.describe()}")

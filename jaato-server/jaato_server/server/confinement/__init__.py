@@ -23,6 +23,7 @@ from jaato_server.server.confinement.selection import (
     REQUIRE_CONFINEMENT_ENV_VAR,
     BackendChoice,
     select_backend,
+    select_daemon_backend,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "CONFINEMENT_ENV_VAR",
     "REQUIRE_CONFINEMENT_ENV_VAR",
     "select_backend",
+    "select_daemon_backend",
 ]

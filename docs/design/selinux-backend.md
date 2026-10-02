@@ -485,9 +485,19 @@ root (or the relabel permissions) for section 6 and nothing privileged per
 session. That is an improvement on the AppArmor path, which runs
 `sudo apparmor_parser -r` per boundary.
 
-`jaato-doctor` gains a check: backend selected, SELinux mode, module
-loaded and its version, the interpreter's and venv's labels, and whether
-`workspace_root` has an fcontext rule.
+`jaato-doctor` reports `kernel confinement` by calling
+`select_daemon_backend`, the function the daemon calls at startup, so it
+names the backend a daemon started now would pick. It FAILs when that
+daemon would refuse to start, and WARNs when no kernel backend is
+available. Under SELinux it shows the host mode, whether `jaato_runner_t`
+is permissive, and the interpreter's label. It also WARNs when either the
+host or the runner domain is permissive, and when `~/.jaato` is not
+`jaato_user_dir_t`, naming the `restorecon` to run. Module loading, its
+version and the role/entrypoint checks are §10's readiness, so a failure
+there is the reason shown on the "none" line. The check runs as the
+doctor's own process, so a daemon started another way may hold another
+context. There is no fcontext check for `workspace_root`: the daemon
+labels the workspace itself (§6).
 
 ## 10. Availability check
 
@@ -538,7 +548,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
-| 2b | **implemented, not yet run on a kernel**: user-tier types and binds in the module (1.2.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. A kernel run follows ([handoff](selinux-phase2b-handoff.md)); the doctor check is still to do | RHEL hosts get a kernel boundary; confined sessions skip the pool |
+| 2b | **implemented, not yet run on a kernel**: user-tier types and binds in the module (1.2.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. A kernel run follows ([handoff](selinux-phase2b-handoff.md)); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
@@ -674,10 +684,16 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   PR #1466); and that file's policy is never applied (raised on #1466).
 * **Not done in 2b**: the isolated sub-runner stays AppArmor-only and
   refuses (phase 3); denial hints and the diagnostics grant view are
-  AppArmor-only; and a runner may still CREATE `.jaato/reactors.json` or
-  `template_routing.yaml` when the file is absent (AppArmor denies the path
-  whether or not it exists; SELinux would need a `.jaato` type with
-  filename transitions), an open item.
+  AppArmor-only.
+* **An absent `.jaato/reactors.json` or `template_routing.yaml`** (AppArmor
+  denies the path whether or not it exists; a label cannot sit on an absent
+  file). Module 1.4.0: a file created under either name is born
+  `jaato_authored_t`, which neither domain may create, so the creation is
+  refused. Filename transitions match in any workspace directory; both
+  names are jaato's own. Not closed: creating it under another name and
+  renaming or hard-linking it into place, which keeps the source's type.
+  AppArmor refuses that by path; SELinux could only by refusing `add_name`
+  in all of `.jaato`, which holds runtime state the runner writes.
 
 ### What phase 2a decided
 

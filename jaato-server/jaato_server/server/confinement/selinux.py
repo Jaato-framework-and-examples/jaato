@@ -55,6 +55,9 @@ logger = logging.getLogger(__name__)
 #: The policy module version this build needs (design §4).
 REQUIRED_POLICY_VERSION = 1
 
+#: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
+USER_DIR_TYPE = "jaato_user_dir_t"
+
 #: jaato's runner domain, as a context the kernel can validate.
 RUNNER_PROBE_CONTEXT = "system_u:system_r:jaato_runner_t:s0"
 
@@ -225,6 +228,35 @@ class SELinuxBackend:
     @property
     def unavailable_reason(self) -> Optional[str]:
         return self.host_readiness().reason
+
+    def host_facts(self, home: str) -> Dict[str, Optional[str]]:
+        """What ``jaato-doctor`` reports about a ready host (design §9).
+
+        Read from this process: the doctor and the daemon share a host and
+        a policy, but a daemon started another way may hold another context.
+
+        Returns:
+            ``mode`` (enforcing / permissive), ``runner_domain`` (whether
+            the policy has made ``jaato_runner_t`` permissive), the
+            interpreter and its label, and ``~/.jaato`` and its label
+            (``None`` where one could not be read).
+        """
+        kernel = self._kernel_factory()
+        enforcing = self.host_readiness().enforcing
+        interpreter = self._interpreter()
+        user_dir = os.path.join(home, ".jaato")
+        permissive = self._domain_permissive(RUNNER_PROBE_CONTEXT)
+        return {
+            "mode": None if enforcing is None else ("enforcing" if enforcing else "permissive"),
+            "runner_domain": None if permissive is None else (
+                "permissive" if permissive else "enforcing"),
+            "interpreter": interpreter,
+            "interpreter_label": kernel.file_context(interpreter) if kernel else None,
+            "user_dir": user_dir,
+            "user_dir_label": (
+                kernel.link_context(user_dir)
+                if kernel and os.path.lexists(user_dir) else None),
+        }
 
     def _level_table(self) -> LevelTable:
         if self._levels is None:

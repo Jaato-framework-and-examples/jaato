@@ -129,3 +129,24 @@ def select_backend(
             choice.name, choice.backend = name, backend
             break
     return choice
+
+
+def select_daemon_backend(environ: Optional[Mapping[str, str]] = None) -> BackendChoice:
+    """The choice a daemon started now would make, with the daemon's factories.
+
+    One definition for the daemon's startup selection and for
+    ``jaato-doctor``, so the doctor cannot report a backend the daemon
+    would not pick.  Imported lazily: both backends pull in modules this
+    one must not load at import time.
+    """
+    from pathlib import Path
+
+    from jaato_server.server.apparmor import AppArmorManager
+    from jaato_server.server.confinement.apparmor import AppArmorBackend
+    from jaato_server.server.confinement.selinux import SELinuxBackend
+
+    return select_backend(
+        apparmor=lambda: AppArmorBackend(AppArmorManager(workspace_root=str(Path.home()))),
+        selinux=SELinuxBackend,
+        environ=environ,
+    )
