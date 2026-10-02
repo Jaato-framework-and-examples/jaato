@@ -17,6 +17,12 @@ is the one place both halves meet:
   session's temp directory and point :func:`path` at it.
 - :func:`path` (every runner-side reader of those files): the snapshot's
   copy when one is installed, else ``~/.jaato/<rel>`` on disk.
+- :func:`home_path`: the same for the read-only interop directories OUTSIDE
+  ``~/.jaato`` a plugin reads (:data:`HOME_SHIPPED_DIRS`, Claude Code's
+  ``~/.claude/skills``).  AppArmor grants the prompt library that read;
+  SELinux leaves the directory the home's type, so it is shipped instead
+  (phase 2b kernel run).  Their snapshot keys carry :data:`HOME_PREFIX`,
+  which no path under ``~/.jaato`` can start with.
 
 Absent snapshot (``None``) means an older daemon or an in-process session:
 readers read disk exactly as before.  An EMPTY snapshot (``{}``) means the
@@ -66,6 +72,14 @@ SHIPPED_DIRS: Tuple[str, ...] = (
     "scripts",
 )
 
+#: Read-only directories under the HOME (not ``~/.jaato``) shipped whole.
+HOME_SHIPPED_DIRS: Tuple[str, ...] = (
+    ".claude/skills",
+)
+
+#: Snapshot-key prefix of a :data:`HOME_SHIPPED_DIRS` entry.
+HOME_PREFIX = "@home/"
+
 #: Names that are credentials wherever they appear; never shipped.
 CREDENTIAL_SUFFIXES: Tuple[str, ...] = (
     "_auth.json", "_oauth.json", "_accounts.json",
@@ -96,28 +110,60 @@ def collect(jaato_dir: str) -> Dict[str, str]:
     A file that is skipped (symlinked, foreign-owned, too large, not
     UTF-8, unreadable) is named in a WARNING and left out.
     """
+    out: Dict[str, str] = {}
+    budget = [MAX_TOTAL_BYTES]
     try:
         top = os.lstat(jaato_dir)
     except FileNotFoundError:
-        return {}
-    if not stat.S_ISDIR(top.st_mode):
+        top = None
+    if top is not None and not stat.S_ISDIR(top.st_mode):
         logger.warning("user tier: %s is not a directory (a symlink?); "
                        "nothing shipped", jaato_dir)
         return {}
-    out: Dict[str, str] = {}
-    total = 0
-    for rel in _candidates(jaato_dir):
-        text = _read_owned(jaato_dir, rel, top.st_uid)
+    if top is not None:
+        _add(out, budget, jaato_dir, _candidates(jaato_dir), top.st_uid, "")
+    _collect_home_dirs(out, budget, os.path.dirname(jaato_dir.rstrip("/")))
+    return out
+
+
+def _add(out: Dict[str, str], budget: list, base: str,
+         rels: Iterator[str], owner: int, prefix: str) -> None:
+    """Read each of *rels* under *base* into *out*, within the size budget."""
+    for rel in rels:
+        text = _read_owned(base, rel, owner)
         if text is None:
             continue
         size = len(text.encode("utf-8"))
-        if total + size > MAX_TOTAL_BYTES:
+        if size > budget[0]:
             logger.warning("user tier: %s/%s skipped, the snapshot would "
-                           "exceed %d bytes", jaato_dir, rel, MAX_TOTAL_BYTES)
+                           "exceed %d bytes", base, rel, MAX_TOTAL_BYTES)
             continue
-        out[rel] = text
-        total += size
-    return out
+        out[prefix + rel] = text
+        budget[0] -= size
+
+
+def _collect_home_dirs(out: Dict[str, str], budget: list, home: str) -> None:
+    """:data:`HOME_SHIPPED_DIRS`, owned by the home's owner, no symlinked step."""
+    try:
+        owner = os.lstat(home).st_uid
+    except OSError:
+        return
+    for rel_dir in HOME_SHIPPED_DIRS:
+        if _real_dirs(home, rel_dir):
+            _add(out, budget, home, _walk(home, rel_dir), owner, HOME_PREFIX)
+
+
+def _real_dirs(base: str, rel_dir: str) -> bool:
+    """Is every component of *rel_dir* under *base* a real directory?"""
+    current = base
+    for part in rel_dir.split("/"):
+        current = os.path.join(current, part)
+        try:
+            if not stat.S_ISDIR(os.lstat(current).st_mode):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _candidates(jaato_dir: str) -> Iterator[str]:
@@ -226,6 +272,13 @@ def install(
 def installed_root() -> Optional[Path]:
     """The installed snapshot directory, or ``None`` (disk reads)."""
     return _installed_root
+
+
+def home_path(rel: str) -> Path:
+    """Where a reader finds ``~/<rel>`` for a :data:`HOME_SHIPPED_DIRS` path."""
+    if _installed_root is not None:
+        return _installed_root / HOME_PREFIX.rstrip("/") / rel
+    return Path.home() / rel
 
 
 def path(rel: str) -> Path:

@@ -23,7 +23,6 @@ kernel spawned is honoured.
 """
 
 import ctypes
-import ctypes.util
 import datetime
 import json
 import logging
@@ -88,9 +87,13 @@ _PR_SET_PDEATHSIG = 1
 # the kernel never reached exec, so its pipe was never healthy.  Doing the
 # CDLL/dlopen here, once, leaves the preexec_fn with nothing but the resolved
 # prctl syscall.  None if libc can't be loaded → PDEATHSIG is simply skipped.
+#
+# The process's own symbol table (``CDLL(None)``, as shared/private_tmp.py
+# does), never ``ctypes.util.find_library``: that runs ``ldconfig -p`` and,
+# when a confined runner may not exec it (SELinux, phase 2b kernel run),
+# falls back to running gcc and objdump at every runner start.
 try:
-    _LIBC = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
-                        use_errno=True)
+    _LIBC = ctypes.CDLL(None, use_errno=True)
     _LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
                             ctypes.c_ulong, ctypes.c_ulong]
     _LIBC.prctl.restype = ctypes.c_int

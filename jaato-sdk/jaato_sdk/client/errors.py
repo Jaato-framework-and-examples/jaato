@@ -50,6 +50,7 @@ from __future__ import annotations
 from typing import Optional
 
 __all__ = [
+    "RequestRefused",
     "SessionCreateFailed",
     "SessionNotSent",
     "SessionRefused",
@@ -175,3 +176,34 @@ class SessionNotConfirmed(SessionCreateFailed):
     def __init__(self, message: str, *, cause: str = "timeout") -> None:
         super().__init__(message)
         self.cause = cause
+
+
+class RequestRefused(RuntimeError):
+    """A correlated request the daemon refused before handling it (#1475).
+
+    Raised by a correlated SDK call (``list_reference_claims``,
+    ``promote_reference_claim``, the memory verbs, ...) when the answer
+    echoing its ``request_id`` is an ``ErrorEvent`` rather than the request's
+    own result event -- e.g. the IPC gate refusing a request that needs an
+    attached session.  Before this, such a refusal carried no ``request_id``
+    and the caller waited out its whole timeout.
+
+    Attributes:
+        method: The SDK method that sent the request.
+        error: The daemon's reason, for a person.
+        error_type: The daemon's error type.
+        category: Machine-readable reason from ``details`` (``no_session``
+            at the IPC gate), ``""`` when the daemon named none.
+        request_id: The echoed correlation id.
+        details: The ``ErrorEvent.details`` dict, verbatim.
+    """
+
+    def __init__(self, method: str, error: str, *, error_type: str = "",
+                 request_id: str = "", details: Optional[dict] = None) -> None:
+        self.method = method
+        self.error = error
+        self.error_type = error_type
+        self.request_id = request_id
+        self.details = dict(details or {})
+        self.category = str(self.details.get("category") or "")
+        super().__init__(f"{method}: refused by the daemon: {error}")

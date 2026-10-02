@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.events import Event
+from jaato_server.server import pool_admin
 from jaato_server.server.event_sink import EventSink, client_peer
 from jaato_server.server.session_manager import SessionManager, session_picker_fields
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
@@ -746,7 +747,7 @@ class CommandRouter:
             self._handle_reference_curation(
                 client_id, cmd, args, workspace_path, session_id=session_id)
             return True
-        if cmd in ("pool.status", "pool.resize"):
+        if cmd in (pool_admin.VERB_STATUS, pool_admin.VERB_RESIZE):
             self._handle_pool_command(client_id, cmd, args)
             return True
         return False
@@ -804,7 +805,7 @@ class CommandRouter:
         from jaato_server.server.pool_admin import (
             INVALID_REQUEST, describe, parse_resize_args,
         )
-        if cmd == "pool.resize":
+        if cmd == pool_admin.VERB_RESIZE:
             try:
                 target, ceiling = parse_resize_args(args)
             except ValueError as exc:

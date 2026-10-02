@@ -34,6 +34,7 @@ import {
 import {
   ConnectionClosedError,
   RequestInterruptedError,
+  RequestRefusedError,
   IncompatibleServerError,
   ReconnectingError,
 } from "./errors.js";
@@ -743,6 +744,32 @@ describe("JaatoClient session management", () => {
       reference_id: "adr-2", ok: true, links: [{ to: "adr-1", rel: "supersedes" }],
     });
     assert.equal((await update).ok, true);
+  });
+
+  test("a correlated error refusal rejects at once with the reason (#1475)", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const pending = client.listReferenceClaims({ timeoutMs: 60_000 });
+    await tick();
+    const req = JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+    // An uncorrelated error is not this call's answer.
+    lastInstance!.emit({ type: EventTypeValue.ERROR, error: "unrelated" });
+    lastInstance!.emit({
+      type: EventTypeValue.ERROR, request_id: req.request_id,
+      error: "ReferenceClaimsRequest: no session selected.", error_type: "RequestError",
+      details: { category: "no_session" },
+    });
+    await assert.rejects(pending, (err: unknown) => {
+      assert.ok(err instanceof RequestRefusedError);
+      assert.equal(err.category, "no_session");
+      assert.equal(err.requestId, req.request_id);
+      assert.match(err.message, /no session selected/);
+      return true;
+    });
   });
 
   test("reference claim verbs are refused below protocol 1.33", async () => {

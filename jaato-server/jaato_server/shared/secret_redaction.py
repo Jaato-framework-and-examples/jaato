@@ -389,15 +389,22 @@ def provider_credential_secrets(provider: Any, provider_name: str = "provider") 
 
 def stored_auth_directories(
     workspace_path: Optional[str], config_root: Optional[str],
+    *, include_home: bool = True,
 ) -> List[str]:
-    """Where providers look for ``<provider>_auth.json``: config root, workspace, home."""
+    """Where providers look for ``<provider>_auth.json``: config root, workspace, home.
+
+    *include_home* is ``False`` for a kernel-confined runner: neither LSM
+    lets it read ``~/.jaato/*_auth.json`` (AppArmor grants no such path,
+    SELinux leaves it the home's type), so a stored credential cannot reach
+    its output and listing the directory only produces a denial.
+    """
     dirs: List[str] = []
     if config_root:
         dirs.append(config_root)
     if workspace_path:
         dirs.append(os.path.join(workspace_path, ".jaato"))
     home = os.path.expanduser("~")
-    if home and home != "~":
+    if include_home and home and home != "~":
         dirs.append(os.path.join(home, ".jaato"))
     return dirs
 
@@ -438,8 +445,13 @@ def configure_redaction_sources(
     workspace_path: Optional[str] = None,
     config_root: Optional[str] = None,
     profile_scrub: Any = None,
+    confined: Optional[bool] = None,
 ) -> SecretRedactor:
     """Record where this session's secrets come from, then build and install.
+
+    *confined*: the runner is kernel-confined, so the stored credentials in
+    ``~/.jaato`` are not scanned (:func:`stored_auth_directories`).
+    ``None`` keeps the previous answer (a reload), unconfined at first.
 
     Replaces what a previous call recorded (a reload is a REPLACEMENT, like
     ``apply_session_env``), except the provider credentials already noted,
@@ -462,6 +474,8 @@ def configure_redaction_sources(
             "profile_scrub": profile_scrub if profile_scrub is not None
             else previous.get("profile_scrub"),
             "provider_secrets": list(previous.get("provider_secrets") or []),
+            "confined": bool(confined if confined is not None
+                             else previous.get("confined", False)),
         }
         return _rebuild_locked()
 
@@ -513,6 +527,7 @@ def _rebuild_locked() -> SecretRedactor:
     secrets.extend(src.get("provider_secrets") or [])
     secrets.extend(stored_auth_secrets(stored_auth_directories(
         src.get("workspace_path"), src.get("config_root"),
+        include_home=not src.get("confined", False),
     )))
     redactor = install_redactor(SecretRedactor(secrets))
     if redactor.active:

@@ -119,7 +119,7 @@ REVERSIONS = [
     Reversion(
         target=_SPAWN,
         find=(
-            "    if not profile_name:\n"
+            "    if not profile_name and confinement is None:\n"
             "        return None\n"
             "    return stashed_private_tmp(server)\n"
         ),

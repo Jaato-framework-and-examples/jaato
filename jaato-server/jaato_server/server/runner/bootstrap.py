@@ -696,6 +696,7 @@ def scan_thread_profiles(
     expected_profile: str,
     *,
     task_dir: str = DEFAULT_TASK_ATTR_DIR,
+    matcher: Callable[[str, str], bool] = _label_is_inside,
 ) -> ThreadProfileScan:
     """Read every thread's AppArmor label and classify it.
 
@@ -732,7 +733,7 @@ def scan_thread_profiles(
             gone.append(tid)
         elif kind == "unreadable":
             unreadable.append((tid, value))
-        elif _label_is_inside(value, expected_profile):
+        elif matcher(value, expected_profile):
             matched.append(tid)
         else:
             divergent.append((tid, value))
@@ -756,6 +757,7 @@ def verify_thread_confinement(
     poll_seconds: float = DEFAULT_VERIFY_POLL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    matcher: Callable[[str, str], bool] = _label_is_inside,
 ) -> ThreadProfileScan:
     """Assert that every thread of this process is inside *expected_profile*.
 
@@ -782,6 +784,9 @@ def verify_thread_confinement(
     Args:
         expected_profile: Profile the process just entered.
         task_dir: See :func:`scan_thread_profiles`.
+        matcher: Whether a thread's label is inside the expected one.
+            The AppArmor default accepts a sub-profile; SELinux passes
+            exact equality (``lsm_confine``).
         grace_seconds: Total time to keep re-scanning while divergence
             persists.
         poll_seconds: Interval between re-scans.
@@ -796,14 +801,14 @@ def verify_thread_confinement(
     Raises:
         ThreadConfinementDivergence: divergence persisted.
     """
-    scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+    scan = scan_thread_profiles(expected_profile, task_dir=task_dir, matcher=matcher)
     if not scan.divergent:
         return scan
 
     deadline = monotonic() + max(0.0, grace_seconds)
     while monotonic() < deadline:
         sleep(poll_seconds)
-        scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+        scan = scan_thread_profiles(expected_profile, task_dir=task_dir, matcher=matcher)
         if not scan.divergent:
             return scan
 

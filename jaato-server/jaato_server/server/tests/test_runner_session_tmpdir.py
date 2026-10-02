@@ -110,7 +110,7 @@ class TestSpawnCreatesTmpdirBeforeFork:
 
         with patch.object(
             RunnerSpawner, "_session_tmpdir",
-            staticmethod(lambda session_id, profile_name='': str(target)),
+            staticmethod(lambda session_id, profile_name='', confinement=None: str(target)),
         ):
             spawner = RunnerSpawner()
             with patch.object(spawner, "_assert_daemon_unconfined"):
@@ -148,7 +148,7 @@ class TestSpawnCreatesTmpdirBeforeFork:
 
         with patch.object(
             RunnerSpawner, "_session_tmpdir",
-            staticmethod(lambda session_id, profile_name='': str(target)),
+            staticmethod(lambda session_id, profile_name='', confinement=None: str(target)),
         ):
             spawner = RunnerSpawner()
             with patch.object(spawner, "_assert_daemon_unconfined"):

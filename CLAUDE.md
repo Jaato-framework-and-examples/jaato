@@ -2212,6 +2212,14 @@ counters, and refreshing the template (new plugins) without a restart.
 
 Guard: `server/tests/test_pool_resize_without_restart.py`, six reversions.
 
+`jaato-scaffold explain pool` is the operator's view: the startup knobs,
+the three entry points, who may resize, the refusal categories, what
+growing and shrinking do, and the counters that say the size is wrong. It
+reads `pool_admin.py` (`STARTUP_KNOBS`, `VERB_*`, `CLI_*_FLAG`,
+`REFUSAL_CATEGORIES`, which the router and argparse also read), the SDK's
+`MIN_POOL_ADMIN_PROTOCOL` and `PoolManager.get_telemetry()`. Guard:
+`jaato_server/shared/tests/test_explain_pool.py`, three reversions.
+
 ### A Slot the Pool Kept Offering After Its Channel Died (#1058)
 
 `PoolManager` had **no notion of RPC liveness**. `_closed` is set in exactly
@@ -4561,6 +4569,21 @@ Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
 reversions), `server/tests/test_a_curator_lists_reference_claims.py`
 (five) and `shared/tests/test_a_proposal_names_who_approved_it.py`
 (seven).
+
+**No session needed (#1475).** The four reference requests are
+session-less on IPC (`REFERENCE_CURATION_REQUEST_TYPES` in
+`jaato_sdk/events.py`, part of the IPC gate's `_SESSIONLESS_REQUEST_TYPES`
+beside the memory verbs): a client that declared a workspace and attached
+to nothing gets the handler's answer, `no_workspace` when it declared none.
+WS daemon mode never gated them. And a correlated request the IPC gate
+still refuses (one that needs a session) is answered with an `ErrorEvent`
+echoing its `request_id` (`details.category: "no_session"`, logged at
+WARNING); `IPCClient._correlated_request` raises `RequestRefused` and the
+TS `_quietRequest` rejects with `RequestRefusedError`, where before the
+uncorrelated refusal was discarded and the call waited out its timeout
+(180 s for promote). Guard:
+`server/tests/test_reference_curation_without_a_session_1475.py`, three
+reversions, over a real `JaatoIPCServer` and `IPCClient`.
 
 ### Typed Links Between References (wikiLLM Seam 3)
 
@@ -13099,5 +13122,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Per-User GitHub Credentials](docs/design/per-user-github-credentials.md) - Proposed (#1225–#1228): how a multi-user web deployment on a root daemon gives each session its WUI user's GitHub token. The BFF holds the grant (GitHub App, refresh token encrypted per OIDC `sub`) and binds an account per workspace; the workspace `.env` carries only a reference (`GH_TOKEN=app://github`), which the daemon resolves at every spawn by asking the owning application over its bind channel, so cascade, wake and revived sessions get it too and nothing resolved is persisted. Includes the per-workspace `.home/` for model-driven subprocesses.
 - [GitHub Workspace Guidance](docs/design/github-workspace-guidance.md) - Proposed (#1240, docs-only, application-scoped): how the web coder ships the "use `gh` safely in a shared workspace" rule-set into every workspace it binds a GitHub account to, as application-managed files (no daemon change). The BFF writes `.jaato/instructions/40-github.md` at bind time beside the `.env`/`.gitconfig` it already seeds, so cascade/wake/revive sessions get the rules as they get the token; the UI refreshes on session start. Recommends BFF-as-primary-writer, one gitconfig source of commit identity, a force-push permission blacklist (enforced) plus prose (judgement), helper+prose worktree cleanup, and a generic managed-file mechanism GitLab can later reuse.
 - [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Built except phase 0 (verification on a confined host) and phase 5 (a shared cache); application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The web coder's `web_coder_toolchains` plugin installs it with mise into `<ws>/.home` from inside the session's runner (the BFF holds only the policy, which the page stages as `.jaato/toolchain-offer.json`), where binaries already run under confinement (#1273/#1274, template v38). Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
+- [SELinux Backend](docs/design/selinux-backend.md) - A confinement backend for hosts whose LSM is SELinux (RHEL, Fedora, Rocky), behind the `ConfinementBackend` seam (`server/confinement/`). The policy module is `jaato-server/selinux/` (installed once; checked rule by rule, each with its reversion, by the `selinux-policy` CI job in a Fedora container). `JAATO_CONFINEMENT=selinux` (or `auto` on an SELinux host) makes the daemon label each workspace at its own MCS level, cold-spawn the runner into `jaato_runner_t` by exec transition (never a pool slot), and move model-driven subprocesses into `jaato_child_t`; the handle travels explicitly as `confinement=` through spawn and envelope, while AppArmor still rides `profile_name`. Phase 2b is implemented and not yet run on a kernel; the handoffs (`selinux-phase2a-handoff.md`, `selinux-phase2b-handoff.md`) and `jaato-server/selinux/tools/` are the kernel runs. The feature map states what does not translate (path fragments, exec scoping, in-process `/proc/self/environ` denial, the isolated sub-runner until phase 3).
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

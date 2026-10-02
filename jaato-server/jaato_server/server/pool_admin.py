@@ -45,6 +45,38 @@ NOT_AUTHORIZED = "not_authorized"
 INVALID_REQUEST = "invalid_request"
 NO_POOL = "no_pool"
 
+#: The typed verbs (TUI prompt, ``rich_client.py --cmd``).  The router
+#: dispatches on these and ``jaato-scaffold explain pool`` prints them, so
+#: the two cannot name different commands.
+VERB_STATUS = "pool.status"
+VERB_RESIZE = "pool.resize"
+
+#: The daemon CLI flags that send a ``PoolStatusRequest``.  Read by the
+#: argparse definition and by ``explain pool``.
+CLI_SIZE_FLAG = "--pool-size"
+CLI_MAX_FLAG = "--pool-max"
+
+#: The env knobs the pool is configured from at startup, with their
+#: defaults.  The reads themselves stay literal (the env-scope catalog is
+#: derived by an AST scan for literal reads); a guard checks every name
+#: here is read where this says it is.
+STARTUP_KNOBS = (
+    ("JAATO_RUNNER_POOL_SIZE", "2",
+     "floor: unreserved idle runners any arriving session may take"),
+    ("JAATO_RUNNER_POOL_MAX_SIZE", "2 x pool size",
+     "ceiling: total idle runners, cascade reservations included"),
+    ("JAATO_RUNNER_POOL_ENABLED", "true",
+     "whether sessions are routed to the pool at all"),
+)
+
+#: Categories of ``PoolStatusEvent`` refusals, for ``explain pool``.
+REFUSAL_CATEGORIES = (
+    (NOT_AUTHORIZED, "the connection is not the daemon's own account or "
+                     "root, or carries no OS account (WS, Windows)"),
+    (INVALID_REQUEST, "a size that is not a non-negative integer"),
+    (NO_POOL, "the daemon runs without a runner pool"),
+)
+
 
 def pool_admin_refusal(peer: Any, daemon_uid: Optional[int] = None) -> Optional[str]:
     """Why ``peer`` may not read or resize the pool, or ``None`` if it may.
@@ -80,7 +112,7 @@ def parse_resize_args(args: List[str]) -> Tuple[Optional[int], Optional[int]]:
         ValueError: No target, too many arguments, or a value that is not
             a non-negative integer.  The message is the usage line.
     """
-    usage = "usage: pool.resize <target_size> [<max_size>]"
+    usage = f"usage: {VERB_RESIZE} <target_size> [<max_size>]"
     if not args or len(args) > 2:
         raise ValueError(usage)
     values = []

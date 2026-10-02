@@ -3244,6 +3244,130 @@ def runner_user() -> Rendered:
     return data, "\n".join(lines)
 
 
+#: The counters that say the pool is the wrong size, and what to change.
+#: Every name is checked against ``PoolManager.get_telemetry()`` when the
+#: topic renders, so a renamed counter fails here rather than in prose.
+_POOL_SIZING_SIGNALS = (
+    ("pool_acquire_miss_total",
+     "sessions found no warm runner and cold-spawned: raise the size"),
+    ("pool_replenish_ceiling_blocked_total",
+     "the ceiling stopped a refill: raise the max"),
+    ("pool_stale_reservation_evicted_total",
+     "a cascade's warm runner was spent at the ceiling: raise the max"),
+)
+
+
+def pool() -> Rendered:
+    """The pre-warm runner pool, and resizing it on a running daemon (1.35).
+
+    The startup knobs, the typed verbs, the CLI flags, the refusal
+    categories and the SDK floor are READ from ``server/pool_admin.py``
+    and ``jaato_sdk.client.ipc``, and the sizing counters are checked
+    against ``PoolManager.get_telemetry()``, so this topic cannot name a
+    flag, verb or counter the daemon does not have.
+
+    Nothing here asks the running daemon: ``--status`` and ``pool.status``
+    do.  The "this shell" line is resolved from THIS process's
+    environment, which a daemon started elsewhere may not share.
+    """
+    import os
+
+    from jaato_sdk.client.ipc import IPCClient
+    from jaato_server.server import pool_admin as pa
+    from jaato_server.server.runner_pool import PoolManager
+
+    counters = PoolManager(None, target_size=0).get_telemetry()
+    missing = [n for n, _ in _POOL_SIZING_SIGNALS if n not in counters]
+    if missing:
+        raise RuntimeError(f"explain pool names counters the pool does "
+                           f"not have: {missing}")
+    floor = IPCClient.MIN_POOL_ADMIN_PROTOCOL
+    data = {
+        "startup_knobs": [
+            {"env": env, "default": default, "meaning": meaning}
+            for env, default, meaning in pa.STARTUP_KNOBS],
+        "this_shell": {env: os.environ.get(env)
+                       for env, _, _ in pa.STARTUP_KNOBS},
+        "resize": {
+            "cli": f"python -m jaato_server {pa.CLI_SIZE_FLAG} N "
+                   f"[{pa.CLI_MAX_FLAG} M]",
+            "status_cli": "python -m jaato_server --status",
+            "typed": [pa.VERB_STATUS,
+                      f"{pa.VERB_RESIZE} <target_size> [<max_size>]"],
+            "sdk": ["IPCClient.pool_status()",
+                    "IPCClient.resize_pool(target_size, max_size)"],
+            "request": "PoolStatusRequest -> PoolStatusEvent",
+            "min_protocol": floor,
+        },
+        "who_may": "the daemon's own uid or root, read from the IPC "
+                   "socket's SO_PEERCRED; never from the request",
+        "refusals": dict(pa.REFUSAL_CATEGORIES),
+        "grow": "wakes the replenish loop; forking starts at once",
+        "shrink": "drops idle runners only: unreserved above the floor "
+                  "first (newest first), then the stalest reservations "
+                  "while over the ceiling; a runner serving a session "
+                  "finishes it",
+        "ceiling": "a chosen max is kept (clamped up to the floor); a "
+                   "derived one (2 x floor) follows the floor",
+        "restart": "--restart keeps the resized values; they outrank "
+                   "the env knobs from then on",
+        "sizing_signals": dict(_POOL_SIZING_SIGNALS),
+    }
+    width = max(len(env) for env, _, _ in pa.STARTUP_KNOBS)
+    cwidth = max(len(c) for c, _ in pa.REFUSAL_CATEGORIES)
+    swidth = max(len(n) for n, _ in _POOL_SIZING_SIGNALS)
+    lines = [
+        "the pre-warm runner pool, and resizing it without a restart:",
+        "",
+        "  Sessions take a warm runner from the pool instead of cold-",
+        "  spawning one.  The FLOOR is how many unreserved idle runners",
+        "  are kept; the CEILING bounds all idle runners, cascade",
+        "  reservations included (each is 129-187 MB).",
+        "",
+        "  AT STARTUP",
+    ] + [
+        f"    {env:<{width}}  default {default}: {meaning}"
+        for env, default, meaning in pa.STARTUP_KNOBS
+    ] + [
+        "    This shell's environment: " + ", ".join(
+            f"{env}={os.environ.get(env, '(unset)')}"
+            for env, _, _ in pa.STARTUP_KNOBS),
+        "    (a daemon started elsewhere may differ; ask it, below)",
+        "",
+        "  ON A RUNNING DAEMON (no restart, no session unloaded)",
+        f"    python -m jaato_server {pa.CLI_SIZE_FLAG} N "
+        f"[{pa.CLI_MAX_FLAG} M]   resize and print",
+        "    python -m jaato_server --status            prints a pool: line",
+        f"    {pa.VERB_STATUS} / {pa.VERB_RESIZE} <target> [<max>]   at the "
+        "TUI prompt,",
+        "        or rich_client.py --cmd \"" + pa.VERB_RESIZE + " 6\" "
+        "(no --session needed)",
+        "    IPCClient.pool_status() / resize_pool(target, max)   from code",
+        f"    Needs a daemon speaking protocol {floor}+; an older one is "
+        "refused by the",
+        "    SDK rather than left to ignore the request.",
+        "",
+        "  WHO MAY  the daemon's own account or root, read from the IPC",
+        "    socket's SO_PEERCRED, never from the request.  A WS connection",
+        "    has no OS account and is refused.",
+        "",
+        "  REFUSALS (PoolStatusEvent.category)",
+    ] + [f"    {c:<{cwidth}}  {why}" for c, why in pa.REFUSAL_CATEGORIES] + [
+        "",
+        "  GROWING  wakes the replenish loop; forking starts at once.",
+        "  SHRINKING  drops IDLE runners only: unreserved above the floor",
+        "    first (newest first), then the stalest reservations while over",
+        "    the ceiling.  A runner serving a session finishes it.",
+        "  CEILING  a chosen max is kept (clamped up to the floor); a",
+        "    derived one (2 x floor) follows the floor.",
+        "  RESTART  --restart keeps the resized values; they outrank the",
+        "    env knobs from then on.  The answer says when that write failed.",
+        "",
+        "  SIZING SIGNALS (counters on PoolStatusEvent.telemetry)",
+    ] + [f"    {n:<{swidth}}  {why}" for n, why in _POOL_SIZING_SIGNALS]
+    return data, "\n".join(lines)
+
+
 def completion() -> Rendered:
     """The completion-processor capability — the OUTPUT-side script hook.
 

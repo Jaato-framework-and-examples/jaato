@@ -209,3 +209,41 @@ export class RelativePathAcrossBoundaryError extends Error {
     this.value = value;
   }
 }
+
+/**
+ * A correlated request the daemon refused before handling it (#1475).
+ *
+ * Thrown by a correlated call (``listReferenceClaims``,
+ * ``promoteReferenceClaim``, the memory verbs, ...) when the answer echoing
+ * its ``request_id`` is an ``error`` event rather than the request's own
+ * result -- e.g. the IPC gate refusing a request that needs an attached
+ * session.  ``category`` is the machine-readable reason (``no_session``).
+ */
+export class RequestRefusedError extends Error {
+  readonly method: string;
+  readonly error: string;
+  readonly errorType: string;
+  readonly requestId: string;
+  readonly details: Record<string, unknown>;
+  readonly category: string;
+
+  constructor(
+    method: string,
+    error: string,
+    options: {
+      errorType?: string;
+      requestId?: string;
+      details?: Record<string, unknown>;
+    } = {},
+  ) {
+    super(`${method}: refused by the daemon: ${error}`);
+    this.name = "RequestRefusedError";
+    this.method = method;
+    this.error = error;
+    this.errorType = options.errorType ?? "";
+    this.requestId = options.requestId ?? "";
+    this.details = options.details ?? {};
+    const category = this.details.category;
+    this.category = typeof category === "string" ? category : "";
+  }
+}

@@ -38,6 +38,8 @@ except ImportError:
     ServerConnection = Any
 
 from jaato_server.shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
+from jaato_server.shared.lsm_label import sandbox_mode_for_selinux
+from jaato_server.server.confinement.base import no_boundary, split_handle
 from .core import JaatoServer
 from . import session_new_timing
 from .ws_tickets import (
@@ -137,6 +139,81 @@ def _ws_daemon_loop(ws_server: "JaatoWSServer") -> Optional[asyncio.AbstractEven
     """
     adapter = ws_server._event_sink_adapter
     return adapter._event_loop if adapter is not None else None
+
+
+def _ws_confinement_available(ws_server: Any) -> bool:
+    """#1253 for either LSM: does this daemon confine WS sessions?"""
+    selinux = getattr(ws_server, "_selinux_backend", None)
+    if selinux is not None:
+        return bool(selinux.is_available())
+    apparmor = ws_server._apparmor
+    return apparmor is not None and apparmor.is_available()
+
+
+def _record_ws_mode_without_apparmor(
+    ws_server: Any, server: Any, session_id: str, sess: Any,
+) -> bool:
+    """Post-init: record the mode when AppArmor is not the backend.
+
+    SELinux: provision again (idempotent: the label stamp skips the walk)
+    and record the handle's mode, as the AppArmor branch re-provisions and
+    records below.  No AppArmor manager, or one that is unavailable: the
+    historical ``soft`` / no record.  Returns ``True`` when it decided.
+    """
+    selinux = getattr(ws_server, "_selinux_backend", None)
+    if selinux is not None:
+        from jaato_server.server.runner_spawn import stashed_private_tmp
+
+        handle = _provision_ws_boundary(
+            ws_server, session_id, sess.workspace_path, None,
+            stashed_private_tmp(server))
+        sess.sandbox_mode = (
+            SANDBOX_MODE_SOFT if handle is None
+            else sandbox_mode_for_selinux(permissive=handle.complain))
+        return True
+    apparmor = ws_server._apparmor
+    if apparmor is not None and apparmor.is_available():
+        return False
+    if apparmor is not None:
+        sess.sandbox_mode = SANDBOX_MODE_SOFT
+    return True
+
+
+def _provision_ws_boundary(
+    ws_server: Any,
+    session_id: str,
+    workspace_path: str,
+    plugin_rules: Any,
+    private_tmp_dir: Optional[str],
+) -> Any:
+    """Provision a WS session's boundary through the confinement seam.
+
+    Shared by the pre-init hook and its post-init re-run, which must render
+    the same boundary: the same plugin rules and the private ``/tmp`` the
+    hook decided (#1381).  The WS path names no ``config_root`` / ``env_file``
+    / fragments in the boundary, as it never has.
+
+    Returns:
+        The :class:`ConfinementHandle`, or ``None`` when provisioning failed
+        (each caller decides what a failure means: a refusal before spawn,
+        a ``soft`` record after).
+    """
+    from jaato_server.server.confinement import Boundary, plugin_rule_fields
+    from jaato_server.server.confinement.apparmor import AppArmorBackend
+
+    selinux = getattr(ws_server, "_selinux_backend", None)
+    if selinux is not None:
+        # Every WS-provisioned workspace sits under the daemon's root
+        # (the hooks gate on it), so it is a managed one (#1273/#1274).
+        return selinux.provision(session_id, Boundary(
+            workspace_path=workspace_path, private_tmp_dir=private_tmp_dir,
+            managed=True,
+        ))
+    return AppArmorBackend(ws_server._apparmor).provision(session_id, Boundary(
+        workspace_path=workspace_path,
+        private_tmp_dir=private_tmp_dir,
+        **plugin_rule_fields(plugin_rules),
+    ))
 
 
 def _record_bootstrap_refusal(server: Any, reason: str) -> None:
@@ -1181,9 +1258,8 @@ class JaatoWSServer:
             # rides the envelope to the runner (defence in depth), and below
             # it turns a provisioning/spawn failure into a REFUSED session
             # rather than an unconfined one.
-            confinement_required = (
-                apparmor is not None and apparmor.is_available()
-            )
+            confinement_required = _ws_confinement_available(ws_server)
+            confinement = None  # an SELinux handle; AppArmor rides profile_name
             if confinement_required:
                 # Phase 0/1 (template v20+, 2026-05-16): resolve plugin-
                 # contributed rules so the WS-spawned session profile
@@ -1218,19 +1294,16 @@ class JaatoWSServer:
                 # the /tmp grants), so it is decided before the render and
                 # stashed for the spawn and the envelope to read back.
                 from jaato_server.server.runner_spawn import (
-                    private_tmp_kwargs, resolve_session_private_tmp,
+                    resolve_session_private_tmp,
                 )
                 private_tmp = resolve_session_private_tmp(
                     server, workspace_path, ws_workspace_root)
-                if apparmor.provision_profile(
-                    session_id, workspace_path,
-                    plugin_rules=plugin_rules,
-                    confinement_id=apparmor.confinement_id_for_boundary(
-                        workspace_path, plugin_rules=plugin_rules,
-                        **private_tmp_kwargs(private_tmp)),
-                    **private_tmp_kwargs(private_tmp),
-                ):
-                    profile_name = apparmor.get_profile_name(session_id)
+                handle = _provision_ws_boundary(
+                    ws_server, session_id, workspace_path, plugin_rules,
+                    private_tmp,
+                )
+                if handle is not None:
+                    profile_name, confinement = split_handle(handle)
                 else:
                     # #1253 FAIL CLOSED: confinement was required and the
                     # profile did NOT provision.  Refuse the session rather
@@ -1319,7 +1392,8 @@ class JaatoWSServer:
                     workspace_path=workspace_path,
                     profile_name=profile_name,
                     daemon_loop=daemon_loop,
-                    disable_confine=(profile_name == ""),
+                    disable_confine=no_boundary(profile_name, confinement),
+                    confinement=confinement,
                     cgroup_attach=cgroup_attach,
                     pool_manager=getattr(ws_server, "_pool_manager_ref", None),
                     # Phase 2 cascade-sharing (server 0.6.144+):
@@ -1370,6 +1444,7 @@ class JaatoWSServer:
                 # cli / interactive_shell / notebook configs for this managed
                 # workspace.
                 managed_workspace_root=ws_workspace_root,
+                confinement=confinement,
             )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
@@ -1464,9 +1539,7 @@ class JaatoWSServer:
             # - Thread-pool workers leak profile state across sessions when
             #   the restore-to-unconfined transition fails (it's gated on a
             #   file-write rule that the profile doesn't grant).
-            if not apparmor or not apparmor.is_available():
-                if apparmor is not None:
-                    sess.sandbox_mode = SANDBOX_MODE_SOFT
+            if _record_ws_mode_without_apparmor(ws_server, server, session_id, sess):
                 return
 
             # Profile provisioning happens in the pre-initialize hook
@@ -1491,18 +1564,11 @@ class JaatoWSServer:
             # #1381: re-render with the private /tmp the pre-init hook
             # decided (read back, never re-decided), or this would load a
             # different body under a different name after the spawn.
-            from jaato_server.server.runner_spawn import (
-                private_tmp_kwargs, stashed_private_tmp,
-            )
-            private_tmp = private_tmp_kwargs(stashed_private_tmp(server))
-            if not apparmor.provision_profile(
-                session_id, sess.workspace_path,
-                plugin_rules=plugin_rules,
-                confinement_id=apparmor.confinement_id_for_boundary(
-                    sess.workspace_path, plugin_rules=plugin_rules,
-                    **private_tmp),
-                **private_tmp,
-            ):
+            from jaato_server.server.runner_spawn import stashed_private_tmp
+            if _provision_ws_boundary(
+                ws_server, session_id, sess.workspace_path, plugin_rules,
+                stashed_private_tmp(server),
+            ) is None:
                 # #1253: reaching here means confinement was REQUIRED for this
                 # WS-provisioned session — the host has an available
                 # AppArmorManager (the ``is_available`` gate above) and the
@@ -1695,6 +1761,72 @@ class JaatoWSServer:
             self._event_sink_adapter = WSEventSinkAdapter(self)
         return self._event_sink_adapter
 
+    def _init_apparmor(self, loop: "asyncio.AbstractEventLoop") -> None:
+        """Create the AppArmor manager and decide this server's posture.
+
+        Called from :meth:`start` in workspace mode.  ``--no-apparmor``
+        drops the manager; required mode refuses to start without
+        AppArmor; auto mode enables it when available.  In auto mode with
+        no AppArmor this is where "no kernel boundary" is said at WARNING,
+        unless the daemon handed this server an SELinux backend
+        (``_selinux_backend``), in which case SELinux confines its sessions.
+
+        Raises:
+            RuntimeError: a contradictory or unsatisfiable configuration.
+        """
+        # Initialize AppArmor manager.  Pass the daemon's main
+        # asyncio loop (we're inside ``async start()``) so that
+        # AppArmor mutations triggered from confined worker
+        # threads — e.g. selectReferences fragment writes — get
+        # dispatched here for execution in the unconfined main
+        # loop, instead of EACCESing on the file write.
+        self._apparmor = AppArmorManager(
+            workspace_root=self._workspace_root,
+            loop=loop,
+        )
+        if self._apparmor_mode is False:
+            if self._apparmor_required_env:
+                # Contradiction: env requires confinement, flag disables
+                # it. Refuse rather than guess which the operator meant.
+                raise RuntimeError(
+                    "Contradictory AppArmor configuration: "
+                    "JAATO_REQUIRE_APPARMOR=1 requires confinement but "
+                    "--no-apparmor disables it. Resolve by unsetting one."
+                )
+            logger.info("AppArmor confinement disabled by configuration")
+            self._apparmor = None
+        elif self._apparmor_mode is True and not self._apparmor.is_available():
+            # Required-but-unavailable: fail closed. The operator
+            # explicitly opted into confinement (--apparmor or
+            # JAATO_REQUIRE_APPARMOR); starting unconfined would leave
+            # only the bypassable directory-sandbox heuristic, which is
+            # not what "required" means. Refuse to start.
+            reason = self._apparmor.unavailable_reason or "reason unknown"
+            raise RuntimeError(
+                "AppArmor confinement required but not available "
+                f"({reason}). Refusing to start unconfined — workspace "
+                "isolation would rely on directory sandboxing only. "
+                "Install/enable AppArmor (and the apparmor_parser "
+                "sudoers rule), or drop the requirement with "
+                "--no-apparmor / unset JAATO_REQUIRE_APPARMOR to accept "
+                "directory-sandbox-only isolation."
+            )
+        elif self._apparmor and self._apparmor.is_available():
+            logger.info("AppArmor confinement enabled")
+        elif getattr(self, "_selinux_backend", None) is None:
+            # The decision site for this server: no AppArmor, and the
+            # daemon handed no SELinux backend (or this is the
+            # standalone server, which runs no backend selection).
+            # The probe itself only records the reason.
+            logger.warning(
+                "AppArmor confinement NOT available (%s) — workspace "
+                "isolation falls back to directory sandboxing only, which "
+                "is a heuristic and not a kernel-enforced boundary. To "
+                "require confinement and refuse to start unconfined, pass "
+                "--apparmor (WS) or set JAATO_REQUIRE_APPARMOR=1.",
+                self._apparmor.unavailable_reason or "reason unknown",
+            )
+
     async def start(self) -> None:
         """Start the server and block until shutdown.
 
@@ -1721,45 +1853,7 @@ class JaatoWSServer:
                 default_template=self._default_template,
             )
 
-            # Initialize AppArmor manager.  Pass the daemon's main
-            # asyncio loop (we're inside ``async start()``) so that
-            # AppArmor mutations triggered from confined worker
-            # threads — e.g. selectReferences fragment writes — get
-            # dispatched here for execution in the unconfined main
-            # loop, instead of EACCESing on the file write.
-            self._apparmor = AppArmorManager(
-                workspace_root=self._workspace_root,
-                loop=asyncio.get_running_loop(),
-            )
-            if self._apparmor_mode is False:
-                if self._apparmor_required_env:
-                    # Contradiction: env requires confinement, flag disables
-                    # it. Refuse rather than guess which the operator meant.
-                    raise RuntimeError(
-                        "Contradictory AppArmor configuration: "
-                        "JAATO_REQUIRE_APPARMOR=1 requires confinement but "
-                        "--no-apparmor disables it. Resolve by unsetting one."
-                    )
-                logger.info("AppArmor confinement disabled by configuration")
-                self._apparmor = None
-            elif self._apparmor_mode is True and not self._apparmor.is_available():
-                # Required-but-unavailable: fail closed. The operator
-                # explicitly opted into confinement (--apparmor or
-                # JAATO_REQUIRE_APPARMOR); starting unconfined would leave
-                # only the bypassable directory-sandbox heuristic, which is
-                # not what "required" means. Refuse to start.
-                reason = self._apparmor.unavailable_reason or "reason unknown"
-                raise RuntimeError(
-                    "AppArmor confinement required but not available "
-                    f"({reason}). Refusing to start unconfined — workspace "
-                    "isolation would rely on directory sandboxing only. "
-                    "Install/enable AppArmor (and the apparmor_parser "
-                    "sudoers rule), or drop the requirement with "
-                    "--no-apparmor / unset JAATO_REQUIRE_APPARMOR to accept "
-                    "directory-sandbox-only isolation."
-                )
-            elif self._apparmor and self._apparmor.is_available():
-                logger.info("AppArmor confinement enabled")
+            self._init_apparmor(asyncio.get_running_loop())
 
             # Initialize cgroups manager (orthogonal to AppArmor — runtime
             # limits, not sandboxing).  Same auto-detect / required /

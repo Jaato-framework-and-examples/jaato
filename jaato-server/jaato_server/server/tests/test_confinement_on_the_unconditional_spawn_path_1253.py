@@ -68,7 +68,7 @@ REVERSIONS = [
     # work unconfined.
     Reversion(
         target=_SM,
-        find="        if confinement_required and not profile_name:",
+        find="        if confinement_required and _no_boundary(profile_name, confinement):",
         replace="        if False:  # #1253 reversion: refusal gate disabled",
         test="test_refuses_when_confinement_required_and_no_profile",
         because=(
