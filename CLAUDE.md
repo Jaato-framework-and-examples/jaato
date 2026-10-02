@@ -4541,6 +4541,7 @@ now also declare edges beside its tags,
 |---|---|
 | `depends-on` | expanded, even with no mention and even from a URL / MCP reference with no readable body |
 | `elaborates` | not expanded; offered on the result as `related` |
+| `see-also` | not expanded; offered as `related` like `elaborates`: a neighbouring concern useful alongside (a coexisting alternative, the other side of one topic) where neither details the other (#1472) |
 | `supersedes` | declared on the NEWER reference; a selection or expansion reaching the older one gets the newer instead and says so (`superseded`). Two successors, or a cycle, route nowhere |
 | `contradicts` | listed only; never expanded, never hinted |
 
@@ -4554,6 +4555,12 @@ now also declare edges beside its tags,
 
 The instruction the model reads carries a `**Links**` line
 (`supersedes `adr-1`; depends on `glossary``), inline references included.
+Each relation's meaning and whether it expands is one table,
+`links.REL_DOCS`: `LINK_RELS`, `EXPANDING_RELS`, the `proposeReference`
+`links` description and `jaato-scaffold explain plugin references` (a
+`link relations` block, `link_relations` under `--json`) are derived from
+it. Guard: `shared/tests/test_see_also_is_a_non_expanding_link_1472.py`,
+four reversions.
 
 **Who declares an edge** (the brainstorm's open question 7): an agent may
 propose one, and none takes effect until a person promotes it.

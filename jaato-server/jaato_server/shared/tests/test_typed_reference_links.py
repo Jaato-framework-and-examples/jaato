@@ -266,7 +266,7 @@ class TestMalformedIsRefused:
     def test_an_unknown_rel_is_an_error(self):
         ok, errors, _ = validate_reference_file({
             "id": "a", "name": "A", "description": "d", "type": "inline", "content": "x",
-            "links": [{"to": "b", "rel": "see-also"}],
+            "links": [{"to": "b", "rel": "related-to"}],
         })
         assert not ok
         assert any("rel must be one of" in e for e in errors)
@@ -281,7 +281,7 @@ class TestMalformedIsRefused:
 
     def test_loading_is_lenient(self):
         src = ReferenceSource.from_dict(_inline("a", links=[
-            {"to": "b", "rel": "see-also"}, {"to": "c", "rel": "depends-on"},
+            {"to": "b", "rel": "related-to"}, {"to": "c", "rel": "depends-on"},
         ]))
         assert [(l.to, l.rel) for l in src.links] == [("c", "depends-on")]
 

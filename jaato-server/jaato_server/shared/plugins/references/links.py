@@ -16,6 +16,10 @@ which is the payoff, since it makes traversal cheaper and better at once:
 =============  ===========================================================
 depends-on     expanded: the source is not comprehensible without the target
 elaborates     NOT expanded; offered as a hint on the selection (``related``)
+see-also       NOT expanded; offered as a hint on the selection (``related``):
+               a neighbouring concern useful alongside (coexisting
+               alternatives, two sides of one topic), neither detailing the
+               other (#1472)
 supersedes     the older target is routed to the source (declared on the NEWER
                reference): a selection or expansion reaching it gets the
                newer one instead, never as well
@@ -23,7 +27,8 @@ contradicts    never expanded and never hinted to a working agent; listed
 =============  ===========================================================
 
 Inference is KEPT beside declaration, and the declared edge wins for its
-pair: a mention of B in A that A declares ``elaborates`` does not expand B.
+pair: a mention of B in A that A declares ``elaborates`` (or ``see-also``)
+does not expand B.
 A declared ``depends-on`` expands even a source with no readable body (a URL
 or MCP reference), which inference never could.
 
@@ -44,12 +49,48 @@ REL_DEPENDS_ON = "depends-on"
 REL_ELABORATES = "elaborates"
 REL_SUPERSEDES = "supersedes"
 REL_CONTRADICTS = "contradicts"
+REL_SEE_ALSO = "see-also"
+
+#: Every relation: its meaning and what a selection does with it.  The ONE
+#: table; ``LINK_RELS``, the tool schema's description and ``explain plugin
+#: references`` are all derived from it, so they cannot disagree.
+REL_DOCS: Dict[str, Dict[str, Any]] = {
+    REL_DEPENDS_ON: {
+        "meaning": "a reader of the source needs the target too",
+        "selection": "expanded: the target is selected with the source",
+        "expands": True},
+    REL_ELABORATES: {
+        "meaning": "the target goes deeper into the source's subject",
+        "selection": "not expanded; offered as an optional neighbour (related)",
+        "expands": False},
+    REL_SEE_ALSO: {
+        "meaning": "the target covers a neighbouring concern useful alongside "
+                   "(a coexisting alternative, the other side of one topic)",
+        "selection": "not expanded; offered as an optional neighbour (related)",
+        "expands": False},
+    REL_SUPERSEDES: {
+        "meaning": "the source replaces the target (declared on the newer one)",
+        "selection": "a request for the target gets the source instead",
+        "expands": False},
+    REL_CONTRADICTS: {
+        "meaning": "the source disagrees with the target",
+        "selection": "never expanded and never offered; listed for a curator",
+        "expands": False},
+}
 
 #: The closed vocabulary, in the order it is documented.
-LINK_RELS = (REL_DEPENDS_ON, REL_ELABORATES, REL_SUPERSEDES, REL_CONTRADICTS)
+LINK_RELS = tuple(REL_DOCS)
 
 #: Relations whose target a selection pulls in.
-EXPANDING_RELS = frozenset({REL_DEPENDS_ON})
+EXPANDING_RELS = frozenset(r for r, d in REL_DOCS.items() if d["expands"])
+
+#: Relations whose target a selection OFFERS (``related``), never pulls in.
+OFFERED_RELS = frozenset({REL_ELABORATES, REL_SEE_ALSO})
+
+
+def rel_summary() -> str:
+    """One line per relation, ``'rel': meaning (selection effect)``, for prose."""
+    return " ".join(f"'{r}': {d['meaning']} ({d['selection']})." for r, d in REL_DOCS.items())
 
 #: Longest ``to`` / ``note`` accepted; an edge is a pointer, not a document.
 MAX_LINK_TARGET_CHARS = 256
@@ -207,12 +248,12 @@ class LinkIndex:
                 if link.to not in self.ids]
 
     def related(self, selected_ids: Iterable[str]) -> List[Dict[str, str]]:
-        """``elaborates`` targets of the selection that the selection does not hold."""
+        """Offered targets (``elaborates`` / ``see-also``) the selection does not hold."""
         chosen = set(selected_ids)
         out = []
         for src in sorted(chosen):
             for link in self.outbound.get(src, []):
-                if link.rel == REL_ELABORATES and link.to in self.ids and link.to not in chosen:
+                if link.rel in OFFERED_RELS and link.to in self.ids and link.to not in chosen:
                     out.append({"id": link.to, "rel": link.rel, "from": src})
         return out
 

@@ -333,7 +333,7 @@ function catalogRow(list: MockRef[], ref: MockRef): Record<string, unknown> {
     linked_from: list.flatMap((r) => r.links.filter((l) => l.to === ref.id).map((l) => ({ from: r.id, rel: l.rel }))),
   };
 }
-const LINK_RELS = new Set(["depends-on", "elaborates", "supersedes", "contradicts"]);
+const LINK_RELS = new Set(["depends-on", "elaborates", "see-also", "supersedes", "contradicts"]);
 /** Answer ``reference.catalog.request`` / ``reference.links.request`` as ``CommandRouter`` does. */
 function answerReferenceCatalog(c: Client, ev: Record<string, unknown>): void {
   const requestId = String(ev.request_id ?? "");

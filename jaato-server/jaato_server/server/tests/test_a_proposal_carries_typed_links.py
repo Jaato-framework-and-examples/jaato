@@ -334,7 +334,7 @@ class TestValidateReportsTheCatalogEdges:
         ], monkeypatch) == []
 
     def test_a_malformed_edge_is_an_error(self, tmp_path, monkeypatch):
-        out = _findings(tmp_path, [{"id": "a", "links": [{"to": "b", "rel": "see-also"}]}, {"id": "b"}],
+        out = _findings(tmp_path, [{"id": "a", "links": [{"to": "b", "rel": "replaces"}]}, {"id": "b"}],
                         monkeypatch)
         assert [(d.severity, d.code) for d in out] == [("error", "reference_link_invalid")]
 

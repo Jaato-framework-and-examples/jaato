@@ -1558,6 +1558,39 @@ def _plan_file_lines(pi) -> List[str]:
     return out
 
 
+def _reference_link_rels() -> List[Dict[str, Any]]:
+    """The references plugin's link vocabulary, from its own table (#1472).
+
+    Read from ``links.REL_DOCS`` rather than restated, so ``explain`` cannot
+    list a relation the plugin refuses, or miss one it accepts.
+    """
+    from jaato_server.shared.plugins.references.links import REL_DOCS
+    return [{"rel": r, **d} for r, d in REL_DOCS.items()]
+
+
+def _reference_link_lines() -> List[str]:
+    """``explain plugin references``'s block naming each ``links[].rel``."""
+    out = ["", "  link relations (links[].rel) — what each means, and whether a "
+               "selection pulls its target in:"]
+    for d in _reference_link_rels():
+        tag = "expands" if d["expands"] else "no-expand"
+        out.append(f"    {d['rel']:12} {tag:9} {d['meaning']}")
+        out.append(f"    {'':12} {'':9} → {d['selection']}")
+    return out
+
+
+def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
+    """Sections one plugin's page carries beyond its tools and config.
+
+    A function rather than branches in :func:`plugin`, which sits at the
+    complexity ceiling.  Only ``references`` has one today: its link
+    vocabulary (#1472).
+    """
+    if name == "references":
+        return _reference_link_lines(), {"link_relations": _reference_link_rels()}
+    return [], {}
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
@@ -1594,6 +1627,8 @@ def plugin(name: str) -> Rendered:
         lines.append(f"  config (plugin_configs.{name}.*):")
         lines.extend(_config_block(pi.config_settings))
         lines.extend(_plan_file_lines(pi))
+    extra_lines, extra_data = _plugin_extra_sections(name)
+    lines.extend(extra_lines)
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
             "commands": _commands_json(pi.commands),
@@ -1612,6 +1647,7 @@ def plugin(name: str) -> Rendered:
             # applicable", and it is NOT folded into ``config`` because the
             # file is not a ``plugin_configs.<name>.*`` sub-object.
             "initial_plan_file": _plan_file_fields(pi)}
+    data.update(extra_data)
     return data, "\n".join(lines)
 
 
