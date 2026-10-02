@@ -297,8 +297,14 @@ class SandboxManagerPlugin(RunnerForwardingMixin):
     # ==================== Config Loading ====================
 
     def _get_global_config_path(self) -> Path:
-        """Get path to global config file."""
-        return Path.home() / ".jaato" / GLOBAL_CONFIG_FILE
+        """Get path to global config file (read only by this plugin).
+
+        #1465: the daemon's snapshot when the runner has one; a confined
+        runner is not granted ``~/.jaato``.
+        """
+        from jaato_server.shared.user_tier import path as user_tier_path
+
+        return user_tier_path(GLOBAL_CONFIG_FILE)
 
     def _get_workspace_config_path(self) -> Optional[Path]:
         """Get path to workspace config file."""

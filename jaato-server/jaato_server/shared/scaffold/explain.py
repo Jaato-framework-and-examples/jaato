@@ -3076,6 +3076,138 @@ def gh() -> Rendered:
     return data, "\n".join(lines)
 
 
+def runner_user() -> Rendered:
+    """Which OS account a root daemon runs each session's runner as (#1168).
+
+    ``--runner-uid-policy`` / ``JAATO_RUNNER_UID_POLICY`` picks one of three
+    policies.  What each names, every case in which it keeps the daemon's
+    uid instead, the refusal, the paths handed to the target and the
+    credential caveat are all READ from ``server/runner_user.py`` (and the
+    exit code from ``server/runner_spawner.py``), so this topic cannot
+    describe a policy differently from the code that resolves it.
+
+    The "this shell" block resolves the policy from THIS process's
+    environment, not the running daemon's: a flag passed to the daemon is
+    invisible here, and the daemon's own value is in its startup log.
+    """
+    import os
+
+    from jaato_server.server import runner_user as ru
+    from jaato_server.server.runner_spawner import PRIVILEGE_DROP_EXIT_CODE
+
+    geteuid = getattr(os, "geteuid", None)
+    euid = geteuid() if geteuid else None
+    keeps_daemon_uid = [
+        f"the policy is {ru.POLICY_DAEMON!r}",
+        "the daemon is not root (it cannot drop privileges)",
+        f"{ru.POLICY_PEER}: {ru.REASON_NO_PEER}",
+        f"{ru.POLICY_WORKSPACE_OWNER}: {ru.REASON_NO_WORKSPACE}",
+        f"{ru.POLICY_WORKSPACE_OWNER}: {ru.REASON_WORKSPACE_UNSTATABLE}",
+        "the named uid is 0 or the daemon's own uid",
+    ]
+    dirs, files = ru.runner_owned_paths(
+        session_id="<session_id>", workspace_path="<ws>",
+        session_tmp="<session tmpdir>", private_tmp="<ws>/.tmp",
+        workspace_home="<ws>/.home", log_path="<runner log>",
+    )
+    import_paths = ru.runner_import_paths()
+    data = {
+        "policies": dict(ru.POLICY_TARGETS),
+        "default": ru.POLICY_DAEMON,
+        "set_by": {
+            "flag": "--runner-uid-policy",
+            "env": ru.RUNNER_UID_POLICY_ENV_VAR,
+            "precedence": "flag, then env, then the default",
+            "scope": "host (the daemon process; never a profile key)",
+            "survives_restart": True,
+        },
+        "this_shell": {
+            "resolved_from_env": ru.resolve_policy(),
+            "euid": euid,
+        },
+        "keeps_daemon_uid_when": keeps_daemon_uid,
+        "refused_when": "the target uid cannot read one of these, or the "
+                        "workspace (ACLs are not consulted)",
+        "must_be_readable": import_paths,
+        "handed_to_target": {"directories": dirs, "files": files},
+        "credentials": "a dropped runner cannot read the daemon's "
+                       "~/.jaato/*_auth.json; put the key in the workspace "
+                       ".env, the profile env:, or the user's own ~/.jaato",
+        "order": ["cgroup attach", "private /tmp",
+                  "setgroups -> setresgid -> setresuid",
+                  "aa_change_profile"],
+        "cold_spawn_exit_code_on_failed_drop": PRIVILEGE_DROP_EXIT_CODE,
+        "pool": "slots are never reused across uids; skips are counted in "
+                "pool_uid_mismatch_skips_total",
+        "verify": "per-session daemon log line "
+                  "'runner_uid_policy=<policy> runs_as=<user>'",
+    }
+    width = max(len(k) for k in ru.POLICY_TARGETS)
+    lines = [
+        "which OS account a session's runner runs as (#1168):",
+        "",
+        "  Only matters on a ROOT daemon.  There, every file the agent writes",
+        "  into a workspace is otherwise root-owned, whatever the umask.",
+        "",
+        "  POLICIES",
+    ] + [
+        f"    {name:<{width}}  {target}"
+        for name, target in ru.POLICY_TARGETS.items()
+    ] + [
+        "",
+        f"  SET BY  --runner-uid-policy <p>  (outranks)  "
+        f"{ru.RUNNER_UID_POLICY_ENV_VAR}=<p>",
+        "          host-scoped: one value for the whole daemon, never a",
+        "          profile key.  Persisted across `jaato-server --restart`.",
+        f"          This shell's environment resolves to "
+        f"{ru.resolve_policy()!r} (euid {euid});",
+        "          the running daemon's value is in its startup log.",
+        "",
+        "  KEEPS THE DAEMON'S UID (logged once per reason, never a guess) when",
+    ] + [f"    - {reason}" for reason in keeps_daemon_uid] + [
+        "",
+        "  REFUSES THE SESSION when the target uid cannot read any of",
+    ] + [f"    {p}" for p in import_paths] + [
+        "    or the workspace itself.  ACLs are not consulted, so the check",
+        "    can be stricter than the kernel.  The session is refused by",
+        "    name; it never falls back to running in the root daemon.",
+        "",
+        "  HANDED TO THE TARGET before the spawn (only daemon-owned paths,",
+        "  never recursively, never another user's file):",
+    ] + [f"    {d}/" for d in dirs] + [f"    {f}" for f in files] + [
+        "    Files a root runner already wrote are NOT migrated:",
+        "    chown -R <user>: <ws>  once.",
+        "",
+        "  CREDENTIALS  a dropped runner's ~ is the target's home, so the",
+        "    daemon's ~/.jaato/*_auth.json is out of reach (the daemon warns",
+        "    once when such files exist).  Put the key in the workspace .env,",
+        "    the profile env:, or the user's own ~/.jaato.  Nothing is copied.",
+        "",
+        "  ORDER  cgroup attach -> private /tmp -> setgroups -> setresgid ->",
+        "    setresuid -> aa_change_profile.  The drop comes first, so no",
+        "    AppArmor profile needs `capability setuid`.  A cold-spawned",
+        f"    runner that cannot drop exits {PRIVILEGE_DROP_EXIT_CODE}; a pool "
+        "slot fails its bootstrap.",
+        "",
+        "  POOL  a slot is never reused across uids, so a daemon serving",
+        "    several users cold-spawns more.  Counter:",
+        "    pool_uid_mismatch_skips_total.",
+        "",
+        "  VERIFY  each session logs `runner_uid_policy=<p> runs_as=<user>`.",
+        "",
+        "  Choosing:",
+        f"    {ru.POLICY_PEER:<{width}}  local users connecting over IPC as "
+        "themselves",
+        f"    {ru.POLICY_WORKSPACE_OWNER:<{width}}  each workspace owned by "
+        "its user's account, over IPC or WS",
+        f"    {'':<{width}}  (a workspace the daemon provisions is "
+        "root-owned, so it keeps root)",
+        f"    {ru.POLICY_DAEMON:<{width}}  a non-root daemon, or one service "
+        "account owning everything",
+    ]
+    return data, "\n".join(lines)
+
+
 def completion() -> Rendered:
     """The completion-processor capability — the OUTPUT-side script hook.
 

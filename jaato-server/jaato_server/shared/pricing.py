@@ -173,7 +173,10 @@ def discover_pricing_paths(workspace_path: Optional[str] = None) -> list[Path]:
     paths = []
     if workspace_path:
         paths.append(Path(workspace_path) / ".jaato" / "pricing.json")
-    paths.append(Path.home() / ".jaato" / "pricing.json")
+    # #1465: the daemon's snapshot when the runner has one.
+    from jaato_server.shared.user_tier import path as user_tier_path
+
+    paths.append(user_tier_path("pricing.json"))
     return paths
 
 

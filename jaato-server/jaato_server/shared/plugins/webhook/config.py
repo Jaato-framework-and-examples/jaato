@@ -410,7 +410,10 @@ def load_config(
     merged: Dict[str, Any] = {}
 
     # Layer 4 → 3: user home config
-    home_config = _load_json_file(Path.home() / '.jaato' / 'webhook.json')
+    # #1465: the daemon's snapshot when the runner has one.
+    from jaato_server.shared.user_tier import path as user_tier_path
+
+    home_config = _load_json_file(user_tier_path('webhook.json'))
     if home_config:
         merged = _deep_merge(merged, home_config)
         logger.debug("Loaded user-level webhook config from ~/.jaato/webhook.json")

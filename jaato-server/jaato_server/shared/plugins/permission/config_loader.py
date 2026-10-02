@@ -8,6 +8,8 @@ import os
 from jaato_server.shared.session_context import get_workspace_root, get_config_root
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from jaato_server.shared.user_tier import path as _user_tier_path
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -213,7 +215,8 @@ def load_config(
         cwd = Path(base_path) if base_path else Path(get_workspace_root() or Path.cwd())
         default_paths = [
             cwd / ".jaato" / "permissions.json",
-            Path.home() / ".jaato" / "permissions.json",
+            # #1465: the daemon's snapshot when the runner has one.
+            _user_tier_path("permissions.json"),
         ]
         for default_path in default_paths:
             if default_path.exists():

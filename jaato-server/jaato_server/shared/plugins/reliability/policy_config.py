@@ -93,7 +93,10 @@ def resolve_policy_config_path(workspace_path: Optional[str] = None) -> Optional
     candidates: List[Path] = []
     if workspace_path:
         candidates.append(Path(workspace_path) / ".jaato" / POLICY_CONFIG_FILENAME)
-    candidates.append(Path.home() / ".jaato" / POLICY_CONFIG_FILENAME)
+    # #1465: the daemon's snapshot when the runner has one.
+    from jaato_server.shared.user_tier import path as user_tier_path
+
+    candidates.append(user_tier_path(POLICY_CONFIG_FILENAME))
 
     for path in candidates:
         if path.is_file():

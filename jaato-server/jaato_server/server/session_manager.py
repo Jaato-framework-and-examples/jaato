@@ -3861,6 +3861,7 @@ class SessionManager:
         # baseline.
         from jaato_server.shared.plugins.subagent.config import _runtime_limits_to_dict
         from jaato_server.server.confinement.apparmor import envelope_descriptor
+        from jaato_server.server.runner_spawn import user_tier_snapshot
         _iso_limits = _isolated_limits(effective_runtime_limits, profile)
         _iso_width = getattr(_iso_limits, "max_parallel_tools", None)
         return SessionInitEnvelope(
@@ -3900,6 +3901,9 @@ class SessionManager:
             # v8: the one writer of the descriptor, so the sub-runner's
             # ``lsm_confine.resolve`` reads the shape the main runner does.
             confinement=envelope_descriptor(sub_apparmor_profile),
+            # #1465: an isolated sub-runner runs as the daemon's uid, so
+            # it reads the daemon's own user tier.
+            user_tier_files=user_tier_snapshot(None),
         )
 
     def _dispatch_isolated_session_bootstrap(

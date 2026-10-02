@@ -3079,6 +3079,63 @@ so before v42 every `mimetypes.guess_type()` in a confined process raised
 `/etc/os-release` needs no rule: it resolves into `/usr/lib`. Guard:
 `jaato_server/shared/tests/test_mimetypes_works_confined.py`, two reversions.
 
+### The User Tier a Confined Runner Was Not Granted (#1465)
+
+A confined runner is granted only the `~/.jaato` subtrees plugins declare
+(`agents/`, `profiles/`, `references/`, `memories/` ...). It read the rest
+anyway. With `~/.jaato/permissions.json` present, `load_config` found it
+with `exists()` (AppArmor does not mediate `stat`), the `open` raised
+`PermissionError`, `PermissionPlugin.initialize` catches only
+`FileNotFoundError`, and every confined session was refused at bootstrap.
+Reproduced on an enforcing kernel.
+
+**The daemon reads the user tier and ships it on the envelope**, as it
+already ships the resolved profile and the rendered persona.
+`shared/user_tier.py` (stdlib only) is the one place both halves meet:
+
+| Piece | Where |
+|---|---|
+| `collect(jaato_dir)`: the snapshot, relative path to UTF-8 text | daemon, `runner_spawn.user_tier_snapshot`, called by `build_session_envelope` and the isolated sub-runner builder |
+| `SessionInitEnvelope.user_tier_files` | the wire; no version bump |
+| `install(snapshot, tmp, session_id)`: written under the session tmpdir as `jaato-user-tier-<session_id>`, the previous installation removed (a pool slot serves sessions in turn) | runner, bootstrap step **1e**, after the tmpdir is pinned (1d) and before the runtime and plugins are built |
+| `path(rel)`: the snapshot's copy when one is installed, else `~/.jaato/<rel>` | every runner-side reader: permissions, base instructions and `system_instructions.md`, sandbox paths, reliability (+ its policy file), webhook, thinking, pricing, completion and spawn schemas, script loader |
+
+Shipped: `permissions.json`, `system_instructions.md`,
+`sandbox_paths.json`, `reliability.json`, `reliability-policies.json`,
+`webhook.json`, `thinking.json`, `pricing.json`, and `instructions/`,
+`completion_schemas/`, `spawn_schemas/`, `scripts/` whole.
+
+| Rule | Why |
+|---|---|
+| **`None` is not `{}`** | `None` (an older daemon, an in-process session) means readers read the disk as before. `{}` means the daemon looked and found nothing, and the runner must not read the disk |
+| **credentials are never shipped** | `*_auth.json`, `*_oauth.json`, `*_accounts.json` are refused at collection and again at install, wherever they sit. A key belongs in `session_env` |
+| **no symlink, no foreign file** | a root daemon reads a dropped user's home (#1168), so every directory is `lstat`-ed, the file is opened `O_NOFOLLOW`, and only regular files owned by the owner of `~/.jaato` are read: neither a symlink nor a hard link carries another file into a session |
+| **bounded** | 256 KiB per file, 2 MiB per snapshot; a file over either, or not UTF-8, is skipped with a WARNING naming it |
+| **whose home** | with a `runner_user` (#1168) the snapshot is that user's `~/.jaato`, and `{}` when the user has no home; otherwise the daemon's |
+| **writes are not routed** | a writer (`reliability` `save_user`, the policy config's default path) keeps the real path and fails there as before, rather than writing into a copy nobody reads back |
+
+No snapshot and an unreadable file is still a `PermissionError`. That
+pairing needs a runner without this change beside a daemon with it, and
+both ship in one package, so handling it would be a fallback for a state
+that does not occur; failing closed is right for a policy file.
+
+Stated limits:
+
+- **The snapshot is taken at spawn.** A user-tier file edited during a
+  session reaches the next session, not this one.
+- **On an unconfined runner the snapshot sits in the host `/tmp`** under
+  the session's name. The next install on the same pool slot removes it;
+  nothing removes it after a cold-spawned runner exits.
+- **A `permissions.json` policy still does not govern a daemon session.**
+  Both the daemon and the runner build the plugin with an inline default
+  `policy`, and an inline policy replaces the file's. The file is read
+  (now without crashing); its rules do not take effect. Older than this
+  change, and not changed by it.
+
+Guard: `jaato_server/shared/tests/test_user_tier_ships_on_the_envelope_1465.py`,
+five reversions (the loader reading the real file, the credential check,
+`O_NOFOLLOW`, the envelope field, the bootstrap install).
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are
@@ -7440,6 +7497,15 @@ Step 3's guard is `jaato_server/server/tests/test_runner_privilege_drop_1168.py`
 nine reversions, each on a case that runs without root (the drop's syscalls
 are substituted, the chown recorded). The cases that fork a child and drop
 to `nobody` for real run where the suite is root and skip elsewhere.
+
+`jaato-scaffold explain runner-user` is the operator's view of all of the
+above: the three policies, every case that keeps the daemon's uid, the
+paths a target must be able to read, what is handed over, the credential
+caveat and the log line to verify. It reads `runner_user.py`
+(`POLICY_TARGETS`, the `REASON_*` constants, `runner_owned_paths`,
+`runner_import_paths`) rather than restating it. Guard:
+`jaato_server/shared/tests/test_explain_runner_user_1168.py`, three
+reversions.
 
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 

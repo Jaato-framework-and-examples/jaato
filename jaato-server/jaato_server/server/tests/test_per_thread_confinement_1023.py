@@ -84,7 +84,7 @@ REVERSIONS = [] if Reversion is None else [
     ),
     Reversion(
         target=_BOOTSTRAP,
-        find="""        elif _label_is_inside(value, expected_profile):
+        find="""        elif matcher(value, expected_profile):
             matched.append(tid)""",
         replace="""        elif True:
             matched.append(tid)""",

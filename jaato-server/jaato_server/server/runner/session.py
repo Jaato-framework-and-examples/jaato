@@ -613,6 +613,29 @@ def _install_confinement_grants(envelope: SessionInitEnvelope) -> None:
         )
 
 
+def _install_user_tier(envelope: SessionInitEnvelope) -> None:
+    """Install the daemon's snapshot of ``~/.jaato`` (#1465).
+
+    Every bootstrap replaces it.  ``None`` (an older daemon) reverts the
+    readers to the disk, as before.  Written under the pinned temp dir
+    (step 1d), the one directory a confined runner may write.
+    """
+    import tempfile
+
+    from jaato_server.shared import user_tier
+
+    root = user_tier.install(
+        getattr(envelope, "user_tier_files", None),
+        tempfile.gettempdir(), envelope.session_id,
+    )
+    if root is not None:
+        logger.info(
+            "runner-session bootstrap: user tier installed from the "
+            "daemon's snapshot (%d files) at %s",
+            len(envelope.user_tier_files or {}), root,
+        )
+
+
 def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]:
     """Apply ``envelope.session_env`` to the runner's ``os.environ``.
 
@@ -1730,6 +1753,12 @@ def bootstrap_session(
     # dir at module scope, and under confinement that resolution is
     # what raised ``No usable temporary directory found``.
     _pin_session_tmpdir(envelope)
+
+    # ---- 1e. The user tier the daemon read for us (#1465) ----
+    # Before any plugin initializes: the permission plugin reads
+    # ~/.jaato/permissions.json at step 8, and a confined runner is not
+    # granted it.
+    _install_user_tier(envelope)
 
     # ---- 2. Optionally construct the runtime ----
     if runtime_factory is None:
