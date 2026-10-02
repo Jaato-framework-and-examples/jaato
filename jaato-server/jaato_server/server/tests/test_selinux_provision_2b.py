@@ -40,6 +40,16 @@ _SELINUX = "jaato-server/jaato_server/server/confinement/selinux.py"
 
 REVERSIONS = [
     Reversion(
+        target=_SELINUX,
+        find="            self.prepare_session_tmpdir(\n"
+             "                handle, session_tmpdir(session_id, handle.confinement_id))\n",
+        replace="            pass\n",
+        test="test_provision_labels_the_session_tmpdir",
+        because="the daemon's bare makedirs leaves it user_tmp_t, which the "
+                "runner cannot write: every bootstrap was refused on the "
+                "phase 2b kernel run",
+    ),
+    Reversion(
         target=_LABELS,
         find="                st = entry.stat(follow_symlinks=False)\n",
         replace="                st = entry.stat()\n",
@@ -95,6 +105,16 @@ REVERSIONS = [
 ]
 
 _OWN = "unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023"
+
+
+@pytest.fixture(autouse=True)
+def _session_tmpdirs_under_tmp_path(tmp_path, monkeypatch):
+    """Provisioning makes the session tmpdir; keep it out of the real /tmp."""
+    from jaato_server.server.confinement import selinux
+
+    monkeypatch.setattr(
+        selinux, "session_tmpdir",
+        lambda sid, cid=None: str(tmp_path / "systmp" / f"jaato-{cid}" / sid))
 _POLICY = {RUNNER_PROBE_CONTEXT, policy_marker_context(1),
            "unconfined_u:unconfined_r:jaato_runner_t:s0"}
 
@@ -105,6 +125,7 @@ class _Kernel:
     def __init__(self, fail_on=None):
         self.labels = {}
         self.calls = 0
+        self.paths = []
         self.fail_on = fail_on
 
     def context_valid(self, context):
@@ -124,6 +145,7 @@ class _Kernel:
 
     def set_file_context(self, path, context):
         self.calls += 1
+        self.paths.append(path)
         if self.fail_on and path.endswith(self.fail_on):
             raise OSError(1, "lsetfilecon: Operation not permitted", path)
         self.labels[path] = context
@@ -244,13 +266,18 @@ def test_a_labelled_workspace_is_not_walked_again(tmp_path):
     kernel = _Kernel()
     ws = _workspace(tmp_path)
     backend = _backend(kernel, tmp_path)
+    def walked():
+        # Label calls inside the workspace; each provision also labels its
+        # session tmpdir, which is outside it.
+        return sum(1 for p in kernel.paths if p.startswith(str(ws)))
+
     backend.provision("s1", Boundary(workspace_path=str(ws)))
-    first = kernel.calls
+    first = walked()
     backend.provision("s2", Boundary(workspace_path=str(ws)))
-    assert kernel.calls == first
+    assert walked() == first
     # A different boundary on the same tree (now managed) walks again.
     backend.provision("s3", Boundary(workspace_path=str(ws), managed=True))
-    assert kernel.calls > first
+    assert walked() > first
 
 
 def test_a_failed_walk_records_no_stamp(tmp_path):
@@ -287,4 +314,15 @@ def test_the_session_tmpdir_is_made_and_labelled_at_the_level(tmp_path):
     assert tmpdir.is_dir()
     level = _level(handle.label)
     for entry in (tmpdir.parent, tmpdir):
+        assert kernel.labels[str(entry)] == f"system_u:object_r:jaato_tmp_t:{level}"
+
+
+def test_provision_labels_the_session_tmpdir(tmp_path):
+    kernel = _Kernel()
+    ws = _workspace(tmp_path)
+    handle = _backend(kernel, tmp_path).provision("s1", Boundary(workspace_path=str(ws)))
+    session_dir = tmp_path / "systmp" / f"jaato-{handle.confinement_id}" / "s1"
+    assert session_dir.is_dir()
+    level = _level(handle.label)
+    for entry in (session_dir.parent, session_dir):
         assert kernel.labels[str(entry)] == f"system_u:object_r:jaato_tmp_t:{level}"

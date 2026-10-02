@@ -40,6 +40,7 @@ from jaato_server.server.confinement import selinux_labels
 from jaato_server.server.confinement.base import Boundary, ConfinementHandle
 from jaato_server.server.confinement.selinux_levels import LabelStamp, LevelTable
 from jaato_server.server.confinement_id import confinement_id as _confinement_id
+from jaato_server.server.confinement_id import session_tmpdir
 from jaato_server.shared.lsm_label import (
     BACKEND_SELINUX,
     AvDecision,
@@ -281,7 +282,7 @@ class SELinuxBackend:
             return None
         label = f"{own.user}:{own.role}:{RUNNER_DOMAIN}:{level}"
         permissive = self._domain_permissive(label)
-        return ConfinementHandle(
+        handle = ConfinementHandle(
             backend=BACKEND_SELINUX,
             label=label,
             confinement_id=self.confinement_id_for_boundary(boundary),
@@ -289,6 +290,18 @@ class SELinuxBackend:
             grants=_grants(plan, label),
             complain=(permissive is True or self.host_readiness().enforcing is False),
         )
+        # The session tmpdir, before the spawn: the runner has no add_name
+        # in /tmp and no write on user_tmp_t, so a directory it did not get
+        # labelled here is one it cannot use (phase 2b kernel run: bootstrap
+        # refused on a user_tmp_t tmpdir).  A failure refuses the session.
+        try:
+            self.prepare_session_tmpdir(
+                handle, session_tmpdir(session_id, handle.confinement_id))
+        except OSError as exc:
+            logger.error("SELinux provision for %s: session tmpdir not "
+                         "labelled: %s", session_id, exc)
+            return None
+        return handle
 
     def _ensure_labelled(self, kernel: "_Kernel", plan: "selinux_labels.Plan") -> None:
         """Walk and label unless the stamp and the root's label say done."""

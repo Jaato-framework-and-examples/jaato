@@ -13,7 +13,15 @@ confinement, drives one ``echo``-provider turn whose tool call runs
 * the workspace is labelled at that level, authored config read-only;
 * the session record says ``sandbox_mode: selinux``.
 
-    /opt/jaato/venv/bin/python live_session.py --root /srv/jaato-2b
+    /opt/jaato/venv/bin/python live_session.py --root /srv/jaato-2b \
+        [--as-uid 1000] [--trace-subprocess]
+
+``--as-uid`` gives the workspace to that uid and runs the daemon with
+``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
+children are that user, not root.  ``--trace-subprocess`` drops a
+``sitecustomize.py`` into the venv for the run that writes a stack for every
+subprocess the runner starts into its log (``<ws>/.jaato/logs/runner-*.log``),
+to name the code behind an ``execute`` AVC; it is removed afterwards.
 
 Prints one PASS / FAIL line per check, then the daemon's SELinux log lines
 and the AVCs the run produced.  Writes ``live-session.json`` beside it.
@@ -101,7 +109,11 @@ async def run_session(sock: Path, ws: Path) -> dict:
                 done.set()
 
     try:
-        await c.create_session(profile="selinux2b")
+        try:
+            await c.create_session(profile="selinux2b")
+        except Exception as exc:  # SessionRefused: record it, keep reporting
+            out["refused"] = f"{type(exc).__name__}: {exc}"
+            return out
         task = asyncio.create_task(collect())
         await asyncio.sleep(0.5)
         await c.send_message("go")
@@ -125,7 +137,7 @@ def type_of(context: Optional[str]) -> str:
     return parts[2] if len(parts) > 2 else ""
 
 
-def _prepare(root: Path) -> Path:
+def _prepare(root: Path, as_uid: Optional[int]) -> Path:
     """A fresh echo-provider workspace whose one tool call runs COMMAND."""
     from jaato_sdk.conformance.daemon import echo_workspace
 
@@ -134,19 +146,53 @@ def _prepare(root: Path) -> Path:
     ws.mkdir(parents=True)
     echo_workspace(ws, tool_call={"name": "cli_based_tool", "args": {"command": COMMAND}},
                    response="done", plugins=["cli"], name="selinux2b")
+    if as_uid is not None:
+        for dirpath, dirnames, filenames in os.walk(ws):
+            for name in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
+                os.chown(name, as_uid, as_uid)
     return ws
 
 
-def _drive(root: Path, ws: Path, sock: Path, log: Path) -> Optional[dict]:
+TRACE_HOOK = '''# jaato-2b live_session.py --trace-subprocess (removed after the run)
+import sys, traceback
+def _jaato_2b_trace(event, args):
+    if event == "subprocess.Popen":
+        sys.stderr.write("JAATO-2B-SUBPROCESS %r\\n%s" % (args[1], "".join(traceback.format_stack()[-12:])))
+sys.addaudithook(_jaato_2b_trace)
+'''
+
+
+def _trace_hook_path() -> Path:
+    import sysconfig
+    return Path(sysconfig.get_paths()["purelib"]) / "sitecustomize.py"
+
+
+def _install_trace_hook() -> Path:
+    """Write the subprocess trace hook into this venv; refuse to overwrite."""
+    path = _trace_hook_path()
+    if path.exists():
+        raise SystemExit(f"{path} exists; refusing to overwrite it for --trace-subprocess")
+    path.write_text(TRACE_HOOK)
+    subprocess.run(["restorecon", str(path)], check=False)
+    return path
+
+
+def _drive(root: Path, ws: Path, sock: Path, log: Path,
+           uid_policy: str) -> Optional[dict]:
     """Start a private daemon, run the session, stop the daemon by group.
 
-    ``None`` when the daemon exits before its socket appears (recorded).
+    The daemon runs in the foreground, where ``--log-file`` does not apply,
+    so its log is its stdout, *log*.  ``None`` when the daemon exits before
+    its socket appears (recorded).  ``OLDPWD`` is dropped: a child shell
+    validates it at startup, and one inherited from the operator's shell
+    produced ``dac_*`` AVCs nothing in jaato caused (phase 2b run).
     """
     env = dict(os.environ, JAATO_CONFINEMENT="selinux", JAATO_REQUIRE_CONFINEMENT="1")
+    env.pop("OLDPWD", None)
     daemon = subprocess.Popen(
         [sys.executable, "-m", "jaato_server", "--ipc-socket", str(sock),
-         "--pid-file", str(root / "d.pid"), "--log-file", str(log)],
-        cwd=str(ws), env=env, stdout=open(root / "d.out", "wb"),
+         "--pid-file", str(root / "d.pid"), "--runner-uid-policy", uid_policy],
+        cwd=str(ws), env=env, stdout=open(log, "wb"),
         stderr=subprocess.STDOUT, start_new_session=True)
     stop = threading.Event()
     threading.Thread(target=sample_runners, args=(daemon.pid, stop), daemon=True).start()
@@ -157,7 +203,7 @@ def _drive(root: Path, ws: Path, sock: Path, log: Path) -> Optional[dict]:
             time.sleep(0.1)
         if daemon.poll() is not None:
             record("the daemon starts with JAATO_CONFINEMENT=selinux", False,
-                   (root / "d.out").read_text(errors="replace")[-1500:])
+                   log.read_text(errors="replace")[-1500:])
             return None
         time.sleep(1.5)
         return asyncio.run(run_session(sock, ws))
@@ -176,10 +222,12 @@ def _label(path: Path) -> str:
 
 def _check_processes(result: dict) -> str:
     """The runner's and the child's domains, the turn and the record."""
+    record("the session was created", "refused" not in result,
+           result.get("refused", "created"))
     runner_ctxs = sorted(set(RUNNER_CONTEXTS.values()))
     runner = next((c for c in runner_ctxs if type_of(c) == "jaato_runner_t"), None)
     level = level_of(runner)
-    output = "".join(OUTPUT)
+    output = "\n".join(OUTPUT)
     child = next((l.strip() for l in output.splitlines() if "jaato_" in l), "")
     record("the runner runs in jaato_runner_t at a workspace level",
            bool(runner) and level.startswith("s0:c"), f"runner contexts seen: {runner_ctxs}")
@@ -222,7 +270,7 @@ def _report(root: Path, log: Path, marker: str, labels: Dict[str, str]) -> int:
     print(f"\n--- AVCs naming a jaato type since the marker: {len(avcs)} ---")
     print("\n".join(avcs[-60:]))
     json.dump({"results": RESULTS, "runner_contexts": sorted(set(RUNNER_CONTEXTS.values())),
-               "output": "".join(OUTPUT), "labels": labels, "avcs": avcs,
+               "output": "\n".join(OUTPUT), "labels": labels, "avcs": avcs,
                "log": log_lines[-80:]},
               open(root / "live-session.json", "w"), indent=2)
     fails = [r for r in RESULTS if r["result"] == "FAIL"]
@@ -231,21 +279,46 @@ def _report(root: Path, log: Path, marker: str, labels: Dict[str, str]) -> int:
     return 1 if fails else 0
 
 
-def main() -> int:
+def _parse() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/srv/jaato-2b")
-    args = ap.parse_args()
+    ap.add_argument("--as-uid", type=int,
+                    help="give the workspace to this uid and drop the runner to it (#1168)")
+    ap.add_argument("--trace-subprocess", action="store_true",
+                    help="log a stack for every subprocess the runner starts")
+    return ap.parse_args()
+
+
+def _ratelimit(value: Optional[str]) -> str:
+    """Set ``kernel.printk_ratelimit`` (when *value*), return the old one."""
+    path = "/proc/sys/kernel/printk_ratelimit"
+    old = open(path).read().strip()
+    if value is not None:
+        open(path, "w").write(value)
+    return old
+
+
+def main() -> int:
+    args = _parse()
     if os.geteuid() != 0:
         print("run as root", file=sys.stderr)
         return 2
     root = Path(args.root)
-    ws = _prepare(root)
+    ws = _prepare(root, args.as_uid)
     rundir = Path("/run/jaato-2b")
     rundir.mkdir(parents=True, exist_ok=True)
-    log = root / "d.log"
+    log = root / "d.out"
+    hook = _install_trace_hook() if args.trace_subprocess else None
     marker = f"jaato-2b-live start pid={os.getpid()} {time.time():.0f}"
+    old_rate = _ratelimit("0")
     open("/dev/kmsg", "w").write(marker + "\n")
-    result = _drive(root, ws, rundir / "d.sock", log)
+    try:
+        result = _drive(root, ws, rundir / "d.sock", log,
+                        "workspace-owner" if args.as_uid is not None else "daemon")
+    finally:
+        _ratelimit(old_rate)
+        if hook is not None:
+            hook.unlink()
     if result is None:
         return _report(root, log, marker, {})
     level = _check_processes(result)

@@ -122,11 +122,23 @@ sure the user exists and has a home before you start.
 
 ```bash
 cd /root/jaato-phase2b
-/opt/jaato/venv/bin/python /root/jaato/jaato-server/selinux/tools/live_session.py \
-  --root /srv/jaato-2b | tee live.txt
+L=/root/jaato/jaato-server/selinux/tools/live_session.py
+# 1. a root runner (the default policy)
+/opt/jaato/venv/bin/python $L --root /srv/jaato-2b | tee live.txt
+cp /srv/jaato-2b/live-session.json live-root.json; cp -r /srv/jaato-2b/ws/.jaato/logs live-root-logs
+# 2. the runner dropped to uid 1000 (#1168), with a stack for every
+#    subprocess the runner starts, to name what execs ldconfig
+/opt/jaato/venv/bin/python $L --root /srv/jaato-2b --as-uid 1000 --trace-subprocess | tee live-uid.txt
+cp /srv/jaato-2b/live-session.json live-uid.json; cp -r /srv/jaato-2b/ws/.jaato/logs live-uid-logs
+grep -A14 JAATO-2B-SUBPROCESS live-uid-logs/runner-*.log | head -60
 ```
 
-It writes `/srv/jaato-2b/live-session.json`, which holds:
+The tool now records a refused session as a FAIL with the daemon's reason
+instead of crashing, reads the daemon's log from its stdout (`d.out`: a
+foreground daemon ignores `--log-file`), sets `kernel.printk_ratelimit=0`
+for the run, and drops `OLDPWD` from the daemon's environment.
+
+Each run writes `/srv/jaato-2b/live-session.json`, which holds:
 
 - the runner contexts it saw;
 - the command's output;
