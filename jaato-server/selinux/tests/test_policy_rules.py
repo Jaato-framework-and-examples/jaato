@@ -145,6 +145,22 @@ def granted(policy, source: str, target: Optional[str], tclass: str,
     return frozenset(out)
 
 
+def _granted_directly(policy, source: str, tclass: str, perms) -> FrozenSet[str]:
+    """The subset of *perms* granted by rules whose source IS *source*.
+
+    Unlike ``granted``, a rule written for an attribute the type carries
+    (``domain``) does not count: it answers "what does this module give
+    the type", not "what may the type do on this host".
+    """
+    out = set()
+    query = setools.TERuleQuery(policy, ruletype=[setools.TERuletype.allow],
+                                source=source, source_indirect=False,
+                                tclass=[tclass])
+    for rule in query.results():
+        out |= set(rule.perms) & set(perms)
+    return frozenset(out)
+
+
 def _is_conditional(rule) -> bool:
     try:
         rule.conditional
@@ -253,6 +269,9 @@ def _forbids(src, tgt, cls, perms):
 
 
 PTY_USE = {"read", "write", "ioctl", "open"}
+ISOLATED = ("jaato_isolated_t", "jaato_isolated_ro_t")
+JAATO_DOMAINS = ("jaato_runner_t", "jaato_child_t") + ISOLATED
+WRITE = frozenset({"write", "append", "create", "unlink", "rename"})
 LOGIN_PTYS = ("user_devpts_t", "sshd_devpts_t")
 
 RULES: Tuple[Rule, ...] = (
@@ -376,11 +395,11 @@ RULES: Tuple[Rule, ...] = (
          find="fs_dontaudit_search_cgroup_dirs(jaato_runner_t)\n"),
 
     # --- the version marker the readiness check probes -----------------
-    Rule("marker type jaato_policy_v1_t exists",
-         lambda p: type_exists(p, "jaato_policy_v1_t"),
+    Rule("marker type jaato_policy_v2_t exists",
+         lambda p: type_exists(p, "jaato_policy_v2_t"),
          "SELinuxBackend refuses a host whose module lacks the marker",
-         find="type jaato_policy_v1_t;\nfiles_type(jaato_policy_v1_t)",
-         replace="type jaato_policy_v0_t;\nfiles_type(jaato_policy_v0_t)"),
+         find="type jaato_policy_v2_t;\nfiles_type(jaato_policy_v2_t)",
+         replace="type jaato_policy_v1_t;\nfiles_type(jaato_policy_v1_t)"),
 
     # --- entering the runner and //child -------------------------------
     Rule("the runner may exec-transition its children into jaato_child_t",
@@ -406,11 +425,11 @@ RULES: Tuple[Rule, ...] = (
     Rule("system_r is authorized for jaato_runner_t",
          lambda p: "jaato_runner_t" in role_types(p, "system_r"),
          "a daemon under systemd keeps system_r (phase 0)",
-         find="role system_r types { jaato_runner_t jaato_child_t };\n"),
+         find="role system_r types { jaato_runner_t jaato_child_t jaato_isolated_t jaato_isolated_ro_t };\n"),
     Rule("unconfined_r is authorized for jaato_runner_t",
          lambda p: "jaato_runner_t" in role_types(p, "unconfined_r"),
          "a daemon started from a login shell keeps unconfined_r",
-         find="role unconfined_r types { jaato_runner_t jaato_child_t };\n"),
+         find="role unconfined_r types { jaato_runner_t jaato_child_t jaato_isolated_t jaato_isolated_ro_t };\n"),
     Rule("jaato_runner_t is MCS-constrained",
          lambda p: "mcs_constrained_type" in type_attrs(p, "jaato_runner_t"),
          "without it the level separates nothing on targeted",
@@ -448,6 +467,16 @@ RULES: Tuple[Rule, ...] = (
          "what a managed project builds runs (#1273)",
          find="allow { jaato_runner_t jaato_child_t } jaato_managed_ws_t:file "
               "{ lock map execute execute_no_trans };\n"),
+    Rule("a child may read agent config",
+         _allows("jaato_child_t", "jaato_agent_config_t", "file", {"read", "open"}),
+         "personas, profiles and scripts are read by the session",
+         find="read_files_pattern({ jaato_runner_t jaato_child_t }, "
+              "jaato_agent_config_t, jaato_agent_config_t)\n"),
+    Rule("the runner and its children may write the prompt library",
+         _allows("jaato_child_t", "jaato_prompts_t", "file", {"write", "create", "unlink"}),
+         "prompt_library's savePrompt/deletePrompt (AppArmor: write-allowed)",
+         find="manage_files_pattern({ jaato_runner_t jaato_child_t }, "
+              "jaato_prompts_t, jaato_prompts_t)\n"),
     Rule("a child may read authored config",
          _allows("jaato_child_t", "jaato_authored_t", "file", {"read", "open"}),
          "profiles, agents and scripts are read by the session",
@@ -462,6 +491,129 @@ RULES: Tuple[Rule, ...] = (
          "TMPDIR and the private /tmp",
          find="manage_files_pattern({ jaato_runner_t jaato_child_t }, "
               "jaato_tmp_t, jaato_tmp_t)\n"),
+
+    # --- the isolated sub-runner (phase 3, design §5.3) -----------------
+    # A transition rule from the daemon is not asserted: targeted lets
+    # unconfined_t transition into every domain (phase 0), so it would be
+    # decorative. The role and the entrypoint are the halves only this
+    # module grants, as the readiness check says.
+    Rule("system_r is authorized for the isolated domains",
+         lambda p: set(ISOLATED) <= role_types(p, "system_r"),
+         "a daemon under systemd keeps system_r",
+         find="role system_r types { jaato_runner_t jaato_child_t jaato_isolated_t "
+              "jaato_isolated_ro_t };\n",
+         replace="role system_r types { jaato_runner_t jaato_child_t };\n"),
+    Rule("bin_t is an entrypoint of jaato_isolated_t",
+         _allows("jaato_isolated_t", "bin_t", "file", {"entrypoint"}),
+         "the daemon execs the interpreter into the isolated domain",
+         find="corecmd_bin_entry_type(jaato_isolated_t)\n"),
+    Rule("bin_t is an entrypoint of jaato_isolated_ro_t",
+         _allows("jaato_isolated_ro_t", "bin_t", "file", {"entrypoint"}),
+         "the read-only variant is entered the same way",
+         find="corecmd_bin_entry_type(jaato_isolated_ro_t)\n"),
+    Rule("jaato_isolated_t is MCS-constrained",
+         lambda p: "mcs_constrained_type" in type_attrs(p, "jaato_isolated_t"),
+         "its parent's level must be the only workspace it reaches",
+         find="mcs_constrained(jaato_isolated_t)\n"),
+    Rule("jaato_isolated_ro_t is MCS-constrained",
+         lambda p: "mcs_constrained_type" in type_attrs(p, "jaato_isolated_ro_t"),
+         "the read-only variant too",
+         find="mcs_constrained(jaato_isolated_ro_t)\n"),
+    Rule("the isolated domains may use the daemon's descriptors",
+         lambda p: all(granted(p, d, "unconfined_service_t", "fd", frozenset({"use"}),
+                               conditional=False) == {"use"} for d in ISOLATED),
+         "the RPC socketpair comes from the daemon (phase 0: silent fd drop)",
+         find="allow { jaato_isolated_t jaato_isolated_ro_t } "
+              "{ unconfined_t unconfined_service_t }:fd use;\n"),
+    Rule("jaato_isolated_t may write its parent's workspace",
+         _allows("jaato_isolated_t", "jaato_workspace_t", "file", {"write", "create", "unlink"}),
+         "AppArmor: \"<ws>/**\" rwkl in the sub-profile",
+         find="manage_files_pattern(jaato_isolated_t, { jaato_workspace_t "
+              "jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })\n"),
+    Rule("jaato_isolated_ro_t may read the workspace",
+         _allows("jaato_isolated_ro_t", "jaato_managed_ws_t", "file", {"read", "open"}),
+         "isolated_read_only_workspace downgrades rwkl to r, not to nothing",
+         find="read_files_pattern(jaato_isolated_ro_t, { jaato_workspace_t "
+              "jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })\n"),
+    Rule("jaato_isolated_ro_t cannot write the workspace",
+         lambda p: all(not granted(p, "jaato_isolated_ro_t", t, "file", WRITE)
+                       and not granted(p, "jaato_isolated_ro_t", t, "dir",
+                                       frozenset({"add_name", "remove_name", "write"}))
+                       for t in ("jaato_workspace_t", "jaato_managed_ws_t")),
+         "the read-only tightening",
+         append="allow jaato_isolated_ro_t jaato_workspace_t:file write;\n"),
+    Rule("the isolated domains may read the shared authored config",
+         lambda p: all(granted(p, d, "jaato_authored_t", "file",
+                               frozenset({"read", "open"}), conditional=False)
+                       == {"read", "open"} for d in ISOLATED),
+         "AppArmor leaves references, templates, services and plans readable",
+         find="read_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, "
+              "jaato_authored_t, jaato_authored_t)\n"),
+    Rule("the isolated domains cannot read agent config",
+         lambda p: all(not granted(p, d, "jaato_agent_config_t", c,
+                                   frozenset({"read", "open", "getattr", "search"}))
+                       for d in ISOLATED for c in ("file", "dir")),
+         "AppArmor read-denies personas, profiles, scripts, schemas, instructions",
+         append="allow jaato_isolated_t jaato_agent_config_t:file { read open };\n"),
+    Rule("the isolated domains cannot read the prompt library",
+         lambda p: all(not granted(p, d, "jaato_prompts_t", c,
+                                   frozenset({"read", "open", "getattr", "search"}))
+                       for d in ISOLATED for c in ("file", "dir")),
+         "AppArmor read-denies .jaato/prompts/ to the sub-profile",
+         append="allow jaato_isolated_ro_t jaato_prompts_t:file { read open };\n"),
+    Rule("the isolated domains reach no user-tier files",
+         lambda p: all(not granted(p, d, t, c, frozenset({"read", "open", "search", "write"}))
+                       for d in ISOLATED
+                       for t in ("jaato_user_dir_t", "jaato_user_config_t",
+                                 "jaato_user_data_t")
+                       for c in ("file", "dir")),
+         "the sub-profile drops ~/.jaato; its user tier rides the envelope",
+         append="allow jaato_isolated_t jaato_user_data_t:file { read open };\n"),
+    # ``execute`` + ``map`` on bin_t stay: after the exec transition the
+    # kernel maps the entry binary (the interpreter) under the NEW domain,
+    # so a domain that cannot execute its own entrypoint cannot start.
+    # What it must not have is a way to run anything else: no
+    # execute_no_trans on any type, no execute beyond the entry type, and
+    # no transition into another domain.  Counted over the rules this
+    # module writes for the domain itself: targeted gives EVERY ``domain``
+    # prelink_exec_t execute (only under fips_mode) and a transition to
+    # abrt_helper_t (inert without execute on abrt_helper_exec_t), which
+    # the runner and the child carry too and no module can take away.
+    Rule("the isolated domains execute nothing but their own entrypoint",
+         lambda p: all(not _granted_directly(p, d, "file", {"execute_no_trans"})
+                       and not _granted_directly(p, d, "process", {"transition"})
+                       and all(not granted(p, d, t, "file", frozenset({"execute"}))
+                               for t in ("shell_exec_t", "jaato_managed_ws_t",
+                                         "jaato_workspace_t", "jaato_tmp_t"))
+                       for d in ISOLATED),
+         "the flat sub-profile grants no exec outside the venv's bin/",
+         append="allow jaato_isolated_t shell_exec_t:file { execute execute_no_trans };\n"),
+    Rule("the isolated domains cannot set an exec context or change domain",
+         lambda p: all(not granted(p, d, d, "process",
+                                   frozenset({"setexec", "dyntransition", "setcurrent"}))
+                       for d in ISOLATED),
+         "the sub-profile: DROP change_profile transitions",
+         append="allow jaato_isolated_t self:process dyntransition;\n"),
+    Rule("jaato_isolated_t may write reference claims",
+         _allows("jaato_isolated_t", "jaato_claims_t", "file", {"write", "create"}),
+         "claims sit inside the workspace the sub-profile grants rwkl",
+         find="manage_files_pattern(jaato_isolated_t, jaato_claims_t, jaato_claims_t)\n"),
+    Rule("jaato_isolated_ro_t cannot write reference claims",
+         _forbids("jaato_isolated_ro_t", "jaato_claims_t", "file", WRITE),
+         "the read-only tightening covers the whole workspace",
+         append="allow jaato_isolated_ro_t jaato_claims_t:file create;\n"),
+    Rule("both isolated domains may write the session tmpdir",
+         lambda p: all(granted(p, d, "jaato_tmp_t", "file", frozenset({"write", "create"}),
+                               conditional=False) == {"write", "create"} for d in ISOLATED),
+         "AppArmor keeps /tmp/jaato-*/** rwkl in the read-only variant too",
+         find="manage_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, "
+              "jaato_tmp_t, jaato_tmp_t)\n"),
+    Rule("no domain may transition into the isolated domains",
+         lambda p: all(not granted(p, d, i, "process",
+                                   frozenset({"transition", "dyntransition"}))
+                       for d in ("jaato_runner_t", "jaato_child_t") for i in ISOLATED),
+         "only the daemon starts a sub-runner",
+         append="allow jaato_runner_t jaato_isolated_t:process transition;\n"),
 
     # --- what must stay absent -----------------------------------------
     Rule("a child cannot set an exec context or change its domain",
@@ -485,23 +637,26 @@ RULES: Tuple[Rule, ...] = (
          _forbids("jaato_child_t", "jaato_runner_t", "file", {"read", "open"}),
          "the runner's environ holds the provider credential",
          append="allow jaato_child_t jaato_runner_t:file { read open };\n"),
-    Rule("a missing .jaato/reactors.json is born authored, so it cannot be created",
-         lambda p: all(born_as_named(p, d, ws, "file", "reactors.json") == {"jaato_authored_t"}
-                       for d in ("jaato_runner_t", "jaato_child_t")
+    Rule("a missing .jaato/reactors.json is born agent config, so it cannot be created",
+         lambda p: all(born_as_named(p, d, ws, "file", "reactors.json") == {"jaato_agent_config_t"}
+                       for d in ("jaato_runner_t", "jaato_child_t", "jaato_isolated_t")
                        for ws in ("jaato_workspace_t", "jaato_managed_ws_t")),
          "AppArmor denies the path whether or not the file exists",
-         find='type_transition { jaato_runner_t jaato_child_t } { jaato_workspace_t '
-              'jaato_managed_ws_t }:file jaato_authored_t "reactors.json";\n'),
+         find='type_transition { jaato_runner_t jaato_child_t jaato_isolated_t } '
+              '{ jaato_workspace_t jaato_managed_ws_t }:file jaato_agent_config_t '
+              '"reactors.json";\n'),
     Rule("a missing .jaato/template_routing.yaml is born authored, so it cannot be created",
          lambda p: all(born_as_named(p, d, ws, "file", "template_routing.yaml") == {"jaato_authored_t"}
-                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for d in ("jaato_runner_t", "jaato_child_t", "jaato_isolated_t")
                        for ws in ("jaato_workspace_t", "jaato_managed_ws_t")),
          "where a rendered template lands is authored config",
-         find='type_transition { jaato_runner_t jaato_child_t } { jaato_workspace_t '
-              'jaato_managed_ws_t }:file jaato_authored_t "template_routing.yaml";\n'),
-    Rule("neither domain may create an authored file",
-         lambda p: all(not granted(p, d, "jaato_authored_t", "file", frozenset({"create"}))
-                       for d in ("jaato_runner_t", "jaato_child_t")),
+         find='type_transition { jaato_runner_t jaato_child_t jaato_isolated_t } '
+              '{ jaato_workspace_t jaato_managed_ws_t }:file jaato_authored_t '
+              '"template_routing.yaml";\n'),
+    Rule("no jaato domain may create an authored or agent-config file",
+         lambda p: all(not granted(p, d, t, "file", frozenset({"create"}))
+                       for d in JAATO_DOMAINS
+                       for t in ("jaato_authored_t", "jaato_agent_config_t")),
          "the filename transitions refuse a creation only because of this",
          append="allow jaato_child_t jaato_authored_t:file create;\n"),
     Rule("nobody writes, renames or removes authored files",
@@ -541,18 +696,18 @@ RULES: Tuple[Rule, ...] = (
          lambda p: all(not granted(p, d, None, "filesystem",
                                    frozenset({"mount", "remount", "unmount"}))
                        and not granted(p, d, None, "dir", frozenset({"mounton"}))
-                       for d in ("jaato_runner_t", "jaato_child_t")),
+                       for d in JAATO_DOMAINS),
          "AppArmor: deny mount",
          append="allow jaato_child_t jaato_tmp_t:filesystem mount;\n"),
     Rule("neither domain may open raw or packet sockets",
          lambda p: all(not granted(p, d, d, c, frozenset({"create"}))
-                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for d in JAATO_DOMAINS
                        for c in ("rawip_socket", "packet_socket")),
          "AppArmor: deny network raw",
          append="allow jaato_child_t self:rawip_socket create;\n"),
     Rule("neither domain may ptrace",
          lambda p: all(not granted(p, d, t, "process", frozenset({"ptrace"}))
-                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for d in JAATO_DOMAINS
                        for t in ("jaato_runner_t", "jaato_child_t",
                                  "unconfined_t", "unconfined_service_t")),
          "AppArmor: deny ptrace",

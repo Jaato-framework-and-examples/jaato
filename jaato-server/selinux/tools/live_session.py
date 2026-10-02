@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one confined jaato session on an SELinux host (phase 2b).
+"""Run one confined jaato session on an SELinux host (phases 2b and 3).
 
 Run as root, with the jaato venv's interpreter, on a host where the module
 is loaded (docs/design/selinux-phase2b-handoff.md).  It starts a jaato
@@ -15,6 +15,14 @@ confinement, drives one ``echo``-provider turn whose tool call runs
 
     /opt/jaato/venv/bin/python live_session.py --root /srv/jaato-2b \
         [--as-uid 1000] [--trace-subprocess]
+
+``--isolated rw|ro`` (phase 3) makes the model's one tool call a
+``spawn_subagent`` with ``agent_params.isolated``, from a second echo
+profile whose own tool call writes ``iso-probe.txt`` into the parent's
+workspace; ``ro`` adds ``isolated_read_only_workspace``.  It then checks
+that a sub-runner ran in ``jaato_isolated_t`` (or ``jaato_isolated_ro_t``)
+at the parent's level, and that the file was written (``rw``) or refused
+(``ro``).
 
 ``--as-uid`` gives the workspace to that uid and runs the daemon with
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
@@ -47,6 +55,8 @@ RESULTS: List[dict] = []
 OUTPUT: List[str] = []
 RUNNER_CONTEXTS: Dict[int, str] = {}
 COMMAND = "id -Z; echo probe > selinux-probe.txt && echo WSOK"
+ISO_FILE = "iso-probe.txt"
+CHILD_PROFILE = "selinux3child"
 
 
 def record(name: str, ok: Optional[bool], observed: str) -> None:
@@ -80,7 +90,25 @@ def sample_runners(daemon_pid: int, stop: threading.Event) -> None:
         stop.wait(0.2)
 
 
-async def run_session(sock: Path, ws: Path) -> dict:
+def _wait_for_isolated(ws: Path, mode: str) -> None:
+    """Hold the session open while the isolated sub-runner works.
+
+    Its turn is asynchronous to the parent's; disconnecting (or stopping
+    the daemon) first would tear it down before it ran.  Waits for the
+    probe file, or (``ro``, where the file must not appear) for the
+    sub-runner's domain to be seen and a few seconds more.
+    """
+    want = "jaato_isolated_ro_t" if mode == "ro" else "jaato_isolated_t"
+    probe = ws / ISO_FILE
+    for _ in range(120):
+        if probe.exists() or (mode == "ro" and any(
+                type_of(c) == want for c in RUNNER_CONTEXTS.values())):
+            break
+        time.sleep(0.5)
+    time.sleep(5.0 if mode == "ro" else 1.0)
+
+
+async def run_session(sock: Path, ws: Path, isolated: Optional[str] = None) -> dict:
     from jaato_sdk.client.ipc import IPCClient
     from jaato_sdk.events import (
         ClientType, ErrorEvent, PermissionRequestedEvent, SessionInfoEvent,
@@ -98,7 +126,8 @@ async def run_session(sock: Path, ws: Path) -> dict:
             if isinstance(ev, PermissionRequestedEvent):
                 await c.respond_to_permission(ev.request_id, "a")
             elif isinstance(ev, ToolCallEndEvent):
-                out["ends"].append({"tool": ev.tool_name, "success": ev.success})
+                out["ends"].append({"tool": ev.tool_name, "success": ev.success,
+                                    "error": ev.error_message})
             elif isinstance(ev, ToolOutputEvent):
                 OUTPUT.append(ev.chunk or "")
             elif isinstance(ev, SessionInfoEvent):
@@ -122,6 +151,8 @@ async def run_session(sock: Path, ws: Path) -> dict:
             await asyncio.wait_for(done.wait(), timeout=180)
         except asyncio.TimeoutError:
             out["errors"].append("timeout waiting for the turn")
+        if isolated:
+            await asyncio.to_thread(_wait_for_isolated, ws, isolated)
         await asyncio.sleep(1.0)
         task.cancel()
     finally:
@@ -138,15 +169,29 @@ def type_of(context: Optional[str]) -> str:
     return parts[2] if len(parts) > 2 else ""
 
 
-def _prepare(root: Path, as_uid: Optional[int]) -> Path:
-    """A fresh echo-provider workspace whose one tool call runs COMMAND."""
+def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str]) -> Path:
+    """A fresh echo-provider workspace whose one tool call runs COMMAND, or
+    (``isolated``) spawns an isolated subagent that writes ISO_FILE."""
     from jaato_sdk.conformance.daemon import echo_workspace
 
     shutil.rmtree(root, ignore_errors=True)
     ws = root / "ws"
     ws.mkdir(parents=True)
-    echo_workspace(ws, tool_call={"name": "cli_based_tool", "args": {"command": COMMAND}},
-                   response="done", plugins=["cli"], name="selinux2b")
+    if isolated:
+        params = {"isolated": True}
+        if isolated == "ro":
+            params["isolated_read_only_workspace"] = True
+        echo_workspace(ws, tool_call={"name": "spawn_subagent", "args": {
+            "task": "write the probe file", "profile": CHILD_PROFILE,
+            "agent_params": params}},
+            response="spawned", plugins=["subagent"], name="selinux2b")
+        echo_workspace(ws, tool_call={"name": "writeNewFile", "args": {
+            "path": ISO_FILE, "content": "isolated\n"}},
+            response="done", plugins=["file_edit"], name=CHILD_PROFILE,
+            plugin_configs={"permission": {"policy": {"defaultPolicy": "allow"}}})
+    else:
+        echo_workspace(ws, tool_call={"name": "cli_based_tool", "args": {"command": COMMAND}},
+                       response="done", plugins=["cli"], name="selinux2b")
     if as_uid is not None:
         for dirpath, dirnames, filenames in os.walk(ws):
             for name in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
@@ -181,7 +226,7 @@ def _install_trace_hook() -> Path:
 
 
 def _drive(root: Path, ws: Path, sock: Path, log: Path,
-           uid_policy: str) -> Optional[dict]:
+           uid_policy: str, isolated: Optional[str] = None) -> Optional[dict]:
     """Start a private daemon, run the session, stop the daemon by group.
 
     The daemon runs in the foreground, where ``--log-file`` does not apply,
@@ -209,7 +254,7 @@ def _drive(root: Path, ws: Path, sock: Path, log: Path,
                    log.read_text(errors="replace")[-1500:])
             return None
         time.sleep(1.5)
-        return asyncio.run(run_session(sock, ws))
+        return asyncio.run(run_session(sock, ws, isolated))
     finally:
         stop.set()
         try:
@@ -223,6 +268,14 @@ def _label(path: Path) -> str:
     return subprocess.run(["ls", "-Zd", str(path)], capture_output=True, text=True).stdout.strip()
 
 
+def _check_spawn(result: dict) -> None:
+    """The parent's spawn_subagent call, with the daemon's reason if refused."""
+    spawns = [e for e in result["ends"] if e["tool"] == "spawn_subagent"]
+    record("spawn_subagent returned", any(e["success"] for e in spawns),
+           "; ".join(e["error"] or "ok" for e in spawns)
+           or json.dumps(result)[:600])
+
+
 def _check_processes(result: dict) -> str:
     """The runner's and the child's domains, the turn and the record."""
     record("the session was created", "refused" not in result,
@@ -234,6 +287,9 @@ def _check_processes(result: dict) -> str:
     child = next((l.strip() for l in output.splitlines() if "jaato_" in l), "")
     record("the runner runs in jaato_runner_t at a workspace level",
            bool(runner) and level.startswith("s0:c"), f"runner contexts seen: {runner_ctxs}")
+    if result.get("isolated"):
+        _check_spawn(result)
+        return level
     record("the model's command runs in jaato_child_t at the same level",
            type_of(child) == "jaato_child_t" and level_of(child) == level,
            f"id -Z said: {child!r}; output: {output!r}")
@@ -246,6 +302,23 @@ def _check_processes(result: dict) -> str:
     return level
 
 
+def _check_isolated(ws: Path, level: str, mode: str) -> None:
+    """Phase 3: the sub-runner's domain and what it could write."""
+    want = "jaato_isolated_ro_t" if mode == "ro" else "jaato_isolated_t"
+    probe = ws / ISO_FILE
+    ctxs = sorted(set(RUNNER_CONTEXTS.values()))
+    iso = next((c for c in ctxs if type_of(c) == want), None)
+    record(f"a sub-runner runs in {want} at the parent's level",
+           bool(iso) and level_of(iso) == level, f"runner contexts seen: {ctxs}")
+    if mode == "ro":
+        record("the read-only sub-runner could not write the workspace",
+               not probe.exists(), f"{ISO_FILE} exists: {probe.exists()}")
+    else:
+        label = _label(probe) if probe.exists() else "(not written)"
+        record("the sub-runner wrote its parent's workspace at the level",
+               probe.exists() and f":{level}" in label, label)
+
+
 def _check_labels(ws: Path, level: str) -> Dict[str, str]:
     """The workspace, its authored config and a file the child created."""
     labels = {str(p): _label(p) for p in (
@@ -254,7 +327,8 @@ def _check_labels(ws: Path, level: str) -> Dict[str, str]:
     record("the workspace is labelled at the runner's level",
            at_level and f"jaato_workspace_t:{level}" in labels[str(ws)], labels[str(ws)])
     authored = labels[str(ws / ".jaato" / "profiles")]
-    record("authored config is jaato_authored_t", "jaato_authored_t" in authored, authored)
+    record("the persona/profile config is jaato_agent_config_t",
+           "jaato_agent_config_t" in authored, authored)
     created = labels[str(ws / "selinux-probe.txt")]
     record("a file the child created carries the level",
            at_level and f":{level}" in created, created)
@@ -289,6 +363,8 @@ def _parse() -> argparse.Namespace:
                     help="give the workspace to this uid and drop the runner to it (#1168)")
     ap.add_argument("--trace-subprocess", action="store_true",
                     help="log a stack for every subprocess the runner starts")
+    ap.add_argument("--isolated", choices=("rw", "ro"),
+                    help="phase 3: spawn an isolated subagent instead of a cli command")
     return ap.parse_args()
 
 
@@ -307,7 +383,7 @@ def main() -> int:
         print("run as root", file=sys.stderr)
         return 2
     root = Path(args.root)
-    ws = _prepare(root, args.as_uid)
+    ws = _prepare(root, args.as_uid, args.isolated)
     rundir = Path("/run/jaato-2b")
     rundir.mkdir(parents=True, exist_ok=True)
     log = root / "d.out"
@@ -317,14 +393,18 @@ def main() -> int:
     open("/dev/kmsg", "w").write(marker + "\n")
     try:
         result = _drive(root, ws, rundir / "d.sock", log,
-                        "workspace-owner" if args.as_uid is not None else "daemon")
+                        "workspace-owner" if args.as_uid is not None else "daemon",
+                        args.isolated)
     finally:
         _ratelimit(old_rate)
         if hook is not None:
             hook.unlink()
     if result is None:
         return _report(root, log, marker, {})
+    result["isolated"] = args.isolated
     level = _check_processes(result)
+    if args.isolated:
+        _check_isolated(ws, level, args.isolated)
     return _report(root, log, marker, _check_labels(ws, level))
 
 

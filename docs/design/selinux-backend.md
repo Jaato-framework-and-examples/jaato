@@ -194,7 +194,8 @@ profiles today.
 |---|---|---|
 | `jaato_runner_t` | base profile `jaato-ws-<id>` | cold spawn: `setexeccon` in the daemon's fork before `execve`; pool slot: `setcon` (section 7) |
 | `jaato_child_t` | `//child` | `setexeccon` in the `preexec_fn` of every model-driven subprocess |
-| `jaato_isolated_t` | isolated sub-runner profile | daemon `setexeccon` at sub-runner spawn |
+| `jaato_isolated_t` | isolated sub-runner profile | exec transition at sub-runner spawn (cold, like the runner) |
+| `jaato_isolated_ro_t` | isolated sub-runner profile with `isolated_read_only_workspace` | same |
 | `jaato_template_t` | (unconfined pool template) | only with pool support, section 7 |
 
 There is no `tool_hat` domain, and there cannot be one of the same shape.
@@ -231,10 +232,18 @@ empty output with exit status 0 (phase 0).
 |---|---|---|---|
 | `jaato_workspace_t` | the workspace tree | read, write, create, unlink, rename, lock, link | same |
 | `jaato_managed_ws_t` | a managed workspace's tree (under `workspace_root`) | as above, **plus execute** | same |
-| `jaato_authored_t` | `.jaato/{agents,profiles,scripts,services/*/,instructions,references,templates,plans,completion_schemas,spawn_schemas}` and `reactors.json`, `template_routing.yaml` | read, search | read, search |
+| `jaato_authored_t` | `.jaato/{services/*/,references,templates,plans}`, `template_routing.yaml` and the other authored entries | read, search | read, search |
+| `jaato_agent_config_t` | `.jaato/{agents,profiles,scripts,completion_schemas,spawn_schemas,instructions}` and `reactors.json` (phase 3) | read, search | read, search |
+| `jaato_prompts_t` | `.jaato/prompts/` (phase 3) | read, write | read, write |
 | `jaato_claims_t` | `.jaato/references-claims/` | read, write | read only (template v43's `//child` deny) |
 | `jaato_tmp_t` | session tmpdir and private `/tmp` | read, write, create | same |
 | `jaato_devpts_t` | a pty either domain opens (`type_transition` from `devpts_t`) | read, write, ioctl, setattr | same |
+
+`jaato_agent_config_t` and `jaato_prompts_t` exist only so the isolated
+domains (§5.3) can be refused them: they are what the AppArmor isolated
+sub-profile read-denies (`selinux_labels.ISOLATED_UNREADABLE` plus
+`prompts`, kept equal to that body by a test). For the runner and the child
+they behave as `jaato_authored_t` and as workspace files.
 
 The authored set is the one `jaato_sdk/scaffold/gitignore.py` `AUTHORED`
 already declares and `test_gitignore_authored_set_tracks_apparmor.py`
@@ -317,9 +326,26 @@ inputs that change what the runner may do are exactly those four.
 
 ### 5.3 Isolated sub-runners
 
-`jaato_isolated_t` at a **second** pair allocated for the sub-runner's own
-workspace. Its parent's files are then out of reach by level, as the
-isolated profile keeps them out of reach by path today.
+Phase 3. The AppArmor isolated sub-runner works in its **parent's**
+workspace (`_spawn_isolated_runner` passes the parent's `workspace_path`);
+what isolates it is what its flat sub-profile denies, not a separate tree.
+So the SELinux sub-runner runs at the **parent's** level, in its own domain:
+
+* `jaato_isolated_t`, or `jaato_isolated_ro_t` under
+  `isolated_read_only_workspace` (workspace list and read, no write);
+* flat: `child_label == label`, and neither domain may exec anything, as
+  the AppArmor body grants no exec (`ix`/`px`/`ux`) outside the interpreter;
+* refused: `jaato_agent_config_t`, `jaato_prompts_t`, the user tier, ptys,
+  `setexec`; allowed: the workspace, `jaato_authored_t`, claims (read-only
+  in the `ro` domain), its own `jaato_tmp_t`, TCP and DNS.
+
+`isolated_workspace_subpath` has no SELinux form (it would need the
+subpath labelled at another level, which the parent's runner could then not
+reach), so `_provision_isolated_selinux` refuses it by name, stage
+`sub_profile`, before anything is provisioned.
+
+An earlier draft of this section gave the sub-runner its own level for its
+own workspace. There is no such workspace.
 
 ## 6. Labelling a workspace
 
@@ -443,7 +469,8 @@ notebook kernel (#1323) take it through the existing
 |---|---|
 | per-session profile | per-workspace level + fixed domain |
 | `//child` | `jaato_child_t` via exec transition |
-| isolated sub-runner | `jaato_isolated_t` at its own level |
+| isolated sub-runner | `jaato_isolated_t` / `jaato_isolated_ro_t` at the parent's level, flat (§5.3) |
+| `isolated_workspace_subpath` | **refused** by name under SELinux |
 | complain mode (`JAATO_APPARMOR_COMPLAIN`) | per-domain permissive (`semanage permissive -a jaato_runner_t`), host-wide; the backend reads it and reports `selinux-permissive`, WARNING once, same as #1014 |
 | per-thread verification (#1023) | same code; label comparison via `lsm_label` |
 | mode check (#1014), `require_confinement` means enforce | same; enforcing and not permissive |
@@ -549,7 +576,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
-| 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
+| 3 | **implemented, not yet run on a kernel**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, module 1.5.0 (marker `jaato_policy_v2_t`, `REQUIRED_POLICY_VERSION = 2`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
@@ -663,6 +690,37 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   from the code that settles on no kernel boundary: the daemon's selection
   line, and the WS server's startup when it was handed no SELinux backend
   (a standalone WS server runs no selection, so there it is still said).
+
+### What phase 3 decided
+
+* **The parent's level, not a new one** (§5.3), because the sub-runner
+  works in the parent's workspace.
+* **Two domains, not a boolean**: read-only is a second domain with no
+  write on the workspace types, as the AppArmor `ro` tightening is a second
+  body.
+* **The read-denied config gets its own types** rather than one type for all
+  authored entries, because the isolated domain needs `references`,
+  `templates` and the rest, and AppArmor denies only the persona entries.
+  Relabelling is driven by the label stamp, which carries the policy
+  version, so a v1 workspace is relabelled once.
+* **Parity, stated where it is weak**: the isolated domain can write claims
+  (AppArmor's isolated body can too); the `ro` domain cannot write through
+  an inherited log fd it did not open (nor can AppArmor's).
+* **"Executes nothing" means its own entrypoint and nothing else.** The
+  isolated domains keep `execute` + `map` on `bin_t`: after the exec
+  transition the kernel maps the entry interpreter under the new domain,
+  so without them the domain cannot start. They have no
+  `execute_no_trans` and no `transition` of their own, and no `execute`
+  on shells, workspace or tmp files. Targeted gives every `domain`
+  `prelink_exec_t` execute (under `fips_mode`) and a transition to
+  `abrt_helper_t` (inert without execute on its entry type); the module
+  cannot remove those, and the runner and child carry them too.
+* **Found on the way, fixed here:** the runner's subagent plugin read the
+  parent id from `_session_id` / `session_id`, which `JaatoSession` does not
+  have (it is `_daemon_session_id`), so every isolated spawn on the runner
+  path was refused by the daemon (`parent_session_id must be a non-empty
+  str`) on any LSM. Its routing test faked the same wrong attribute on a
+  `MagicMock`. Found by driving `live_session.py --isolated` locally.
 
 ### What phase 2b decided
 

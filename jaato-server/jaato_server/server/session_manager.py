@@ -830,6 +830,10 @@ class SubRunnerHandle:
             Empty when no cgroup was created (no runtime_limits or
             cgroups unavailable).
         created_at: Timestamp for diagnostics + leak detection.
+        confinement: The SELinux :class:`ConfinementHandle` the sub-runner
+            was spawned into (``sub_apparmor_profile`` is then empty), or
+            ``None`` under AppArmor.  Nothing to tear down: labels persist
+            with the workspace.
     """
     parent_session_id: str
     subagent_id: str
@@ -841,6 +845,7 @@ class SubRunnerHandle:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
+    confinement: Optional[Any] = None
 
 
 @dataclass
@@ -1117,6 +1122,23 @@ _DELIVERY_FAILURE_REASON = {
         "itself declined to take another"
     ),
 }
+
+
+def _isolated_descriptor(
+    confinement: Optional[Any], sub_apparmor_profile: str,
+) -> Optional[Dict[str, str]]:
+    """``SessionInitEnvelope.confinement`` for an isolated sub-runner.
+
+    The SELinux handle's descriptor when the sub-runner was provisioned an
+    isolated domain, else the AppArmor sub-profile's.  One writer of the
+    shape the runner's ``lsm_confine.resolve`` reads.
+    """
+    from jaato_server.server.confinement.apparmor import envelope_descriptor
+    from jaato_server.server.confinement.base import selinux_descriptor
+
+    if confinement is not None:
+        return selinux_descriptor(confinement)
+    return envelope_descriptor(sub_apparmor_profile)
 
 
 def _isolated_limits(
@@ -3289,75 +3311,22 @@ class SessionManager:
         # name, it can derive it from this session id.
         isolated_session_id = f"{parent_session_id}__sub_{subagent_id}"
 
-        # ── Stage: sub_profile (next stage — §4.3.4) ───────────
-        # Stop here.  Refusing to spawn until §4.3.4 provisions a
-        # sub-AppArmor profile is intentional: the alternative
-        # would be ``profile_name=""`` (unconfined sub-runner),
-        # which weakens security relative to the §4.3 default-
-        # share path callers can use today.  Monotonic security
-        # gradient through the sub-track.
-        # ── Stage: sub_profile — provision sub-AppArmor profile ──
-        # Phase 4 §4.3.4: ask the daemon's AppArmorManager to write
-        # + load a sub-profile named ``jaato-ws-{parent}//{subagent}``.
-        # Standalone-with-prefix-name (not a true hat) per Audit 6.
-        # When AppArmor isn't available (host doesn't support it, or
-        # AppArmorManager isn't wired into this SessionManager
-        # instance), we treat the sub-profile as absent and return
-        # ``stage=sub_profile`` — the isolated-runner spawn requires
-        # kernel confinement.
-        apparmor_manager = self._resolve_apparmor_manager()
-        if apparmor_manager is None or not apparmor_manager.is_available():
-            return {
-                "ok": False,
-                "error": (
-                    f"sub-AppArmor profile cannot be provisioned: "
-                    f"AppArmorManager unavailable on this host.  "
-                    f"Isolated-runner spawn requires kernel-level "
-                    f"confinement.  Profile reconstruction succeeded "
-                    f"(name={profile.name!r}, model={profile.model!r}).  "
-                    f"Would-be isolated session: {isolated_session_id!r}.  "
-                    f"Workaround: set agent_params.isolated=false (or "
-                    f"omit) to use the default-share path (subagent "
-                    f"runs in the parent's runner) — works end-to-end "
-                    f"today.  See docs/design/phase4_implementation_audits.md."
-                ),
-                "stage": "sub_profile",
-                "isolated_session_id": isolated_session_id,
-                "profile_name": profile.name,
-            }
-
-        ok, sub_profile_or_err = apparmor_manager.provision_sub_profile(
-            parent_session_id=parent_session_id,
-            subagent_id=subagent_id,
-            workspace_path=workspace_path,
-            tightenings=sub_profile_tightenings,
-        )
-        if not ok:
-            logger.warning(
-                "_spawn_isolated_runner: sub-profile provision failed "
-                "for parent=%s subagent=%s: %s",
-                parent_session_id, subagent_id, sub_profile_or_err,
-            )
-            return {
-                "ok": False,
-                "error": (
-                    f"sub-AppArmor profile provision failed: "
-                    f"{sub_profile_or_err}.  Profile reconstruction "
-                    f"succeeded (name={profile.name!r}).  Would-be "
-                    f"isolated session: {isolated_session_id!r}.  "
-                    f"Workaround: omit agent_params.isolated."
-                ),
-                "stage": "sub_profile",
-                "isolated_session_id": isolated_session_id,
-                "profile_name": profile.name,
-            }
-
-        sub_profile_name = sub_profile_or_err
-        logger.info(
-            "_spawn_isolated_runner: sub-profile provisioned for "
-            "parent=%s subagent=%s (sub_profile=%s)",
-            parent_session_id, subagent_id, sub_profile_name,
-        )
+        # ── Stage: sub_profile — the sub-runner's kernel boundary ──
+        # AppArmor: a sub-profile (§4.3.4).  SELinux: an isolated domain
+        # at the parent's level (selinux-backend.md §5.3).  No boundary,
+        # no spawn: the alternative is an unconfined sub-runner, weaker
+        # than the default-share path callers can use today.
+        refusal, sub_profile_name, isolated_confinement = (
+            self._provision_isolated_boundary(
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                isolated_session_id=isolated_session_id,
+                workspace_path=workspace_path,
+                tightenings=sub_profile_tightenings,
+                profile=profile,
+            ))
+        if refusal is not None:
+            return refusal
 
         # ── Stage: sub_cgroup — provision sub-cgroup ───────────
         # Phase 4 §4.3.5: when cgroups available + profile declares
@@ -3399,18 +3368,13 @@ class SessionManager:
                 # change the §4.3.5 return shape.  Idempotent
                 # re-load via provision_sub_profile would succeed
                 # anyway, so a stuck-loaded profile is not blocking.
-                try:
-                    apparmor_manager.teardown_sub_profile(
-                        parent_session_id=parent_session_id,
-                        subagent_id=subagent_id,
-                    )
-                except Exception:  # noqa: BLE001 — best-effort
-                    logger.exception(
-                        "_spawn_isolated_runner: sub-AppArmor "
-                        "rollback failed after sub-cgroup provision "
-                        "failure for parent=%s subagent=%s",
-                        parent_session_id, subagent_id,
-                    )
+                self._rollback_isolated_resources(
+                    parent_session_id=parent_session_id,
+                    subagent_id=subagent_id,
+                    isolated_session_id=isolated_session_id,
+                    cgroup_path="",
+                    sub_profile_name=sub_profile_name,
+                )
                 logger.warning(
                     "_spawn_isolated_runner: sub-cgroup provision "
                     "failed for parent=%s subagent=%s "
@@ -3488,6 +3452,7 @@ class SessionManager:
                 sub_apparmor_profile=sub_profile_name,
                 cgroup_path=cgroup_path,
                 profile=profile,
+                confinement=isolated_confinement,
                 effective_runtime_limits=effective_runtime_limits,
                 agent_params=agent_params,
             )
@@ -3505,6 +3470,7 @@ class SessionManager:
                 subagent_id=subagent_id,
                 isolated_session_id=isolated_session_id,
                 cgroup_path=cgroup_path,
+                sub_profile_name=sub_profile_name,
             )
             return {
                 "ok": False,
@@ -3547,6 +3513,7 @@ class SessionManager:
             isolated_session_id=isolated_session_id,
             workspace_path=workspace_path,
             sub_apparmor_profile=sub_profile_name,
+            confinement=sub_handle.confinement,
             agent_params=agent_params,
             # #859: a subagent acts for the user who owns its parent.
             created_by=self._creator_of(parent_session_id),
@@ -3601,6 +3568,153 @@ class SessionManager:
             "sub_session_id": isolated_session_id,
         }
 
+    def _provision_isolated_boundary(
+        self, *, parent_session_id: str, subagent_id: str,
+        isolated_session_id: str, workspace_path: str,
+        tightenings: Optional[Dict[str, Any]], profile: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], str, Optional[Any]]:
+        """The isolated sub-runner's kernel boundary, by the selected backend.
+
+        Returns ``(refusal, sub_profile_name, selinux_handle)``: a refusal
+        dict (``stage=sub_profile``) when no boundary could be provisioned,
+        else the AppArmor sub-profile name (``""`` under SELinux) and the
+        SELinux handle (``None`` under AppArmor).
+        """
+        backend = getattr(self, "_selinux_backend", None)
+        if backend is not None:
+            refusal, handle = self._provision_isolated_selinux(
+                backend, isolated_session_id=isolated_session_id,
+                workspace_path=workspace_path, tightenings=tightenings or {},
+                profile=profile,
+            )
+            return refusal, "", handle
+        refusal, name = self._provision_isolated_apparmor(
+            parent_session_id=parent_session_id, subagent_id=subagent_id,
+            isolated_session_id=isolated_session_id,
+            workspace_path=workspace_path, tightenings=tightenings,
+            profile=profile,
+        )
+        return refusal, name, None
+
+    def _provision_isolated_selinux(
+        self, backend: Any, *, isolated_session_id: str, workspace_path: str,
+        tightenings: Dict[str, Any], profile: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
+        """An isolated domain at the parent's level (selinux-backend.md §5.3).
+
+        ``isolated_workspace_subpath`` is refused by name: SELinux cannot
+        scope a domain to part of a tree its level reaches, and running the
+        sub-runner wider than the supervisor asked would be the opposite of
+        the tightening.  ``isolated_read_only_workspace`` picks the
+        read-only domain.
+        """
+        from jaato_server.server.confinement import Boundary
+        from jaato_server.shared.plugins.workspace_home import _is_daemon_managed
+
+        def refuse(why: str) -> Dict[str, Any]:
+            return {
+                "ok": False,
+                "error": (
+                    f"{why}  Profile reconstruction succeeded "
+                    f"(name={profile.name!r}).  Would-be isolated session: "
+                    f"{isolated_session_id!r}."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }
+
+        if tightenings.get("isolated_workspace_subpath"):
+            return refuse(
+                "isolated_workspace_subpath cannot be enforced under SELinux "
+                "(a domain cannot be scoped to a subtree of its workspace; "
+                "selinux-backend.md §5.3).  Refusing rather than running the "
+                "sub-runner over the whole workspace.  Drop the tightening, "
+                "or use agent_params.isolated_read_only_workspace."), None
+        handle = backend.provision_isolated(
+            isolated_session_id,
+            Boundary(
+                workspace_path=workspace_path,
+                managed=_is_daemon_managed(
+                    workspace_path, self._managed_workspace_root_for_spawn()),
+            ),
+            read_only=bool(tightenings.get("isolated_read_only_workspace")),
+        )
+        if handle is None:
+            return refuse(
+                "the SELinux isolated domain could not be provisioned (see "
+                "the daemon log).  Isolated-runner spawn requires kernel-"
+                "level confinement."), None
+        logger.info(
+            "_spawn_isolated_runner: SELinux boundary for %s: %s",
+            isolated_session_id, handle.label,
+        )
+        return None, handle
+
+    def _provision_isolated_apparmor(
+        self, *, parent_session_id: str, subagent_id: str,
+        isolated_session_id: str, workspace_path: str,
+        tightenings: Optional[Dict[str, Any]], profile: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Phase 4 §4.3.4: write and load a sub-profile
+        ``jaato-ws-{parent}//{subagent}`` (standalone, prefix-named per
+        Audit 6).  With no usable AppArmorManager the spawn is refused:
+        it requires kernel confinement.
+        """
+        apparmor_manager = self._resolve_apparmor_manager()
+        if apparmor_manager is None or not apparmor_manager.is_available():
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile cannot be provisioned: "
+                    f"AppArmorManager unavailable on this host.  "
+                    f"Isolated-runner spawn requires kernel-level "
+                    f"confinement.  Profile reconstruction succeeded "
+                    f"(name={profile.name!r}, model={profile.model!r}).  "
+                    f"Would-be isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: set agent_params.isolated=false (or "
+                    f"omit) to use the default-share path (subagent "
+                    f"runs in the parent's runner) — works end-to-end "
+                    f"today.  See docs/design/phase4_implementation_audits.md."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }, ""
+
+        ok, sub_profile_or_err = apparmor_manager.provision_sub_profile(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            workspace_path=workspace_path,
+            tightenings=tightenings,
+        )
+        if not ok:
+            logger.warning(
+                "_spawn_isolated_runner: sub-profile provision failed "
+                "for parent=%s subagent=%s: %s",
+                parent_session_id, subagent_id, sub_profile_or_err,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile provision failed: "
+                    f"{sub_profile_or_err}.  Profile reconstruction "
+                    f"succeeded (name={profile.name!r}).  Would-be "
+                    f"isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: omit agent_params.isolated."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }, ""
+
+        logger.info(
+            "_spawn_isolated_runner: sub-profile provisioned for "
+            "parent=%s subagent=%s (sub_profile=%s)",
+            parent_session_id, subagent_id, sub_profile_or_err,
+        )
+        return None, sub_profile_or_err
+
     def _do_spawn_isolated_runner(
         self,
         *,
@@ -3613,6 +3727,7 @@ class SessionManager:
         profile: Any,  # SubagentProfile
         effective_runtime_limits: RuntimeLimits,
         agent_params: Optional[Dict[str, Any]],
+        confinement: Optional[Any] = None,
     ) -> SubRunnerHandle:
         """Spawn the sub-runner subprocess + initialize its RPC
         channel (Phase 4 §4.3.6a).
@@ -3673,6 +3788,7 @@ class SessionManager:
             tool_timeout_seconds=effective_runtime_limits.tool_timeout_seconds,
             disable_confine=False,  # Always confined for §4.3.6.
             cgroup_attach=cgroup_attach,
+            confinement=confinement,
         )
 
         rpc = RunnerRPCClient(
@@ -3691,6 +3807,7 @@ class SessionManager:
             spawned=spawned,
             sub_apparmor_profile=sub_apparmor_profile,
             cgroup_path=cgroup_path,
+            confinement=confinement,
         )
 
     def _creator_of(self, session_id: str) -> Optional[str]:
@@ -3733,6 +3850,7 @@ class SessionManager:
         sub_apparmor_profile: str,
         agent_params: Optional[Dict[str, Any]],
         created_by: Optional[str] = None,
+        confinement: Optional[Any] = None,
         effective_runtime_limits: Optional[RuntimeLimits] = None,
     ) -> Any:
         """Build a :class:`SessionInitEnvelope` for an isolated
@@ -3860,7 +3978,6 @@ class SessionManager:
         # conditional because this builder sits on its complexity
         # baseline.
         from jaato_server.shared.plugins.subagent.config import _runtime_limits_to_dict
-        from jaato_server.server.confinement.apparmor import envelope_descriptor
         from jaato_server.server.runner_spawn import user_tier_snapshot
         _iso_limits = _isolated_limits(effective_runtime_limits, profile)
         _iso_width = getattr(_iso_limits, "max_parallel_tools", None)
@@ -3900,7 +4017,7 @@ class SessionManager:
             created_by=created_by,
             # v8: the one writer of the descriptor, so the sub-runner's
             # ``lsm_confine.resolve`` reads the shape the main runner does.
-            confinement=envelope_descriptor(sub_apparmor_profile),
+            confinement=_isolated_descriptor(confinement, sub_apparmor_profile),
             # #1465: an isolated sub-runner runs as the daemon's uid, so
             # it reads the daemon's own user tier.
             user_tier_files=user_tier_snapshot(None),
@@ -4280,9 +4397,14 @@ class SessionManager:
         subagent_id: str,
         isolated_session_id: str,
         cgroup_path: str,
+        sub_profile_name: str,
     ) -> None:
         """Tear down sub-cgroup + sub-AppArmor on §4.3.6a spawn
         failure (Phase 4 §4.3.6a).
+
+        *sub_profile_name* empty means no sub-profile was loaded (an
+        SELinux sub-runner, whose labels need no teardown), so AppArmor
+        is not touched.
 
         Best-effort: each teardown wrapped in try/except.  Rollback
         failures log but don't propagate — the helper's return
@@ -4302,6 +4424,8 @@ class SessionManager:
                 )
 
         # AppArmor next.
+        if not sub_profile_name:
+            return
         try:
             apparmor_manager = self._resolve_apparmor_manager()
             if apparmor_manager is not None:

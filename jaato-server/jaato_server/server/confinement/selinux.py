@@ -52,8 +52,9 @@ from jaato_server.shared.lsm_label import (
 
 logger = logging.getLogger(__name__)
 
-#: The policy module version this build needs (design §4).
-REQUIRED_POLICY_VERSION = 1
+#: The policy module version this build needs (design §4).  v2: the
+#: isolated domains and the agent-config and prompts types (phase 3).
+REQUIRED_POLICY_VERSION = 2
 
 #: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
 USER_DIR_TYPE = "jaato_user_dir_t"
@@ -63,6 +64,13 @@ RUNNER_PROBE_CONTEXT = "system_u:system_r:jaato_runner_t:s0"
 
 RUNNER_DOMAIN = "jaato_runner_t"
 CHILD_DOMAIN = "jaato_child_t"
+
+#: An isolated subagent's sub-runner, and its read-only variant (design
+#: §5.3).  Flat, as the AppArmor sub-profile is: no child domain, so a
+#: subprocess would stay in the same domain (and the policy grants it
+#: nothing to exec).
+ISOLATED_DOMAIN = "jaato_isolated_t"
+ISOLATED_RO_DOMAIN = "jaato_isolated_ro_t"
 
 SELINUX_MOUNT = "/sys/fs/selinux"
 
@@ -263,20 +271,26 @@ class SELinuxBackend:
             self._levels = LevelTable()
         return self._levels
 
-    def confinement_id_for_boundary(self, boundary: Boundary) -> str:
+    def confinement_id_for_boundary(
+        self, boundary: Boundary, domain: str = RUNNER_DOMAIN,
+    ) -> str:
         """Slug plus a digest of what the runner may do (design §5.2).
 
         Nothing is rendered under SELinux, so the digest covers the inputs
-        that change the boundary: policy version, level, managed, private
-        ``/tmp``.  Allocates the workspace's level on first use.
+        that change the boundary: policy version, domain, level, managed,
+        private ``/tmp``.  The domain is part of it because an isolated
+        sub-runner shares its parent's level and is still a different
+        boundary.  Allocates the workspace's level on first use.
         """
         workspace = os.path.realpath(boundary.workspace_path)
         level = self._level_table().level_for(workspace)
+        domain_part = "" if domain == RUNNER_DOMAIN else f" domain={domain}"
         return _confinement_id(
             workspace_root=workspace, config_root=boundary.config_root,
             rendered_body=(
                 f"selinux policy=v{REQUIRED_POLICY_VERSION} level={level} "
                 f"managed={boundary.managed} private_tmp={boundary.private_tmp_dir or ''}"
+                f"{domain_part}"
             ),
         )
 
@@ -289,6 +303,27 @@ class SELinuxBackend:
         label that would not apply, an unreadable own context.  A caller
         that required confinement then refuses the session.
         """
+        return self._provision(session_id, boundary, RUNNER_DOMAIN, CHILD_DOMAIN)
+
+    def provision_isolated(
+        self, session_id: str, boundary: Boundary, *, read_only: bool,
+    ) -> Optional[ConfinementHandle]:
+        """An isolated subagent's sub-runner, at its parent's level (§5.3).
+
+        The sub-runner works in its parent's workspace, so it runs at that
+        workspace's level; what isolates it is the domain.  Flat: the child
+        label is its own label.  *read_only* is the
+        ``isolated_read_only_workspace`` tightening.  The
+        ``isolated_workspace_subpath`` tightening has no SELinux form and
+        is refused by the caller before this is reached.
+        """
+        domain = ISOLATED_RO_DOMAIN if read_only else ISOLATED_DOMAIN
+        return self._provision(session_id, boundary, domain, domain)
+
+    def _provision(
+        self, session_id: str, boundary: Boundary, domain: str, child_domain: str,
+    ) -> Optional[ConfinementHandle]:
+        """The steps both entry points share; *domain* names the boundary."""
         if not self.is_available():
             logger.error("SELinux provision for %s: backend unavailable (%s)",
                          session_id, self.unavailable_reason)
@@ -312,14 +347,14 @@ class SELinuxBackend:
             logger.error("SELinux provision for %s at %s failed: %s",
                          session_id, workspace, exc)
             return None
-        label = f"{own.user}:{own.role}:{RUNNER_DOMAIN}:{level}"
+        label = f"{own.user}:{own.role}:{domain}:{level}"
         permissive = self._domain_permissive(label)
         handle = ConfinementHandle(
             backend=BACKEND_SELINUX,
             label=label,
-            confinement_id=self.confinement_id_for_boundary(boundary),
-            child_label=f"{own.user}:{own.role}:{CHILD_DOMAIN}:{level}",
-            grants=_grants(plan, label),
+            confinement_id=self.confinement_id_for_boundary(boundary, domain),
+            child_label=f"{own.user}:{own.role}:{child_domain}:{level}",
+            grants=_grants(plan, label, domain, child_domain),
             complain=(permissive is True or self.host_readiness().enforcing is False),
         )
         # The session tmpdir, before the spawn: the runner has no add_name
@@ -377,12 +412,13 @@ class SELinuxBackend:
         return None
 
 
-def _grants(plan: "selinux_labels.Plan", label: str) -> Dict[str, Any]:
+def _grants(plan: "selinux_labels.Plan", label: str,
+            domain: str, child_domain: str) -> Dict[str, Any]:
     """The diagnostics record (#1326), SELinux-shaped (design §8)."""
     return {
         "backend": BACKEND_SELINUX,
-        "domain": RUNNER_DOMAIN,
-        "child_domain": CHILD_DOMAIN,
+        "domain": domain,
+        "child_domain": child_domain,
         "level": plan.level,
         "label": label,
         "labelled_roots": [plan.workspace],

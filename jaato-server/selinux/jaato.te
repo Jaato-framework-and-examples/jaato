@@ -1,4 +1,4 @@
-policy_module(jaato, 1.4.0)
+policy_module(jaato, 1.5.0)
 
 ########################################
 #
@@ -15,10 +15,9 @@ policy_module(jaato, 1.4.0)
 # "Deliberately absent" record those, and tests/test_policy_rules.py
 # asserts both what is granted and what is not.
 #
-# Scope of this version (phase 2a): the runner and //child domains, the
-# workspace, authored, claims and tmp file types. Not yet: the isolated
-# sub-runner (jaato_isolated_t, phase 3) and the pool template
-# (jaato_template_t, phase 4).
+# Scope of this version (phase 3): the runner, //child and isolated
+# sub-runner domains, and the file types they share. Not yet: the pool
+# template (jaato_template_t, phase 4).
 #
 
 gen_require(`
@@ -34,11 +33,13 @@ gen_require(`
 #
 
 ## The version marker. SELinuxBackend's readiness check asks whether
-## system_u:object_r:jaato_policy_v1_t:s0 is a valid context (no
+## system_u:object_r:jaato_policy_v2_t:s0 is a valid context (no
 ## privilege needed) and refuses an older module. Bump the number, and
 ## REQUIRED_POLICY_VERSION in server/confinement/selinux.py, together.
-type jaato_policy_v1_t;
-files_type(jaato_policy_v1_t)
+## v2 (phase 3): the isolated domains and the agent-config and prompts
+## types; a workspace labelled for v1 is relabelled once.
+type jaato_policy_v2_t;
+files_type(jaato_policy_v2_t)
 
 ## The session runner (AppArmor: the base profile jaato-ws-<id>).
 type jaato_runner_t;
@@ -49,6 +50,16 @@ domain_type(jaato_runner_t)
 type jaato_child_t;
 domain_type(jaato_child_t)
 
+## An isolated subagent's sub-runner (AppArmor: the flat sub-profile
+## jaato-ws-<parent>//<subagent>), and its read-only variant (the
+## isolated_read_only_workspace tightening). Flat: no child domain, and
+## nothing to exec (the AppArmor body grants exec on the venv's bin/
+## only, whose interpreter resolves outside it).
+type jaato_isolated_t;
+domain_type(jaato_isolated_t)
+type jaato_isolated_ro_t;
+domain_type(jaato_isolated_ro_t)
+
 ## A user's own checkout (IPC, user-CWD): read/write, no execute.
 type jaato_workspace_t;
 files_type(jaato_workspace_t)
@@ -58,10 +69,24 @@ files_type(jaato_workspace_t)
 type jaato_managed_ws_t;
 files_type(jaato_managed_ws_t)
 
-## Authored config inside a workspace (.jaato/agents, profiles, scripts,
-## ...): readable, never writable, renamable or removable by a session.
+## Authored config inside a workspace (.jaato/references, templates,
+## services, plans, ...): readable, never writable, renamable or removable
+## by a session.
 type jaato_authored_t;
 files_type(jaato_authored_t)
+
+## The authored entries an isolated sub-runner may not even read (.jaato/
+## agents, profiles, scripts, both payload schemas, instructions,
+## reactors.json; the AppArmor isolated sub-profile's read-denies). To a
+## runner and its children, exactly jaato_authored_t.
+type jaato_agent_config_t;
+files_type(jaato_agent_config_t)
+
+## .jaato/prompts/, the prompt library: written by sessions
+## (prompt_library's savePrompt/deletePrompt), unreadable to an isolated
+## sub-runner.
+type jaato_prompts_t;
+files_type(jaato_prompts_t)
 
 ## .jaato/references-claims/: the runner writes claims, //child cannot
 ## (template v43).
@@ -102,13 +127,15 @@ userdom_user_home_content(jaato_user_data_t)
 # type and level only), so both roles the daemon runs under are
 # authorized for the jaato domains. Phase 0: without the role, the
 # transition fails with "user and role not authorized".
-role system_r types { jaato_runner_t jaato_child_t };
-role unconfined_r types { jaato_runner_t jaato_child_t };
+role system_r types { jaato_runner_t jaato_child_t jaato_isolated_t jaato_isolated_ro_t };
+role unconfined_r types { jaato_runner_t jaato_child_t jaato_isolated_t jaato_isolated_ro_t };
 
 # MCS: the level decides which workspace. Without this the targeted
 # policy applies no MCS constraint to these types at all.
 mcs_constrained(jaato_runner_t)
 mcs_constrained(jaato_child_t)
+mcs_constrained(jaato_isolated_t)
+mcs_constrained(jaato_isolated_ro_t)
 
 ########################################
 #
@@ -389,6 +416,9 @@ allow { jaato_runner_t jaato_child_t } jaato_managed_ws_t:file { lock map execut
 list_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato_authored_t)
 read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato_authored_t)
 read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato_authored_t)
+list_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_agent_config_t, jaato_agent_config_t)
+read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_agent_config_t, jaato_agent_config_t)
+read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_agent_config_t, jaato_agent_config_t)
 
 # The two authored FILES directly under .jaato (the rest are directories,
 # created at provisioning). AppArmor denies a write to the path whether or
@@ -401,8 +431,18 @@ read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato
 # hard-linking it into place. rename/link keep the source's type, and
 # refusing add_name in .jaato would also refuse the runtime state the
 # runner keeps there. AppArmor, which mediates paths, refuses that too.
-type_transition { jaato_runner_t jaato_child_t } { jaato_workspace_t jaato_managed_ws_t }:file jaato_authored_t "reactors.json";
-type_transition { jaato_runner_t jaato_child_t } { jaato_workspace_t jaato_managed_ws_t }:file jaato_authored_t "template_routing.yaml";
+type_transition { jaato_runner_t jaato_child_t jaato_isolated_t } { jaato_workspace_t jaato_managed_ws_t }:file jaato_agent_config_t "reactors.json";
+type_transition { jaato_runner_t jaato_child_t jaato_isolated_t } { jaato_workspace_t jaato_managed_ws_t }:file jaato_authored_t "template_routing.yaml";
+
+########################################
+#
+# The prompt library (AppArmor: written by base and //child alike; read-
+# denied to the isolated sub-profile)
+#
+
+manage_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_prompts_t, jaato_prompts_t)
+manage_files_pattern({ jaato_runner_t jaato_child_t }, jaato_prompts_t, jaato_prompts_t)
+manage_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_prompts_t, jaato_prompts_t)
 
 ########################################
 #
@@ -437,3 +477,130 @@ allow jaato_tmp_t self:filesystem associate;
 # Deliberately absent: add_name on tmp_t (the host's /tmp). Models write
 # to /tmp by habit; #1381's private /tmp is the answer, not a grant on
 # the host's /tmp.
+
+########################################
+#
+# The isolated sub-runner (AppArmor: the flat sub-profile rendered by
+# AppArmorManager._render_sub_profile; design §5.3)
+#
+# It works in its parent's workspace, so it runs at the PARENT's level.
+# Translated rule by rule from that body:
+#   workspace "<ws>/**" rwkl, or r under isolated_read_only_workspace;
+#   the authored write-denies; read-denies on the persona/config entries
+#   and prompts/; /tmp/jaato-*/** rwkl; /proc self-introspection; network
+#   through abstractions/nameservice; the venv and source tree r.
+# Absent, as in that body: every exec (it has no //child and no
+# /usr/bin grant), ptys, and the user tier beyond two TUI files (the
+# runner reads its user tier from the envelope's snapshot, #1465, which
+# lands in its session tmpdir).
+#
+
+allow unconfined_t { jaato_isolated_t jaato_isolated_ro_t }:process transition;
+allow unconfined_service_t { jaato_isolated_t jaato_isolated_ro_t }:process transition;
+corecmd_bin_entry_type(jaato_isolated_t)
+corecmd_bin_entry_type(jaato_isolated_ro_t)
+allow { jaato_isolated_t jaato_isolated_ro_t } { unconfined_t unconfined_service_t }:fd use;
+allow { jaato_isolated_t jaato_isolated_ro_t } { unconfined_t unconfined_service_t }:fifo_file rw_inherited_fifo_file_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } { unconfined_t unconfined_service_t }:unix_stream_socket { getattr getopt setopt read write shutdown };
+allow { jaato_isolated_t jaato_isolated_ro_t } { unconfined_t unconfined_service_t }:process sigchld;
+
+allow { jaato_isolated_t jaato_isolated_ro_t } self:process { fork sigchld signal signull sigkill sigstop getattr getsched setsched getpgid setpgid getsession };
+allow { jaato_isolated_t jaato_isolated_ro_t } self:fifo_file rw_fifo_file_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } self:unix_stream_socket create_stream_socket_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } self:unix_dgram_socket create_socket_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } self:dir list_dir_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } self:file rw_file_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } self:lnk_file read_lnk_file_perms;
+kernel_read_system_state(jaato_isolated_t)
+kernel_read_system_state(jaato_isolated_ro_t)
+kernel_read_kernel_sysctls(jaato_isolated_t)
+kernel_read_kernel_sysctls(jaato_isolated_ro_t)
+dev_read_sysfs(jaato_isolated_t)
+dev_read_sysfs(jaato_isolated_ro_t)
+fs_getattr_all_fs(jaato_isolated_t)
+fs_getattr_all_fs(jaato_isolated_ro_t)
+fs_dontaudit_search_cgroup_dirs(jaato_isolated_t)
+fs_dontaudit_search_cgroup_dirs(jaato_isolated_ro_t)
+#
+# Deliberately absent: self:process { setexec dyntransition setcurrent }
+# (the sub-profile's "DROP: change_profile transitions"), and every
+# execute: corecmd_exec_bin, corecmd_exec_shell, execute on the
+# workspace types.
+
+# The interpreter and its libraries, read only.
+libs_use_ld_so(jaato_isolated_t)
+libs_use_ld_so(jaato_isolated_ro_t)
+libs_use_shared_libs(jaato_isolated_t)
+libs_use_shared_libs(jaato_isolated_ro_t)
+libs_read_lib_files(jaato_isolated_t)
+libs_read_lib_files(jaato_isolated_ro_t)
+corecmd_read_bin_files(jaato_isolated_t)
+corecmd_read_bin_files(jaato_isolated_ro_t)
+files_read_usr_files(jaato_isolated_t)
+files_read_usr_files(jaato_isolated_ro_t)
+files_read_etc_files(jaato_isolated_t)
+files_read_etc_files(jaato_isolated_ro_t)
+auth_read_passwd(jaato_isolated_t)
+auth_read_passwd(jaato_isolated_ro_t)
+miscfiles_read_localization(jaato_isolated_t)
+miscfiles_read_localization(jaato_isolated_ro_t)
+miscfiles_read_generic_certs(jaato_isolated_t)
+miscfiles_read_generic_certs(jaato_isolated_ro_t)
+dev_rw_null(jaato_isolated_t)
+dev_rw_null(jaato_isolated_ro_t)
+dev_read_urand(jaato_isolated_t)
+dev_read_urand(jaato_isolated_ro_t)
+dev_read_rand(jaato_isolated_t)
+dev_read_rand(jaato_isolated_ro_t)
+
+# Network: abstractions/nameservice's inet/inet6 stream and dgram.
+allow { jaato_isolated_t jaato_isolated_ro_t } self:tcp_socket create_stream_socket_perms;
+allow { jaato_isolated_t jaato_isolated_ro_t } self:udp_socket create_socket_perms;
+corenet_tcp_connect_all_ports(jaato_isolated_t)
+corenet_tcp_connect_all_ports(jaato_isolated_ro_t)
+sysnet_dns_name_resolve(jaato_isolated_t)
+sysnet_dns_name_resolve(jaato_isolated_ro_t)
+corenet_tcp_bind_generic_node(jaato_isolated_t)
+corenet_tcp_bind_generic_node(jaato_isolated_ro_t)
+corenet_tcp_bind_all_unreserved_ports(jaato_isolated_t)
+corenet_tcp_bind_all_unreserved_ports(jaato_isolated_ro_t)
+corenet_udp_bind_generic_node(jaato_isolated_t)
+corenet_udp_bind_generic_node(jaato_isolated_ro_t)
+corenet_udp_bind_all_unreserved_ports(jaato_isolated_t)
+corenet_udp_bind_all_unreserved_ports(jaato_isolated_ro_t)
+
+# The workspace: read-write for jaato_isolated_t, read only for
+# jaato_isolated_ro_t (AppArmor: rwkl / r on "<ws>/**").
+manage_dirs_pattern(jaato_isolated_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+manage_files_pattern(jaato_isolated_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+manage_lnk_files_pattern(jaato_isolated_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+allow jaato_isolated_t { jaato_workspace_t jaato_managed_ws_t }:file lock;
+list_dirs_pattern(jaato_isolated_ro_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+read_files_pattern(jaato_isolated_ro_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+read_lnk_files_pattern(jaato_isolated_ro_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+
+# Authored config it may read (references, templates, services, plans, the
+# routing table, the fragment tiers), and claims (inside the workspace, so
+# rwkl / r like the rest of it).
+list_dirs_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_authored_t, jaato_authored_t)
+read_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_authored_t, jaato_authored_t)
+read_lnk_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_authored_t, jaato_authored_t)
+manage_dirs_pattern(jaato_isolated_t, jaato_claims_t, jaato_claims_t)
+manage_files_pattern(jaato_isolated_t, jaato_claims_t, jaato_claims_t)
+list_dirs_pattern(jaato_isolated_ro_t, jaato_claims_t, jaato_claims_t)
+read_files_pattern(jaato_isolated_ro_t, jaato_claims_t, jaato_claims_t)
+#
+# Deliberately absent: any access to jaato_agent_config_t and
+# jaato_prompts_t (the sub-profile's read-denies: information isolation
+# between agents of a cascade), and to the user tier
+# (jaato_user_dir_t, jaato_user_config_t, jaato_user_data_t).
+
+# The session tmpdir, labelled by the daemon at the parent's level
+# (AppArmor: /tmp/jaato-*/** rwkl, kept by the read-only variant too).
+files_search_tmp(jaato_isolated_t)
+files_search_tmp(jaato_isolated_ro_t)
+manage_dirs_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaato_tmp_t)
+manage_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaato_tmp_t)
+manage_lnk_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaato_tmp_t)
+manage_sock_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaato_tmp_t)
+allow { jaato_isolated_t jaato_isolated_ro_t } jaato_tmp_t:file { lock map };
