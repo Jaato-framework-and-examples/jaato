@@ -193,12 +193,15 @@ def find_gc_file(
     file_path: Optional[str] = None,
     workspace_root: Optional[str] = None,
     config_root: Optional[str] = None,
+    home: Optional[str] = None,
 ) -> Optional["Path"]:
     """The ``gc.json`` :func:`load_gc_from_file` would read, or ``None``.
 
     The search order is :func:`load_gc_from_file`'s.  The daemon calls this
     for a session whose boundary denies these paths (an isolated
-    sub-runner) and ships the contents on its envelope.
+    sub-runner) and ships the contents on its envelope.  ``home`` is the
+    home of the user the runner runs as, when that is not the caller's
+    (a runner dropped to another uid, #1168); ``None`` is the caller's own.
     """
     from pathlib import Path
 
@@ -215,7 +218,7 @@ def find_gc_file(
             candidates.append(Path(workspace_root) / ".jaato" / "gc.json")
         else:
             candidates.append(Path(".jaato") / "gc.json")
-        candidates.append(Path.home() / ".jaato" / "gc.json")
+        candidates.append(Path(home or Path.home()) / ".jaato" / "gc.json")
     return next((p for p in candidates if p.exists()), None)
 
 

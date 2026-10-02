@@ -56,6 +56,14 @@ REVERSIONS = [
         test="test_the_envelope_carries_the_user_and_its_user_tier",
         because="a dropped sub-runner would be handed the daemon's user tier",
     ),
+    Reversion(
+        target=_SM,
+        find="    home = runner_user.home if runner_user is not None else None\n",
+        replace="    home = None\n",
+        test="test_the_gc_json_is_the_runner_users",
+        because="the fourth kernel run: a dropped user's ~/.jaato/gc.json "
+                "reached its parent runner and not the isolated sub-runner",
+    ),
 ]
 
 _USER = RunnerUser(uid=1000, gid=1000, groups=(1000,), username="apanoia",
@@ -154,3 +162,22 @@ def test_the_envelope_carries_the_user_and_its_user_tier(monkeypatch, tmp_path):
         agent_params=None, runner_user=_USER)
     assert env.runner_user == _USER.to_dict()
     assert asked == [_USER]
+
+
+def test_the_gc_json_is_the_runner_users(tmp_path, monkeypatch):
+    """The fourth kernel run: the daemon looked in its own home."""
+    import json
+    from dataclasses import replace
+
+    monkeypatch.setenv("HOME", str(tmp_path / "daemon-home"))
+    user_home = tmp_path / "user-home"
+    (user_home / ".jaato").mkdir(parents=True)
+    (user_home / ".jaato" / "gc.json").write_text(json.dumps({"type": "truncate"}))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    profile = build_inline_profile(_payload(), name="researcher", description="d")
+    env = SessionManager._build_isolated_envelope(
+        MagicMock(), profile=profile, isolated_session_id="iso-1",
+        workspace_path=str(ws), sub_apparmor_profile="",
+        agent_params=None, runner_user=replace(_USER, home=str(user_home)))
+    assert env.gc_file == {"type": "truncate"}

@@ -577,7 +577,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
-| 3 | **implemented; three kernel runs (the last at 573f1470: probe 61/61, live 8/8 per mode as root), the uid fix not yet re-run**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
+| 3 | **implemented; four kernel runs (the last at 79a0506a: probe 61/61 and live 8/8 in both modes, as root and as uid 1000), two follow-up fixes not yet re-run**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
@@ -766,6 +766,26 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   directory and its log before the spawn, the spawner drops to it, and the
   envelope carries it with that user's user tier. The spawn line now names
   `runs_as` for every runner.
+
+### The fourth phase 3 kernel run (79a0506a)
+
+* **Everything passes**: probe 61/61 at both uids, and live 8/8 in both
+  modes as root and as uid 1000. The sub-runner's spawn line and log name
+  the parent's user, and the `dac_override` denial is gone.
+* **A dropped isolated sub-runner lost `todo` and `filesystem_query`.**
+  Their loaders asked `~/.config/jaato/<plugin>.json` `exists()`. The
+  isolated domains are refused `search` on a user's home (105 AVCs per uid
+  run; `/root` is searchable, so the root runs were unaffected), pathlib
+  re-raises `EACCES`, and the registry dropped both plugins. **Fixed (your
+  choice: the daemon ships it):** `.config/jaato` joins
+  `~/.claude/skills` in the user-tier snapshot (`HOME_SHIPPED_DIRS`), and
+  the `todo`, `filesystem_query` and `references` loaders read it through
+  `user_tier.home_path`. Credential files there (`*_accounts.json`) are
+  refused as everywhere else. `references` loses the `OSError` catch it
+  carried for the same probe under AppArmor.
+* **A dropped user's `~/.jaato/gc.json` reached the parent and not the
+  sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
+  takes the runner user's home.
 
 ### What phase 3 decided
 

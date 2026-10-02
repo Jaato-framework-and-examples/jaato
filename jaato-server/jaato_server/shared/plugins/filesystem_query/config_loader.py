@@ -15,6 +15,7 @@ subject to force-include overrides.
 import json
 import logging
 import os
+from jaato_server.shared import user_tier
 from jaato_server.shared.session_context import get_workspace_root, get_config_root
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -335,7 +336,7 @@ def load_config(
             default_paths = [
                 cwd / ".jaato" / "filesystem_query.json",
                 cwd / "filesystem_query.json",
-                Path.home() / ".config" / "jaato" / "filesystem_query.json",
+                user_tier.home_path(".config/jaato/filesystem_query.json"),
             ]
             for default_path in default_paths:
                 if default_path.exists():

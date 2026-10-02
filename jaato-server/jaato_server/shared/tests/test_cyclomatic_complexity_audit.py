@@ -394,7 +394,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/prompt_library/plugin.py::PromptLibraryPlugin._fetch_from_npx": 17,
     "jaato-server/jaato_server/shared/plugins/prompt_library/plugin.py::PromptLibraryPlugin.get_command_completions": 29,
     "jaato-server/jaato_server/shared/plugins/references/config_loader.py::discover_references": 26,
-    "jaato-server/jaato_server/shared/plugins/references/config_loader.py::load_config": 20,
+    "jaato-server/jaato_server/shared/plugins/references/config_loader.py::load_config": 19,
     "jaato-server/jaato_server/shared/plugins/references/config_loader.py::validate_config": 19,
     "jaato-server/jaato_server/shared/plugins/references/config_loader.py::validate_reference_file": 33,
     "jaato-server/jaato_server/shared/plugins/references/config_loader.py::validate_source": 22,

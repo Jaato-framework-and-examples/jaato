@@ -1127,21 +1127,24 @@ _DELIVERY_FAILURE_REASON = {
 }
 
 
-def _isolated_gc(profile: Any, workspace_path: str) -> tuple:
+def _isolated_gc(profile: Any, workspace_path: str, runner_user: Any = None) -> tuple:
     """``(gc, gc_file)`` for an isolated sub-runner's envelope.
 
     ``gc`` is the profile's whole ``gc:`` block (``to_dict``, as the main
     envelope sends it since #1133; this builder used to read a ``config``
     attribute ``GCProfileConfig`` does not have, so only ``type`` crossed).
     Without one, ``gc_file`` is the ``gc.json`` the main runner would read,
-    found and read here because the sub-runner's boundary denies it.
+    found and read here because the sub-runner's boundary denies it.  The
+    user tier is ``runner_user``'s home when the sub-runner drops to one,
+    as its parent did; the daemon's own home otherwise.
     """
     gc_obj = getattr(profile, "gc", None)
     if gc_obj is not None:
         return gc_obj.to_dict(), None
     from jaato_server.shared.plugins.gc import find_gc_file
 
-    path = find_gc_file(workspace_root=workspace_path)
+    home = runner_user.home if runner_user is not None else None
+    path = find_gc_file(workspace_root=workspace_path, home=home)
     if path is None:
         return None, None
     try:
@@ -4033,7 +4036,7 @@ class SessionManager:
             plugin_specs.append(entry)
 
         system_instructions = getattr(profile, "system_instructions", None)
-        gc_dict, gc_file = _isolated_gc(profile, workspace_path)
+        gc_dict, gc_file = _isolated_gc(profile, workspace_path, runner_user)
         env_overrides = dict(getattr(profile, "env", {}) or {})
 
         if not provider_name:

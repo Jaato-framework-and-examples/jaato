@@ -18,6 +18,16 @@ The module is now **1.6.0** (marker `jaato_policy_v3_t`), and the daemon
 refuses an older one. A workspace labelled under an older module is
 relabelled once, because the label stamp carries the policy version.
 
+**Fifth run (after the fourth run's two findings).** The fourth run
+passed everything. Two fixes follow, with no policy change (still 1.6.0).
+First, `~/.config/jaato` now ships on the envelope, so a uid-1000
+sub-runner keeps `todo` and `filesystem_query`: its log should have no
+`initialize() failed` line, and the home-level `search` AVCs on the
+user's home should drop to none or a few. Second, a `gc.json` in only
+the dropped user's `~/.jaato` should reach the sub-runner. Repeat the
+`gc-user` rw run and expect `GC installed from gc.json (via the daemon)`
+in the sub-runner's log.
+
 **Fourth run (after the uid fix).** The third run passed everything as
 root; under `--as-uid 1000` the isolated sub-runner ran as root and could
 not write the owner's workspace. It now runs as its parent's user. No

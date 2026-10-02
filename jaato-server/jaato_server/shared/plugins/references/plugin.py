@@ -1634,12 +1634,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
             else:
                 self._project_root = str(base_path_obj)
 
-        # Try to load from file first (master catalog).  load_config skips any
-        # HOME tier it can't reach (missing, or a confined session correctly
-        # denied ~/.jaato/references / ~/.config/jaato — see config_loader's
-        # OSError handling), so it won't raise here under confinement; the
-        # workspace-tier catalog is loaded by set_workspace_path() ->
-        # _reload_catalog().
+        # Try to load from file first (master catalog).  load_config skips a
+        # denied ~/.jaato/references (discover_references) and reads
+        # ~/.config/jaato from the daemon's user-tier snapshot on a runner,
+        # so it won't raise here under confinement; the workspace-tier
+        # catalog is loaded by set_workspace_path() -> _reload_catalog().
         config_path = config.get("config_path")
         self._config_path = config_path
         self._begin_catalog_load(inline_base_path)
