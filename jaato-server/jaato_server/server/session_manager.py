@@ -1124,6 +1124,22 @@ _DELIVERY_FAILURE_REASON = {
 }
 
 
+def _rollback_note(cgroup_path: str, sub_profile_name: str) -> str:
+    """What an isolated-spawn failure released, named rather than assumed.
+
+    Under SELinux there is no sub-profile, and a host without cgroups gets
+    no sub-cgroup, so a fixed "sub-cgroup + sub-AppArmor profile rolled
+    back" described resources that were never made.
+    """
+    released = [what for what, held in (
+        ("sub-cgroup", cgroup_path),
+        (f"sub-AppArmor profile {sub_profile_name!r}", sub_profile_name),
+    ) if held]
+    if not released:
+        return "Nothing was provisioned that needed rolling back."
+    return "Rolled back: " + ", ".join(released) + "."
+
+
 def _isolated_descriptor(
     confinement: Optional[Any], sub_apparmor_profile: str,
 ) -> Optional[Dict[str, str]]:
@@ -3385,8 +3401,8 @@ class SessionManager:
                     "ok": False,
                     "error": (
                         f"sub-cgroup provision failed for isolated "
-                        f"session {isolated_session_id!r}.  Sub-AppArmor "
-                        f"profile {sub_profile_name!r} rolled back.  "
+                        f"session {isolated_session_id!r}.  "
+                        f"{_rollback_note('', sub_profile_name)}  "
                         f"Workaround: omit agent_params.isolated to "
                         f"use default-share path."
                     ),
@@ -3477,7 +3493,7 @@ class SessionManager:
                 "error": (
                     f"sub-runner subprocess spawn failed: "
                     f"{type(spawn_exc).__name__}: {spawn_exc}.  "
-                    f"Sub-cgroup + sub-AppArmor profile rolled back.  "
+                    f"{_rollback_note(cgroup_path, sub_profile_name)}  "
                     f"Workaround: omit agent_params.isolated to use "
                     f"default-share path."
                 ),
@@ -3759,6 +3775,11 @@ class SessionManager:
             log_path = os.path.join(
                 log_dir, f"runner-{isolated_session_id}.log",
             )
+            if confinement is not None:
+                # SELinux: the read-only domain may append to a log only
+                # of its own type; a failure refuses the spawn, as a
+                # session tmpdir that cannot be labelled does.
+                self._selinux_backend.prepare_runner_log(confinement, log_path)
 
         # Cgroup attach: when §4.3.5 provisioned a sub-cgroup, build
         # the preexec_fn that migrates the forked child in.  When no

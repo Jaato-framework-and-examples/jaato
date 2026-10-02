@@ -14,9 +14,15 @@ Phase 3 confines the isolated sub-runner (`spawn_subagent` with
   `reactors.json`) or the prompt library (`jaato_prompts_t`);
 - `isolated_workspace_subpath` is refused by name.
 
-The module is now **1.5.0** (marker `jaato_policy_v2_t`), and the daemon
-refuses an older one. A workspace labelled under 1.4.0 is relabelled once,
-because the label stamp carries the policy version.
+The module is now **1.6.0** (marker `jaato_policy_v3_t`), and the daemon
+refuses an older one. A workspace labelled under an older module is
+relabelled once, because the label stamp carries the policy version.
+
+**Second run (after 64020ec9).** The first run's probe passed 57/57; its
+live runs all failed at the spawn on a daemon deadlock (fixed: the spawn
+now runs off the daemon loop), and the read-only sub-runner could not
+write its log (fixed: `jaato_runner_log_t`). Expect the probe to grow by
+four log checks and every live check to pass.
 
 CI checks the policy rules (Fedora container, setools) and the wiring with
 fakes. This run answers what CI cannot: **does a real isolated subagent end
@@ -61,9 +67,9 @@ cd /root/jaato && git fetch origin && git checkout claude/selinux-phase3 \
   && git pull --ff-only && git log --oneline -1
 cd jaato-server/selinux && make -f /usr/share/selinux/devel/Makefile jaato.pp \
   && semodule -i jaato.pp
-semodule -l | grep jaato                 # jaato 1.5.0
-seinfo -t | grep -c '^ *jaato_'          # 16 types
-seinfo -t jaato_policy_v2_t              # present
+semodule -l | grep jaato                 # jaato 1.6.0
+seinfo -t | grep -c '^ *jaato_'          # 17 types
+seinfo -t jaato_policy_v3_t              # present
 ```
 
 Reinstall the venv non-editable, as in 2b §2 (the code changed):
@@ -90,8 +96,8 @@ EOF
 /opt/jaato/venv/bin/jaato-doctor 2>&1 | grep -i -A3 'confinement\|selinux'
 ```
 
-Expected: `ready=True`, `is_available True`, and the doctor names policy
-version 2.
+Expected: `ready=True`, `is_available True`, and the doctor's selinux
+row says `policy module v3`.
 
 ## 4. The policy probe, both uids
 
@@ -113,6 +119,7 @@ New since 2b, all expected to PASS:
 | isolated cannot read `.jaato/agents` (file or listing), `.jaato/prompts`, another workspace, a user-tier persona | the isolated boundary is open |
 | isolated cannot create `.jaato/reactors.json`, exec `/bin/true`, or set an exec context | the flat, no-exec domain is not flat |
 | `jaato_isolated_ro_t` reads the workspace and writes its tmpdir, and cannot write or create a workspace file or a claim | the read-only domain |
+| both isolated domains append to a `jaato_runner_log_t` file, and truncating it is refused | the v3 log type |
 
 ## 5. The live session, both modes, both uids
 
@@ -134,12 +141,18 @@ done
 |---|---|
 | `spawn_subagent returned` | the daemon refused the spawn; the JSON quotes its stage and error (`sub_profile` = provisioning) |
 | the sub-runner ran in `jaato_isolated_t` / `jaato_isolated_ro_t` at the parent runner's level | the isolated handle did not reach the spawn, or the exec transition did not happen |
-| `rw`: `iso-probe.txt` exists in the workspace; `ro`: it does not | the domain's write grant, or the read-only domain is not read-only |
+| `rw`: `iso-probe.txt` exists in the workspace at the level | the domain's write grant |
+| `ro`: it does not, AND an enforced `jaato_isolated_ro_t` AVC refused a write on a workspace directory | the read-only domain is not read-only, or the sub-runner never tried |
+| the sub-runner wrote its own log (`jaato_runner_log_t`, not empty) | the daemon did not label the log, or the domain cannot append to it |
 | the parent runner and its labels as in 2b | a regression from the authored-config split |
 
 In `ro` mode the subagent's write is expected to fail inside the subagent;
 the parent turn still completes. Record the subagent's error text from the
 runner logs either way.
+
+A `LOOP_STALL` naming `_do_spawn_isolated_runner` in `d.out`, or a spawn
+failing with a bare `TimeoutError`, means the venv predates the off-loop
+fix.
 
 Before this branch, every isolated spawn on the runner path was refused
 with `parent_session_id must be a non-empty str` on any host; if that line

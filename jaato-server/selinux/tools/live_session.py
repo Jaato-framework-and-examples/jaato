@@ -302,25 +302,63 @@ def _check_processes(result: dict) -> str:
     return level
 
 
-def _check_isolated(ws: Path, level: str, mode: str) -> None:
-    """Phase 3: the sub-runner's domain and what it could write."""
+def _avcs_since(marker: str) -> List[str]:
+    """The kernel's AVC lines naming a jaato type, after the run's marker."""
+    dmesg = subprocess.run(["dmesg"], capture_output=True, text=True).stdout.splitlines()
+    idx = max((i for i, l in enumerate(dmesg) if marker in l), default=-1)
+    return [l for l in dmesg[idx + 1:] if "avc:" in l and "jaato_" in l]
+
+
+def _check_isolated(ws: Path, level: str, mode: str, marker: str) -> None:
+    """Phase 3: the sub-runner's domain, its log and what it could write."""
     want = "jaato_isolated_ro_t" if mode == "ro" else "jaato_isolated_t"
-    probe = ws / ISO_FILE
     ctxs = sorted(set(RUNNER_CONTEXTS.values()))
     iso = next((c for c in ctxs if type_of(c) == want), None)
     record(f"a sub-runner runs in {want} at the parent's level",
            bool(iso) and level_of(iso) == level, f"runner contexts seen: {ctxs}")
+    _check_sub_runner_log(ws)
     if mode == "ro":
-        record("the read-only sub-runner could not write the workspace",
-               not probe.exists(), f"{ISO_FILE} exists: {probe.exists()}")
+        _check_read_only_refused(ws, marker)
     else:
+        probe = ws / ISO_FILE
         label = _label(probe) if probe.exists() else "(not written)"
         record("the sub-runner wrote its parent's workspace at the level",
                probe.exists() and f":{level}" in label, label)
 
 
-def _check_labels(ws: Path, level: str) -> Dict[str, str]:
-    """The workspace, its authored config and a file the child created."""
+def _check_sub_runner_log(ws: Path) -> None:
+    """The log the daemon labelled jaato_runner_log_t, appended to (v3)."""
+    logs = sorted((ws / ".jaato" / "logs").glob("runner-*__sub_*.log"))
+    label = _label(logs[0]) if logs else "(no sub-runner log)"
+    size = logs[0].stat().st_size if logs else 0
+    record("the sub-runner wrote its own log (jaato_runner_log_t, not empty)",
+           bool(logs) and "jaato_runner_log_t" in label and size > 0,
+           f"{label}; bytes: {size}")
+
+
+def _check_read_only_refused(ws: Path, marker: str) -> None:
+    """The read-only sub-runner tried to write and the kernel refused it.
+
+    An absent file alone is also what a sub-runner that never ran leaves,
+    so the kernel's word is required. Creating a file is refused on its
+    DIRECTORY (write / add_name), so the AVC names the directory.
+    """
+    probe = ws / ISO_FILE
+    refused = [l for l in _avcs_since(marker)
+               if "jaato_isolated_ro_t" in l and "permissive=0" in l
+               and "tclass=dir" in l
+               and ("{ write }" in l or "add_name" in l)]
+    record("the read-only sub-runner tried to write the workspace and was refused",
+           not probe.exists() and bool(refused),
+           f"{ISO_FILE} exists: {probe.exists()}; refusals: {refused[:2]}")
+
+
+def _check_labels(ws: Path, level: str, isolated: Optional[str] = None) -> Dict[str, str]:
+    """The workspace, its authored config and a file the child created.
+
+    In isolated mode no child runs a command, so the created-file check
+    is ``_check_isolated``'s, on ``ISO_FILE``.
+    """
     labels = {str(p): _label(p) for p in (
         ws, ws / ".jaato" / "profiles", ws / "selinux-probe.txt")}
     at_level = bool(level)
@@ -329,17 +367,16 @@ def _check_labels(ws: Path, level: str) -> Dict[str, str]:
     authored = labels[str(ws / ".jaato" / "profiles")]
     record("the persona/profile config is jaato_agent_config_t",
            "jaato_agent_config_t" in authored, authored)
-    created = labels[str(ws / "selinux-probe.txt")]
-    record("a file the child created carries the level",
-           at_level and f":{level}" in created, created)
+    if not isolated:
+        created = labels[str(ws / "selinux-probe.txt")]
+        record("a file the child created carries the level",
+               at_level and f":{level}" in created, created)
     return labels
 
 
 def _report(root: Path, log: Path, marker: str, labels: Dict[str, str]) -> int:
     """Print the daemon's SELinux lines and the AVCs; write the JSON."""
-    dmesg = subprocess.run(["dmesg"], capture_output=True, text=True).stdout.splitlines()
-    idx = max((i for i, l in enumerate(dmesg) if marker in l), default=-1)
-    avcs = [l for l in dmesg[idx + 1:] if "avc:" in l and "jaato_" in l]
+    avcs = _avcs_since(marker)
     log_lines = [l for l in log.read_text(errors="replace").splitlines()
                  if "selinux" in l.lower() or "confine" in l.lower()]
     print("\n--- daemon log (SELinux / confinement lines) ---")
@@ -404,8 +441,8 @@ def main() -> int:
     result["isolated"] = args.isolated
     level = _check_processes(result)
     if args.isolated:
-        _check_isolated(ws, level, args.isolated)
-    return _report(root, log, marker, _check_labels(ws, level))
+        _check_isolated(ws, level, args.isolated, marker)
+    return _report(root, log, marker, _check_labels(ws, level, args.isolated))
 
 
 if __name__ == "__main__":

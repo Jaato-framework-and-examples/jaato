@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 #: The policy module version this build needs (design §4).  v2: the
 #: isolated domains and the agent-config and prompts types (phase 3).
-REQUIRED_POLICY_VERSION = 2
+REQUIRED_POLICY_VERSION = 3
 
 #: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
 USER_DIR_TYPE = "jaato_user_dir_t"
@@ -246,8 +246,10 @@ class SELinuxBackend:
         Returns:
             ``mode`` (enforcing / permissive), ``runner_domain`` (whether
             the policy has made ``jaato_runner_t`` permissive), the
-            interpreter and its label, and ``~/.jaato`` and its label
-            (``None`` where one could not be read).
+            interpreter and its label, ``~/.jaato`` and its label
+            (``None`` where one could not be read), and ``policy_version``:
+            the module version readiness found the marker for, since a host
+            reaching this method has passed that check.
         """
         kernel = self._kernel_factory()
         enforcing = self.host_readiness().enforcing
@@ -264,6 +266,7 @@ class SELinuxBackend:
             "user_dir_label": (
                 kernel.link_context(user_dir)
                 if kernel and os.path.lexists(user_dir) else None),
+            "policy_version": str(REQUIRED_POLICY_VERSION),
         }
 
     def _level_table(self) -> LevelTable:
@@ -406,6 +409,24 @@ class SELinuxBackend:
         target = selinux_labels.file_context(selinux_labels.TMP_TYPE, ctx.level)
         for entry in (parent, path):
             kernel.set_file_context(entry, target)
+
+    def prepare_runner_log(self, handle: ConfinementHandle, path: str) -> None:
+        """Create an isolated sub-runner's log as ``jaato_runner_log_t``.
+
+        The read-only isolated domain may write nothing in the workspace,
+        its log included, unless the log carries a type of its own that
+        it may append to (phase 3 kernel run: no log at all). Created here,
+        before the spawn, with the mode the spawner would use; the
+        spawner's ``O_CREAT`` then finds it.
+        """
+        kernel = self._kernel_factory()
+        ctx = parse_selinux_context(handle.label)
+        if kernel is None or ctx is None:
+            raise OSError(f"cannot label {path}: no libselinux or bad label {handle.label!r}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+        kernel.set_file_context(path, selinux_labels.file_context(
+            selinux_labels.RUNNER_LOG_TYPE, ctx.level))
 
     def release(self, handle: ConfinementHandle) -> None:
         """Nothing to unload: labels persist with the workspace (design §6)."""

@@ -1,4 +1,4 @@
-policy_module(jaato, 1.5.0)
+policy_module(jaato, 1.6.0)
 
 ########################################
 #
@@ -33,13 +33,14 @@ gen_require(`
 #
 
 ## The version marker. SELinuxBackend's readiness check asks whether
-## system_u:object_r:jaato_policy_v2_t:s0 is a valid context (no
+## system_u:object_r:jaato_policy_v3_t:s0 is a valid context (no
 ## privilege needed) and refuses an older module. Bump the number, and
 ## REQUIRED_POLICY_VERSION in server/confinement/selinux.py, together.
 ## v2 (phase 3): the isolated domains and the agent-config and prompts
 ## types; a workspace labelled for v1 is relabelled once.
-type jaato_policy_v2_t;
-files_type(jaato_policy_v2_t)
+## v3: jaato_runner_log_t, the isolated sub-runners' log files.
+type jaato_policy_v3_t;
+files_type(jaato_policy_v3_t)
 
 ## The session runner (AppArmor: the base profile jaato-ws-<id>).
 type jaato_runner_t;
@@ -96,6 +97,14 @@ files_type(jaato_claims_t)
 ## The session tmpdir and the private /tmp mount (#1171, #1381).
 type jaato_tmp_t;
 files_tmp_file(jaato_tmp_t)
+
+## An isolated sub-runner's own log, .jaato/logs/runner-<id>.log. The
+## daemon creates and labels it before the spawn; the read-only domain
+## may append to it and to nothing else in the workspace (phase 3 kernel
+## run: the read-only sub-runner's inherited log fds and its log handler
+## were refused, so it ran with no log at all).
+type jaato_runner_log_t;
+files_type(jaato_runner_log_t)
 
 ## A pty a runner or child opens (interactive_shell, notebook kernels).
 ## Its own type, so the jaato domains need no access to anyone else's
@@ -604,3 +613,5 @@ manage_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaat
 manage_lnk_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaato_tmp_t)
 manage_sock_files_pattern({ jaato_isolated_t jaato_isolated_ro_t }, jaato_tmp_t, jaato_tmp_t)
 allow { jaato_isolated_t jaato_isolated_ro_t } jaato_tmp_t:file { lock map };
+# Their log: append only (no write, create, unlink, rename or setattr).
+allow { jaato_isolated_t jaato_isolated_ro_t } jaato_runner_log_t:file { getattr open append ioctl lock };

@@ -94,6 +94,22 @@ REVERSIONS = [
         because="every isolated spawn would send an empty parent id and be "
                 "refused by the daemon before any boundary is provisioned",
     ),
+    Reversion(
+        target=_SEL,
+        find="            selinux_labels.RUNNER_LOG_TYPE, ctx.level))\n",
+        replace="            selinux_labels.WORKSPACE_TYPE, ctx.level))\n",
+        test="test_the_sub_runner_log_is_labelled_for_append",
+        because="a read-only sub-runner could not append to its own log and "
+                "would run with none (phase 3 kernel run)",
+    ),
+    Reversion(
+        target=_SM,
+        find="                self._selinux_backend.prepare_runner_log(confinement, log_path)\n",
+        replace="                pass\n",
+        test="test_the_daemon_labels_the_log_before_the_spawn",
+        because="the log would keep the workspace type the read-only domain "
+                "may not write",
+    ),
 ]
 
 _OWN_ROLE = "unconfined_u:unconfined_r"
@@ -308,3 +324,48 @@ def test_an_isolated_spawn_names_its_parent_session():
         profile=SubagentProfile(name="p", description="d", model="m",
                                 provider="anthropic", plugins=["file_edit"]))
     assert rpc.spawn_isolated_runner.call_args.kwargs["parent_session_id"] == "sess-A"
+
+
+# ---------------------------------------------------------------- the log
+
+
+def test_the_sub_runner_log_is_labelled_for_append(tmp_path):
+    kernel = _Kernel()
+    ws = _workspace(tmp_path)
+    backend = _backend(kernel, tmp_path)
+    handle = backend.provision_isolated(
+        "s1__sub_a", Boundary(workspace_path=str(ws)), read_only=True)
+    log = ws / ".jaato" / "logs" / "runner-s1__sub_a.log"
+    backend.prepare_runner_log(handle, str(log))
+    assert log.exists() and (log.stat().st_mode & 0o777) == 0o600
+    assert _type(kernel.labels[str(log)]) == "jaato_runner_log_t"
+    assert _level(kernel.labels[str(log)]) == _level(handle.label)
+
+
+def test_the_daemon_labels_the_log_before_the_spawn(monkeypatch):
+    import asyncio
+    from jaato_server.server import runner_spawner
+
+    order = []
+    backend = MagicMock()
+    backend.prepare_runner_log.side_effect = lambda h, p: order.append(("label", p))
+
+    def spawn(self, **kwargs):
+        order.append(("spawn", kwargs["log_path"]))
+        raise RuntimeError("stop after the spawn")
+
+    monkeypatch.setattr(runner_spawner.RunnerSpawner, "spawn", spawn)
+    sm = _manager(backend)
+    sm._daemon_loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(RuntimeError, match="stop after the spawn"):
+            sm._do_spawn_isolated_runner(
+                parent_session_id="sess-A", subagent_id="a1",
+                isolated_session_id="sess-A__sub_a1", workspace_path="/work",
+                sub_apparmor_profile="", cgroup_path="", profile=MagicMock(),
+                confinement=_handle(), effective_runtime_limits=MagicMock(),
+                agent_params=None)
+    finally:
+        sm._daemon_loop.close()
+    log = "/work/.jaato/logs/runner-sess-A__sub_a1.log"
+    assert order == [("label", log), ("spawn", log)]

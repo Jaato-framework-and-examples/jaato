@@ -395,11 +395,11 @@ RULES: Tuple[Rule, ...] = (
          find="fs_dontaudit_search_cgroup_dirs(jaato_runner_t)\n"),
 
     # --- the version marker the readiness check probes -----------------
-    Rule("marker type jaato_policy_v2_t exists",
-         lambda p: type_exists(p, "jaato_policy_v2_t"),
+    Rule("marker type jaato_policy_v3_t exists",
+         lambda p: type_exists(p, "jaato_policy_v3_t"),
          "SELinuxBackend refuses a host whose module lacks the marker",
-         find="type jaato_policy_v2_t;\nfiles_type(jaato_policy_v2_t)",
-         replace="type jaato_policy_v1_t;\nfiles_type(jaato_policy_v1_t)"),
+         find="type jaato_policy_v3_t;\nfiles_type(jaato_policy_v3_t)",
+         replace="type jaato_policy_v2_t;\nfiles_type(jaato_policy_v2_t)"),
 
     # --- entering the runner and //child -------------------------------
     Rule("the runner may exec-transition its children into jaato_child_t",
@@ -602,6 +602,20 @@ RULES: Tuple[Rule, ...] = (
          _forbids("jaato_isolated_ro_t", "jaato_claims_t", "file", WRITE),
          "the read-only tightening covers the whole workspace",
          append="allow jaato_isolated_ro_t jaato_claims_t:file create;\n"),
+    Rule("both isolated domains may append to their log",
+         lambda p: all(granted(p, d, "jaato_runner_log_t", "file",
+                               frozenset({"open", "append"}), conditional=False)
+                       == {"open", "append"} for d in ISOLATED),
+         "a read-only sub-runner that cannot write its log runs blind",
+         find="allow { jaato_isolated_t jaato_isolated_ro_t } jaato_runner_log_t:file "
+              "{ getattr open append ioctl lock };\n"),
+    Rule("the isolated domains cannot rewrite or remove their log",
+         lambda p: all(not granted(p, d, "jaato_runner_log_t", "file",
+                                   frozenset({"write", "create", "unlink", "rename",
+                                              "setattr", "relabelfrom"}))
+                       for d in ISOLATED),
+         "append only: a sub-runner may add to its log, not erase what it said",
+         append="allow jaato_isolated_ro_t jaato_runner_log_t:file write;\n"),
     Rule("both isolated domains may write the session tmpdir",
          lambda p: all(granted(p, d, "jaato_tmp_t", "file", frozenset({"write", "create"}),
                                conditional=False) == {"write", "create"} for d in ISOLATED),

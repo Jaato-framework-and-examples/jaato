@@ -178,6 +178,8 @@ def setup(root: str) -> dict:
         open(f"{paths[key]}/.jaato/agents/a.md", "w").write("persona\n")
         open(f"{paths[key]}/.jaato/references/r.json", "w").write("{}\n")
         open(f"{paths[key]}/.jaato/prompts/p.md", "w").write("prompt\n")
+        os.makedirs(f"{paths[key]}/.jaato/logs", exist_ok=True)
+        open(f"{paths[key]}/.jaato/logs/runner-iso.log", "w").write("")
         shutil.copy("/usr/bin/true", f"{paths[key]}/bin/t")
     os.makedirs(paths["tmpA"], exist_ok=True)
     _setup_user_tier()
@@ -197,6 +199,9 @@ def setup(root: str) -> dict:
         chcon(f"{paths[key]}/.jaato/references", "jaato_authored_t", lvl)
         chcon(f"{paths[key]}/.jaato/prompts", "jaato_prompts_t", lvl)
         chcon(f"{paths[key]}/.jaato/references-claims", "jaato_claims_t", lvl)
+        # v3: an isolated sub-runner's log, as the daemon labels it.
+        chcon(f"{paths[key]}/.jaato/logs/runner-iso.log", "jaato_runner_log_t", lvl,
+              recursive=False)
     chcon(paths["tmpA"], "jaato_tmp_t", L1)
     return paths
 
@@ -424,6 +429,12 @@ attempt(lambda: os.unlink('{p['wsA']}/iso.txt'), False)"""))
                       py_in(RO, L1, TRY + f"attempt(lambda: {code}, True)"))
     expect_ok("isolated read-only: writes its session tmpdir",
               py_in(RO, L1, TRY + f"attempt(lambda: open('{p['tmpA']}/ro','w').write('x'), False)"))
+    log = f"{p['wsA']}/.jaato/logs/runner-iso.log"
+    for dom, name in ((I, "isolated"), (RO, "isolated read-only")):
+        expect_ok(f"{name}: appends to its log (jaato_runner_log_t)",
+                  py_in(dom, L1, TRY + f"attempt(lambda: open('{log}','a').write('x'), False)"))
+        expect_denied(f"{name}: truncating its log is refused",
+                      py_in(dom, L1, TRY + f"attempt(lambda: open('{log}','w').write('x'), True)"))
 
 
 def auditd_running() -> bool:

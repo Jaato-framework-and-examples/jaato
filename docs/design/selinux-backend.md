@@ -237,6 +237,7 @@ empty output with exit status 0 (phase 0).
 | `jaato_prompts_t` | `.jaato/prompts/` (phase 3) | read, write | read, write |
 | `jaato_claims_t` | `.jaato/references-claims/` | read, write | read only (template v43's `//child` deny) |
 | `jaato_tmp_t` | session tmpdir and private `/tmp` | read, write, create | same |
+| `jaato_runner_log_t` | an isolated sub-runner's `.jaato/logs/runner-<id>.log` (phase 3, created by the daemon) | none | none (the isolated domains: open, append) |
 | `jaato_devpts_t` | a pty either domain opens (`type_transition` from `devpts_t`) | read, write, ioctl, setattr | same |
 
 `jaato_agent_config_t` and `jaato_prompts_t` exist only so the isolated
@@ -576,7 +577,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
-| 3 | **implemented, not yet run on a kernel**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, module 1.5.0 (marker `jaato_policy_v2_t`, `REQUIRED_POLICY_VERSION = 2`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
+| 3 | **implemented; one kernel run (64020ec9), fixes not yet re-run**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
@@ -691,6 +692,34 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   line, and the WS server's startup when it was handed no SELinux backend
   (a standalone WS server runs no selection, so there it is still said).
 
+### What the phase 3 kernel run found (64020ec9)
+
+* **Probe 57/57** as root and as uid 1000, every refusal backed by an
+  enforced AVC: the agent-config and prompts types, another workspace's
+  level, the user tier, `reactors.json`, `execute_no_trans` on `bin_t`,
+  `setexec`, and the read-only domain's writes.
+* **The sub-runner entered `jaato_isolated_t` / `jaato_isolated_ro_t` at
+  the parent's level** in all four live runs (rw, ro; root, uid 1000), and
+  served RPC.
+* **Every live spawn then failed at `stage=forwarding` with a bare
+  `TimeoutError`, on a daemon defect, not SELinux.** The runner-RPC handler
+  (`async def handle`) called the synchronous `_spawn_isolated_runner` on
+  the daemon loop, which then waited 10 s on `rpc.start()`, a coroutine
+  only that loop could run (`LOOP_STALL` in every daemon log). Unreachable
+  before this branch, since the parent-id bug refused the spawn earlier.
+  Fixed: the handler hands it to `asyncio.to_thread` (the #1355 rule), the
+  #1355 guard lists `_spawn_isolated_runner`, and a test drives the real
+  handler on a running loop.
+* **The read-only sub-runner had no log**: three `append` denials on
+  `.jaato/logs/runner-<id>__sub_*.log`, 0-byte logs. Fixed with
+  `jaato_runner_log_t` (above).
+* **Fixed in the tools and messages:** `live_session.py --isolated` no
+  longer runs the child-file check, its read-only check needs the kernel's
+  refusal rather than an absent file, and it checks the sub-runner's log;
+  the spawn-failure message names what was actually rolled back (nothing,
+  on an SELinux host without cgroups) instead of "sub-cgroup + sub-AppArmor
+  profile"; `jaato-doctor` names the policy module version.
+
 ### What phase 3 decided
 
 * **The parent's level, not a new one** (§5.3), because the sub-runner
@@ -704,8 +733,15 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   Relabelling is driven by the label stamp, which carries the policy
   version, so a v1 workspace is relabelled once.
 * **Parity, stated where it is weak**: the isolated domain can write claims
-  (AppArmor's isolated body can too); the `ro` domain cannot write through
-  an inherited log fd it did not open (nor can AppArmor's).
+  (AppArmor's isolated body can too).
+* **The sub-runner's log has a type of its own** (`jaato_runner_log_t`,
+  module 1.6.0 / policy v3). The daemon creates `.jaato/logs/runner-<id>.log`
+  and labels it at the level before the spawn; both isolated domains may
+  open and append to it, and nothing more (no write, truncate, unlink or
+  rename). Without it the read-only domain was refused its inherited log
+  fds at exec and its log handler, and ran with no log (kernel run below).
+  A label failure refuses the spawn, as a session tmpdir does. Main runner
+  logs keep the workspace type.
 * **"Executes nothing" means its own entrypoint and nothing else.** The
   isolated domains keep `execute` + `map` on `bin_t`: after the exec
   transition the kernel maps the entry interpreter under the new domain,

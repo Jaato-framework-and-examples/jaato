@@ -32,6 +32,9 @@ AGENT_CONFIG_TYPE = "jaato_agent_config_t"
 PROMPTS_TYPE = "jaato_prompts_t"
 CLAIMS_TYPE = "jaato_claims_t"
 TMP_TYPE = "jaato_tmp_t"
+#: An isolated sub-runner's log file: the daemon creates and labels it,
+#: the isolated domains may only append to it (policy v3).
+RUNNER_LOG_TYPE = "jaato_runner_log_t"
 
 #: The SELinux user of files the daemon labels; restorecon uses it too.
 FILE_USER = "system_u"
