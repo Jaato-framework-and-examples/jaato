@@ -20,8 +20,8 @@ confinement, drives one ``echo``-provider turn whose tool call runs
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
 children are that user, not root.  ``--trace-subprocess`` drops a
 ``sitecustomize.py`` into the venv for the run that writes a stack for every
-subprocess the runner starts, and for every listing of a ``.jaato``
-directory, into its log (``<ws>/.jaato/logs/runner-*.log``), to name the
+subprocess the runner starts, and for every listing of the runner's
+``~/.jaato``, into its log (``<ws>/.jaato/logs/runner-*.log``), to name the
 code behind an ``execute`` or ``read`` AVC; it is removed afterwards.
 
 Prints one PASS / FAIL line per check, then the daemon's SELinux log lines
@@ -155,11 +155,11 @@ def _prepare(root: Path, as_uid: Optional[int]) -> Path:
 
 
 TRACE_HOOK = '''# jaato-2b live_session.py --trace-subprocess (removed after the run)
-import sys, traceback
+import os, sys, traceback
 def _jaato_2b_trace(event, args):
     if event == "subprocess.Popen":
         sys.stderr.write("JAATO-2B-SUBPROCESS %r\\n%s" % (args[1], "".join(traceback.format_stack()[-12:])))
-    elif event in ("os.scandir", "os.listdir") and str(args[0]).rstrip("/").endswith("/.jaato"):
+    elif event in ("os.scandir", "os.listdir") and str(args[0]).rstrip("/") == os.path.join(os.path.expanduser("~"), ".jaato"):
         sys.stderr.write("JAATO-2B-LISTDIR %r\\n%s" % (args[0], "".join(traceback.format_stack()[-12:])))
 sys.addaudithook(_jaato_2b_trace)
 '''

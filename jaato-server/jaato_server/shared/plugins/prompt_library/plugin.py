@@ -40,6 +40,7 @@ from typing import Dict, List, Any, Callable, Optional, Set, TYPE_CHECKING
 import yaml
 
 from jaato_server.shared.subprocess_runner import run_command as _run_command, RunResult
+from jaato_server.shared import user_tier
 
 if TYPE_CHECKING:
     from ..permission.plugin import PermissionPlugin
@@ -563,7 +564,9 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                 writable=True,
             ),
             PromptSource(
-                path=home / ".claude" / "skills",
+                # Shipped on the envelope for a confined runner (#1465's
+                # user tier, extended in SELinux phase 2b).
+                path=user_tier.home_path(".claude/skills"),
                 source_name="claude-global",
                 entry_file=SKILL_ENTRY_FILE,
                 writable=False,

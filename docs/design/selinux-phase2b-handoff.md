@@ -139,7 +139,8 @@ Since bf978cfe the runner no longer scans `~/.jaato` for stored
 credentials when it is confined, and since module 1.3.0 `~/.jaato` has a
 type of its own and no other home subdirectory is searchable. Expected on
 this run, and both are evidence for the change rather than assumptions:
-no `read` AVC on `.jaato`, and no `JAATO-2B-LISTDIR` line. If either
+no `read` AVC on `.jaato`, and no `JAATO-2B-LISTDIR` line (it flags
+only the runner's `~/.jaato`, never the workspace's own `.jaato`). If either
 appears, the stack names the code that lists it.
 
 The tool now records a refused session as a FAIL with the daemon's reason

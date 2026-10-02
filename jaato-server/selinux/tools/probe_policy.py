@@ -83,8 +83,12 @@ def run_in(domain: str, level: str, argv: List[str], *, pass_fds=(),
             os.setresgid(AS_UID, AS_UID, AS_UID)
             os.setresuid(AS_UID, AS_UID, AS_UID)
 
+    # OLDPWD dropped: a child shell validates it at startup, and one
+    # inherited from the operator's shell caused dac_* AVCs nothing in the
+    # probe asked for (phase 2b runs).
+    env = {k: v for k, v in os.environ.items() if k != "OLDPWD"}
     return subprocess.run(argv, preexec_fn=preexec, pass_fds=pass_fds, cwd=cwd,
-                          capture_output=True, text=True, timeout=timeout)
+                          env=env, capture_output=True, text=True, timeout=timeout)
 
 
 def py_in(domain: str, level: str, code: str, **kw) -> subprocess.CompletedProcess:

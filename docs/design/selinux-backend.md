@@ -618,6 +618,25 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   (`ctypes.util.find_library`, three runner-side callers). No evidence yet
   which; `live_session.py --trace-subprocess` records it.
 
+### The second phase 2b kernel run (ec964406)
+
+* **Both live sessions pass end to end, 9 of 9**: a root runner and one
+  dropped to uid 1000 by `--runner-uid-policy workspace-owner`, with no
+  workaround. The session tmpdir is `jaato_tmp_t` at the workspace level;
+  the `~/.jaato` read and the `user_tmp_t` write are gone. Probe 34 of 34
+  under both uids.
+* **`ldconfig` was the notebook backend's `find_library("c")`** at import
+  (named by `--trace-subprocess`). Refused, it fell back to running gcc
+  and objdump at every runner start. It now takes `prctl` from the
+  process's own symbols (`CDLL(None)`), as `private_tmp` already did; no
+  subprocess at import on any LSM.
+* **The prompt library's `~/.claude/skills`** is granted under AppArmor and
+  was silently skipped under SELinux (17 enforced `search` denials for a
+  user with a `~/.claude`). It now rides the #1465 user-tier snapshot under
+  `@home/`, read through `user_tier.home_path`, rather than relabelling
+  another tool's directory. (`~/.claude/commands`, also in the AppArmor
+  grant, is not read from the home by any code.)
+
 ### What phase 2b decided
 
 * **Parity with AppArmor, measured, where the two differ by construction.**
