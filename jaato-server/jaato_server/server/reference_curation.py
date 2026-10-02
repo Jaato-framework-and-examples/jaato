@@ -676,7 +676,8 @@ def create_bundle(
         return done("invalid_request",
                     f"usage: {BUNDLE_CREATE_COMMAND} <name> -- one id token "
                     "(letters, digits, '.', '_', '-'), not 'root'")
-    if not may_curate(owner, user_id):
+    allowed = may_curate(owner, user_id)
+    if not allowed:
         return done("not_owner", "only the workspace owner may create its reference bundles")
     rel = f"{CATALOG_REL}/{name}"
     try:

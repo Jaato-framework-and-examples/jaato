@@ -267,10 +267,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_CURATION,
-        find="    if not may_curate(owner, user_id):\n"
-             "        return done(\"not_owner\"",
-        replace="    if False:\n"
-                "        return done(\"not_owner\"",
+        find="    allowed = may_curate(owner, user_id)\n",
+        replace="    allowed = True\n",
         test="test_a_non_owner_is_refused",
         because="anyone could create bundles in a workspace another user owns",
     ),
