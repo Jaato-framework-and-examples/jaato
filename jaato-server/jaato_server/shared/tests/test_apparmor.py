@@ -85,17 +85,6 @@ class TestAvailability:
             assert manager.is_available() is False
             assert "apparmor_parser" in (manager.unavailable_reason or "")
 
-    def test_is_available_logs_warning_when_unavailable(self, manager, caplog):
-        """Degradation is logged at WARNING (visible), not INFO/silent."""
-        with patch("jaato_server.server.apparmor.platform.system", return_value="Darwin"):
-            manager._available = None
-            with caplog.at_level("WARNING", logger="jaato_server.server.apparmor"):
-                assert manager.is_available() is False
-            assert any(
-                "NOT available" in r.message and r.levelname == "WARNING"
-                for r in caplog.records
-            )
-
 
 class TestProfileName:
     def test_profile_name_format(self, manager):

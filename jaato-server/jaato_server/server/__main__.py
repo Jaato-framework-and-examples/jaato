@@ -1019,7 +1019,10 @@ class JaatoDaemon:
         if choice.refuse:
             logger.error("refusing to start: %s", choice.describe())
             raise SystemExit(f"jaato_server: refusing to start: {choice.describe()}")
-        logger.info(choice.describe())
+        # No backend is the degraded posture, so it is said at WARNING;
+        # the per-backend probes only record their reasons.
+        (logger.info if choice.backend is not None else logger.warning)(
+            choice.describe())
         self._selinux_backend = choice.backend if choice.name == "selinux" else None
 
     def _wire_ipc_apparmor_dependencies(self) -> None:

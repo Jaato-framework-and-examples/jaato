@@ -1322,19 +1322,13 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if self._available:
             logger.info("AppArmor confinement available")
         else:
-            # WARNING, not INFO: when the kernel boundary is absent the
-            # only remaining workspace isolation is the bypassable
-            # directory-sandbox heuristic. Operators need this in the log
-            # at a visible level, with the specific failing precondition,
-            # so the degradation is a deliberate, observable choice rather
-            # than a silent one. Use the require-confinement startup gate
-            # (--apparmor / JAATO_REQUIRE_APPARMOR) to fail closed instead.
-            logger.warning(
-                "AppArmor confinement NOT available (%s) — workspace "
-                "isolation falls back to directory sandboxing only, which "
-                "is a heuristic and not a kernel-enforced boundary. To "
-                "require confinement and refuse to start unconfined, pass "
-                "--apparmor (WS) or set JAATO_REQUIRE_APPARMOR=1.",
+            # A probe, not a decision: on an SELinux host the daemon asks
+            # AppArmor first and then picks SELinux, so "isolation falls
+            # back to directory sandboxing" here would be false.  The code
+            # that decides there is no kernel boundary says so at WARNING
+            # (the daemon's backend selection, the WS server's startup).
+            logger.info(
+                "AppArmor not available: %s",
                 self._unavailable_reason or "reason unknown",
             )
         return self._available

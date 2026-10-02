@@ -199,7 +199,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._register_client_tools": 25,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer.set_command_router._apparmor_pre_init_hook": 16,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer.set_command_router._apparmor_session_hook": 17,
-    "jaato-server/jaato_server/server/websocket.py::JaatoWSServer.start": 21,
     "jaato-server/jaato_server/server/workspace_monitor.py::WorkspaceMonitor._on_fs_event": 18,
     "jaato-server/jaato_server/server/workspace_monitor.py::WorkspaceMonitor.reconcile": 30,
     # 73 -> 57: the permission gate moved out into check_permission_only so

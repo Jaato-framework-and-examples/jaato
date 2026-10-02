@@ -647,6 +647,23 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   another tool's directory. (`~/.claude/commands`, also in the AppArmor
   grant, is not read from the home by any code.)
 
+### The third phase 2b kernel run (025dd212)
+
+* **Everything passed**: probe 36 of 36 under both uids (including the
+  two authored-file refusals, each backed by its `create` AVC), the live
+  session 9 of 9 under both uids, and the pty path (`interactive_shell`)
+  9 of 9 under both, the child in `jaato_child_t` on a real `/dev/pts`.
+  No unrequested jaato denial in any run.
+* **`jaato-doctor` reported SELinux correctly and printed a false line
+  above it**: `AppArmor confinement NOT available … falls back to
+  directory sandboxing only`. `AppArmorManager.is_available()` logged that
+  as a side effect of answering, and under `auto` the selection asks
+  AppArmor first, so every SELinux host got it, the daemon's own startup
+  included. The probe now records its reason at INFO; the WARNING comes
+  from the code that settles on no kernel boundary: the daemon's selection
+  line, and the WS server's startup when it was handed no SELinux backend
+  (a standalone WS server runs no selection, so there it is still said).
+
 ### What phase 2b decided
 
 * **Parity with AppArmor, measured, where the two differ by construction.**

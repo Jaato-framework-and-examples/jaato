@@ -1761,6 +1761,72 @@ class JaatoWSServer:
             self._event_sink_adapter = WSEventSinkAdapter(self)
         return self._event_sink_adapter
 
+    def _init_apparmor(self, loop: "asyncio.AbstractEventLoop") -> None:
+        """Create the AppArmor manager and decide this server's posture.
+
+        Called from :meth:`start` in workspace mode.  ``--no-apparmor``
+        drops the manager; required mode refuses to start without
+        AppArmor; auto mode enables it when available.  In auto mode with
+        no AppArmor this is where "no kernel boundary" is said at WARNING,
+        unless the daemon handed this server an SELinux backend
+        (``_selinux_backend``), in which case SELinux confines its sessions.
+
+        Raises:
+            RuntimeError: a contradictory or unsatisfiable configuration.
+        """
+        # Initialize AppArmor manager.  Pass the daemon's main
+        # asyncio loop (we're inside ``async start()``) so that
+        # AppArmor mutations triggered from confined worker
+        # threads — e.g. selectReferences fragment writes — get
+        # dispatched here for execution in the unconfined main
+        # loop, instead of EACCESing on the file write.
+        self._apparmor = AppArmorManager(
+            workspace_root=self._workspace_root,
+            loop=loop,
+        )
+        if self._apparmor_mode is False:
+            if self._apparmor_required_env:
+                # Contradiction: env requires confinement, flag disables
+                # it. Refuse rather than guess which the operator meant.
+                raise RuntimeError(
+                    "Contradictory AppArmor configuration: "
+                    "JAATO_REQUIRE_APPARMOR=1 requires confinement but "
+                    "--no-apparmor disables it. Resolve by unsetting one."
+                )
+            logger.info("AppArmor confinement disabled by configuration")
+            self._apparmor = None
+        elif self._apparmor_mode is True and not self._apparmor.is_available():
+            # Required-but-unavailable: fail closed. The operator
+            # explicitly opted into confinement (--apparmor or
+            # JAATO_REQUIRE_APPARMOR); starting unconfined would leave
+            # only the bypassable directory-sandbox heuristic, which is
+            # not what "required" means. Refuse to start.
+            reason = self._apparmor.unavailable_reason or "reason unknown"
+            raise RuntimeError(
+                "AppArmor confinement required but not available "
+                f"({reason}). Refusing to start unconfined — workspace "
+                "isolation would rely on directory sandboxing only. "
+                "Install/enable AppArmor (and the apparmor_parser "
+                "sudoers rule), or drop the requirement with "
+                "--no-apparmor / unset JAATO_REQUIRE_APPARMOR to accept "
+                "directory-sandbox-only isolation."
+            )
+        elif self._apparmor and self._apparmor.is_available():
+            logger.info("AppArmor confinement enabled")
+        elif getattr(self, "_selinux_backend", None) is None:
+            # The decision site for this server: no AppArmor, and the
+            # daemon handed no SELinux backend (or this is the
+            # standalone server, which runs no backend selection).
+            # The probe itself only records the reason.
+            logger.warning(
+                "AppArmor confinement NOT available (%s) — workspace "
+                "isolation falls back to directory sandboxing only, which "
+                "is a heuristic and not a kernel-enforced boundary. To "
+                "require confinement and refuse to start unconfined, pass "
+                "--apparmor (WS) or set JAATO_REQUIRE_APPARMOR=1.",
+                self._apparmor.unavailable_reason or "reason unknown",
+            )
+
     async def start(self) -> None:
         """Start the server and block until shutdown.
 
@@ -1787,45 +1853,7 @@ class JaatoWSServer:
                 default_template=self._default_template,
             )
 
-            # Initialize AppArmor manager.  Pass the daemon's main
-            # asyncio loop (we're inside ``async start()``) so that
-            # AppArmor mutations triggered from confined worker
-            # threads — e.g. selectReferences fragment writes — get
-            # dispatched here for execution in the unconfined main
-            # loop, instead of EACCESing on the file write.
-            self._apparmor = AppArmorManager(
-                workspace_root=self._workspace_root,
-                loop=asyncio.get_running_loop(),
-            )
-            if self._apparmor_mode is False:
-                if self._apparmor_required_env:
-                    # Contradiction: env requires confinement, flag disables
-                    # it. Refuse rather than guess which the operator meant.
-                    raise RuntimeError(
-                        "Contradictory AppArmor configuration: "
-                        "JAATO_REQUIRE_APPARMOR=1 requires confinement but "
-                        "--no-apparmor disables it. Resolve by unsetting one."
-                    )
-                logger.info("AppArmor confinement disabled by configuration")
-                self._apparmor = None
-            elif self._apparmor_mode is True and not self._apparmor.is_available():
-                # Required-but-unavailable: fail closed. The operator
-                # explicitly opted into confinement (--apparmor or
-                # JAATO_REQUIRE_APPARMOR); starting unconfined would leave
-                # only the bypassable directory-sandbox heuristic, which is
-                # not what "required" means. Refuse to start.
-                reason = self._apparmor.unavailable_reason or "reason unknown"
-                raise RuntimeError(
-                    "AppArmor confinement required but not available "
-                    f"({reason}). Refusing to start unconfined — workspace "
-                    "isolation would rely on directory sandboxing only. "
-                    "Install/enable AppArmor (and the apparmor_parser "
-                    "sudoers rule), or drop the requirement with "
-                    "--no-apparmor / unset JAATO_REQUIRE_APPARMOR to accept "
-                    "directory-sandbox-only isolation."
-                )
-            elif self._apparmor and self._apparmor.is_available():
-                logger.info("AppArmor confinement enabled")
+            self._init_apparmor(asyncio.get_running_loop())
 
             # Initialize cgroups manager (orthogonal to AppArmor — runtime
             # limits, not sandboxing).  Same auto-detect / required /
