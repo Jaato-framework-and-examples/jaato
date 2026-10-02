@@ -756,6 +756,9 @@ def _configure_output_redaction(
     """
     from jaato_server.shared.secret_redaction import configure_redaction_sources
 
+    # Outside the try: a descriptor the runner cannot use refuses the
+    # bootstrap here as it would at step 1c, never as a redactor error.
+    confined, _ = _runner_boundary(envelope)
     try:
         configure_redaction_sources(
             session_env,
@@ -763,6 +766,7 @@ def _configure_output_redaction(
             provider_name=envelope.provider_name,
             workspace_path=envelope.workspace_path,
             config_root=envelope.config_root,
+            confined=confined,
         )
     except Exception:  # noqa: BLE001 -- boundary, reported
         logger.exception(
@@ -778,11 +782,29 @@ def _private_tmp_of(envelope: SessionInitEnvelope) -> Optional[str]:
     empty ``profile_name`` is ignored, so an unconfined pool slot never
     acquires a namespace another workspace would inherit.
     """
-    if not envelope.profile_name:
+    confined, _ = _runner_boundary(envelope)
+    if not confined:
         return None
     # ``getattr``: a duck-typed envelope (a test double) predating the
     # field means "no private /tmp", as an older daemon's envelope does.
     return getattr(envelope, "private_tmp_dir", None)
+
+
+def _runner_boundary(envelope: SessionInitEnvelope) -> Tuple[bool, Optional[str]]:
+    """``(confined, confinement_id)`` from the envelope's descriptor.
+
+    AppArmor reads the id out of ``profile_name``; SELinux carries it in
+    the descriptor.  Keyed on the resolved confinement rather than on
+    ``profile_name`` alone, which is empty for an SELinux boundary.
+    """
+    from . import lsm_confine
+
+    conf = lsm_confine.resolve(envelope)
+    if conf is None:
+        return False, None
+    if conf.backend == lsm_confine.BACKEND_SELINUX:
+        return True, conf.confinement_id or None
+    return True, confinement_id_from_profile_name(envelope.profile_name or "")
 
 
 def _enter_private_tmp(envelope: SessionInitEnvelope) -> None:
@@ -943,15 +965,13 @@ def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
         sandbox_utils.set_temp_roots(list(PRIVATE_TMP_TARGETS))
         _set_tempdir("/tmp", envelope)
         return
-    path = session_tmpdir(
-        envelope.session_id,
-        confinement_id_from_profile_name(envelope.profile_name or ""),
-    )
+    confined, boundary_id = _runner_boundary(envelope)
+    path = session_tmpdir(envelope.session_id, boundary_id)
 
     # The profile grants this directory and nothing else under /tmp, so
     # the pre-flight and the file tools must not allow more (#1361).
     # Before the mkdir below: the grant holds whether or not it succeeds.
-    if envelope.profile_name:
+    if confined:
         sandbox_utils.narrow_temp_roots(path)
     else:
         sandbox_utils.restore_temp_roots()
@@ -1087,6 +1107,16 @@ def _maybe_self_confine(
             in the error message so operators know to restart the
             daemon to pick up the new template.
     """
+    # The envelope's confinement descriptor is checked FIRST: a daemon that
+    # provisioned a boundary this runner cannot enter (``backend: selinux``)
+    # is refused here, before the unconfined no-op below could read an empty
+    # ``profile_name`` as "the operator opted out" (selinux-backend.md §3.2).
+    from . import lsm_confine
+    confinement = lsm_confine.resolve(envelope)
+    backend = confinement.backend if confinement else ""
+    if backend == lsm_confine.BACKEND_SELINUX:
+        _confirm_selinux_domain(confinement, recycle_pools)
+        return
     target_profile = envelope.profile_name or ""
     if not target_profile:
         if getattr(envelope, "confinement_required", False):
@@ -1123,7 +1153,6 @@ def _maybe_self_confine(
     try:
         from .bootstrap import (
             ConfinementMismatchError,
-            confine_to_profile,
             current_confinement,
         )
     except ImportError as exc:  # noqa: BLE001 — boundary surface
@@ -1180,7 +1209,7 @@ def _maybe_self_confine(
     # Need to transition.  ``confine_to_profile`` does the
     # ``aa_change_profile`` syscall + verifies the kernel agrees.
     try:
-        confine_to_profile(target_profile)
+        lsm_confine.self_confine(backend, target_profile)
     except ConfinementMismatchError as exc:
         # Phase 3 cascade-sharing diagnostic: an empty/non-jaato-ws
         # current profile usually means daemon-side provisioning
@@ -1255,9 +1284,29 @@ def _announce_unenforced_profile(
     )
 
 
+def _confirm_selinux_domain(
+    confinement: Any, recycle_pools: Optional[Callable[[str], Any]],
+) -> None:
+    """Step 1c under SELinux: confirm the exec landed in the domain.
+
+    The daemon set the exec context before spawning this runner, so every
+    thread was born in the domain; :func:`lsm_confine.self_confine` refuses
+    a runner that is not in it.  The #1023 check still runs: it costs one
+    walk, and it is the evidence the session record's claim rests on.
+    """
+    from . import lsm_confine
+
+    lsm_confine.self_confine(confinement.backend, confinement.label)
+    logger.info("runner-session bootstrap: running in SELinux domain %s",
+                confinement.label)
+    _retire_and_verify_threads(confinement.label, recycle_pools,
+                               backend=confinement.backend)
+
+
 def _retire_and_verify_threads(
     target_profile: str,
     recycle_pools: Optional[Callable[[str], Any]],
+    backend: str = "apparmor",
 ) -> None:
     """Retire pre-transition worker threads, then verify every thread (#1023).
 
@@ -1301,10 +1350,8 @@ def _retire_and_verify_threads(
             )
 
     try:
-        from .bootstrap import (
-            ThreadConfinementDivergence,
-            verify_thread_confinement,
-        )
+        from . import lsm_confine
+        from .bootstrap import ThreadConfinementDivergence
     except ImportError as exc:  # noqa: BLE001 — boundary surface
         logger.warning(
             "runner-session bootstrap: per-thread confinement check "
@@ -1313,13 +1360,13 @@ def _retire_and_verify_threads(
         return
 
     try:
-        scan = verify_thread_confinement(target_profile)
+        scan = lsm_confine.verify_threads(backend, target_profile)
     except ThreadConfinementDivergence as exc:
         raise BootstrapError(
             "confine",
             f"{exc}  The runner refuses this session rather than report "
-            f"sandbox_mode=apparmor for a process carrying threads "
-            f"outside the profile.",
+            f"sandbox_mode={backend} for a process carrying threads "
+            f"outside the boundary.",
         ) from exc
 
     if scan.unreadable:
@@ -1386,12 +1433,18 @@ def _prearm_child_callback(
     Returns:
         The callback, or ``None`` when this session installs none.
     """
-    runner_profile = (envelope.profile_name or "").strip()
+    from . import lsm_confine
+    try:
+        confinement = lsm_confine.resolve(envelope)
+    except BootstrapError:
+        return None  # step 1c already refused this envelope
+    runner_profile = confinement.label if confinement else ""
     if not runner_profile or "//" in runner_profile:
         return None
     try:
-        from jaato_server.server.apparmor import make_child_transition_callback
-        child_cb = make_child_transition_callback(runner_profile)
+        child_cb = lsm_confine.child_transition_callback(
+            confinement.backend, confinement.label, confinement.child_label,
+        )
         registry = getattr(runtime, "_registry", None)
         for name in (registry.list_exposed() if registry else ()):
             plugin = registry.get_plugin(name)
@@ -1470,7 +1523,9 @@ def _maybe_install_child_callback(
             ``set_apparmor_child_transition_callback`` OR the setter
             raised.  Bubbles up unchanged through ``bootstrap_session``.
     """
-    runner_profile = (envelope.profile_name or "").strip()
+    from . import lsm_confine
+    confinement = lsm_confine.resolve(envelope)
+    runner_profile = confinement.label if confinement else ""
     if not runner_profile:
         logger.info(
             "runner-session bootstrap: envelope.profile_name empty; "
@@ -1494,8 +1549,9 @@ def _maybe_install_child_callback(
     # Case 3: main runner, install required + audibly failing.
     try:
         if child_cb is None:
-            from jaato_server.server.apparmor import make_child_transition_callback
-            child_cb = make_child_transition_callback(runner_profile)
+            child_cb = lsm_confine.child_transition_callback(
+                confinement.backend, confinement.label, confinement.child_label,
+            )
         executor = getattr(session, "_executor", None)
         if executor is None or not hasattr(
             executor, "set_apparmor_child_transition_callback",

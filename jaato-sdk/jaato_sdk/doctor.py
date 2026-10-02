@@ -495,6 +495,62 @@ def check_package_releases(*, timeout: float = _releases.DEFAULT_TIMEOUT,
     return [Check("package releases", PASS, _clean_detail(report))]
 
 
+def check_confinement() -> List[Check]:
+    """Which kernel confinement a daemon started now would use, and why.
+
+    Asks ``select_daemon_backend``, the function the daemon itself calls at
+    startup, so the answer cannot differ from the daemon's.  It is asked
+    from THIS process: a daemon started another way (another account, a
+    systemd unit) may hold another SELinux context and get another answer.
+
+    FAIL when the daemon would refuse to start (an unknown
+    ``JAATO_CONFINEMENT``, or ``JAATO_REQUIRE_CONFINEMENT`` with nothing
+    available); WARN when no kernel backend is available, or SELinux is
+    selected but would not enforce, or ``~/.jaato`` carries no jaato label
+    (a confined runner cannot reach it then).  An SDK-only install has no
+    daemon here and gets N/A.
+    """
+    name = "kernel confinement"
+    try:
+        from jaato_server.server.confinement import select_daemon_backend
+    except ImportError:
+        return [Check(name, PASS, "N/A — jaato-server is not installed here")]
+    choice = select_daemon_backend()
+    if choice.refuse:
+        return [Check(name, FAIL,
+                      f"a daemon started now would refuse to start: "
+                      f"{choice.describe()}")]
+    if choice.backend is None:
+        return [Check(name, WARN, choice.describe())]
+    if choice.name != "selinux":
+        return [Check(name, PASS, choice.name)]
+    return _selinux_checks(name, choice.backend.host_facts(str(Path.home())))
+
+
+def _selinux_checks(name: str, facts: Dict[str, Optional[str]]) -> List[Check]:
+    """The selinux row plus a WARN for each fact that weakens the boundary."""
+    from jaato_server.server.confinement.selinux import USER_DIR_TYPE
+    from jaato_server.shared.lsm_label import parse_selinux_context
+
+    checks = [Check(name, PASS,
+                    f"selinux — mode {facts['mode']}, runner domain "
+                    f"{facts['runner_domain']}, interpreter "
+                    f"{facts['interpreter']} ({facts['interpreter_label']})")]
+    if "permissive" in (facts["mode"], facts["runner_domain"]):
+        checks.append(Check(name, WARN,
+                            "SELinux would log denials and allow them: the host "
+                            "or jaato_runner_t is permissive, so sessions are "
+                            "not confined"))
+    parsed = parse_selinux_context(facts["user_dir_label"])
+    if facts["user_dir_label"] is not None and (
+            parsed is None or parsed.type != USER_DIR_TYPE):
+        checks.append(Check(name, WARN,
+                            f"{facts['user_dir']} is labelled "
+                            f"{facts['user_dir_label']}, not {USER_DIR_TYPE}; "
+                            f"run: restorecon -Rv {facts['user_dir']}"))
+    return checks
+
+
 def check_mcp_sdk() -> List[Check]:
     """Can the MCP plugin still find the installed SDK's JSON-RPC decode seam?
 
@@ -1761,6 +1817,7 @@ def run_checks(
                                                       enabled=release_check))
     checks += _guarded(lambda: check_integrations())
     checks += _guarded(lambda: check_mcp_sdk())
+    checks += _guarded(lambda: check_confinement())
     checks += _guarded(lambda: check_socket(info, auto_start=auto_start))
     checks += _guarded(lambda: check_daemon_identity(info))
     checks += _guarded(lambda: check_oversight(info, socket_path, pidfile))

@@ -59,7 +59,7 @@ import logging
 import os
 import socket
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 
 _FATAL_PREFIX = "RUNNER_FATAL:"  # Stable log marker for daemon scraping.
@@ -513,6 +513,57 @@ def _run_slot_mode(slot_fd: int, log) -> None:
     sys.exit(0)
 
 
+def _cold_spawn_confine(profile_name: str, disable_confine: bool, log: Any) -> None:
+    """Steps 2-3 of a cold-spawned runner: be confined, or exit.
+
+    AppArmor: ``aa_change_profile`` into *profile_name*.  SELinux: the
+    daemon's exec already entered the domain it named in
+    ``JAATO_RUNNER_SELINUX_LABEL`` (selinux-backend.md §7.1), so this only
+    confirms it, and exits when the runner is anywhere else.
+    """
+    selinux_label = os.environ.get("JAATO_RUNNER_SELINUX_LABEL", "").strip()  # env: internal — set by the daemon per runner: the SELinux context the exec put this runner in
+    if not profile_name and not selinux_label and not disable_confine:
+        _fatal(
+            "JAATO_RUNNER_PROFILE not set; the runner refuses to start "
+            "without an AppArmor profile to self-confine to.  Set "
+            "JAATO_RUNNER_DISABLE_CONFINE=1 to bypass for local pdb "
+            "debugging only — this is NOT a supported deployment."
+        )
+    if disable_confine:
+        log.warning(
+            "JAATO_RUNNER_DISABLE_CONFINE is set — running unconfined.  "
+            "This is NOT a supported deployment; AppArmor isolation is "
+            "disabled for this runner."
+        )
+        return
+    if selinux_label:
+        from . import lsm_confine
+        try:
+            lsm_confine.self_confine(lsm_confine.BACKEND_SELINUX, selinux_label)
+        except Exception as exc:  # BootstrapError: not in the domain
+            _fatal(f"SELinux domain check failed: {exc}")
+        log.info("runner in SELinux domain %s", selinux_label)
+        return
+    # Imported here, NOT at module top, so a bug in bootstrap
+    # surfaces before any unrelated code runs.
+    from .bootstrap import (
+        ConfinementMismatchError,
+        confine_to_profile,
+    )
+    try:
+        confine_to_profile(profile_name)
+    except ConfinementMismatchError as exc:
+        _fatal(
+            f"AppArmor confinement mismatch — kernel reports "
+            f"{exc.actual!r} but we requested {exc.expected!r}.  "
+            f"Likely cause: parent profile lacks "
+            f"'change_profile -> {exc.expected}' rule.  See design "
+            f"§4.6 daemon apparmor-state constraint."
+        )
+    except RuntimeError as exc:
+        _fatal(f"AppArmor self-confine failed: {exc}")
+
+
 def main() -> None:
     """Run bootstrap + serve.  Never returns under normal operation —
     serve exits cleanly on peer EOF, after which we ``sys.exit(0)``."""
@@ -550,40 +601,8 @@ def main() -> None:
         max_output_chars, tool_timeout_seconds, disable_confine,
     )
 
-    if not profile_name and not disable_confine:
-        _fatal(
-            "JAATO_RUNNER_PROFILE not set; the runner refuses to start "
-            "without an AppArmor profile to self-confine to.  Set "
-            "JAATO_RUNNER_DISABLE_CONFINE=1 to bypass for local pdb "
-            "debugging only — this is NOT a supported deployment."
-        )
-
     # ----- 2-3. Self-confine + verify -----
-    if disable_confine:
-        log.warning(
-            "JAATO_RUNNER_DISABLE_CONFINE is set — running unconfined.  "
-            "This is NOT a supported deployment; AppArmor isolation is "
-            "disabled for this runner."
-        )
-    else:
-        # Imported here, NOT at module top, so a bug in bootstrap
-        # surfaces before any unrelated code runs.
-        from .bootstrap import (
-            ConfinementMismatchError,
-            confine_to_profile,
-        )
-        try:
-            confine_to_profile(profile_name)
-        except ConfinementMismatchError as exc:
-            _fatal(
-                f"AppArmor confinement mismatch — kernel reports "
-                f"{exc.actual!r} but we requested {exc.expected!r}.  "
-                f"Likely cause: parent profile lacks "
-                f"'change_profile -> {exc.expected}' rule.  See design "
-                f"§4.6 daemon apparmor-state constraint."
-            )
-        except RuntimeError as exc:
-            _fatal(f"AppArmor self-confine failed: {exc}")
+    _cold_spawn_confine(profile_name, disable_confine, log)
 
     # ----- 4. Now import plugin code -----
     # Per §4.6 step 4 the import happens AFTER confinement so plugin

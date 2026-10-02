@@ -85,9 +85,12 @@ REVERSIONS = [
                  "of the bug that has nothing to do with cascades"),
     ),
     Reversion(
-        target="jaato-server/jaato_server/server/session_manager.py",
-        find="            confinement_id=confinement_id,\n",
-        replace="",
+        # Since phase 1b of the SELinux design the IPC path provisions
+        # through the confinement seam, so the id is handed to the manager
+        # by the AppArmor adapter.
+        target="jaato-server/jaato_server/server/confinement/apparmor.py",
+        find="            confinement_id=confinement_id, **kwargs,\n",
+        replace="            **kwargs,\n",
         test=("TestProfileNaming::"
               "test_one_boundary_gets_one_profile_name"),
         because=("the profile being named after the session again, so "
