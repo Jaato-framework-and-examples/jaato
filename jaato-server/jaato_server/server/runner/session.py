@@ -160,6 +160,7 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
         workspace_path=workspace_path,
         config_root=envelope.config_root,
         telemetry_config=(envelope.plugin_configs or {}).get("telemetry"),
+        read_config_tiers=not envelope.config_resolved_by_daemon,
     )
 
 
@@ -2102,9 +2103,12 @@ def _install_gc(session: "JaatoSession", envelope: SessionInitEnvelope) -> None:
         session: The freshly built runner-side session.
         envelope: Its init envelope; ``gc`` carries the profile block
             (complete since #1133 — it previously carried only
-            ``type``) and ``workspace_path`` locates ``gc.json``.
+            ``type``) and ``workspace_path`` locates ``gc.json``.  When
+            ``config_resolved_by_daemon`` is set (an isolated sub-runner,
+            whose boundary denies ``gc.json``), the file is never read
+            here: ``gc_file`` carries what the daemon found.
     """
-    from jaato_server.shared.plugins.gc import load_gc_from_file
+    from jaato_server.shared.plugins.gc import load_gc_from_data, load_gc_from_file
     from jaato_server.shared.plugins.subagent.config import (
         GCProfileConfig, gc_profile_to_plugin_config,
     )
@@ -2118,7 +2122,16 @@ def _install_gc(session: "JaatoSession", envelope: SessionInitEnvelope) -> None:
                 agent_name=envelope.agent_id or None,
             )
             source = "profile"
-        if not gc_result and envelope.workspace_path:
+        if not gc_result and envelope.config_resolved_by_daemon:
+            # The daemon read gc.json for this session; its boundary
+            # denies the files, so they are not probed here.
+            if envelope.gc_file:
+                gc_result = load_gc_from_data(
+                    envelope.gc_file, agent_name=envelope.agent_id or None,
+                    source="the envelope (gc.json read by the daemon)",
+                )
+                source = "gc.json (via the daemon)"
+        elif not gc_result and envelope.workspace_path:
             gc_result = load_gc_from_file(
                 workspace_root=envelope.workspace_path,
                 agent_name=envelope.agent_id or None,

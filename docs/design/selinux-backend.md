@@ -720,6 +720,35 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   on an SELinux host without cgroups) instead of "sub-cgroup + sub-AppArmor
   profile"; `jaato-doctor` names the policy module version.
 
+### The second phase 3 kernel run (a1d59347)
+
+* **Probe 61/61** as root and as uid 1000; the four log checks pass, and
+  truncating the log is refused as a `write` on the `jaato_runner_log_t`
+  file. The doctor names policy module v3.
+* **The spawn no longer deadlocks**, and the sub-runner's log is created,
+  labelled and written by both domains (~6 KB).
+* **Every live session then failed in the sub-runner's bootstrap**: the
+  base-instructions loader asked `<ws>/.jaato/instructions` `is_dir()`,
+  the boundary denies that directory down to `getattr`, and
+  `Path.is_dir()` re-raises `EACCES`. The policy was right; the runner
+  probed config its boundary denies. With that one check patched in the
+  host's venv copy (diagnostic only), both domains passed 8/8 end to end,
+  the read-only one with the kernel refusing its write.
+* **GC was off in every isolated session** for the same reason
+  (`~/.jaato/gc.json` `exists()`), and the isolated envelope dropped every
+  number of a profile's `gc:` block but `type` (#1133 on this path).
+* **Fixed (your choice: the daemon supplies, the runner never looks):**
+  the isolated envelope carries `config_resolved_by_daemon` and, without
+  a profile `gc:`, the `gc.json` the daemon found (`gc_file`). The runner
+  builds its runtime with `read_config_tiers=False` (premium instructions
+  only, no workspace or user tier) and installs GC from the envelope,
+  never from disk. `gc:` crosses whole (`to_dict`).
+* **Not fixed, stated:** plugins and provider `env.py` files still list
+  `<ws>/.jaato` and `~/.jaato` through `resolve_config_search_path`, and
+  probe them. Every such caller tolerates the refusal (no warning, no
+  functional loss in the run's logs), but each probe is an AVC: 111 to
+  472 per live run, most of them `search` on `~/.jaato`.
+
 ### What phase 3 decided
 
 * **The parent's level, not a new one** (§5.3), because the sub-runner

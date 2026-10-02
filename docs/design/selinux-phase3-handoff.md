@@ -18,6 +18,19 @@ The module is now **1.6.0** (marker `jaato_policy_v3_t`), and the daemon
 refuses an older one. A workspace labelled under an older module is
 relabelled once, because the label stamp carries the policy version.
 
+**Third run (after a1d59347).** The second run passed the probe 61/61
+and got past the spawn, then every sub-runner crashed in bootstrap
+probing `.jaato/instructions`, which its boundary denies. Fixed: the
+daemon now resolves the isolated session's config (instructions tier,
+gc.json) and the sub-runner never reads it. No policy change: the module
+is still 1.6.0, so reinstalling it is optional. Expect every live check
+to pass, and the sub-runner's log to say
+`GC installed from gc.json (via the daemon)` when the workspace or the
+daemon's `~/.jaato` has a `gc.json`, or no GC line when neither has one.
+Refused `search` / `getattr` AVCs on `~/.jaato`, `.jaato/agents` and
+`.jaato/prompts` are still expected (non-fatal probes, a known
+follow-up); a bootstrap `PermissionError` is not.
+
 **Second run (after 64020ec9).** The first run's probe passed 57/57; its
 live runs all failed at the spawn on a daemon deadlock (fixed: the spawn
 now runs off the daemon loop), and the read-only sub-runner could not

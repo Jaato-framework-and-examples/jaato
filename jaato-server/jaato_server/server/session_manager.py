@@ -1124,6 +1124,30 @@ _DELIVERY_FAILURE_REASON = {
 }
 
 
+def _isolated_gc(profile: Any, workspace_path: str) -> tuple:
+    """``(gc, gc_file)`` for an isolated sub-runner's envelope.
+
+    ``gc`` is the profile's whole ``gc:`` block (``to_dict``, as the main
+    envelope sends it since #1133; this builder used to read a ``config``
+    attribute ``GCProfileConfig`` does not have, so only ``type`` crossed).
+    Without one, ``gc_file`` is the ``gc.json`` the main runner would read,
+    found and read here because the sub-runner's boundary denies it.
+    """
+    gc_obj = getattr(profile, "gc", None)
+    if gc_obj is not None:
+        return gc_obj.to_dict(), None
+    from jaato_server.shared.plugins.gc import find_gc_file
+
+    path = find_gc_file(workspace_root=workspace_path)
+    if path is None:
+        return None, None
+    try:
+        return None, json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("isolated subagent: %s not used: %s", path, exc)
+        return None, None
+
+
 def _rollback_note(cgroup_path: str, sub_profile_name: str) -> str:
     """What an isolated-spawn failure released, named rather than assumed.
 
@@ -3943,13 +3967,7 @@ class SessionManager:
             plugin_specs.append(entry)
 
         system_instructions = getattr(profile, "system_instructions", None)
-        gc_dict = None
-        gc_obj = getattr(profile, "gc", None)
-        if gc_obj is not None:
-            gc_type = getattr(gc_obj, "type", None)
-            gc_config = getattr(gc_obj, "config", None) or {}
-            if gc_type:
-                gc_dict = {"type": gc_type, **dict(gc_config)}
+        gc_dict, gc_file = _isolated_gc(profile, workspace_path)
         env_overrides = dict(getattr(profile, "env", {}) or {})
 
         if not provider_name:
@@ -4021,6 +4039,12 @@ class SessionManager:
             system_instructions=system_instructions,
             agent_id="main",
             gc=gc_dict,
+            # The boundary denies the workspace and user config tiers, so
+            # the daemon resolves them and the sub-runner never probes
+            # them (SELinux phase 3 kernel run: a refused stat crashed its
+            # bootstrap, and gc.json was unreachable).
+            config_resolved_by_daemon=True,
+            gc_file=gc_file,
             agent_params=dict(agent_params or {}),
             config_root=None,  # Isolated subagent doesn't inherit.
             env_overrides=env_overrides,

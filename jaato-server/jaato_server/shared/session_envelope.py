@@ -518,6 +518,18 @@ class SessionInitEnvelope:
     # daemon, and the runner reads disk as it always did, so no
     # schema_version bump.  Never carries credentials.
     user_tier_files: Optional[Dict[str, str]] = None
+    # SELinux phase 3: True when the daemon resolved this session's
+    # workspace and user config tiers, because its boundary denies them
+    # (an isolated sub-runner).  The runner then reads neither tier: no
+    # base instructions from ``.jaato/instructions`` or the user tier,
+    # and GC only from ``gc`` / ``gc_file``.  ``False`` = any other
+    # session, or an older daemon: the runner reads disk as before, so
+    # no schema_version bump.
+    config_resolved_by_daemon: bool = False
+    # The ``gc.json`` the daemon found for such a session (workspace,
+    # then user tier, ``load_gc_from_file``'s order) when the profile
+    # declares no ``gc:``; ``None`` = none found.
+    gc_file: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -610,6 +622,8 @@ class SessionInitEnvelope:
                 None if self.user_tier_files is None
                 else dict(self.user_tier_files)
             ),
+            "config_resolved_by_daemon": self.config_resolved_by_daemon,
+            "gc_file": dict(self.gc_file) if self.gc_file else None,
         }
 
     @classmethod
@@ -696,6 +710,8 @@ class SessionInitEnvelope:
             confinement=d.get("confinement"),
             runner_user=_optional_dict(d.get("runner_user")),
             user_tier_files=_text_map(d.get("user_tier_files")),
+            config_resolved_by_daemon=bool(d.get("config_resolved_by_daemon", False)),
+            gc_file=_optional_dict(d.get("gc_file")),
         )
 
 
