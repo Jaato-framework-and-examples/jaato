@@ -222,6 +222,14 @@ def silenced(policy, source: str, target: str, tclass: str,
     return frozenset(perms) <= got
 
 
+def born_at(policy, source: str, target: str, tclass: str) -> FrozenSet[str]:
+    """The ranges a *tclass* object *source* creates in *target* is given."""
+    return frozenset(
+        str(rule.default) for rule in setools.MLSRuleQuery(
+            policy, ruletype=[setools.MLSRuletype.range_transition],
+            source=source, target=target, tclass=[tclass]).results())
+
+
 def _allows(src, tgt, cls, perms):
     perms = frozenset(perms)
     return lambda p: granted(p, src, tgt, cls, perms, conditional=False) == perms
@@ -269,12 +277,68 @@ RULES: Tuple[Rule, ...] = (
          append="term_use_generic_ptys(jaato_child_t)\n"),
 
     # --- refused quietly (phase 2a kernel run, traced on the import) ----
-    Rule("urllib3's ::1 bind probe is refused without an AVC",
-         lambda p: (silenced(p, "jaato_runner_t", "node_t", "tcp_socket", {"node_bind"})
-                    and not granted(p, "jaato_runner_t", "node_t", "tcp_socket",
-                                    frozenset({"node_bind"}))),
-         "urllib3 binds ::1 at import to test for IPv6; refused, it uses IPv4",
-         find="corenet_dontaudit_tcp_bind_generic_node(jaato_runner_t)\n"),
+    # --- binding (parity with AppArmor's `network inet stream`) --------
+    Rule("the runner may bind any address",
+         _allows("jaato_runner_t", "node_t", "tcp_socket", {"node_bind"}),
+         "the webhook plugin listens on its configured host",
+         find="corenet_tcp_bind_generic_node(jaato_runner_t)\n"),
+    Rule("the runner may bind the webhook's default port 9100",
+         _allows("jaato_runner_t", "hplip_port_t", "tcp_socket", {"name_bind"}),
+         "9100 is hplip_port_t, a defined port the unreserved set covers",
+         find="corenet_tcp_bind_all_unreserved_ports(jaato_runner_t)\n"),
+    Rule("a child may bind an unreserved port on any address",
+         lambda p: (granted(p, "jaato_child_t", "node_t", "tcp_socket",
+                            frozenset({"node_bind"}), conditional=False)
+                    and granted(p, "jaato_child_t", "unreserved_port_t", "tcp_socket",
+                                frozenset({"name_bind"}), conditional=False)),
+         "a test server, `npm run dev`",
+         find="corenet_tcp_bind_all_unreserved_ports(jaato_child_t)\n"),
+    Rule("neither domain may bind a port below 1024",
+         lambda p: all(not granted(p, d, t, "tcp_socket", frozenset({"name_bind"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for t in ("http_port_t", "ssh_port_t", "reserved_port_t")),
+         "AppArmor's runner holds no net_bind_service either",
+         append="corenet_tcp_bind_http_port(jaato_child_t)\n"),
+
+    # --- the user-global tier, ~/.jaato ---------------------------------
+    Rule("both may read the user tier's config",
+         lambda p: all(granted(p, d, "jaato_user_config_t", "file",
+                               frozenset({"read", "open"}), conditional=False)
+                       == {"read", "open"} for d in ("jaato_runner_t", "jaato_child_t")),
+         "agents/, profiles/, references/, services/, gc.json (AppArmor plugin grants)",
+         find="read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)\n"),
+    Rule("nobody writes the user tier's config",
+         lambda p: all(not granted(p, d, "jaato_user_config_t", c,
+                                   frozenset({"write", "append", "add_name", "remove_name", "unlink", "rename"}))
+                       for d in ("jaato_runner_t", "jaato_child_t") for c in ("file", "dir")),
+         "a profile or persona every workspace loads is not a session's to change",
+         append="manage_files_pattern(jaato_child_t, jaato_user_config_t, jaato_user_config_t)\n"),
+    Rule("both may write the user tier's memories, prompts and skills",
+         lambda p: all(granted(p, d, "jaato_user_data_t", c, frozenset(perms), conditional=False)
+                       == frozenset(perms)
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for c, perms in (("dir", {"add_name", "remove_name", "write"}),
+                                        ("file", {"create", "write", "rename", "unlink"}))),
+         "the memory plugin's global tier, prompt_library",
+         find="manage_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)\n",
+         replace="read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)\n"),
+    Rule("what a runner writes to the user tier is born at s0",
+         lambda p: born_at(p, "jaato_runner_t", "jaato_user_data_t", "file") == {"s0"},
+         "at the workspace's level another workspace could not read it, and "
+         "the global memory tier would split per workspace",
+         find="range_transition { jaato_runner_t jaato_child_t } jaato_user_data_t:{ file dir lnk_file } s0;\n"),
+    Rule("nothing else in a home is readable",
+         lambda p: all(not granted(p, d, t, "file", frozenset({"read", "open"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for t in ("user_home_t", "admin_home_t")),
+         "~/.jaato/*_auth.json, instructions/, permissions.json keep the home's type",
+         append="userdom_read_user_home_content_files(jaato_runner_t)\n"),
+    Rule("no home directory can be listed",
+         lambda p: all(not granted(p, d, t, "dir", frozenset({"read"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for t in ("user_home_dir_t", "user_home_t", "admin_home_t")),
+         "search reaches the granted subtrees; read would enumerate the home",
+         append="userdom_list_user_home_dirs(jaato_child_t)\n"),
     Rule("cryptography's cgroup read is refused without an AVC",
          lambda p: all(silenced(p, d, "cgroup_t", "dir", {"search"})
                        and not granted(p, d, "cgroup_t", "dir", frozenset({"search"}))

@@ -1,4 +1,4 @@
-policy_module(jaato, 1.1.0)
+policy_module(jaato, 1.2.0)
 
 ########################################
 #
@@ -77,6 +77,17 @@ files_tmp_file(jaato_tmp_t)
 ## terminal (phase 2a run, design §12).
 type jaato_devpts_t;
 term_pty(jaato_devpts_t)
+
+## The user-global tier, ~/.jaato: the subtrees the plugins grant under
+## AppArmor (their get_apparmor_rules), and nothing else. Labelled by
+## jaato.fc for every home (HOME_DIR) and /root. Read-only: agents/,
+## profiles/, references/, services/, gc.json, the legacy memories.jsonl.
+type jaato_user_config_t;
+userdom_user_home_content(jaato_user_config_t)
+## Writable: memories/ (the memory plugin's global tier), prompts/,
+## skills/ (prompt_library).
+type jaato_user_data_t;
+userdom_user_home_content(jaato_user_data_t)
 
 # A session keeps the daemon's SELinux user and role (setexeccon sets
 # type and level only), so both roles the daemon runs under are
@@ -252,23 +263,68 @@ allow jaato_child_t self:udp_socket create_socket_perms;
 corenet_tcp_connect_all_ports(jaato_child_t)
 sysnet_dns_name_resolve(jaato_child_t)
 
+# Binding and listening, any address, ports 1024 and up: what AppArmor's
+# `network inet stream` allows (checked on an enforcing kernel, 2026-10-02).
+# The runner serves the webhook plugin (9100 by default, hplip_port_t,
+# which unreserved_port_type covers); a child runs test and dev servers.
+# urllib3's ::1 bind probe at import then succeeds, so urllib3 keeps IPv6.
+# Ports below 1024 stay refused (reserved port types, no
+# net_bind_service).
+corenet_tcp_bind_generic_node(jaato_runner_t)
+corenet_tcp_bind_generic_node(jaato_child_t)
+corenet_tcp_bind_all_unreserved_ports(jaato_runner_t)
+corenet_tcp_bind_all_unreserved_ports(jaato_child_t)
+corenet_udp_bind_generic_node(jaato_runner_t)
+corenet_udp_bind_generic_node(jaato_child_t)
+corenet_udp_bind_all_unreserved_ports(jaato_runner_t)
+corenet_udp_bind_all_unreserved_ports(jaato_child_t)
+
 # Not granted, not logged (phase 2a run, traced on the import):
-# - urllib3 binds a TCP socket to ::1 at import to test for IPv6
-#   (urllib3/util/connection.py _has_ipv6). Refused, it resolves IPv4 only.
-# - cryptography's Rust core reads /proc/self/cgroup and cpu.max to size
-#   its thread pool (available_parallelism). Refused at the cgroup
-#   directory search, it uses the affinity mask.
-# The bind is silenced for the runner only: a child that binds (a test
-# server, `npm run dev`) is refused too, and that denial must stay visible
-# until 2b decides what a child may bind.
-corenet_dontaudit_tcp_bind_generic_node(jaato_runner_t)
+# cryptography's Rust core reads /proc/self/cgroup and cpu.max to size its
+# thread pool (available_parallelism). Refused at the cgroup directory
+# search, it uses the affinity mask.
 fs_dontaudit_search_cgroup_dirs(jaato_runner_t)
+fs_dontaudit_search_cgroup_dirs(jaato_child_t)
 fs_dontaudit_search_cgroup_dirs(jaato_child_t)
 
 # Deliberately absent: rawip_socket, packet_socket, netlink_route_socket
 # write; every capability (sys_admin, net_admin, sys_ptrace, ...); ptrace;
 # mount/mounton and filesystem mount. AppArmor states these as deny rules
 # because it grants by path; here nothing grants them.
+
+########################################
+#
+# The user-global tier, ~/.jaato (AppArmor: the @{HOME}/.jaato/... rules
+# the plugins contribute, composed into base, tool_hat and //child alike)
+#
+# Reaching it takes search, never read, on the home directory and on
+# ~/.jaato itself, so neither can be listed and nothing else in either can
+# be opened: the stored *_auth.json credentials, instructions/ and
+# permissions.json keep their home type. A runner dropped to a user
+# (#1168) reads that user's home; a root runner reads /root.
+#
+userdom_search_user_home_dirs(jaato_runner_t)
+userdom_search_user_home_dirs(jaato_child_t)
+userdom_search_user_home_content(jaato_runner_t)
+userdom_search_user_home_content(jaato_child_t)
+userdom_search_admin_dir(jaato_runner_t)
+userdom_search_admin_dir(jaato_child_t)
+list_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)
+read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)
+read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, jaato_user_config_t)
+manage_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)
+manage_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)
+manage_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)
+# What a runner writes here is born at s0, not at its workspace's level.
+# The tier is global by design (AppArmor gives every session the same
+# ~/.jaato/memories/): a file at s0:c101,c102 could not be read by a
+# runner of another workspace, and the memory tier would split per
+# workspace without saying so.
+range_transition { jaato_runner_t jaato_child_t } jaato_user_data_t:{ file dir lnk_file } s0;
+#
+# Deliberately absent: add_name on the home or on ~/.jaato (user_home_t,
+# admin_home_t). memories/, prompts/ and skills/ must exist before a
+# runner writes there; the operator creates them (design §9).
 
 ########################################
 #

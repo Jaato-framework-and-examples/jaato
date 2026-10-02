@@ -1,7 +1,7 @@
 # jaato confinement module: file contexts.
 #
-# Deliberately almost empty. A workspace can live anywhere, so its labels
-# are applied by the daemon at provisioning (§6 of
+# A workspace can live anywhere, so its labels are applied by the daemon
+# at provisioning (§6 of
 # docs/design/selinux-backend.md), not by path patterns here. The one
 # stable location, the daemon's managed workspace root, is registered by
 # the operator with `semanage fcontext` because its path is per install
@@ -9,4 +9,17 @@
 #
 #   semanage fcontext -a -t jaato_managed_ws_t '/srv/jaato/workspaces(/.*)?'
 #
-# Empty .fc files are accepted by the build; this comment is the content.
+
+# The user-global tier, ~/.jaato: only the subtrees plugins are granted
+# under AppArmor. HOME_DIR expands to every user's home (genhomedircon);
+# /root is listed separately because it is not a HOME_DIR. Everything
+# else under ~/.jaato (credentials, instructions/, permissions.json) keeps
+# the home's type, which the jaato domains cannot read.
+HOME_DIR/\.jaato/(agents|profiles|references|services)(/.*)?	gen_context(system_u:object_r:jaato_user_config_t,s0)
+HOME_DIR/\.jaato/gc\.json	--	gen_context(system_u:object_r:jaato_user_config_t,s0)
+HOME_DIR/\.jaato/memories\.jsonl	--	gen_context(system_u:object_r:jaato_user_config_t,s0)
+HOME_DIR/\.jaato/(memories|prompts|skills)(/.*)?	gen_context(system_u:object_r:jaato_user_data_t,s0)
+/root/\.jaato/(agents|profiles|references|services)(/.*)?	gen_context(system_u:object_r:jaato_user_config_t,s0)
+/root/\.jaato/gc\.json	--	gen_context(system_u:object_r:jaato_user_config_t,s0)
+/root/\.jaato/memories\.jsonl	--	gen_context(system_u:object_r:jaato_user_config_t,s0)
+/root/\.jaato/(memories|prompts|skills)(/.*)?	gen_context(system_u:object_r:jaato_user_data_t,s0)
