@@ -411,11 +411,11 @@ threads by the time it serves its first bootstrap.
 
 Phase plan:
 
-* **Phase 1: SELinux-confined sessions do not use the pool.** The
+* **Phase 2b (shipped): SELinux-confined sessions do not use the pool.** The
   routing gate in `spawn_session_runner` already routes `cgroup_attach`
   sessions away from the pool; SELinux confinement joins it. Cost: the
   cold start (~7 s vs ~1 s warm). Unconfined sessions still use the pool.
-* **Phase 3: bounded pool.** The template runs as
+* **Phase 4: bounded pool.** The template runs as
   `jaato_template_t:s0-s0:c0.c1023` with
   `typebounds jaato_template_t jaato_runner_t`, and each slot calls
   `setcon(jaato_runner_t:<level>)` on its main thread. Threads created
@@ -548,7 +548,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
-| 2b | **implemented, not yet run on a kernel**: user-tier types and binds in the module (1.2.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. A kernel run follows ([handoff](selinux-phase2b-handoff.md)); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
+| 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
