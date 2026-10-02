@@ -98,6 +98,8 @@ from jaato_sdk.events import (
     ReferenceCatalogRequest,
     ReferenceClaimsRequest,
     ReferenceCurationRequest,
+    ReferenceBundleCreateRequest,
+    ReferenceBundleCreateResultEvent,
     ReferenceLinksUpdateRequest,
     ReferenceLinksUpdateResultEvent,
     ReferenceCurationResultEvent,
@@ -2335,6 +2337,44 @@ class IPCClient:
             "update_reference_links",
             ReferenceLinksUpdateRequest(reference_id=reference_id, links=list(links)),
             timeout, "refk")
+
+    #: Floor for :meth:`create_reference_bundle` (1.35, #1478).  A NEW verb
+    #: (the 1.7 rule): an older daemon ignores it, and the caller would wait
+    #: out its timeout for a bundle nobody created.
+    MIN_REFERENCE_BUNDLE_PROTOCOL = "1.35"
+
+    async def create_reference_bundle(
+        self, name: str, *, timeout: float = 10.0,
+    ) -> ReferenceBundleCreateResultEvent:
+        """Create a workspace-tier reference sub-bundle, unindexed (1.35, #1478).
+
+        Needs no session and no embedding provider: the daemon writes
+        ``.jaato/references/<name>/bundle.json`` and nothing else, so a
+        driver can create the bundle it then promotes into
+        (:meth:`promote_reference_claim` with ``bundle=name``).  A vector
+        index is a separate step, ``references bundle index <name>`` from a
+        session whose workspace has an embedding provider.  An existing
+        bundle (or directory) by that name answers ``category="collision"``
+        with nothing changed -- a driver may treat that as "already there".
+        Only the workspace owner may, on an owned workspace.  The answer's
+        ``bundles`` lists the workspace's sub-bundles after the call.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_BUNDLE_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_REFERENCE_BUNDLE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"create_reference_bundle: this daemon speaks protocol {spoken} "
+                f"and does not serve reference bundle creation (needs >= "
+                f"{self.MIN_REFERENCE_BUNDLE_PROTOCOL}).  It would ignore the "
+                f"request silently.  Upgrade the daemon.")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "create_reference_bundle", ReferenceBundleCreateRequest(name=name),
+            timeout, "refb")
 
     def _require_reference_curation_protocol(self, method: str) -> None:
         """Refuse a daemon that would ignore the reference-claim verbs.

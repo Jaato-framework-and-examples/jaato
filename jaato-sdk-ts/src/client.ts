@@ -75,6 +75,7 @@ import {
   type ReferenceCurationResultEvent,
   type ReferenceCatalogEvent,
   type ReferenceLinksUpdateResultEvent,
+  type ReferenceBundleCreateResultEvent,
   type MemoryGetResultEvent,
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
@@ -199,6 +200,13 @@ export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
  * read the silence as "no findings".
  */
 export const MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34";
+
+/**
+ * Floor for {@link JaatoClient.createReferenceBundle} (protocol 1.35, #1478).
+ * A new verb (the 1.7 rule): an older daemon ignores it, and the caller would
+ * wait out its timeout for a bundle nobody created.
+ */
+export const MIN_REFERENCE_BUNDLE_PROTOCOL = "1.35";
 
 /**
  * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
@@ -1342,6 +1350,31 @@ export class JaatoClient {
       MIN_REFERENCE_CURATION_PROTOCOL,
       "the reference catalog verbs (upgrade the daemon)",
       "refk",
+    );
+  }
+
+  /**
+   * Create a workspace-tier reference sub-bundle, unindexed (protocol 1.35,
+   * #1478).  Needs no session and no embedding provider, so a driver can
+   * create the bundle it then promotes into.  An existing bundle (or
+   * directory) by that name answers ``category: "collision"`` with nothing
+   * changed.  Only the workspace owner may, on an owned workspace.  Mirror
+   * of Python ``IPCClient.create_reference_bundle``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_BUNDLE_PROTOCOL}.
+   */
+  async createReferenceBundle(
+    name: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceBundleCreateResultEvent> {
+    return this._quietRequest<ReferenceBundleCreateResultEvent>(
+      "createReferenceBundle",
+      { type: EventTypeValue.REFERENCE_BUNDLE_CREATE_REQUEST, name },
+      EventTypeValue.REFERENCE_BUNDLE_CREATE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_BUNDLE_PROTOCOL,
+      "reference bundle creation (upgrade the daemon)",
+      "refb",
     );
   }
 

@@ -66,6 +66,7 @@ from .bundle import (
     VALID_BUNDLE_TIERS,
     ReferenceBundle,
     write_bundle_manifest,
+    new_index_config,
     detect_drift,
     discover_bundles,
     find_bundle,
@@ -3342,6 +3343,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             eject <ref-id>                          Remove a ref from its bundle
             remove <ref-id>                         Delete a ref entirely
             reconcile [<ref>] [--scope ...]         Sync sidecars
+            index <bundle-ref>                      Add an index to an unindexed bundle
             merge <src> [--into <tgt>] [flags]      Merge bundles
             pack <bundle-ref> [--to <archive>]      Build distributable archive
             unpack <archive> [...]                  Install an archive
@@ -3366,6 +3368,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return self._cmd_bundle_remove(target)
         elif subcommand == "reconcile":
             return self._cmd_bundle_reconcile(target)
+        elif subcommand == "index":
+            return self._cmd_bundle_index(target)
         elif subcommand == "merge":
             return self._cmd_bundle_merge(target)
         elif subcommand == "pack":
@@ -3378,7 +3382,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return {
                 "error": (
                     f"Unknown subcommand: {subcommand}. Use: list, create, "
-                    f"delete, add, eject, remove, reconcile, merge, pack, "
+                    f"delete, add, eject, remove, reconcile, index, merge, pack, "
                     f"unpack, help"
                 )
             }
@@ -3477,84 +3481,97 @@ class ReferencesPlugin(RunnerForwardingMixin):
             }
         return None
 
-    def _cmd_bundle_create(self, raw_args: str) -> Dict[str, Any]:
-        """Execute 'bundle create <name> [--scope workspace|user]'.
+    _BUNDLE_CREATE_USAGE = (
+        "Usage: references bundle create <name> [--scope workspace|user] [--no-index]"
+    )
 
-        Creates an empty bundle directory with a fresh
-        ``embedding_config.json``. The bundle's embedding model and
-        dimensions are inherited from the active embedding provider so
-        that future references added to the bundle are vector-compatible
-        out of the box. With no provider available, the command refuses
-        — a sidecar can't be written without one.
+    @staticmethod
+    def _parse_bundle_create_args(
+        raw_args: str,
+    ) -> "Tuple[Optional[str], str, bool, Optional[str]]":
+        """``(name, scope, no_index, error)`` from a ``bundle create`` tail.
 
-        ``<name>`` is the directory name on disk. The reserved value
-        ``"root"`` (or empty string) creates the tier-root bundle by
-        writing the manifest at the tier root itself.
+        ``error`` is set (and the rest meaningless) on any malformed tail.
         """
         import shlex
 
         try:
             tokens = shlex.split(raw_args or "")
         except ValueError as e:
-            return {"error": f"Failed to parse arguments: {e}"}
-
+            return None, "", False, f"Failed to parse arguments: {e}"
         name: Optional[str] = None
         scope: str = BUNDLE_TIER_WORKSPACE
+        no_index = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
+            value: Optional[str] = None
             if tok == "--scope":
                 if i + 1 >= len(tokens):
-                    return {"error": "--scope requires a value: workspace or user"}
-                value = tokens[i + 1]
-                if value not in VALID_BUNDLE_TIERS:
-                    return {
-                        "error": (
-                            f"Unknown scope {value!r}. Use 'workspace' or 'user'."
-                        )
-                    }
-                scope = value
-                i += 2
+                    return None, "", False, "--scope requires a value: workspace or user"
+                value, i = tokens[i + 1], i + 2
+            elif tok.startswith("--scope="):
+                value, i = tok.split("=", 1)[1], i + 1
+            elif tok == "--no-index":
+                no_index, i = True, i + 1
                 continue
-            if tok.startswith("--scope="):
-                value = tok.split("=", 1)[1]
-                if value not in VALID_BUNDLE_TIERS:
-                    return {
-                        "error": (
-                            f"Unknown scope {value!r}. Use 'workspace' or 'user'."
-                        )
-                    }
-                scope = value
-                i += 1
+            elif name is not None:
+                return None, "", False, ReferencesPlugin._BUNDLE_CREATE_USAGE
+            else:
+                name, i = tok, i + 1
                 continue
-            if name is not None:
-                return {
-                    "error": "Usage: references bundle create <name> [--scope workspace|user]"
-                }
-            name = tok
-            i += 1
-
+            if value not in VALID_BUNDLE_TIERS:
+                return None, "", False, f"Unknown scope {value!r}. Use 'workspace' or 'user'."
+            scope = value
         if name is None:
-            return {
-                "error": "Usage: references bundle create <name> [--scope workspace|user]"
-            }
-
-        # Normalize the root-bundle alias; everything else stays as-is.
+            return None, "", False, ReferencesPlugin._BUNDLE_CREATE_USAGE
         if name in ("root", "(root)"):
             name = ROOT_BUNDLE_NAME
+        return name, scope, no_index, None
+
+    def _provider_index_config(self) -> "Tuple[Optional[Dict[str, Any]], Optional[str]]":
+        """``(index_config, error)`` from the active embedding provider.
+
+        ``(None, None)`` when there is no provider: the bundle is created
+        unindexed (#1478).  An error only when a provider exists and
+        cannot say what it embeds with.
+        """
+        if self._embedding_provider is None:
+            return None, None
+        # Ensure the provider has loaded its model so .dimensions is accurate.
+        if not self._embedding_provider.available:
+            self._embedding_provider.load_model()
+        dimensions = getattr(self._embedding_provider, "dimensions", None)
+        if not isinstance(dimensions, int) or dimensions <= 0:
+            return None, ("embedding provider did not report a valid dimension; "
+                          "cannot write a bundle index without it")
+        return new_index_config(self._embedding_provider.model_name, dimensions), None
+
+    def _cmd_bundle_create(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle create <name> [--scope workspace|user] [--no-index]'.
+
+        Creates an empty bundle directory marked by ``bundle.json``.  When
+        an embedding provider is active (and ``--no-index`` is not given)
+        it also writes a fresh ``embedding_config.json`` inherited from the
+        provider, so references added later are vector-compatible.  With
+        no provider the bundle is created UNINDEXED (#1478): no
+        ``embedding_config.json``, ``has_index`` false, tag lookup and
+        selection as on the root.  ``bundle index <name>`` adds the index
+        later from a session that has a provider.
+
+        ``<name>`` is the directory name on disk. The reserved value
+        ``"root"`` (or empty string) creates the tier-root bundle by
+        writing the manifest at the tier root itself.
+        """
+        name, scope, no_index, error = self._parse_bundle_create_args(raw_args)
+        if error is not None:
+            return {"error": error}
 
         # Refuse if a bundle with this name already exists in the chosen
         # tier. A workspace bundle that shadows a user bundle of the
-        # same name still counts as "exists" — discovery returns the
-        # workspace one, and overwriting it is what ``--overwrite`` (on
-        # unpack) and ``delete --force`` (here) are for.
+        # same name still counts as "exists".
         existing = next(
-            (
-                b for b in self._bundles
-                if b.name == name and b.tier == scope
-            ),
-            None,
-        )
+            (b for b in self._bundles if b.name == name and b.tier == scope), None)
         if existing is not None:
             return {
                 "error": (
@@ -3564,26 +3581,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 )
             }
 
-        if self._embedding_provider is None:
-            return {
-                "error": (
-                    "bundle create requires an embedding provider — none "
-                    "is configured. Install sentence-transformers or "
-                    "configure an embedding provider before creating a bundle."
-                )
-            }
-        # Ensure the provider has loaded its model so .dimensions is accurate.
-        if not self._embedding_provider.available:
-            self._embedding_provider.load_model()
-        model_name = self._embedding_provider.model_name
-        dimensions = getattr(self._embedding_provider, "dimensions", None)
-        if not isinstance(dimensions, int) or dimensions <= 0:
-            return {
-                "error": (
-                    "embedding provider did not report a valid dimension; "
-                    "cannot write a bundle manifest without it"
-                )
-            }
+        index_config, error = (None, None) if no_index else self._provider_index_config()
+        if error is not None:
+            return {"error": error}
 
         tier_root = self._tier_root(scope)
         if tier_root is None:
@@ -3599,59 +3599,81 @@ class ReferencesPlugin(RunnerForwardingMixin):
         occupied = self._refuse_occupied_bundle_dir(bundle_dir)
         if occupied is not None:
             return occupied
-        index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
-        sidecar_name = "references.embeddings.npy"
-        index_path.write_text(
-            json.dumps({
-                "embedding_model": model_name,
-                "embedding_dimensions": int(dimensions),
-                "embedding_sidecar": sidecar_name,
-                "rows": [],
-            }, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        if index_config is not None:
+            (bundle_dir / EMBEDDING_CONFIG_FILENAME).write_text(
+                json.dumps(index_config, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
         # The marker, written last: an index descriptor declares nothing
         # about who owns the directory (#1130), so without this the
         # bundle this command just built would not be discovered at all.
-        write_bundle_manifest(
-            bundle_dir,
-            name=name,
-            description="references bundle",
-        )
+        write_bundle_manifest(bundle_dir, name=name, description="references bundle")
 
         # Re-discover so the new bundle is visible to subsequent ops.
         self._discover_and_load_bundles()
-
         new_bundle = next(
-            (
-                b for b in self._bundles
-                if b.name == name and b.tier == scope
-            ),
-            None,
-        )
-        qualified = (
-            new_bundle.qualified_ref if new_bundle is not None
-            else f"{scope}:{name or '(root)'}"
-        )
-        self._trace(
-            f"bundle create: {qualified} at {bundle_dir} "
-            f"model={model_name} dim={dimensions}"
-        )
-
+            (b for b in self._bundles if b.name == name and b.tier == scope), None)
+        qualified = (new_bundle.qualified_ref if new_bundle is not None
+                     else f"{scope}:{name or '(root)'}")
+        model = index_config["embedding_model"] if index_config else ""
+        dims = index_config["embedding_dimensions"] if index_config else 0
+        self._trace(f"bundle create: {qualified} at {bundle_dir} "
+                    f"indexed={bool(index_config)} model={model or '-'} dim={dims}")
+        index_line = (f"  model: {model} (dim={dims})" if index_config else
+                      "  index: none (add one with 'references bundle index "
+                      f"{name or 'root'}' from a session with an embedding provider)")
         return {
             "status": "ok",
             "bundle": qualified,
             "directory": str(bundle_dir),
-            "embedding_model": model_name,
-            "embedding_dimensions": int(dimensions),
+            "indexed": bool(index_config),
+            "embedding_model": model,
+            "embedding_dimensions": dims,
             "help_lines": HelpLines(lines=[
                 ("CREATE", "bold"),
                 ("", ""),
                 (f"  bundle: {qualified}", ""),
                 (f"  directory: {bundle_dir}", ""),
-                (f"  model: {model_name} (dim={dimensions})", ""),
+                (index_line, ""),
             ]),
         }
+
+    def _cmd_bundle_index(self, target: str) -> Dict[str, Any]:
+        """Execute 'bundle index <bundle-ref>': give an unindexed bundle an index.
+
+        Writes ``embedding_config.json`` from the active embedding
+        provider, then reconciles the bundle so its existing references get
+        rows (#1478).  Refuses without a provider, for an unknown bundle,
+        and for one that already has an index (``bundle reconcile`` keeps
+        that one current).
+        """
+        ref_token = (target or "").strip()
+        if not ref_token or len(ref_token.split()) != 1:
+            return {"error": "Usage: references bundle index <bundle-ref>"}
+        try:
+            hit = find_bundle(self._bundles, parse_bundle_ref(ref_token),
+                              default_scope=BUNDLE_TIER_WORKSPACE)
+        except (ValueError, AmbiguousBundleRefError) as e:
+            return {"error": str(e)}
+        if hit is None:
+            return {"error": f"Unknown bundle '{ref_token}'. Known bundles: "
+                             f"{[b.qualified_ref for b in self._bundles] or '(none)'}"}
+        if hit.has_index:
+            return {"error": f"bundle '{hit.qualified_ref}' already has an index "
+                             f"({hit.embedding_model}); use 'bundle reconcile'"}
+        if self._embedding_provider is None:
+            return {"error": "bundle index requires an embedding provider -- none is "
+                             "configured in this session"}
+        index_config, error = self._provider_index_config()
+        if error is not None:
+            return {"error": error}
+        (hit.directory / EMBEDDING_CONFIG_FILENAME).write_text(
+            json.dumps(index_config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        self._discover_and_load_bundles()
+        self._trace(f"bundle index: {hit.qualified_ref} model={index_config['embedding_model']}")
+        return self._cmd_bundle_reconcile(hit.qualified_ref)
 
     def _cmd_bundle_delete(self, raw_args: str) -> Dict[str, Any]:
         """Execute 'bundle delete <bundle-ref> [--force]'.
@@ -4203,9 +4225,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             ("        Show loaded bundles. Tier column distinguishes workspace", "dim"),
             ("        bundles (./jaato/references) from user bundles (~/.jaato/references).", "dim"),
             ("", ""),
-            ("    create <name> [--scope workspace|user]", "dim"),
-            ("        Create an empty bundle with a fresh manifest. Embedding", "dim"),
-            ("        model and dimensions come from the active provider.", "dim"),
+            ("    create <name> [--scope workspace|user] [--no-index]", "dim"),
+            ("        Create an empty bundle. With an embedding provider it gets", "dim"),
+            ("        a vector index from that provider; without one (or with", "dim"),
+            ("        --no-index) it is created unindexed.", "dim"),
             ("", ""),
             ("    delete <bundle-ref> [--force]", "dim"),
             ("        Remove a bundle directory. Refuses if the bundle has any", "dim"),
@@ -4227,6 +4250,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             ("        Bring a bundle's sidecar in sync with the catalog: embed", "dim"),
             ("        newly dropped refs, refresh stale ones, drop orphans.", "dim"),
             ("        With no argument, reconciles every workspace-tier bundle.", "dim"),
+            ("", ""),
+            ("    index <bundle-ref>", "dim"),
+            ("        Give an unindexed bundle a vector index from the active", "dim"),
+            ("        embedding provider, then reconcile it.", "dim"),
             ("", ""),
             ("    merge <source-ref> [--into <target-ref>] [flags]", "dim"),
             ("        Merge a knowledge bundle into another. Cross-tier merges", "dim"),
@@ -5633,6 +5660,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             CommandCompletion("eject", "Remove a reference from its bundle"),
             CommandCompletion("remove", "Delete a reference entirely"),
             CommandCompletion("reconcile", "Reconcile bundle sidecars"),
+            CommandCompletion("index", "Add a vector index to an unindexed bundle"),
             CommandCompletion("merge", "Merge a bundle into another"),
             CommandCompletion("pack", "Pack a bundle into a distributable archive"),
             CommandCompletion("unpack", "Unpack an archive into a tier"),

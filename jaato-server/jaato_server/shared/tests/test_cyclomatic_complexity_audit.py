@@ -406,7 +406,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._build_contents_annotation": 18,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._bundle_completions": 87,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._cmd_bundle_add": 22,
-    "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._cmd_bundle_create": 28,
+    "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._cmd_bundle_create": 22,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._cmd_bundle_delete": 24,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._cmd_bundle_merge": 55,
     "jaato-server/jaato_server/shared/plugins/references/plugin.py::ReferencesPlugin._cmd_bundle_pack": 28,

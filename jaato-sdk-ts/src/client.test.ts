@@ -18,6 +18,7 @@ import {
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_REFERENCE_CURATION_PROTOCOL,
+  MIN_REFERENCE_BUNDLE_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_SCAFFOLD_VALIDATE_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
@@ -710,6 +711,34 @@ describe("JaatoClient session management", () => {
       const answer = await pending;
       assert.equal(answer.category, "not_owner");
     }
+  });
+
+  test("createReferenceBundle correlates its answer, and is refused below 1.35", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_CURATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(() => client.createReferenceBundle("run-1"), /1\.35/);
+    assert.equal(lastInstance!.sent.length, 0);
+
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_BUNDLE_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    const pending = client.createReferenceBundle("run-1");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const req = JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+    assert.equal(req.type, EventTypeValue.REFERENCE_BUNDLE_CREATE_REQUEST);
+    assert.equal(req.name, "run-1");
+    lastInstance!.emit({
+      type: EventTypeValue.REFERENCE_BUNDLE_CREATE_RESULT, request_id: req.request_id,
+      ok: true, bundle: "run-1", indexed: false, bundles: [{ name: "run-1", indexed: false }],
+    });
+    const answer = await pending;
+    assert.equal(answer.ok, true);
+    assert.equal(answer.indexed, false);
   });
 
   test("reference catalog verbs correlate their answers", async () => {
