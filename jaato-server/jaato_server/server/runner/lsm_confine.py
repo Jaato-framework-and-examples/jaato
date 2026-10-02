@@ -53,11 +53,15 @@ class RunnerConfinement:
         label: The runner's own label: an AppArmor profile name, or an
             SELinux context (``user:role:jaato_runner_t:s0:cA,cB``).
         child_label: What model-driven subprocesses exec into.
+        confinement_id: The boundary's id, carried for SELinux (which has
+            no profile name to read it out of); ``""`` for AppArmor, whose
+            id is read from the profile name.
     """
 
     backend: str
     label: str
     child_label: str
+    confinement_id: str = ""
 
 
 def _refuse(message: str) -> Exception:
@@ -124,7 +128,9 @@ def _resolve_selinux(label: str, profile: str,
         raise _refuse(
             "envelope.confinement names SELinux without both label and "
             "child_label; refusing to guess the domains")
-    return RunnerConfinement(backend=BACKEND_SELINUX, label=label, child_label=child)
+    return RunnerConfinement(
+        backend=BACKEND_SELINUX, label=label, child_label=child,
+        confinement_id=str(descriptor.get("confinement_id") or ""))
 
 
 def _own_selinux_label() -> str:

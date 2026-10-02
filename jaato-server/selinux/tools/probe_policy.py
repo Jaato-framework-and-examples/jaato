@@ -135,6 +135,28 @@ def attempt(fn, must_fail):
 # setup
 # ----------------------------------------------------------------------
 
+def probe_home() -> str:
+    """The home a runner of this uid reads its user tier from (#1168)."""
+    if AS_UID is None:
+        return os.path.expanduser("~")
+    import pwd
+    return pwd.getpwuid(AS_UID).pw_dir
+
+
+def _setup_user_tier() -> None:
+    """Scratch user-tier files in the probe's home, labelled by jaato.fc."""
+    home = os.path.join(probe_home(), ".jaato")
+    for sub in ("agents", "memories"):
+        os.makedirs(os.path.join(home, sub), exist_ok=True)
+    open(os.path.join(home, "agents", "jaato-2a-probe.md"), "w").write("persona\n")
+    open(os.path.join(home, "jaato-2a-probe_auth.json"), "w").write("{}\n")
+    if AS_UID is not None:
+        for dirpath, dirnames, filenames in os.walk(home):
+            for name in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
+                os.chown(name, AS_UID, AS_UID)
+    subprocess.run(["restorecon", "-R", home], check=True)
+
+
 def setup(root: str) -> dict:
     shutil.rmtree(root, ignore_errors=True)
     paths = {
@@ -149,6 +171,7 @@ def setup(root: str) -> dict:
         open(f"{paths[key]}/.jaato/agents/a.md", "w").write("persona\n")
         shutil.copy("/usr/bin/true", f"{paths[key]}/bin/t")
     os.makedirs(paths["tmpA"], exist_ok=True)
+    _setup_user_tier()
     if AS_UID is not None:
         for key in ("wsA", "wsB", "wsU", "tmpA"):
             for dirpath, dirnames, filenames in os.walk(paths[key]):
@@ -229,6 +252,27 @@ attempt(lambda: os.mkdir('{p['wsA']}/d'), False)"""))
         finally:
             if fd_use == "off":
                 subprocess.run(["setsebool", "domain_fd_use", "1"], check=True)
+
+    # Binds (module 1.2.0): parity with AppArmor's `network inet stream`.
+    expect_ok("runner: binds and listens on 127.0.0.1, an unreserved port",
+              py_in(R, L1, "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(); print('OK', s.getsockname())"))
+    expect_ok("runner: binds the webhook's default port 9100 (hplip_port_t)",
+              py_in(R, L1, "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1',9100)); print('OK')"))
+    expect_denied("runner: binding port 80 is refused",
+                  py_in(R, L1, TRY + "import socket\nattempt(lambda: socket.socket().bind(('127.0.0.1', 80)), True)"))
+
+    # The user tier, ~/.jaato (module 1.2.0), in the HOME this probe runs with.
+    home = probe_home()
+    expect_ok("runner: reads a user-tier persona (~/.jaato/agents)",
+              py_in(R, L1, TRY + f"attempt(lambda: open('{home}/.jaato/agents/jaato-2a-probe.md').read(), False)"))
+    expect_ok("runner: writes the user-tier memory store (~/.jaato/memories)",
+              py_in(R, L1, TRY + f"attempt(lambda: open('{home}/.jaato/memories/jaato-2a-probe.txt','w').write('x'), False)"))
+    expect_denied("runner: writing a user-tier persona is refused",
+                  py_in(R, L1, TRY + f"attempt(lambda: open('{home}/.jaato/agents/jaato-2a-probe.md','a').write('x'), True)"))
+    expect_denied("runner: a stored credential (~/.jaato/*_auth.json) is unreadable",
+                  py_in(R, L1, TRY + f"attempt(lambda: open('{home}/.jaato/jaato-2a-probe_auth.json').read(), True)"))
+    expect_denied("runner: the home directory cannot be listed",
+                  py_in(R, L1, TRY + f"attempt(lambda: os.listdir('{home}'), True)"))
 
     expect_ok("runner: opens a pty (interactive_shell)",
               py_in(R, L1, "import pty, os; m, s = pty.openpty(); os.write(s, b'x'); print('OK', os.read(m, 1))"))

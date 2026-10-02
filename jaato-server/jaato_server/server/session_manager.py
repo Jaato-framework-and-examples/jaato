@@ -38,6 +38,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from jaato_server.shared.lsm_label import (
+    sandbox_mode_for_selinux,
+    sandbox_mode_is_kernel,
+    sandbox_mode_is_kernel_enforced,
+)
 from jaato_server.shared.apparmor_label import (
     SANDBOX_MODE_APPARMOR_COMPLAIN,
     SANDBOX_MODE_SOFT,
@@ -1443,6 +1448,10 @@ def _agent_not_found_error(
     )
 
 
+
+from jaato_server.server.confinement.base import no_boundary as _no_boundary  # noqa: E402
+
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -2295,8 +2304,9 @@ class SessionManager:
         # spawn path that a WS ``session.new`` actually takes.
         confinement_required = False
         from jaato_server.server.runner_spawn import resolve_session_private_tmp
+        confinement = None
         if opt_in_apparmor:
-            profile_name, sandbox_mode = self._provision_apparmor_for_session(
+            profile_name, sandbox_mode, confinement = self._provision_session_boundary(
                 session_id=session_id,
                 workspace_path=workspace_path,
                 client_id=client_id,
@@ -2311,7 +2321,7 @@ class SessionManager:
                     server, workspace_path,
                     self._managed_workspace_root_for_spawn()),
             )
-            confinement_required = self._apparmor_available()
+            confinement_required = self._kernel_confinement_available()
 
         # Seed client-provided ("host") tool SCHEMAS the transport buffered for
         # this client BEFORE session.new, so spawn_session_runner's
@@ -2341,7 +2351,7 @@ class SessionManager:
         # (``RunnerBootstrapFailed``), and do NOT spawn.  A genuinely-unconfined
         # session (no opt-in, or a host with no AppArmor) has
         # ``confinement_required=False`` and reaches the spawn unchanged.
-        if confinement_required and not profile_name:
+        if confinement_required and _no_boundary(profile_name, confinement):
             logger.warning(
                 "AppArmor confinement required for session %s (opted in, "
                 "host supports it) but no profile was provisioned — REFUSING "
@@ -2363,6 +2373,7 @@ class SessionManager:
             client_id=client_id,
             profile_name=profile_name,
             cascade_driver_id=cascade_driver_id,
+            confinement=confinement,
             # #1253: carry the invariant to the runner-side gate as a
             # defence-in-depth backstop.  On the success path ``profile_name``
             # is populated so the gate is a no-op; on a spawn path that reaches
@@ -2380,7 +2391,7 @@ class SessionManager:
             return None
 
         # ----- Step 5b: success notification + return -----
-        if opt_in_apparmor and sandbox_mode_is_apparmor(sandbox_mode):
+        if opt_in_apparmor and sandbox_mode_is_kernel(sandbox_mode):
             self._notify_apparmor_provisioned(
                 client_id=client_id,
                 session_id=session_id,
@@ -2417,17 +2428,20 @@ class SessionManager:
         generated the policy with, so the notification reflects what was
         actually rendered.
         """
-        complain = sandbox_mode == SANDBOX_MODE_APPARMOR_COMPLAIN
+        lsm = "selinux" if sandbox_mode.startswith("selinux") else "apparmor"
+        complain = not sandbox_mode_is_kernel_enforced(sandbox_mode)
         posture = (
-            " in COMPLAIN mode — the kernel logs denials and allows them, "
-            "so this session has NO kernel boundary"
+            f" in {'PERMISSIVE' if lsm == 'selinux' else 'COMPLAIN'} mode — "
+            "the kernel logs denials and allows them, so this session has "
+            "NO kernel boundary"
             if complain else ""
         )
         self._notify_apparmor(
             client_id, session_id,
-            f"profile provisioned{posture} (workspace={workspace_path}, "
+            f"{'boundary' if lsm == 'selinux' else 'profile'} provisioned"
+            f"{posture} (workspace={workspace_path}, "
             f"config_root={config_root or '(none)'}); runner spawned",
-            style="warning" if complain else "info",
+            style="warning" if complain else "info", lsm=lsm,
         )
 
     def _notify_apparmor(
@@ -2436,8 +2450,10 @@ class SessionManager:
         session_id: str,
         message: str,
         style: str,
+        lsm: str = "apparmor",
     ) -> None:
-        """Surface an apparmor-status line to the client.
+        """Surface a confinement-status line to the client (``[apparmor]`` /
+        ``[selinux]``).
 
         Helper extracted for reuse between the apparmor-provision
         path and the no-workspace warning path.  Routes via
@@ -2447,10 +2463,10 @@ class SessionManager:
         session creation.
         """
         from jaato_sdk.events import SystemMessageEvent
-        logger.info("[apparmor] %s", message)
+        logger.info("[%s] %s", lsm, message)
         try:
             self._emit_to_client(client_id, SystemMessageEvent(
-                message=f"[apparmor] {message}",
+                message=f"[{lsm}] {message}",
                 style=style,
             ))
         except Exception:
@@ -2520,6 +2536,62 @@ class SessionManager:
             return explicit
         ws_server = getattr(self, "_ws_server_ref", None)
         return getattr(ws_server, "_workspace_root", None) or None
+
+    def set_selinux_backend(self, backend: Any) -> None:
+        """The daemon selected SELinux (``select_backend``); provision with it.
+
+        ``None`` (the default) keeps the AppArmor path exactly as it was.
+        One kernel runs one LSM, so a daemon never holds both.
+        """
+        self._selinux_backend = backend
+
+    def _kernel_confinement_available(self) -> bool:
+        """#1253 for either LSM: can THIS host confine an opted-in session?"""
+        backend = getattr(self, "_selinux_backend", None)
+        if backend is not None:
+            return bool(backend.is_available())
+        return self._apparmor_available()
+
+    def _provision_session_boundary(self, **kwargs: Any) -> Tuple[str, Optional[str], Any]:
+        """``(profile_name, sandbox_mode, selinux_handle)`` for one session.
+
+        AppArmor: the profile name and mode as before, and no handle.
+        SELinux: an empty profile name and the handle, which the spawn and
+        the envelope then carry (selinux-backend.md §3.1).
+        """
+        backend = getattr(self, "_selinux_backend", None)
+        if backend is None:
+            return (*self._provision_apparmor_for_session(**kwargs), None)
+        return self._provision_selinux_for_session(backend, **kwargs)
+
+    def _provision_selinux_for_session(
+        self, backend: Any, *, session_id: str, workspace_path: str,
+        client_id: str, config_root: Optional[str] = None,
+        env_file: Optional[str] = None, private_tmp_dir: Optional[str] = None,
+        **_apparmor_only: Any,
+    ) -> Tuple[str, Optional[str], Any]:
+        """Label the workspace at its level and name the domains (§5, §6).
+
+        AppArmor-only arguments (fragments, plugin rules) are accepted and
+        not used: SELinux has no per-session rule text (design §8).
+        """
+        from jaato_server.server.confinement import Boundary
+        from jaato_server.shared.plugins.workspace_home import _is_daemon_managed
+
+        handle = backend.provision(session_id, Boundary(
+            workspace_path=workspace_path, config_root=config_root,
+            env_file=env_file, private_tmp_dir=private_tmp_dir,
+            managed=_is_daemon_managed(
+                workspace_path, self._managed_workspace_root_for_spawn()),
+        ))
+        if handle is None:
+            self._notify_apparmor(
+                client_id, session_id,
+                "provisioning failed (see daemon log) — running "
+                "unconfined", style="warning", lsm="selinux",
+            )
+            return "", SANDBOX_MODE_SOFT, None
+        return "", sandbox_mode_for_selinux(permissive=handle.complain), handle
 
     def _apparmor_available(self) -> bool:
         """#1253: does THIS host support kernel-enforced AppArmor?
@@ -2780,6 +2852,7 @@ class SessionManager:
         profile_name: str,
         cascade_driver_id: Optional[str] = None,
         confinement_required: bool = False,
+        confinement: Any = None,
     ) -> bool:
         """Spawn the per-session runner subprocess (Phase 3 §7a —
         always-called for IPC sessions with a workspace).
@@ -2927,7 +3000,7 @@ class SessionManager:
                 workspace_path=workspace_path,
                 profile_name=profile_name,
                 daemon_loop=getattr(self, "_daemon_loop", None),
-                disable_confine=(profile_name == ""),
+                disable_confine=_no_boundary(profile_name, confinement),
                 cgroup_attach=cgroup_attach,
                 pool_manager=getattr(self, "_pool_manager_ref", None),
                 cascade_driver_id=cascade_driver_id,
@@ -2935,6 +3008,8 @@ class SessionManager:
                 # #1168: the connection's OS principal, for the ``peer``
                 # runner uid policy.
                 peer=self._client_peer(client_id),
+                # SELinux: the handle; the runner enters its domain by exec.
+                confinement=confinement,
             )
             # #812: record WHICH PROCESS is running this session, now that
             # the spawn helper has left the ``SpawnedRunner`` on the server.
@@ -2985,6 +3060,7 @@ class SessionManager:
                     # #1280: the envelope's plugin configs get the managed
                     # workspace HOME / venv defaults from this.
                     managed_workspace_root=managed_workspace_root,
+                    confinement=confinement,
                 )
                 # Phase 3 cascade-sharing: if this session inherited a
                 # pool slot that previously served session
@@ -12486,12 +12562,13 @@ class SessionManager:
             # threaded above.  env_file stays a saved-driven override; config_root
             # is resolved saved→client→<workspace>/.jaato (restore_config_root
             # above) so a pre-persistence None can't hang the runner.
-            # #1014: ANY apparmor mode re-arms confinement on revive.
-            # The mode is re-decided at provisioning time from the env as
-            # it stands then, so a session that ran complain does not
-            # inherit that posture — it inherits "this session wants a
-            # profile", which is what the field was always asking.
-            apparmor=sandbox_mode_is_apparmor(
+            # #1014: ANY kernel mode re-arms confinement on revive, from
+            # either LSM (``apparmor`` is the opt-in flag's historical
+            # name; it means "this session wants a kernel boundary", and
+            # the daemon's selected backend provides it).  The mode is
+            # re-decided at provisioning time, so a session that ran
+            # complain or permissive does not inherit that posture.
+            apparmor=sandbox_mode_is_kernel(
                 getattr(state, "sandbox_mode", None)
             ),
             profile=restored_profile,

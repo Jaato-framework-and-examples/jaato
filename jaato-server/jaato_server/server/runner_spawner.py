@@ -40,6 +40,8 @@ from jaato_server.server.confinement_id import (
 )
 
 
+from jaato_server.server.confinement.base import is_selinux
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,6 +144,21 @@ def _drop_privileges_in_child(runner_user: Optional[RunnerUser]) -> None:
             os._exit(PRIVILEGE_DROP_EXIT_CODE)
 
 
+#: Where a task names the context its next ``execve`` enters.
+_ATTR_EXEC = "/proc/self/attr/exec"
+
+
+def _set_exec_context_in_child(context: Optional[str]) -> None:
+    """``setexeccon(context)`` in the forked child; ``None`` does nothing."""
+    if not context:
+        return
+    fd = os.open(_ATTR_EXEC, os.O_WRONLY)
+    try:
+        os.write(fd, context.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 class RunnerSpawner:
     """Forks ``python -m server.runner`` once per top-level session.
 
@@ -170,6 +187,7 @@ class RunnerSpawner:
         cgroup_attach: Optional[Callable[[], None]] = None,
         private_tmp_dir: Optional[str] = None,
         runner_user: Optional[RunnerUser] = None,
+        confinement: Optional[Any] = None,
     ) -> SpawnedRunner:
         """Fork+exec a runner; return the daemon-side handle.
 
@@ -216,6 +234,12 @@ class RunnerSpawner:
                 :data:`PRIVILEGE_DROP_EXIT_CODE`.  ``None`` = keep the
                 daemon's uid.  Resolved and made fork-safe daemon-side
                 (``server.runner_user``); the child does no NSS lookup.
+            confinement: An SELinux ``ConfinementHandle``, or ``None``.
+                The child writes its label to ``/proc/self/attr/exec``
+                last, after the privilege drop, so the ``execve`` lands
+                the runner in its domain (selinux-backend.md §7.1);
+                *profile_name* is then empty.  An AppArmor session
+                passes only *profile_name*, as before.
 
         Raises:
             DaemonConfinementError: daemon thread is confined at the
@@ -224,7 +248,8 @@ class RunnerSpawner:
                 isn't disabled.
             OSError: socketpair / fork / exec failed.
         """
-        if not profile_name and not disable_confine:
+        exec_context = confinement.label if is_selinux(confinement) else None
+        if not profile_name and not disable_confine and exec_context is None:
             raise ValueError(
                 "RunnerSpawner.spawn: profile_name required (set "
                 "disable_confine=True for the developer escape hatch)"
@@ -239,16 +264,14 @@ class RunnerSpawner:
         # confinement-related checks.  ``exist_ok=True`` handles
         # the rare case of a stale dir from a prior session with the
         # same id (e.g., session-restore path).
+        tmpdir = self._session_tmpdir(session_id, profile_name, confinement)
         try:
-            os.makedirs(
-                self._session_tmpdir(session_id, profile_name),
-                exist_ok=True,
-            )
+            os.makedirs(tmpdir, exist_ok=True)
         except OSError as exc:
             logger.warning(
                 "RunnerSpawner.spawn: failed to create session tmpdir %s "
                 "before fork: %s — runner may EACCES on tempfile probe",
-                self._session_tmpdir(session_id, profile_name), exc,
+                tmpdir, exc,
             )
 
         parent_sock, child_sock = socket.socketpair(
@@ -263,6 +286,8 @@ class RunnerSpawner:
             max_output_chars=max_output_chars,
             tool_timeout_seconds=tool_timeout_seconds,
             disable_confine=disable_confine,
+            tmpdir=tmpdir,
+            selinux_label=exec_context,
         )
 
         pid = os.fork()
@@ -292,7 +317,8 @@ class RunnerSpawner:
                     cgroup_attach()
                 _enter_private_tmp_in_child(private_tmp_dir)
                 self._exec_runner(
-                    child_sock, parent_sock, log_path, env, runner_user)
+                    child_sock, parent_sock, log_path, env, runner_user,
+                    exec_context)
             except BaseException:  # noqa: BLE001 — child must never return
                 # Any failure pre-exec lands us here.  os._exit(127) so
                 # the parent sees a non-zero status it can attribute.
@@ -371,6 +397,8 @@ class RunnerSpawner:
         max_output_chars: Optional[int],
         tool_timeout_seconds: Optional[float],
         disable_confine: bool,
+        tmpdir: Optional[str] = None,
+        selinux_label: Optional[str] = None,
     ) -> Dict[str, str]:
         """Compose the env dict the runner reads at startup.
 
@@ -401,13 +429,19 @@ class RunnerSpawner:
             env["JAATO_RUNNER_TOOL_TIMEOUT_SECONDS"] = str(tool_timeout_seconds)
         if disable_confine:
             env["JAATO_RUNNER_DISABLE_CONFINE"] = "1"
+        if selinux_label:
+            # Tells runner/__main__ the exec already entered the domain,
+            # so it confirms rather than calling aa_change_profile.
+            env["JAATO_RUNNER_SELINUX_LABEL"] = selinux_label
         # Phase 5 — session-scoped TMPDIR.  Profile allow rule:
         # /tmp/jaato-{session_id}/** rwkl.
-        env["TMPDIR"] = self._session_tmpdir(session_id, profile_name)
+        env["TMPDIR"] = tmpdir or self._session_tmpdir(session_id, profile_name)
         return env
 
     @staticmethod
-    def _session_tmpdir(session_id: str, profile_name: str = "") -> str:
+    def _session_tmpdir(
+        session_id: str, profile_name: str = "", confinement: Optional[Any] = None,
+    ) -> str:
         """Return the session-scoped tmpdir path used by ``TMPDIR``.
 
         Keyed on the BOUNDARY, not on the session alone (#1171).  The
@@ -426,6 +460,8 @@ class RunnerSpawner:
         Static so :meth:`spawn` can mkdir before fork and tests can
         pin the convention without instantiating a spawner.
         """
+        if confinement is not None:
+            return session_tmpdir(session_id, confinement.confinement_id)
         return session_tmpdir(
             session_id, confinement_id_from_profile_name(profile_name),
         )
@@ -437,6 +473,7 @@ class RunnerSpawner:
         log_path: Optional[str],
         env: Dict[str, str],
         runner_user: Optional[RunnerUser] = None,
+        exec_context: Optional[str] = None,
     ) -> None:
         """Child-side: dup socket → fd 3, optionally redirect 1+2 to log,
         close inherited fds, drop to *runner_user* (#1168), exec the runner.
@@ -492,6 +529,11 @@ class RunnerSpawner:
 
         # #1168: last thing before exec, after every root-only step above.
         _drop_privileges_in_child(runner_user)
+        # SELinux (design §7.1): the exec below lands in the runner's
+        # domain.  After the drop, which changes the uid and not the
+        # context; a write that fails raises and the child exits 127,
+        # so no runner starts outside its domain.
+        _set_exec_context_in_child(exec_context)
 
         os.execvpe(
             self._python_executable,

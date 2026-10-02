@@ -117,16 +117,16 @@ def _pool_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def _ensure_session_tmpdir(session_id: str, profile_name: Optional[str]) -> None:
+def _ensure_session_tmpdir(
+    session_id: str, profile_name: Optional[str], confinement: Any = None,
+) -> None:
     """Create the directory the runner's ``TMPDIR`` will point at.
 
     The daemon runs unconfined, so it is the only party that can make
     the boundary directory.  See the call site for why this is here
     rather than in either spawn branch.
     """
-    path = session_tmpdir(
-        session_id, confinement_id_from_profile_name(profile_name or ""),
-    )
+    path = session_tmpdir(session_id, _confinement_id_of(profile_name, confinement))
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as exc:
@@ -172,7 +172,48 @@ def private_tmp_kwargs(private_tmp_dir: Optional[str]) -> Dict[str, str]:
     return {"private_tmp_dir": private_tmp_dir} if private_tmp_dir else {}
 
 
-def session_private_tmp(server: Any, profile_name: Optional[str]) -> Optional[str]:
+def _confinement_id_of(profile_name: Optional[str], confinement: Any) -> Optional[str]:
+    """The boundary's id: the handle's, else read out of an AppArmor name."""
+    if confinement is not None:
+        return confinement.confinement_id
+    return confinement_id_from_profile_name(profile_name or "")
+
+
+def _envelope_descriptor_of(profile_name: Optional[str], confinement: Any) -> Any:
+    """``SessionInitEnvelope.confinement``: SELinux from the handle, AppArmor
+    from the profile name (which an AppArmor handle's label equals)."""
+    from jaato_server.server.confinement.base import is_selinux, selinux_descriptor
+
+    if is_selinux(confinement):
+        return selinux_descriptor(confinement)
+    return _apparmor_descriptor(profile_name or "")
+
+
+def _boundary_label(profile_name: Optional[str], confinement: Any) -> str:
+    """What the runner is confined to, for the log: the AppArmor profile
+    or the SELinux context, ``(none)`` when unconfined."""
+    if confinement is not None:
+        return confinement.label
+    return profile_name or "(none)"
+
+
+def _pool_may_serve(pool_manager: Any, cgroup_attach: Any, confinement: Any) -> bool:
+    """May a pre-warm slot serve this session?
+
+    Not with a cgroup to attach (a slot is already in the daemon's), and
+    not under SELinux: a slot is a forked, threaded process, and SELinux
+    refuses ``setcon`` there (phase 0), so the domain can only be entered
+    by the exec a cold spawn does (selinux-backend.md §7.2).
+    """
+    from jaato_server.server.confinement.base import is_selinux
+
+    return (pool_manager is not None and _pool_enabled()
+            and cgroup_attach is None and not is_selinux(confinement))
+
+
+def session_private_tmp(
+    server: Any, profile_name: Optional[str], confinement: Any = None,
+) -> Optional[str]:
     """The private ``/tmp`` this runner must enter, or ``None`` (#1381).
 
     Only a CONFINED runner gets one: the namespace exists to make the
@@ -181,7 +222,7 @@ def session_private_tmp(server: Any, profile_name: Optional[str]) -> Optional[st
     answers ``None`` whatever was stashed, which also keeps an unconfined
     pool slot free of a namespace another workspace would inherit.
     """
-    if not profile_name:
+    if not profile_name and confinement is None:
         return None
     return stashed_private_tmp(server)
 
@@ -210,6 +251,7 @@ def spawn_session_runner(
     cascade_driver_id: Optional[str] = None,
     managed_workspace_root: Optional[str] = None,
     peer: Any = None,
+    confinement: Any = None,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
@@ -227,6 +269,10 @@ def spawn_session_runner(
     Args:
         server: The session's :class:`JaatoServer` instance.
         session_id: Session identifier (passed via env to the runner).
+        confinement: The provisioned ``ConfinementHandle`` when it is an
+            SELinux one, else ``None`` (an AppArmor boundary is carried by
+            *profile_name* as before).  An SELinux session is always cold
+            spawned, and its runner enters the domain by the exec.
         workspace_path: Session workspace; used both as the runner's
             cwd and as the prefix for the per-session log file path
             (plan §5.1).
@@ -348,7 +394,7 @@ def spawn_session_runner(
     # at plugin-import time with ``No usable temporary directory``,
     # which is #1171 itself — so this must not fail silently, and must
     # not take down a session that would otherwise run.
-    _ensure_session_tmpdir(session_id, profile_name)
+    _ensure_session_tmpdir(session_id, profile_name, confinement)
 
     # ----- The session's workspace HOME, before either branch (#1225) -----
     # The daemon creates ``<ws>/.home/`` (+ its ``*`` gitignore) here, for
@@ -370,7 +416,7 @@ def spawn_session_runner(
     # child or the pool slot binds it over ``/tmp``.  No-op when the session
     # has no private /tmp.  A failure is logged; the runner then refuses to
     # start, naming the missing directory.
-    ensure_private_tmp_dir(session_private_tmp(server, profile_name))
+    ensure_private_tmp_dir(session_private_tmp(server, profile_name, confinement))
 
     # ----- Which uid the runner runs as, before either branch (#1168) -----
     # Resolved once, stashed on the server (the cold spawn and the envelope
@@ -380,6 +426,7 @@ def spawn_session_runner(
         server, peer=peer, session_id=session_id,
         workspace_path=workspace_path, profile_name=profile_name,
         log_path=log_path, workspace_home=workspace_home,
+        confinement=confinement,
     )
 
     # ----- Pool routing (pool PR 4 + 5a) -----
@@ -394,11 +441,7 @@ def spawn_session_runner(
     # to envelope.profile_name in bootstrap_session step 1c.)
     spawned: Optional[SpawnedRunner] = None
     pool_served = False
-    if (
-        pool_manager is not None
-        and _pool_enabled()
-        and cgroup_attach is None
-    ):
+    if _pool_may_serve(pool_manager, cgroup_attach, confinement):
         slot = pool_manager.acquire_slot(
             cascade_driver_id=cascade_driver_id,
             # A slot's warm plugin state was built from ITS config root.
@@ -459,6 +502,7 @@ def spawn_session_runner(
             log_path=log_path,
             disable_confine=disable_confine,
             cgroup_attach=cgroup_attach,
+            confinement=confinement,
         )
 
     # Phase 3 cascade-sharing hotfix (server 0.6.150+): reuse the
@@ -494,6 +538,7 @@ def spawn_session_runner(
             log_path=log_path,
             disable_confine=disable_confine,
             cgroup_attach=cgroup_attach,
+            confinement=confinement,
         )
         pool_slot = None
         pool_served = False
@@ -532,7 +577,7 @@ def spawn_session_runner(
         "runner spawned for session %s: pid=%d profile=%s log=%s "
         "confined=%s pool_served=%s runner_uid_policy=%s runs_as=%s",
         session_id, spawned.pid,
-        profile_name or "(none)",
+        _boundary_label(profile_name, confinement),
         log_path or "(inherited)",
         not disable_confine,
         pool_served,
@@ -553,6 +598,7 @@ def _cold_spawn_runner(
     log_path: Optional[str],
     disable_confine: bool,
     cgroup_attach: Optional[Any],
+    confinement: Any = None,
 ) -> Any:
     """Spawn a fresh session-mode runner subprocess.
 
@@ -632,10 +678,13 @@ def _cold_spawn_runner(
         cgroup_attach=cgroup_attach,
         # #1381: entered in the forked child before exec, i.e. before
         # ``runner/__main__`` confines itself.
-        private_tmp_dir=session_private_tmp(server, profile_name),
+        private_tmp_dir=session_private_tmp(server, profile_name, confinement),
         # #1168: dropped in the forked child after the private /tmp and
         # before exec -- so before ``runner/__main__`` confines itself.
         runner_user=stashed_runner_user(server),
+        # SELinux: the child sets its exec context last, so the exec
+        # enters the domain (selinux-backend.md §7.1).
+        confinement=confinement,
     )
 
 
@@ -648,6 +697,7 @@ def _prepare_runner_user(
     profile_name: Optional[str],
     log_path: Optional[str],
     workspace_home: Optional[str],
+    confinement: Any = None,
 ) -> Optional[RunnerUser]:
     """Resolve this session's runner user, stash it, hand it its paths (#1168).
 
@@ -673,8 +723,8 @@ def _prepare_runner_user(
         session_id=session_id,
         workspace_path=workspace_path,
         session_tmp=session_tmpdir(
-            session_id, confinement_id_from_profile_name(profile_name or "")),
-        private_tmp=session_private_tmp(server, profile_name),
+            session_id, _confinement_id_of(profile_name, confinement)),
+        private_tmp=session_private_tmp(server, profile_name, confinement),
         workspace_home=workspace_home,
         log_path=log_path,
     )
@@ -961,6 +1011,7 @@ def build_session_envelope(
     profile_name: str,
     managed_workspace_root: Optional[str] = None,
     confinement_required: bool = False,
+    confinement: Any = None,
 ) -> "SessionInitEnvelope":
     """Build a :class:`SessionInitEnvelope` from a pre-init JaatoServer.
 
@@ -1425,12 +1476,12 @@ def build_session_envelope(
         # #1348: the //child grants, so a refused command can name its cause.
         confinement_grants=_confinement_grants_of(profile_name),
         # #1381: the <ws>/.tmp the profile's /tmp grant was rendered for.
-        private_tmp_dir=session_private_tmp(server, profile_name),
+        private_tmp_dir=session_private_tmp(server, profile_name, confinement),
         # v8: which LSM provisioned the boundary.  Only AppArmor provisions
         # today, so the descriptor is derived from ``profile_name`` -- the
         # one value every spawn path already carries -- and cannot disagree
         # with it (the runner refuses a descriptor that does).
-        confinement=_apparmor_descriptor(profile_name),
+        confinement=_envelope_descriptor_of(profile_name, confinement),
         # #1168: the user the runner drops to at step 1b3 (a pool slot) or
         # already dropped to before exec (a cold spawn), or ``None``.
         runner_user=_runner_user_wire(server),
@@ -1496,6 +1547,7 @@ def dispatch_bootstrap_envelope(
     timeout: float = 30.0,
     managed_workspace_root: Optional[str] = None,
     confinement_required: bool = False,
+    confinement: Any = None,
 ) -> None:
     """Send the ``session.bootstrap`` RPC so the runner-side
     :class:`shared.jaato_session.JaatoSession` host is populated.
@@ -1580,6 +1632,7 @@ def dispatch_bootstrap_envelope(
             profile_name=profile_name,
             managed_workspace_root=managed_workspace_root,
             confinement_required=confinement_required,
+            confinement=confinement,
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)

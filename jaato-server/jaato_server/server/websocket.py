@@ -38,6 +38,8 @@ except ImportError:
     ServerConnection = Any
 
 from jaato_server.shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
+from jaato_server.shared.lsm_label import sandbox_mode_for_selinux
+from jaato_server.server.confinement.base import no_boundary, split_handle
 from .core import JaatoServer
 from . import session_new_timing
 from .ws_tickets import (
@@ -139,8 +141,46 @@ def _ws_daemon_loop(ws_server: "JaatoWSServer") -> Optional[asyncio.AbstractEven
     return adapter._event_loop if adapter is not None else None
 
 
+def _ws_confinement_available(ws_server: Any) -> bool:
+    """#1253 for either LSM: does this daemon confine WS sessions?"""
+    selinux = getattr(ws_server, "_selinux_backend", None)
+    if selinux is not None:
+        return bool(selinux.is_available())
+    apparmor = ws_server._apparmor
+    return apparmor is not None and apparmor.is_available()
+
+
+def _record_ws_mode_without_apparmor(
+    ws_server: Any, server: Any, session_id: str, sess: Any,
+) -> bool:
+    """Post-init: record the mode when AppArmor is not the backend.
+
+    SELinux: provision again (idempotent: the label stamp skips the walk)
+    and record the handle's mode, as the AppArmor branch re-provisions and
+    records below.  No AppArmor manager, or one that is unavailable: the
+    historical ``soft`` / no record.  Returns ``True`` when it decided.
+    """
+    selinux = getattr(ws_server, "_selinux_backend", None)
+    if selinux is not None:
+        from jaato_server.server.runner_spawn import stashed_private_tmp
+
+        handle = _provision_ws_boundary(
+            ws_server, session_id, sess.workspace_path, None,
+            stashed_private_tmp(server))
+        sess.sandbox_mode = (
+            SANDBOX_MODE_SOFT if handle is None
+            else sandbox_mode_for_selinux(permissive=handle.complain))
+        return True
+    apparmor = ws_server._apparmor
+    if apparmor is not None and apparmor.is_available():
+        return False
+    if apparmor is not None:
+        sess.sandbox_mode = SANDBOX_MODE_SOFT
+    return True
+
+
 def _provision_ws_boundary(
-    apparmor: Any,
+    ws_server: Any,
     session_id: str,
     workspace_path: str,
     plugin_rules: Any,
@@ -161,7 +201,15 @@ def _provision_ws_boundary(
     from jaato_server.server.confinement import Boundary, plugin_rule_fields
     from jaato_server.server.confinement.apparmor import AppArmorBackend
 
-    return AppArmorBackend(apparmor).provision(session_id, Boundary(
+    selinux = getattr(ws_server, "_selinux_backend", None)
+    if selinux is not None:
+        # Every WS-provisioned workspace sits under the daemon's root
+        # (the hooks gate on it), so it is a managed one (#1273/#1274).
+        return selinux.provision(session_id, Boundary(
+            workspace_path=workspace_path, private_tmp_dir=private_tmp_dir,
+            managed=True,
+        ))
+    return AppArmorBackend(ws_server._apparmor).provision(session_id, Boundary(
         workspace_path=workspace_path,
         private_tmp_dir=private_tmp_dir,
         **plugin_rule_fields(plugin_rules),
@@ -1210,9 +1258,8 @@ class JaatoWSServer:
             # rides the envelope to the runner (defence in depth), and below
             # it turns a provisioning/spawn failure into a REFUSED session
             # rather than an unconfined one.
-            confinement_required = (
-                apparmor is not None and apparmor.is_available()
-            )
+            confinement_required = _ws_confinement_available(ws_server)
+            confinement = None  # an SELinux handle; AppArmor rides profile_name
             if confinement_required:
                 # Phase 0/1 (template v20+, 2026-05-16): resolve plugin-
                 # contributed rules so the WS-spawned session profile
@@ -1252,11 +1299,11 @@ class JaatoWSServer:
                 private_tmp = resolve_session_private_tmp(
                     server, workspace_path, ws_workspace_root)
                 handle = _provision_ws_boundary(
-                    apparmor, session_id, workspace_path, plugin_rules,
+                    ws_server, session_id, workspace_path, plugin_rules,
                     private_tmp,
                 )
                 if handle is not None:
-                    profile_name = handle.label
+                    profile_name, confinement = split_handle(handle)
                 else:
                     # #1253 FAIL CLOSED: confinement was required and the
                     # profile did NOT provision.  Refuse the session rather
@@ -1345,7 +1392,8 @@ class JaatoWSServer:
                     workspace_path=workspace_path,
                     profile_name=profile_name,
                     daemon_loop=daemon_loop,
-                    disable_confine=(profile_name == ""),
+                    disable_confine=no_boundary(profile_name, confinement),
+                    confinement=confinement,
                     cgroup_attach=cgroup_attach,
                     pool_manager=getattr(ws_server, "_pool_manager_ref", None),
                     # Phase 2 cascade-sharing (server 0.6.144+):
@@ -1396,6 +1444,7 @@ class JaatoWSServer:
                 # cli / interactive_shell / notebook configs for this managed
                 # workspace.
                 managed_workspace_root=ws_workspace_root,
+                confinement=confinement,
             )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
@@ -1490,9 +1539,7 @@ class JaatoWSServer:
             # - Thread-pool workers leak profile state across sessions when
             #   the restore-to-unconfined transition fails (it's gated on a
             #   file-write rule that the profile doesn't grant).
-            if not apparmor or not apparmor.is_available():
-                if apparmor is not None:
-                    sess.sandbox_mode = SANDBOX_MODE_SOFT
+            if _record_ws_mode_without_apparmor(ws_server, server, session_id, sess):
                 return
 
             # Profile provisioning happens in the pre-initialize hook
@@ -1519,7 +1566,7 @@ class JaatoWSServer:
             # different body under a different name after the spawn.
             from jaato_server.server.runner_spawn import stashed_private_tmp
             if _provision_ws_boundary(
-                apparmor, session_id, sess.workspace_path, plugin_rules,
+                ws_server, session_id, sess.workspace_path, plugin_rules,
                 stashed_private_tmp(server),
             ) is None:
                 # #1253: reaching here means confinement was REQUIRED for this

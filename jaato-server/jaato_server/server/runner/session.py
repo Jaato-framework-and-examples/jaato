@@ -755,11 +755,29 @@ def _private_tmp_of(envelope: SessionInitEnvelope) -> Optional[str]:
     empty ``profile_name`` is ignored, so an unconfined pool slot never
     acquires a namespace another workspace would inherit.
     """
-    if not envelope.profile_name:
+    confined, _ = _runner_boundary(envelope)
+    if not confined:
         return None
     # ``getattr``: a duck-typed envelope (a test double) predating the
     # field means "no private /tmp", as an older daemon's envelope does.
     return getattr(envelope, "private_tmp_dir", None)
+
+
+def _runner_boundary(envelope: SessionInitEnvelope) -> Tuple[bool, Optional[str]]:
+    """``(confined, confinement_id)`` from the envelope's descriptor.
+
+    AppArmor reads the id out of ``profile_name``; SELinux carries it in
+    the descriptor.  Keyed on the resolved confinement rather than on
+    ``profile_name`` alone, which is empty for an SELinux boundary.
+    """
+    from . import lsm_confine
+
+    conf = lsm_confine.resolve(envelope)
+    if conf is None:
+        return False, None
+    if conf.backend == lsm_confine.BACKEND_SELINUX:
+        return True, conf.confinement_id or None
+    return True, confinement_id_from_profile_name(envelope.profile_name or "")
 
 
 def _enter_private_tmp(envelope: SessionInitEnvelope) -> None:
@@ -920,15 +938,13 @@ def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
         sandbox_utils.set_temp_roots(list(PRIVATE_TMP_TARGETS))
         _set_tempdir("/tmp", envelope)
         return
-    path = session_tmpdir(
-        envelope.session_id,
-        confinement_id_from_profile_name(envelope.profile_name or ""),
-    )
+    confined, boundary_id = _runner_boundary(envelope)
+    path = session_tmpdir(envelope.session_id, boundary_id)
 
     # The profile grants this directory and nothing else under /tmp, so
     # the pre-flight and the file tools must not allow more (#1361).
     # Before the mkdir below: the grant holds whether or not it succeeds.
-    if envelope.profile_name:
+    if confined:
         sandbox_utils.narrow_temp_roots(path)
     else:
         sandbox_utils.restore_temp_roots()

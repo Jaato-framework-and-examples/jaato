@@ -43,6 +43,14 @@ _RUNNER_SPAWN = "jaato-server/jaato_server/server/runner_spawn.py"
 REVERSIONS = [
     Reversion(
         target=_ADAPTER,
+        find="            grants=_recorded_grants(profile),\n",
+        replace="            grants=_recorded_grants(confinement_id),\n",
+        test="test_the_handle_carries_the_recorded_grants",
+        because="the record is keyed by profile name, so a lookup by the bare "
+                "id returns nothing and the handle never carries the grants",
+    ),
+    Reversion(
+        target=_ADAPTER,
         find="                None if boundary.requested_fragments is None\n"
              "                else list(boundary.requested_fragments)\n",
         replace="                list(boundary.requested_fragments or ()) or None\n"
@@ -72,7 +80,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_RUNNER_SPAWN,
-        find="        confinement=_apparmor_descriptor(profile_name),\n",
+        find="        confinement=_envelope_descriptor_of(profile_name, confinement),\n",
         replace="        confinement=None,\n",
         test="test_the_envelope_builder_names_the_backend",
         because="the envelope would stop naming the backend, so a later "
@@ -177,8 +185,17 @@ def test_the_envelope_builder_names_the_backend() -> None:
     src = open(runner_spawn.__file__).read()
     # The builder is large and needs a whole server to run; what matters
     # is that the kwarg is written from ``profile_name`` and not dropped.
-    assert "confinement=_apparmor_descriptor(profile_name)," in src
-    assert runner_spawn._apparmor_descriptor("jaato-ws-x")["label"] == "jaato-ws-x"
+    assert "confinement=_envelope_descriptor_of(profile_name, confinement)," in src
+    assert runner_spawn._envelope_descriptor_of("jaato-ws-x", None)["label"] == "jaato-ws-x"
+    assert runner_spawn._envelope_descriptor_of("", None) is None
+    from jaato_server.server.confinement import ConfinementHandle
+
+    handle = ConfinementHandle(
+        backend="selinux", label="u:r:jaato_runner_t:s0:c1,c2",
+        confinement_id="ws-abc", child_label="u:r:jaato_child_t:s0:c1,c2")
+    assert runner_spawn._envelope_descriptor_of("", handle) == {
+        "backend": "selinux", "label": "u:r:jaato_runner_t:s0:c1,c2",
+        "child_label": "u:r:jaato_child_t:s0:c1,c2", "confinement_id": "ws-abc"}
 
 
 # ------------------------------------------------------------ the runner
@@ -230,3 +247,13 @@ def test_the_runner_enters_the_label_through_the_dispatcher() -> None:
             except BootstrapError:
                 pass  # a post-transition readback may object; the call is the point
     assert calls == ["jaato-ws-x"]
+
+
+def test_the_handle_carries_the_recorded_grants() -> None:
+    from jaato_server.server import apparmor
+
+    manager = _Manager()
+    with patch.object(apparmor, "recorded_grants",
+                      side_effect=lambda key: {"key": key}):
+        handle = AppArmorBackend(manager).provision("s1", Boundary(workspace_path="/w"))
+    assert handle.grants == {"key": handle.label}

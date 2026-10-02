@@ -388,6 +388,9 @@ class JaatoDaemon:
         self._session_manager: Optional[SessionManager] = None
         self._ipc_server = None
         self._ws_server = None
+        # The SELinux backend when start() selects it, else None (AppArmor
+        # keeps its per-transport managers; selinux-backend.md §3.1).
+        self._selinux_backend = None
         self._wake_ingress = None  # daemon-tier mode-B wake HTTP ingress
 
         # Daemon extensions loaded via ``jaato.extensions`` entry points.
@@ -503,6 +506,10 @@ class JaatoDaemon:
         # hook was load-bearing only because daemon threads ran tools
         # under apparmor_confine; after Phase 2 the daemon is unconfined
         # and the asyncio default executor is fine.
+
+        # Which kernel LSM confines sessions (selinux-backend.md §3.1).
+        # Before the PID file, so a refusal leaves nothing behind.
+        self._select_confinement_backend()
 
         # Write PID and config files early so that clients checking
         # _check_server_running() see this daemon before initialization
@@ -635,6 +642,8 @@ class JaatoDaemon:
             # ``getattr(ws_server, "_pool_manager_ref", None)`` — no
             # constructor parameter churn required.
             self._ws_server._pool_manager_ref = self._pool_manager
+            # SELinux, when selected: the WS hooks provision with it.
+            self._ws_server._selinux_backend = self._selinux_backend
             ws_adapter = self._ws_server.get_event_sink_adapter()
             ws_adapter.bind_loop(asyncio.get_running_loop())
             composite_sink.add_sink(ws_adapter)
@@ -990,6 +999,35 @@ class JaatoDaemon:
     # IPC AppArmor opt-in wiring (Phase 3 §3.13 — relocated)
     # ------------------------------------------------------------------
 
+    def _select_confinement_backend(self) -> None:
+        """Pick the kernel LSM once, or refuse to start.
+
+        ``JAATO_CONFINEMENT`` / ``JAATO_REQUIRE_CONFINEMENT`` decide
+        (:func:`server.confinement.select_backend`).  AppArmor keeps its
+        existing per-transport managers, so only an SELinux choice is
+        stored and handed to both transports; ``None`` leaves every
+        AppArmor path exactly as it was.
+
+        Raises:
+            SystemExit: an unknown ``JAATO_CONFINEMENT``, or a required
+                backend that is unavailable.  Raised rather than returned
+                so the daemon exits with the reason, before its PID file.
+        """
+        from jaato_server.server.apparmor import AppArmorManager
+        from jaato_server.server.confinement import select_backend
+        from jaato_server.server.confinement.apparmor import AppArmorBackend
+        from jaato_server.server.confinement.selinux import SELinuxBackend
+
+        choice = select_backend(
+            apparmor=lambda: AppArmorBackend(AppArmorManager(workspace_root=str(Path.home()))),
+            selinux=SELinuxBackend,
+        )
+        if choice.refuse:
+            logger.error("refusing to start: %s", choice.describe())
+            raise SystemExit(f"jaato_server: refusing to start: {choice.describe()}")
+        logger.info(choice.describe())
+        self._selinux_backend = choice.backend if choice.name == "selinux" else None
+
     def _wire_ipc_apparmor_dependencies(self) -> None:
         """Wire the IPC AppArmor + runner-spawn dependencies onto the
         session manager (Phase 3 §3.13).
@@ -1015,6 +1053,7 @@ class JaatoDaemon:
         except RuntimeError:
             daemon_loop = None
         if self._session_manager is not None:
+            self._session_manager.set_selinux_backend(self._selinux_backend)
             self._session_manager.set_apparmor_dependencies(
                 ws_server=self._ws_server,
                 daemon_loop=daemon_loop,

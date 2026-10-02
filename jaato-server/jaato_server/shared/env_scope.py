@@ -351,6 +351,9 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_RUNNER_PROFILE": EnvClass(INTERNAL, None,
         "daemon hands the runner the AppArmor profile name to self- "
         "confine to"),
+    "JAATO_RUNNER_SELINUX_LABEL": EnvClass(INTERNAL, None,
+        "daemon tells a cold-spawned runner the SELinux context its exec "
+        "transition entered, so it confirms instead of aa_change_profile"),
     "JAATO_RUNNER_SESSION_ID": EnvClass(INTERNAL, None,
         "daemon hands the runner its session id"),
     "JAATO_RUNNER_WORKSPACE": EnvClass(INTERNAL, None,

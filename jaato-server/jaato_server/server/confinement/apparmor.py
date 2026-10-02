@@ -76,7 +76,9 @@ class AppArmorBackend:
             label=profile,
             confinement_id=confinement_id,
             child_label=child_label_for(profile),
-            grants=_recorded_grants(confinement_id),
+            # The record is keyed by the PROFILE NAME (``_record_grants``),
+            # not the bare id: looking it up by the id always found nothing.
+            grants=_recorded_grants(profile),
             complain=_complain(self._manager, session_id),
         )
 
@@ -139,10 +141,10 @@ def _complain(manager: Any, session_id: str) -> bool:
     return probe(session_id) is True
 
 
-def _recorded_grants(confinement_id: str) -> Dict[str, Any]:
+def _recorded_grants(profile_name: str) -> Dict[str, Any]:
     from jaato_server.server.apparmor import recorded_grants
 
     try:
-        return dict(recorded_grants(confinement_id) or {})
+        return dict(recorded_grants(profile_name) or {})
     except Exception:  # a diagnostics record must never fail a provision
         return {}

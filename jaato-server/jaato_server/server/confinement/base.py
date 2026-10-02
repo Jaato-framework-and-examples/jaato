@@ -116,3 +116,39 @@ class ConfinementBackend(Protocol):
 
     def release(self, handle: ConfinementHandle) -> None:
         """Drop what :meth:`provision` created once no runner wears it."""
+
+
+def is_selinux(handle: Optional["ConfinementHandle"]) -> bool:
+    """Does *handle* name an SELinux boundary?  ``None`` is no boundary."""
+    return handle is not None and handle.backend == "selinux"
+
+
+def selinux_descriptor(handle: "ConfinementHandle") -> Dict[str, str]:
+    """``SessionInitEnvelope.confinement`` for an SELinux *handle*.
+
+    Carries ``confinement_id`` beside the two domains: SELinux has no
+    profile name to read the id back out of, and the runner keys its
+    session tmpdir on it (#1171).
+    """
+    return {
+        "backend": handle.backend,
+        "label": handle.label,
+        "child_label": handle.child_label,
+        "confinement_id": handle.confinement_id,
+    }
+
+
+def no_boundary(profile_name: Optional[str], handle: Optional["ConfinementHandle"]) -> bool:
+    """No kernel boundary was provisioned: no AppArmor profile, no SELinux handle."""
+    return not profile_name and handle is None
+
+
+def split_handle(handle: "ConfinementHandle") -> Tuple[str, Optional["ConfinementHandle"]]:
+    """``(profile_name, selinux_handle)`` as the spawn and envelope take them.
+
+    AppArmor's label IS the profile name and travels as before; an SELinux
+    handle travels as itself, with an empty profile name.
+    """
+    if is_selinux(handle):
+        return "", handle
+    return handle.label, None
