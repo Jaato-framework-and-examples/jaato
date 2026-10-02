@@ -197,6 +197,21 @@ def setup(root: str) -> dict:
 # probes
 # ----------------------------------------------------------------------
 
+def spawn_child_create(target: str) -> str:
+    """Runner code that execs a child shell which tries to create *target*."""
+    child_ctx = context("jaato_child_t", L1)
+    return f"""
+import os, subprocess
+def pre():
+    fd = os.open('/proc/self/attr/exec', os.O_WRONLY)
+    os.write(fd, b'{child_ctx}')
+    os.close(fd)
+p = subprocess.run(['/bin/sh', '-c', 'echo x > {target} && echo LEAK || echo DENIED'],
+                   preexec_fn=pre, capture_output=True, text=True)
+print(p.stdout + p.stderr)
+"""
+
+
 def probes(p: dict, venv: Optional[str]) -> None:
     R, C = "jaato_runner_t", "jaato_child_t"
 
@@ -225,6 +240,10 @@ attempt(lambda: os.mkdir('{p['wsA']}/d'), False)"""))
         expect_denied(f"runner: {what} is refused",
                       py_in(R, L1, TRY + f"attempt(lambda: {code}, True)"))
 
+    expect_denied("runner: creating a missing .jaato/reactors.json is refused",
+                  py_in(R, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/reactors.json','w').write('{{}}'), True)"))
+    expect_denied("child: creating a missing .jaato/template_routing.yaml is refused",
+                  py_in(R, L1, spawn_child_create(p['wsA'] + "/.jaato/template_routing.yaml")))
     expect_ok("runner: writes a reference claim",
               py_in(R, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/references-claims/c.json','w').write('x'), False)"))
     expect_ok("runner: writes its session tmpdir",

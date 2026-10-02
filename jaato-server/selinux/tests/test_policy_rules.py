@@ -222,6 +222,18 @@ def silenced(policy, source: str, target: str, tclass: str,
     return frozenset(perms) <= got
 
 
+def born_as_named(policy, source: str, parent: str, tclass: str, name: str) -> FrozenSet[str]:
+    """The types a *tclass* object named *name* is given when *source*
+    creates it under *parent* (a filename type_transition)."""
+    out = set()
+    for rule in setools.TERuleQuery(
+            policy, ruletype=[setools.TERuletype.type_transition],
+            source=source, target=parent, tclass=[tclass]).results():
+        if getattr(rule, "filename", None) == name:
+            out.add(str(rule.default))
+    return frozenset(out)
+
+
 def born_at(policy, source: str, target: str, tclass: str) -> FrozenSet[str]:
     """The ranges a *tclass* object *source* creates in *target* is given."""
     return frozenset(
@@ -473,6 +485,25 @@ RULES: Tuple[Rule, ...] = (
          _forbids("jaato_child_t", "jaato_runner_t", "file", {"read", "open"}),
          "the runner's environ holds the provider credential",
          append="allow jaato_child_t jaato_runner_t:file { read open };\n"),
+    Rule("a missing .jaato/reactors.json is born authored, so it cannot be created",
+         lambda p: all(born_as_named(p, d, ws, "file", "reactors.json") == {"jaato_authored_t"}
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for ws in ("jaato_workspace_t", "jaato_managed_ws_t")),
+         "AppArmor denies the path whether or not the file exists",
+         find='type_transition { jaato_runner_t jaato_child_t } { jaato_workspace_t '
+              'jaato_managed_ws_t }:file jaato_authored_t "reactors.json";\n'),
+    Rule("a missing .jaato/template_routing.yaml is born authored, so it cannot be created",
+         lambda p: all(born_as_named(p, d, ws, "file", "template_routing.yaml") == {"jaato_authored_t"}
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for ws in ("jaato_workspace_t", "jaato_managed_ws_t")),
+         "where a rendered template lands is authored config",
+         find='type_transition { jaato_runner_t jaato_child_t } { jaato_workspace_t '
+              'jaato_managed_ws_t }:file jaato_authored_t "template_routing.yaml";\n'),
+    Rule("neither domain may create an authored file",
+         lambda p: all(not granted(p, d, "jaato_authored_t", "file", frozenset({"create"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "the filename transitions refuse a creation only because of this",
+         append="allow jaato_child_t jaato_authored_t:file create;\n"),
     Rule("nobody writes, renames or removes authored files",
          lambda p: all(not granted(p, d, "jaato_authored_t", "file",
                                    frozenset({"write", "append", "create", "unlink",
