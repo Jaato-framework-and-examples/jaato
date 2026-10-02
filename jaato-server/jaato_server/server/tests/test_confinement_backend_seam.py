@@ -6,8 +6,8 @@ What is pinned here, none of it needing a kernel:
   choice is honoured; an unknown value and a required-but-missing backend
   refuse;
 * the SELinux backend's readiness checks run in order and name the first
-  that fails, and the backend never claims availability while it cannot
-  provision;
+  that fails, and it is available exactly when they all pass (phase 2b:
+  provisioning exists, ``test_selinux_provision_2b.py``);
 * the AppArmor adapter hands the manager exactly what its callers do today.
 """
 
@@ -48,14 +48,11 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SELINUX,
-        find='        """``False`` until provisioning exists, whatever the host says."""\n'
-             "        return False\n",
-        replace='        """``False`` until provisioning exists, whatever the host says."""\n'
-                "        return self.host_readiness().ready\n",
-        test="test_a_ready_host_is_still_not_available",
-        because="the backend would be selected on a ready host and then "
-                "provision nothing, so sessions would run unconfined while "
-                "the daemon reported SELinux confinement",
+        find="    def is_available(self) -> bool:\n        return self.host_readiness().ready\n",
+        replace="    def is_available(self) -> bool:\n        return True\n",
+        test="test_an_unready_host_is_not_available",
+        because="selection would pick SELinux on a host without the module "
+                "and every provision would then fail",
     ),
 ]
 
@@ -218,13 +215,18 @@ def test_readiness_names_the_first_failing_check(backend, reason):
     assert reason in backend.unavailable_reason
 
 
-def test_a_ready_host_is_still_not_available():
+def test_a_ready_host_is_available():
     backend = _selinux(_FakeKernel(_POLICY), enforcing=False)
     readiness = backend.host_readiness()
     assert readiness.ready and readiness.enforcing is False
+    assert backend.is_available() is True
+    assert backend.unavailable_reason is None
+
+
+def test_an_unready_host_is_not_available():
+    backend = _selinux(_FakeKernel(()), enforcing=True)
     assert backend.is_available() is False
-    assert "cannot provision" in backend.unavailable_reason
-    assert backend.provision("s1", Boundary(workspace_path="/w")) is None
+    assert "not loaded" in backend.unavailable_reason
 
 
 # --------------------------------------------------------------- AppArmor

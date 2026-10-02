@@ -1,12 +1,10 @@
 """The SELinux backend (design ``docs/design/selinux-backend.md``).
 
-Phase 1: it answers whether this host could run SELinux confinement, and
-provisions nothing.  Until provisioning exists, :meth:`is_available` is
-``False`` even on a ready host, with a reason that says the host is ready
-and the backend is not; :meth:`host_readiness` is the check itself, which
-is what ``jaato-doctor`` and the selection log report.  Saying "available"
-before a boundary can be provisioned would let a caller believe a session
-was confined.
+Phase 2b: on a ready host it provisions a boundary by giving the
+workspace a per-workspace MCS level (:mod:`.selinux_levels`), labelling
+the tree once (:mod:`.selinux_labels`), and naming the two fixed domains
+the runner and its children run in at that level.  Nothing is loaded per
+session: the policy module is installed once by the operator (§9).
 
 The checks follow design §10, first failing precondition wins:
 
@@ -31,20 +29,27 @@ entrypoint checks are the halves only jaato's module grants.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import platform
 import sys
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
+from jaato_server.server.confinement import selinux_labels
 from jaato_server.server.confinement.base import Boundary, ConfinementHandle
+from jaato_server.server.confinement.selinux_levels import LabelStamp, LevelTable
+from jaato_server.server.confinement_id import confinement_id as _confinement_id
 from jaato_server.shared.lsm_label import (
     BACKEND_SELINUX,
     AvDecision,
     load_libselinux,
     parse_selinux_context,
+    selinux_domain_permissive,
     selinux_host_enforcing,
 )
+
+logger = logging.getLogger(__name__)
 
 #: The policy module version this build needs (design §4).
 REQUIRED_POLICY_VERSION = 1
@@ -53,6 +58,7 @@ REQUIRED_POLICY_VERSION = 1
 RUNNER_PROBE_CONTEXT = "system_u:system_r:jaato_runner_t:s0"
 
 RUNNER_DOMAIN = "jaato_runner_t"
+CHILD_DOMAIN = "jaato_child_t"
 
 SELINUX_MOUNT = "/sys/fs/selinux"
 
@@ -138,6 +144,25 @@ class _Kernel:
             return None
         return bool(avd.allowed & bit)
 
+    def set_file_context(self, path: str, context: str) -> None:
+        """``lsetfilecon``: label *path* itself, never a symlink's target."""
+        fn = self._lib.lsetfilecon
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        fn.restype = ctypes.c_int
+        if fn(path.encode("utf-8"), context.encode("utf-8")) != 0:
+            err = ctypes.get_errno()
+            raise OSError(err, f"lsetfilecon {context}: {os.strerror(err)}", path)
+
+    def link_context(self, path: str) -> Optional[str]:
+        """``lgetfilecon``: *path*'s own label, ``None`` when unreadable."""
+        fn = self._lib.lgetfilecon
+        fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
+        fn.restype = ctypes.c_int
+        out = ctypes.c_char_p()
+        if fn(path.encode("utf-8"), ctypes.byref(out)) < 0 or not out.value:
+            return None
+        return out.value.decode("utf-8", "replace")
+
 
 def _default_kernel() -> Optional[_Kernel]:
     lib = load_libselinux()
@@ -145,7 +170,7 @@ def _default_kernel() -> Optional[_Kernel]:
 
 
 class SELinuxBackend:
-    """SELinux confinement (phase 1: readiness only)."""
+    """SELinux confinement: per-workspace MCS level, fixed jaato domains."""
 
     name = BACKEND_SELINUX
 
@@ -157,6 +182,8 @@ class SELinuxBackend:
         system: Callable[[], str] = platform.system,
         mount_present: Optional[Callable[[], bool]] = None,
         interpreter: Callable[[], str] = lambda: os.path.realpath(sys.executable),
+        levels: Optional[LevelTable] = None,
+        domain_permissive: Callable[[str], Optional[bool]] = selinux_domain_permissive,
     ) -> None:
         self._kernel_factory = kernel_factory
         self._host_enforcing = host_enforcing
@@ -164,6 +191,8 @@ class SELinuxBackend:
         self._mount_present = mount_present or _selinux_mounted
         self._interpreter = interpreter
         self._readiness: Optional[Readiness] = None
+        self._levels = levels
+        self._domain_permissive = domain_permissive
 
     def host_readiness(self) -> Readiness:
         """Run the §10 checks once and remember the answer."""
@@ -190,29 +219,132 @@ class SELinuxBackend:
         return Readiness(reason is None, reason, enforcing)
 
     def is_available(self) -> bool:
-        """``False`` until provisioning exists, whatever the host says."""
-        return False
+        return self.host_readiness().ready
 
     @property
     def unavailable_reason(self) -> Optional[str]:
-        readiness = self.host_readiness()
-        if not readiness.ready:
-            return readiness.reason
-        return (
-            "the host is ready for SELinux confinement, but this build "
-            "cannot provision SELinux boundaries yet"
-        )
+        return self.host_readiness().reason
+
+    def _level_table(self) -> LevelTable:
+        if self._levels is None:
+            self._levels = LevelTable()
+        return self._levels
 
     def confinement_id_for_boundary(self, boundary: Boundary) -> str:
-        raise NotImplementedError("SELinux provisioning is not implemented yet")
+        """Slug plus a digest of what the runner may do (design §5.2).
+
+        Nothing is rendered under SELinux, so the digest covers the inputs
+        that change the boundary: policy version, level, managed, private
+        ``/tmp``.  Allocates the workspace's level on first use.
+        """
+        workspace = os.path.realpath(boundary.workspace_path)
+        level = self._level_table().level_for(workspace)
+        return _confinement_id(
+            workspace_root=workspace, config_root=boundary.config_root,
+            rendered_body=(
+                f"selinux policy=v{REQUIRED_POLICY_VERSION} level={level} "
+                f"managed={boundary.managed} private_tmp={boundary.private_tmp_dir or ''}"
+            ),
+        )
 
     def provision(
         self, session_id: str, boundary: Boundary,
     ) -> Optional[ConfinementHandle]:
-        return None
+        """Level the workspace, label it once, and name the domains.
+
+        ``None`` on failure, logged with the cause: an unsafe root, a
+        label that would not apply, an unreadable own context.  A caller
+        that required confinement then refuses the session.
+        """
+        if not self.is_available():
+            logger.error("SELinux provision for %s: backend unavailable (%s)",
+                         session_id, self.unavailable_reason)
+            return None
+        kernel = self._kernel_factory()
+        own = parse_selinux_context(kernel.current_context() if kernel else None)
+        if kernel is None or own is None:
+            logger.error("SELinux provision for %s: own context unreadable", session_id)
+            return None
+        workspace = os.path.realpath(boundary.workspace_path)
+        try:
+            selinux_labels.check_root(workspace)
+            level = self._level_table().level_for(workspace)
+            plan = selinux_labels.Plan(
+                workspace=workspace, level=level, managed=boundary.managed,
+                private_tmp_dir=(os.path.realpath(boundary.private_tmp_dir)
+                                 if boundary.private_tmp_dir else None),
+            )
+            self._ensure_labelled(kernel, plan)
+        except (OSError, ValueError) as exc:
+            logger.error("SELinux provision for %s at %s failed: %s",
+                         session_id, workspace, exc)
+            return None
+        label = f"{own.user}:{own.role}:{RUNNER_DOMAIN}:{level}"
+        permissive = self._domain_permissive(label)
+        return ConfinementHandle(
+            backend=BACKEND_SELINUX,
+            label=label,
+            confinement_id=self.confinement_id_for_boundary(boundary),
+            child_label=f"{own.user}:{own.role}:{CHILD_DOMAIN}:{level}",
+            grants=_grants(plan, label),
+            complain=(permissive is True or self.host_readiness().enforcing is False),
+        )
+
+    def _ensure_labelled(self, kernel: "_Kernel", plan: "selinux_labels.Plan") -> None:
+        """Walk and label unless the stamp and the root's label say done."""
+        table = self._level_table()
+        stamp = table.stamp(plan.workspace)
+        want = selinux_labels.file_context(plan.base_type, plan.level)
+        if (stamp is not None
+                and stamp == LabelStamp(REQUIRED_POLICY_VERSION, plan.managed,
+                                        plan.private_tmp_dir, stamp.files)
+                and kernel.link_context(plan.workspace) == want):
+            return
+        table.forget_stamp(plan.workspace)
+        selinux_labels.precreate_authored_dirs(plan.workspace)
+        if plan.private_tmp_dir:
+            os.makedirs(plan.private_tmp_dir, exist_ok=True)
+        count = selinux_labels.apply(plan, kernel.set_file_context)
+        table.record_stamp(plan.workspace, LabelStamp(
+            REQUIRED_POLICY_VERSION, plan.managed, plan.private_tmp_dir, count))
+        logger.info("SELinux: labelled %d entries of %s at %s (%s)",
+                    count, plan.workspace, plan.level, plan.base_type)
+
+    def prepare_session_tmpdir(self, handle: ConfinementHandle, path: str) -> None:
+        """Create the session tmpdir and its boundary parent, as ``jaato_tmp_t``.
+
+        Under ``/tmp`` the runner has no ``add_name`` (the host's ``/tmp``
+        is not its own), so the daemon makes both directories and labels
+        them at the boundary's level before the runner starts.
+        """
+        kernel = self._kernel_factory()
+        ctx = parse_selinux_context(handle.label)
+        if kernel is None or ctx is None:
+            raise OSError(f"cannot label {path}: no libselinux or bad label {handle.label!r}")
+        parent = os.path.dirname(path)
+        os.makedirs(path, exist_ok=True)
+        target = selinux_labels.file_context(selinux_labels.TMP_TYPE, ctx.level)
+        for entry in (parent, path):
+            kernel.set_file_context(entry, target)
 
     def release(self, handle: ConfinementHandle) -> None:
+        """Nothing to unload: labels persist with the workspace (design §6)."""
         return None
+
+
+def _grants(plan: "selinux_labels.Plan", label: str) -> Dict[str, Any]:
+    """The diagnostics record (#1326), SELinux-shaped (design §8)."""
+    return {
+        "backend": BACKEND_SELINUX,
+        "domain": RUNNER_DOMAIN,
+        "child_domain": CHILD_DOMAIN,
+        "level": plan.level,
+        "label": label,
+        "labelled_roots": [plan.workspace],
+        "workspace_type": plan.base_type,
+        "policy_version": REQUIRED_POLICY_VERSION,
+        "exec_scope": "unscoped",
+    }
 
 
 def _policy_problem(kernel: _Kernel) -> Optional[str]:
