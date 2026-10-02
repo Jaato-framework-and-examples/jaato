@@ -610,7 +610,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # A NEW verb (the 1.7 rule): an older daemon never answers, and "resized"
 # would describe a pool nobody changed, so the SDK refuses below
 # ``MIN_POOL_ADMIN_PROTOCOL``.
-PROTOCOL_VERSION = "1.35"
+# 1.36 -- ``ReferenceBundleCreateRequest`` (or the typable
+# ``reference.bundle.create <name>``) -> ``ReferenceBundleCreateResultEvent``
+# (#1478): create a workspace-tier reference sub-bundle, UNINDEXED, so a
+# driver can set up the bundle it promotes into without a session or an
+# embedding provider.  Daemon-level and session-less like the other curation
+# requests, and written by the daemon under the same owner rule.  The answer
+# carries the workspace's ``bundles`` after the create (the listing
+# ``ReferenceClaimsEvent.bundles`` already gives).  A NEW verb (the 1.7
+# rule): the SDKs refuse below ``MIN_REFERENCE_BUNDLE_PROTOCOL``.
+PROTOCOL_VERSION = "1.36"
 
 
 # =============================================================================
@@ -840,6 +849,8 @@ class EventType(str, Enum):
     REFERENCE_CATALOG_REQUEST = "reference.catalog.request"  # Client -> Server (1.33)
     REFERENCE_LINKS_UPDATE_REQUEST = "reference.links.request"  # Client -> Server (1.33)
     REFERENCE_LINKS_UPDATE_RESULT = "reference.links.result"  # Answer to ReferenceLinksUpdateRequest (1.33)
+    REFERENCE_BUNDLE_CREATE_REQUEST = "reference.bundle.create.request"  # Client -> Server (1.36)
+    REFERENCE_BUNDLE_CREATE_RESULT = "reference.bundle.create.result"  # Answer to ReferenceBundleCreateRequest (1.36)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
     SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
@@ -3124,6 +3135,48 @@ class ReferenceLinksUpdateRequest(Event):
     links: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class ReferenceBundleCreateRequest(Event):
+    """Create a workspace-tier reference sub-bundle (1.36, #1478).
+
+    Answered by :class:`ReferenceBundleCreateResultEvent` carrying this
+    ``request_id``.  ``name`` is one id token (the claim/reference id rule);
+    the bundle is created UNINDEXED -- ``references bundle index <name>``
+    adds a vector index later, from a session with an embedding provider.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_BUNDLE_CREATE_REQUEST)
+    request_id: str = ""
+    name: str = ""
+
+
+class ReferenceBundleCreateResultEvent(Event):
+    """What one bundle create did (1.36, #1478).
+
+    Fields:
+        request_id: Echoed from the request (``""`` for the typed command).
+        ok: Whether the bundle was created.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``collision`` (a bundle, or any
+            directory, by that name already exists), ``unsafe_path`` or
+            ``io_error``.
+        error: The reason, for a person.
+        bundle: The bundle name, as created (or as refused).
+        indexed: Whether the bundle has a vector index (``False`` for every
+            bundle this verb creates).
+        bundles: The workspace's sub-bundles after the call, in
+            ``ReferenceClaimsEvent.bundles`` shape (``{name, indexed,
+            model?}``) -- answered on every outcome, so a ``collision`` also
+            says whether the existing one is indexed.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_BUNDLE_CREATE_RESULT)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    bundle: str = ""
+    indexed: bool = False
+    bundles: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 #: The reference-curation requests (1.33).  Daemon-level: each handler
 #: resolves the caller's workspace from the CONNECTION and answers a
 #: session-less caller with a correlated result (``no_workspace`` when it has
@@ -3133,6 +3186,7 @@ REFERENCE_CURATION_REQUEST_TYPES = (
     ReferenceCurationRequest,
     ReferenceCatalogRequest,
     ReferenceLinksUpdateRequest,
+    ReferenceBundleCreateRequest,
 )
 
 
@@ -5593,6 +5647,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REFERENCE_CATALOG_REQUEST.value: ReferenceCatalogRequest,
     EventType.REFERENCE_LINKS_UPDATE_REQUEST.value: ReferenceLinksUpdateRequest,
     EventType.REFERENCE_LINKS_UPDATE_RESULT.value: ReferenceLinksUpdateResultEvent,
+    EventType.REFERENCE_BUNDLE_CREATE_REQUEST.value: ReferenceBundleCreateRequest,
+    EventType.REFERENCE_BUNDLE_CREATE_RESULT.value: ReferenceBundleCreateResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,

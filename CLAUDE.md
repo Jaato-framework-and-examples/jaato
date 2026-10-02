@@ -4565,6 +4565,25 @@ Loaded It](#a-catalog-written-after-the-session-loaded-it-1145)).
 Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
 reversions (the numpy-backed reconcile tests skip without numpy).
 
+**A bundle may have no index, and a driver can create one (#1478,
+protocol 1.36).** `references bundle create <name>` with no embedding
+provider (or `--no-index`) creates an UNINDEXED bundle: `bundle.json`
+only, `indexed: False` in the listing, tag lookup and selection as on the
+root, and a promotion into it reports `reconcile: none`.
+`ReferenceBundleCreateRequest{name}` -> `ReferenceBundleCreateResultEvent`
+(or the typed `reference.bundle.create <name>`) does the same daemon-side,
+with no session: session-less on IPC like the other curation requests, the
+`may_curate` owner gate, one id token as the name (no root alias, no
+traversal), any existing entry by that name answered `collision` with
+nothing changed, and the workspace's `bundles` on every answer
+(`reference_curation.create_bundle`). `IPCClient.create_reference_bundle`
+/ `createReferenceBundle`, refused below `MIN_REFERENCE_BUNDLE_PROTOCOL`.
+The index is a separate step: `references bundle index <name>` from a
+session with an embedding provider writes `embedding_config.json` and
+reconciles; there is no daemon-side index verb yet. Guard:
+`server/tests/test_a_driver_creates_the_bundle_it_promotes_into_1478.py`,
+five reversions.
+
 Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
 reversions), `server/tests/test_a_curator_lists_reference_claims.py`
 (five) and `shared/tests/test_a_proposal_names_who_approved_it.py`

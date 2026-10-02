@@ -624,3 +624,77 @@ def curate_claim(
         return _fail(outcome, "io_error", f"could not remove the claim: {exc}")
     outcome.ok = True
     return outcome
+
+
+#: The typable bundle verb (1.36, #1478).
+BUNDLE_CREATE_COMMAND = "reference.bundle.create"
+
+#: Names a bundle may not take: the catalog root's spellings.
+_RESERVED_BUNDLE_NAMES = frozenset({"root", "(root)", ROOT_BUNDLE_NAME})
+
+
+@dataclass
+class BundleCreateOutcome:
+    """What one :func:`create_bundle` did; mirrors ``ReferenceBundleCreateResultEvent``."""
+    ok: bool = False
+    category: str = ""
+    error: str = ""
+    bundle: str = ""
+    indexed: bool = False
+    bundles: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def create_bundle(
+    workspace: str, name: str, *, owner: Optional[str], user_id: Optional[str],
+) -> BundleCreateOutcome:
+    """Create the workspace-tier sub-bundle ``name``, unindexed (#1478).
+
+    Writes only ``<workspace>/.jaato/references/<name>/bundle.json`` (the
+    marker ``write_bundle_manifest`` writes, same body), never an
+    ``embedding_config.json``: the daemon holds no embedding model, and a
+    bundle without an index is a bundle -- tag lookup and selection work on
+    it as on the root, and a promotion into it reports ``reconcile: none``.
+    ``references bundle index <name>`` adds the index later from a session
+    whose workspace has an embedding provider.
+
+    The name is one id token (:func:`valid_id`, the rule a promotion's
+    ``bundle`` already obeys: one flat component, no traversal), not a root
+    alias.  Any existing directory by that name -- a bundle or not -- is a
+    ``collision``; nothing is overwritten.  The write goes through
+    :func:`write_contained`, so a link planted on the path is refused.
+    Gated by the owner rule promotion uses.  Never raises for a refusal.
+    """
+    outcome = BundleCreateOutcome(bundle=name if isinstance(name, str) else "")
+    root = os.path.realpath(workspace)
+
+    def done(category: str = "", error: str = "") -> BundleCreateOutcome:
+        outcome.ok, outcome.category, outcome.error = not category, category, error
+        outcome.bundles = workspace_bundles(root)
+        return outcome
+
+    if not valid_id(name) or name in _RESERVED_BUNDLE_NAMES:
+        return done("invalid_request",
+                    f"usage: {BUNDLE_CREATE_COMMAND} <name> -- one id token "
+                    "(letters, digits, '.', '_', '-'), not 'root'")
+    allowed = may_curate(owner, user_id)
+    if not allowed:
+        return done("not_owner", "only the workspace owner may create its reference bundles")
+    rel = f"{CATALOG_REL}/{name}"
+    try:
+        catalog = contained_dir(root, CATALOG_REL, create=False)
+    except PathLeavesRoot as exc:
+        return done("unsafe_path", str(exc))
+    target = os.path.join(catalog, name) if catalog else ""
+    if target and os.path.lexists(target):
+        what = ("a bundle" if os.path.isfile(os.path.join(target, "bundle.json"))
+                else "an entry")
+        return done("collision", f"{what} named '{name}' already exists in {CATALOG_REL}")
+    body = json.dumps({"name": name, "description": "references bundle"},
+                      indent=2, ensure_ascii=False) + "\n"
+    try:
+        write_contained(root, f"{rel}/bundle.json", body.encode("utf-8"))
+    except PathLeavesRoot as exc:
+        return done("unsafe_path", str(exc))
+    except OSError as exc:
+        return done("io_error", f"could not create the bundle: {exc}")
+    return done()
