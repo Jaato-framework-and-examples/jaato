@@ -18,7 +18,13 @@
  *   • the typed ``links`` it declares, a ``supersedes`` marked because
  *     promoting it reroutes requests for the target, and ``warnings`` (an
  *     edge this workspace's catalog cannot place) that do not block Promote;
- *   • expanding shows the description and any inline content.
+ *   • expanding shows the description and any inline content;
+ *   • a REVISION (``revises``, #1437) is drawn as a diff against the
+ *     reference as it is now -- which fields change, and when expanded the
+ *     before / after of each (inline content as a line diff) -- not as a
+ *     new page.  It is written in place, so it has no bundle selector.  A
+ *     STALE one (the reference changed since it was written) says so and
+ *     why, and its Promote is disabled.
  *
  * Every model-written string is rendered as React text, never as markup.
  * Promote / Dismiss are drawn only when the daemon says this connection may
@@ -34,6 +40,7 @@ import {
   describeClaimOrigin,
   describeRenderedFrom,
   isRoutingLink,
+  revisionChanges,
   dismissReferenceClaim,
   promoteReferenceClaim,
   refreshReferenceClaims,
@@ -54,7 +61,10 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
   const [confirmDismiss, setConfirmDismiss] = useState(false);
   const [bundle, setBundle] = useState("");
   const title = row.name || row.id;
-  const blocked = row.problems.length > 0;
+  const revision = !!row.revises;
+  const stale = revision && row.stale === true;
+  const blocked = row.problems.length > 0 || stale;
+  const changes = revision ? revisionChanges(row) : [];
   const witnessed = !!row.origin?.witnessed_by;
   const rendered = describeRenderedFrom(row.origin);
   return (
@@ -65,6 +75,7 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
           <span className="block text-[13px]">{title}</span>
           <span className="block font-mono text-[11px] text-text-muted truncate">
             <span className="text-warning uppercase tracking-[0.08em] mr-1.5">unreviewed</span>
+            {revision && <span className="text-steel uppercase tracking-[0.08em] mr-1.5" data-testid="proposal-revision">revision of</span>}
             <span className="mr-1.5">{row.id}</span>
             {row.tags.map((t) => `#${t}`).join(" ")}
           </span>
@@ -85,8 +96,16 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
       </div>
       {blocked && (
         <ul className="m-0 pl-6 pb-1.5 list-none text-[12px] text-error" aria-label={`Why ${title} cannot be promoted`}>
+          {stale && <li data-testid="proposal-stale">Stale: {row.stale_reason || "the reference changed since this revision was written."}</li>}
           {row.problems.map((p) => <li key={p}>{p}</li>)}
         </ul>
+      )}
+      {revision && (
+        <p className="m-0 pl-6 pb-1.5 font-mono text-[11px] text-text-muted" data-testid="proposal-changes">
+          {changes.length ? `changes ${changes.map((c) => c.field).join(", ")}` : row.current ? "changes nothing" : ""}
+          {row.revises_file ? ` · ${row.revises_file}` : ""}
+          {!row.links_replaced ? " · keeps its links" : ""}
+        </p>
       )}
       {!!row.links?.length && (
         <ul className="m-0 pl-6 pb-1.5 list-none font-mono text-[11px] text-text-muted" aria-label={`Links proposed by ${title}`} data-testid="proposal-links">
@@ -104,9 +123,31 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
       )}
       {expanded && (
         <div className="pl-6 pb-2 flex flex-col gap-1.5">
-          {row.description && <p className="m-0 text-[12px]">{row.description}</p>}
-          {row.type === "inline" && row.content !== undefined && (
-            <pre className="m-0 whitespace-pre-wrap font-mono text-[12px]" data-testid="proposal-content">{row.content}</pre>
+          {revision ? (
+            changes.map((c) => (
+              <div key={c.field} data-testid="proposal-diff" data-field={c.field}>
+                <span className="block font-mono text-[11px] text-text-muted uppercase tracking-[0.08em]">{c.field}</span>
+                {c.lines ? (
+                  <pre className="m-0 whitespace-pre-wrap font-mono text-[12px]">
+                    {c.lines.map((l, i) => (
+                      <span key={i} className={`block ${l.op === "-" ? "text-error" : l.op === "+" ? "text-success" : "text-text-muted"}`} data-op={l.op}>{`${l.op} ${l.text}`}</span>
+                    ))}
+                  </pre>
+                ) : (
+                  <>
+                    <span className="block whitespace-pre-wrap font-mono text-[12px] text-error" data-op="-">{`- ${c.before || "(none)"}`}</span>
+                    <span className="block whitespace-pre-wrap font-mono text-[12px] text-success" data-op="+">{`+ ${c.after || "(none)"}`}</span>
+                  </>
+                )}
+              </div>
+            ))
+          ) : (
+            <>
+              {row.description && <p className="m-0 text-[12px]">{row.description}</p>}
+              {row.type === "inline" && row.content !== undefined && (
+                <pre className="m-0 whitespace-pre-wrap font-mono text-[12px]" data-testid="proposal-content">{row.content}</pre>
+              )}
+            </>
           )}
           <p className="m-0 font-mono text-[11px] text-text-muted">
             {[describeClaimOrigin(row.origin), when(row.origin?.at) ? `proposed ${when(row.origin?.at)}` : "", `claim ${row.claim_id}`]
@@ -116,7 +157,7 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
       )}
       {mayCurate && (
         <div className="pl-6 pb-2 flex flex-wrap gap-1.5" aria-label={`Curate proposal ${row.claim_id}`}>
-          {bundles.length > 0 && (
+          {bundles.length > 0 && !revision && (
             <select
               value={bundle}
               onChange={(e) => setBundle(e.target.value)}
@@ -130,7 +171,7 @@ export function ProposalRow({ row, mayCurate, bundles = [] }: {
               ))}
             </select>
           )}
-          <button type="button" disabled={!!busy || blocked} onClick={() => { void promoteReferenceClaim(row.claim_id, bundle); }} className="btn btn-sm btn-steel" aria-label={`Promote proposal ${title}`}>Promote</button>
+          <button type="button" disabled={!!busy || blocked} onClick={() => { void promoteReferenceClaim(row.claim_id, bundle); }} className="btn btn-sm btn-steel" aria-label={`Promote proposal ${title}`} title={stale ? "Stale: the reference changed since this revision was written" : undefined}>Promote</button>
           {confirmDismiss ? (
             <>
               <button type="button" disabled={!!busy} onClick={() => { setConfirmDismiss(false); void dismissReferenceClaim(row.claim_id); }} className="btn btn-sm btn-quiet text-error" aria-label={`Confirm dismiss proposal ${title}`}>Confirm dismiss</button>

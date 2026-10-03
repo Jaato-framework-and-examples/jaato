@@ -17,6 +17,14 @@ proposing SESSION -- never from the tool's arguments.  ``mode`` is always
 ``selectable``: an ``auto`` reference is injected into every system prompt,
 which is a curator's decision and not the writing agent's.
 
+**A revision claim** (``revises``, #1437) proposes a new version of a
+reference already in the workspace catalog rather than a new one.  It
+carries ``revises: {id, file, digest}`` -- the sha256 of the catalog file
+when the claim was written -- and promotion replaces that file in place,
+keeping its id and ``origin``, and refuses (``stale``) when the file has
+changed since (:func:`build_revision`, :func:`revision_target`,
+:func:`revision_staleness`).
+
 **What a claim's origin is worth.**  On a confined host only this tool
 writes the claims directory: the file tools and ``cli`` refuse
 ``.jaato/...``, and the template write-denies it in ``//child`` (v43), so
@@ -43,6 +51,9 @@ from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
 
 from jaato_server.shared.call_witness import current_call_witness
 
+from jaato_server.shared.plugins.bundle_common.bundle import BUNDLE_MANIFEST_FILENAME
+
+from .bundle import REFERENCE_NON_SOURCE_FILENAMES
 from .config_loader import validate_reference_file
 from .links import LINK_RELS, link_errors, parse_links
 from .models import ORIGIN_AGENT, ReferenceOrigin
@@ -57,6 +68,21 @@ CLAIM_STATUS_PROPOSED = "proposed"
 #: to a workspace file and propose its ``path`` instead, so the claim stays
 #: small enough to list and the document stays editable.
 INLINE_CLAIM_MAX_CHARS = 32 * 1024
+
+#: The key a REVISION claim carries: ``{"id", "file", "digest"}`` -- the
+#: catalog reference it revises, the file it was in and the sha256 of that
+#: file's bytes when the claim was written (the stale guard).
+REVISES_KEY = "revises"
+
+#: A sha256 hex digest, as a revision claim records it.
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
+#: Reference types whose document a revision can replace.
+REVISABLE_TYPES = ("local", "inline")
+
+#: Files in a catalog directory that are not references (manifests, the
+#: embedding index).  The reference loader's own list.
+_NON_SOURCE_FILES = REFERENCE_NON_SOURCE_FILENAMES
 
 #: A reference id: one token a later ``selectReferences`` can name, a
 #: filename component when promoted, and a whole word the transitive matcher
@@ -238,23 +264,15 @@ def link_warnings(
     return out
 
 
-def build_proposed_reference(
-    args: Dict[str, Any], *, workspace: str, catalog_ids: Iterable[str],
+def _entry_from_args(
+    args: Dict[str, Any], ref_id: str, workspace: str, *, keep_links_key: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
-    """The catalog entry a claim proposes, or the reasons it cannot be one.
+    """The entry half both doors share: name, description, tags, document, links.
 
-    Returns ``(entry, [])`` on success and ``(None, errors)`` otherwise.  The
-    entry passes ``validate_reference_file``, so promotion copies it as is.
-    ``links`` (typed edges, ``links.py``) are carried when well-formed,
-    whether or not their targets are in the catalog yet (see
-    :func:`_proposed_links`).
+    ``keep_links_key``: write ``links`` whenever the arguments carried the
+    key, even as ``[]`` -- a revision distinguishes "no edges" (remove them)
+    from "not said" (keep the reference's edges).
     """
-    ref_id = args.get("id")
-    if not isinstance(ref_id, str) or not _ID_RE.match(ref_id):
-        return None, ["'id' must be one token: letters, digits, '.', '_' or '-'."]
-    if ref_id in set(catalog_ids):
-        return None, [f"'{ref_id}' is already in the catalog; propose a different "
-                      "id, or ask a curator to revise the existing reference."]
     name = args.get("name")
     if not isinstance(name, str) or not name.strip():
         return None, ["'name' is required."]
@@ -271,10 +289,178 @@ def build_proposed_reference(
         return None, link_problems
     entry = {"id": ref_id, "name": name.strip(), "description": description,
              "mode": "selectable", "tags": tags, **document}
-    if links:
+    if links or (keep_links_key and args.get("links") is not None):
         entry["links"] = links
     ok, errors, _warnings = validate_reference_file(entry)
     return (entry, []) if ok else (None, errors)
+
+
+def already_in_catalog(ref_id: str) -> str:
+    """The refusal for a plain proposal of an id the catalog holds.
+
+    It names the revision route FIRST and does not invite another id: a
+    model told "propose a different id" invents ``<id>-r2`` and leaves two
+    references where one was meant (#1437, the kbwiki case).
+    """
+    return (f"'{ref_id}' is already in the catalog. To change it, call "
+            f"proposeReference again with revises='{ref_id}' (omit 'id') and the "
+            "full new version; it replaces the reference in place when promoted, "
+            "keeping its id and inbound links. Use a new id only for a "
+            "different reference.")
+
+
+def build_proposed_reference(
+    args: Dict[str, Any], *, workspace: str, catalog_ids: Iterable[str],
+) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """The catalog entry a claim proposes, or the reasons it cannot be one.
+
+    Returns ``(entry, [])`` on success and ``(None, errors)`` otherwise.  The
+    entry passes ``validate_reference_file``, so promotion copies it as is.
+    ``links`` (typed edges, ``links.py``) are carried when well-formed,
+    whether or not their targets are in the catalog yet (see
+    :func:`_proposed_links`).  A ``revises`` argument is the other door,
+    :func:`build_revision`.
+    """
+    ref_id = args.get("id")
+    if not isinstance(ref_id, str) or not _ID_RE.match(ref_id):
+        return None, ["'id' must be one token: letters, digits, '.', '_' or '-'."]
+    if ref_id in set(catalog_ids):
+        return None, [already_in_catalog(ref_id)]
+    return _entry_from_args(args, ref_id, workspace)
+
+
+def build_revision(
+    args: Dict[str, Any], *, workspace: str, catalog_ids: Iterable[str],
+) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """The new version of an existing reference a REVISION claim proposes.
+
+    ``args["revises"]`` names a reference in ``catalog_ids``.  A revision
+    may change the name, description, tags, the document (``path`` /
+    ``content``) and, when ``links`` is given, the edges (``[]`` removes
+    them; absent keeps them).  It may NOT change the id -- a different id
+    is a new reference plus a ``supersedes`` link, which already works --
+    so an ``id`` other than ``revises`` is refused, and it may not carry an
+    ``origin``: where a reference arrived is a fact of its arrival, kept
+    by promotion as the file records it.
+    """
+    ref_id = args.get(REVISES_KEY)
+    if not valid_id(ref_id):
+        return None, ["'revises' must be one reference id."]
+    if args.get("id") not in (None, "", ref_id):
+        return None, [f"a revision cannot change the id ('{args.get('id')}' != "
+                      f"'{ref_id}'); propose '{args.get('id')}' as a new reference "
+                      f"with a 'supersedes' link to '{ref_id}' instead."]
+    if args.get("origin") is not None:
+        return None, ["a revision cannot set 'origin': the reference keeps the "
+                      "origin it arrived with."]
+    if ref_id not in set(catalog_ids):
+        return None, [f"'{ref_id}' is not in the catalog; propose it as a new reference."]
+    return _entry_from_args(args, ref_id, workspace, keep_links_key=True)
+
+
+def catalog_dirs(base: str) -> List[Tuple[str, str]]:
+    """``[(bundle, directory)]`` the loader reads: the root, then each sub-bundle.
+
+    A sub-bundle is an immediate subdirectory carrying ``bundle.json``
+    (``bundle_common.discover_bundles``); any other directory is not part
+    of the catalog, and a linked one is never followed.
+    """
+    dirs = [("", base)]
+    for name in sorted(os.listdir(base)):
+        path = os.path.join(base, name)
+        if (not os.path.islink(path) and os.path.isdir(path)
+                and os.path.isfile(os.path.join(path, BUNDLE_MANIFEST_FILENAME))):
+            dirs.append((name, path))
+    return dirs
+
+
+def revision_target(
+    workspace: str, ref_id: str,
+) -> Tuple[Optional[Dict[str, Any]], str, str]:
+    """``(target, category, error)``: the workspace catalog file ``ref_id`` lives in.
+
+    ``target`` is ``{"id", "file" (workspace-relative), "bundle" ("" for the
+    catalog root), "digest" (sha256 of the file's bytes), "data"}``.  The
+    files read are the ones the reference loader reads (the catalog root and
+    each sub-bundle, ``*.json`` that is not a manifest), never through a
+    link, and the catalog directory itself must resolve inside the
+    workspace.  Only a workspace-tier reference can be revised: a user-tier
+    one, or a ``references.json`` source, is in no file a curator of this
+    workspace writes.  Refusals: ``not_found``, ``ambiguous`` (the id is in
+    two files, and which one the loader keeps is not this function's to
+    guess), ``not_revisable`` (a ``url`` / ``mcp`` reference, whose
+    document is not a path or inline text).  Called by ``proposeReference``
+    to record the digest and by the daemon to check it at promotion.
+    """
+    root = os.path.realpath(workspace)
+    base = os.path.join(root, ".jaato", "references")
+    real = os.path.realpath(base)
+    if not os.path.isdir(base) or (real != root and not real.startswith(root + os.sep)):
+        return None, "not_found", f"'{ref_id}' is in no workspace catalog file"
+    found: List[Tuple[str, str, bytes, Dict[str, Any]]] = []
+    for bundle, directory in catalog_dirs(real):
+        for name in sorted(os.listdir(directory)):
+            path = os.path.join(directory, name)
+            if (not name.endswith(".json") or name in _NON_SOURCE_FILES
+                    or os.path.islink(path) or not os.path.isfile(path)):
+                continue
+            try:
+                raw = Path(path).read_bytes()
+                data = json.loads(raw.decode("utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("id") == ref_id:
+                found.append((bundle, path, raw, data))
+    if not found:
+        return None, "not_found", f"'{ref_id}' is in no workspace catalog file"
+    if len(found) > 1:
+        rels = ", ".join(os.path.relpath(p, root) for _b, p, _r, _d in found)
+        return None, "ambiguous", f"'{ref_id}' is defined in {rels}"
+    bundle, path, raw, data = found[0]
+    if data.get("type", "local") not in REVISABLE_TYPES:
+        return None, "not_revisable", (
+            f"'{ref_id}' is a {data.get('type')} reference; only a local or inline "
+            "reference's document can be revised by a claim")
+    return {"id": ref_id, "file": os.path.relpath(path, root).replace(os.sep, "/"),
+            "bundle": bundle, "digest": hashlib.sha256(raw).hexdigest(),
+            "data": data}, "", ""
+
+
+def revision_record(target: Mapping[str, Any]) -> Dict[str, str]:
+    """The ``revises`` block a revision claim carries: what it was written against."""
+    return {"id": target["id"], "file": target["file"], "digest": target["digest"]}
+
+
+def is_revision(claim: Mapping[str, Any]) -> bool:
+    """Whether ``claim`` (already ``is_claim``) revises a catalog reference."""
+    return isinstance(claim.get(REVISES_KEY), dict)
+
+
+def current_fields(target: Mapping[str, Any], workspace: str) -> Dict[str, Any]:
+    """The revised reference as it is now, in a claim's own terms.
+
+    ``name``, ``description``, ``tags``, ``type``, ``path`` (workspace-
+    relative, as a claim stores it, not relative to the catalog file) or
+    ``content``, and ``links``: what the curator's diff is drawn against.
+    """
+    data = target["data"]
+    root = os.path.realpath(workspace)
+    out: Dict[str, Any] = {
+        "name": data.get("name") if isinstance(data.get("name"), str) else "",
+        "description": data.get("description") if isinstance(data.get("description"), str) else "",
+        "tags": [t for t in data.get("tags") or [] if isinstance(t, str)]
+        if isinstance(data.get("tags"), list) else [],
+        "type": data.get("type", "local"),
+        "links": [link.to_dict() for link in parse_links(data.get("links"))],
+    }
+    if out["type"] == "inline" and isinstance(data.get("content"), str):
+        out["content"] = data["content"][:INLINE_CLAIM_MAX_CHARS]
+    elif out["type"] == "local" and isinstance(data.get("path"), str):
+        path = data["path"]
+        if not os.path.isabs(path):
+            path = os.path.join(root, os.path.dirname(target["file"]), path)
+        out["path"] = os.path.relpath(os.path.realpath(path), root).replace(os.sep, "/")
+    return out
 
 
 def new_claim(entry: Dict[str, Any], session: Any,
@@ -428,7 +614,16 @@ def is_claim(data: Any) -> bool:
     if not isinstance(data, dict) or data.get("status") != CLAIM_STATUS_PROPOSED:
         return False
     ref, claim_id = data.get("reference"), data.get("claim_id")
-    return valid_id(claim_id) and isinstance(ref, dict) and valid_id(ref.get("id"))
+    if not (valid_id(claim_id) and isinstance(ref, dict) and valid_id(ref.get("id"))):
+        return False
+    revises = data.get(REVISES_KEY)
+    if revises is None:
+        return True
+    # A revision must revise the reference it carries: an id that differs
+    # would be a rename, which a revision cannot be (``build_revision``).
+    return (isinstance(revises, dict) and revises.get("id") == ref["id"]
+            and isinstance(revises.get("digest"), str)
+            and bool(_DIGEST_RE.match(revises["digest"])))
 
 
 def claim_tags(claim: Dict[str, Any]) -> List[str]:
@@ -442,6 +637,9 @@ def claim_tags(claim: Dict[str, Any]) -> List[str]:
 def claim_as_args(claim: Dict[str, Any]) -> Dict[str, Any]:
     """The ``proposeReference`` arguments a claim's entry corresponds to.
 
+    A revision claim's arguments carry ``revises`` (so they go back through
+    :func:`build_revision`), never its entry's ``origin`` or ``mode``.
+
     Promotion re-validates a claim by running it back through
     :func:`build_proposed_reference` -- the one door a proposal passed --
     because the claims directory is model-writable and the file may no
@@ -451,6 +649,8 @@ def claim_as_args(claim: Dict[str, Any]) -> Dict[str, Any]:
     args = {k: ref.get(k) for k in ("id", "name", "description", "tags")}
     if ref.get("links") is not None:
         args["links"] = ref.get("links")
+    if is_revision(claim):
+        args[REVISES_KEY] = claim[REVISES_KEY].get("id")
     if ref.get("type") == "inline":
         args["content"] = ref.get("content")
     else:
@@ -483,6 +683,8 @@ def listing_entry(claim: Dict[str, Any]) -> Dict[str, Any]:
     }
     if ref.get("type") == "local" and isinstance(ref.get("path"), str):
         entry["path"] = ref["path"]
+    if is_revision(claim):
+        entry[REVISES_KEY] = ref["id"]
     links = claim_links(claim)
     if links:
         entry["links"] = links
@@ -502,3 +704,35 @@ def claim_links(claim: Dict[str, Any]) -> List[Dict[str, str]]:
     return [{"to": link.to, "rel": link.rel}
             for link in parse_links(claim["reference"].get("links"))
             if valid_id(link.to) and link.rel in LINK_RELS]
+
+
+def build_claim_entry(
+    args: Dict[str, Any], *, workspace: str, catalog_ids: Iterable[str],
+) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """The one door a claim's arguments go through: a revision or a new entry."""
+    if args.get(REVISES_KEY) is not None:
+        return build_revision(args, workspace=workspace, catalog_ids=catalog_ids)
+    return build_proposed_reference(args, workspace=workspace, catalog_ids=catalog_ids)
+
+
+def revision_staleness(
+    claim: Mapping[str, Any], workspace: str,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """``(stale, reason, target)`` for a revision claim, decided NOW.
+
+    A revision is stale when the reference it revises is no longer in
+    exactly one workspace catalog file, or that file's bytes no longer have
+    the digest the claim recorded -- another revision was promoted first,
+    its links were edited, or somebody changed it by hand.  Promoting a
+    stale revision would silently undo that change, so it is refused.
+    ``target`` is :func:`revision_target`'s answer when the reference is
+    still there (fresh or not), for the curator's diff.
+    """
+    revises = claim.get(REVISES_KEY) or {}
+    target, _category, error = revision_target(workspace, str(revises.get("id")))
+    if target is None:
+        return True, f"the reference it revises is gone: {error}", None
+    if target["digest"] != revises.get("digest"):
+        return True, (f"'{target['id']}' has changed since this revision was written "
+                      f"({target['file']}); ask for a revision of the current version"), target
+    return False, "", target

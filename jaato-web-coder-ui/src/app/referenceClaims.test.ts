@@ -201,3 +201,51 @@ describe("triggers", () => {
     expect(rc.triggersReferenceClaimsRefresh({ type: "session.info" })).toBe(false);
   });
 });
+
+describe("revisions (#1437)", () => {
+  const revision = (extra: Partial<ReferenceClaimRow> = {}) => row("runbook", {
+    revises: "runbook", name: "Runbook", description: "current steps", tags: ["ops", "deploy"],
+    content: "step 1\nstep 2\n", links_replaced: false, stale: false,
+    current: { name: "Runbook", description: "old steps", tags: ["ops"], type: "inline", content: "step 1\n", links: [] },
+    ...extra,
+  });
+
+  it("lists only the fields that change, inline content as a line diff", () => {
+    const changes = rc.revisionChanges(revision());
+    expect(changes.map((c) => c.field)).toEqual(["description", "tags", "content"]);
+    const content = changes.find((c) => c.field === "content")!;
+    expect(content.lines).toEqual([
+      { op: " ", text: "step 1" }, { op: "+", text: "step 2" }, { op: " ", text: "" },
+    ]);
+  });
+
+  it("compares links only when the revision sets them", () => {
+    const keep = revision({ links: [{ to: "glossary", rel: "see-also" }] });
+    expect(rc.revisionChanges(keep).map((c) => c.field)).not.toContain("links");
+    const set = revision({ links: [{ to: "glossary", rel: "see-also" }], links_replaced: true });
+    expect(rc.revisionChanges(set).map((c) => c.field)).toContain("links");
+  });
+
+  it("a path document is compared as a path", () => {
+    const changes = rc.revisionChanges(revision({
+      type: "local", path: "docs/v2.md", content: undefined,
+      current: { name: "Runbook", description: "current steps", tags: ["ops", "deploy"], type: "local", path: "docs/v1.md" },
+    }));
+    expect(changes).toEqual([{ field: "document", before: "file: docs/v1.md", after: "file: docs/v2.md" }]);
+  });
+
+  it("is empty for a new page", () => {
+    expect(rc.revisionChanges(row("a"))).toEqual([]);
+  });
+
+  it("a stale refusal is said in words", () => {
+    expect(rc.refusalText("stale", "changed since")).toContain("changed since this revision was written");
+  });
+
+  it("a promoted revision says it was revised in place", async () => {
+    promoteReferenceClaim.mockResolvedValue({ ok: true, reference_id: "runbook", revised: true, reconcile: "none" });
+    listReferenceClaims.mockResolvedValue({ ok: true, claims: [], may_curate: true });
+    await rc.promoteReferenceClaim("c-runbook");
+    expect(useJaato.getState().referenceClaims.notice?.text).toBe("Revised runbook in place in the catalog.");
+  });
+});

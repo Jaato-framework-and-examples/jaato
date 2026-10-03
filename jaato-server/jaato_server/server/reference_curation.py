@@ -40,6 +40,14 @@ What a promotion does, in order, and why each step is here:
    be removed afterwards is reported, and the next promotion of it answers
    ``collision`` rather than writing a second copy.
 
+**A revision claim** (``revises``, #1437) is promoted by
+:func:`_promote_revision` instead: the catalog file is found the way the
+loader reads the catalog, its digest compared with the one the claim
+recorded (``stale`` on a mismatch, nothing written), and the file replaced
+in place through ``write_contained`` -- origin, mode and every other key
+kept, a ``revisions[]`` record appended -- in whichever bundle it lives,
+whose index is then reconciled.
+
 A local ``path`` is stored in the claim workspace-relative and rewritten
 relative to the catalog file (``../../docs/x.md``), because the catalog
 loader resolves a relative path against the reference file's own
@@ -86,13 +94,19 @@ from jaato_server.shared.plugins.references.bundle import (
 from jaato_server.shared.plugins.references.claims import (
     CLAIMS_DIRNAME,
     INLINE_CLAIM_MAX_CHARS,
+    REVISES_KEY,
+    build_claim_entry,
     build_proposed_reference,
     claim_as_args,
     claim_tags,
+    current_fields,
     is_claim,
+    is_revision,
     link_warnings,
     pending_claim_ids,
     rendered_stamp_now,
+    revision_staleness,
+    revision_target,
     valid_id,
 )
 from jaato_server.shared.plugins.references.config_loader import discover_references
@@ -143,8 +157,10 @@ class CurationOutcome:
         claim_id: The claim acted on, as the caller named it.
         category: ``""`` on success, else one of ``invalid_request``,
             ``not_owner``, ``unknown_bundle``, ``not_found``,
-            ``invalid_claim``, ``collision``, ``unsafe_path``, ``io_error``.  A client branches on this, not
-            on ``error``.
+            ``invalid_claim``, ``collision``, ``stale`` (a revision written
+            against a version that has since changed), ``ambiguous`` (the
+            revised id is in two catalog files), ``unsafe_path``,
+            ``io_error``.  A client branches on this, not on ``error``.
         error: The reason, for a person.
         reference_id: The catalog id promoted (promote only).
         reference_file: The workspace-relative catalog file written.
@@ -155,6 +171,8 @@ class CurationOutcome:
             (:data:`RECONCILE_OUTCOMES`), ``""`` when nothing was promoted.
         reconcile_detail: Why, when it is not ``updated`` / ``clean`` /
             ``none``.
+        revised: ``True`` when the claim was a revision and the catalog
+            file was replaced in place rather than created.
     """
 
     ok: bool
@@ -168,6 +186,7 @@ class CurationOutcome:
     bundle: str = ""
     reconcile: str = ""
     reconcile_detail: str = ""
+    revised: bool = False
 
 
 def curator_stamp(user_id: Optional[str]) -> Dict[str, Any]:
@@ -291,20 +310,148 @@ def _catalog_entry(entry: Dict[str, Any], root: str, origin: ReferenceOrigin,
     return out
 
 
+#: Keys of a catalog entry a revision replaces: the document's.  Everything
+#: else in the file (``mode``, ``origin``, ``contents``, a fetch hint, earlier
+#: ``revisions``) is kept as the file has it.
+_DOCUMENT_KEYS = ("type", "path", "content")
+
+
+def revision_stamp(origin: ReferenceOrigin) -> Dict[str, Any]:
+    """One ``revisions[]`` record: who wrote the revision, who promoted it, when.
+
+    The promotion origin's fields without ``kind`` (a revision is not an
+    arrival): ``claim_id``, ``at``, ``curated_by`` (the daemon's own stamp),
+    and, as the claim recorded them, ``generated_by`` / ``witnessed_by`` /
+    ``rendered_from``, plus a re-derived ``created_by``.
+    """
+    stamp = origin.to_dict()
+    stamp.pop("kind", None)
+    return stamp
+
+
+def revised_entry(current: Dict[str, Any], entry: Dict[str, Any], *, root: str,
+                  rel_file: str, stamp: Dict[str, Any]) -> Dict[str, Any]:
+    """The catalog file after a revision: ``current`` with ``entry``'s fields.
+
+    Replaced: name, description, tags, the document (``type`` + ``path`` /
+    ``content``, a path re-anchored to the catalog file's directory), and
+    ``links`` only when the revision carried them (``[]`` removes them).
+    Kept: the id, ``origin`` (where the reference arrived), ``mode`` and
+    every other key.  ``stamp`` is appended to ``revisions``.
+    """
+    out = {k: v for k, v in current.items() if k not in _DOCUMENT_KEYS}
+    out["name"], out["description"], out["tags"] = (
+        entry["name"], entry["description"], list(entry["tags"]))
+    out["type"] = entry["type"]
+    if entry["type"] == "local":
+        out["path"] = os.path.relpath(
+            os.path.join(root, entry["path"]),
+            os.path.join(root, os.path.dirname(rel_file))).replace(os.sep, "/")
+    else:
+        out["content"] = entry["content"]
+    if "links" in entry:
+        if entry["links"]:
+            out["links"] = entry["links"]
+        else:
+            out.pop("links", None)
+    prior = current.get("revisions")
+    out["revisions"] = (list(prior) if isinstance(prior, list) else []) + [stamp]
+    return out
+
+
+def _promote_revision(
+    root: str, claim_path: str, claim: Dict[str, Any], *, user_id: Optional[str],
+    creator_in_workspace: Callable[[str, str], Optional[str]],
+    outcome: CurationOutcome, embed: Optional[Embed] = None,
+) -> CurationOutcome:
+    """Promote a REVISION claim: replace the catalog file in place.
+
+    The file is found the way the loader reads the catalog
+    (``claims.revision_target``), and its bytes must still have the digest
+    the claim recorded -- otherwise ``stale``, nothing written: promoting
+    would undo whatever changed it (another revision promoted first, an
+    edge edited, a hand edit).  The claim's entry is re-validated through
+    ``build_revision``, which refuses an id change or an ``origin``.  The
+    revision is written where the reference lives; a ``bundle`` naming
+    another one is refused.  Then the destination index is reconciled,
+    because the embedding text (name, description, tags) may have changed.
+    """
+    stale, reason, target = revision_staleness(claim, root)
+    if target is None:
+        revised_id = (claim.get(REVISES_KEY) or {}).get("id")
+        _t, category, error = revision_target(root, str(revised_id))
+        if category == "ambiguous":
+            return _fail(outcome, "ambiguous", f"{error}; remove the duplicate first")
+        if category == "not_revisable":
+            return _fail(outcome, "invalid_claim", error)
+        return _fail(outcome, "stale", reason)
+    if stale:
+        return _fail(outcome, "stale", reason)
+    if outcome.bundle and outcome.bundle != target["bundle"]:
+        return _fail(outcome, "invalid_request",
+                     f"a revision is written where '{target['id']}' lives "
+                     f"({destination_rel(target['bundle'])}), not into another bundle")
+    outcome.bundle = target["bundle"]
+    entry, errors = build_claim_entry(claim_as_args(claim), workspace=root,
+                                      catalog_ids=catalog_ids(root))
+    if entry is None:
+        return _fail(outcome, "invalid_claim", "; ".join(errors))
+    origin = promoted_origin(claim, root=root, user_id=user_id,
+                             creator_in_workspace=creator_in_workspace,
+                             at=datetime.now(timezone.utc).isoformat(), entry=entry)
+    rel_file = target["file"]
+    data = json.dumps(revised_entry(target["data"], entry, root=root, rel_file=rel_file,
+                                    stamp=revision_stamp(origin)),
+                      indent=2, ensure_ascii=False)
+    try:
+        write_contained(root, rel_file, (data + "\n").encode("utf-8"))
+    except PathLeavesRoot as exc:
+        return _fail(outcome, "unsafe_path", str(exc))
+    except OSError as exc:
+        return _fail(outcome, "io_error", f"could not write {rel_file}: {exc}")
+    return _after_write(root, claim_path, entry["id"], rel_file, outcome, embed,
+                        revised=True)
+
+
+def _after_write(root: str, claim_path: str, ref_id: str, rel_file: str,
+                 outcome: CurationOutcome, embed: Optional[Embed], *,
+                 revised: bool = False) -> CurationOutcome:
+    """What every successful promotion does next: drop the claim, reconcile."""
+    outcome.ok, outcome.reference_id, outcome.reference_file = True, ref_id, rel_file
+    outcome.revised = revised
+    try:
+        os.unlink(claim_path)
+    except OSError as exc:
+        outcome.warnings.append(f"promoted, but the claim file could not be removed: {exc}")
+    outcome.reconcile, outcome.reconcile_detail = reconcile_destination(
+        root, outcome.bundle, embed, ref_id)
+    if outcome.reconcile not in ("none", "updated", "clean"):
+        outcome.warnings.append(
+            f"promoted, but the bundle's vector index was not updated "
+            f"({outcome.reconcile}: {outcome.reconcile_detail}); similarity "
+            f"matching will not find '{ref_id}' until it is reconciled")
+    return outcome
+
+
 def _promote(
     root: str, claim_path: str, claim: Dict[str, Any], *, user_id: Optional[str],
     creator_in_workspace: Callable[[str, str], Optional[str]],
     outcome: CurationOutcome, embed: Optional[Embed] = None,
 ) -> CurationOutcome:
     """Steps 2 (re-validation) to 5 of the module docstring, then the index."""
+    if is_revision(claim):
+        return _promote_revision(root, claim_path, claim, user_id=user_id,
+                                 creator_in_workspace=creator_in_workspace,
+                                 outcome=outcome, embed=embed)
     ids = catalog_ids(root)
     ref_id = claim["reference"]["id"]
     dest_rel = destination_rel(outcome.bundle)
     rel_file = f"{dest_rel}/{ref_id}.json"
     if ref_id in ids or os.path.lexists(os.path.join(root, rel_file)):
         return _fail(outcome, "collision",
-                     f"'{ref_id}' is already in the catalog; dismiss the claim, or "
-                     "revise the existing reference")
+                     f"'{ref_id}' is already in the catalog; dismiss the claim and "
+                     f"propose it again with revises='{ref_id}' to replace the "
+                     "existing reference in place")
     entry, errors = build_proposed_reference(claim_as_args(claim), workspace=root,
                                              catalog_ids=ids)
     if entry is None:
@@ -320,19 +467,7 @@ def _promote(
         return _fail(outcome, "unsafe_path", str(exc))
     except OSError as exc:
         return _fail(outcome, "io_error", f"could not write {rel_file}: {exc}")
-    outcome.ok, outcome.reference_id, outcome.reference_file = True, ref_id, rel_file
-    try:
-        os.unlink(claim_path)
-    except OSError as exc:
-        outcome.warnings.append(f"promoted, but the claim file could not be removed: {exc}")
-    outcome.reconcile, outcome.reconcile_detail = reconcile_destination(
-        root, outcome.bundle, embed, ref_id)
-    if outcome.reconcile not in ("none", "updated", "clean"):
-        outcome.warnings.append(
-            f"promoted, but the bundle's vector index was not updated "
-            f"({outcome.reconcile}: {outcome.reconcile_detail}); similarity "
-            f"matching will not find '{ref_id}' until it is reconciled")
-    return outcome
+    return _after_write(root, claim_path, ref_id, rel_file, outcome, embed)
 
 
 class RunnerEmbeddingProvider:
@@ -510,13 +645,39 @@ def claim_row(
     if origin is not None:
         origin.rendered_from = rendered_stamp_now(root, ref, origin.rendered_from)
         row["origin"] = origin.to_dict()
-    entry, problems = build_proposed_reference(claim_as_args(claim), workspace=root,
-                                               catalog_ids=ids)
+    entry, problems = build_claim_entry(claim_as_args(claim), workspace=root,
+                                        catalog_ids=ids)
     row["problems"] = problems
+    if is_revision(claim):
+        row.update(_revision_fields(claim, root))
     if entry is not None and entry.get("links"):
         row["links"] = entry["links"]
         row["warnings"] = link_warnings(entry["links"], ids, pending)
     return row
+
+
+def _revision_fields(claim: Dict[str, Any], root: str) -> Dict[str, Any]:
+    """What a revision row adds, so the curator sees a diff, not a new page.
+
+    ``revises`` (the id), ``revises_file`` (where it lives now), ``current``
+    (its fields as they are, in the claim's own terms --
+    :func:`~...claims.current_fields`), ``links_replaced`` (whether the
+    revision sets the edges or leaves them), and ``stale`` with
+    ``stale_reason`` -- decided now, against the file's current bytes,
+    because a revision written against an older version cannot be promoted.
+    """
+    stale, reason, target = revision_staleness(claim, root)
+    fields: Dict[str, Any] = {
+        "revises": claim[REVISES_KEY]["id"],
+        "stale": stale,
+        "links_replaced": "links" in claim["reference"],
+    }
+    if stale:
+        fields["stale_reason"] = reason
+    if target is not None:
+        fields["revises_file"] = target["file"]
+        fields["current"] = current_fields(target, root)
+    return fields
 
 
 def _load_claim_file(path: str) -> Any:

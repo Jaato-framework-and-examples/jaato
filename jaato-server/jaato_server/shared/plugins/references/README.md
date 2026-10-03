@@ -253,6 +253,25 @@ claim, re-derives `created_by` from its own session record (never from the
 claim file), stamps `origin.curated_by` with the promoting person, and
 refuses to overwrite an existing entry.
 
+### Revising a reference
+
+To propose a new version of a reference already in the workspace catalog,
+pass `revises` with its id (and omit `id`):
+
+```json
+{"revises": "pool-notes", "name": "Runner pool notes",
+ "description": "Read before changing slot reuse.", "path": "notes/pool-v2.md"}
+```
+
+The claim records the sha256 of the catalog file it was written against.
+Promoting it replaces that file in place, keeping the id, `origin`, `mode`
+and every other key, and appends a record to `revisions`. If the file has
+changed since (another revision promoted first, a links edit, a hand edit)
+promotion is refused `stale` and nothing is written. The id cannot change
+(propose a new id with a `supersedes` link instead); `links` replaces the
+edges only when given. Only a `local` or `inline` reference in the
+workspace catalog can be revised.
+
 A curator sees the claims with `IPCClient.list_reference_claims()`
 (TypeScript: `listReferenceClaims()`), each with its recorded origin and the
 `problems` a promotion would raise; the web coder's Proposals rail uses it.
