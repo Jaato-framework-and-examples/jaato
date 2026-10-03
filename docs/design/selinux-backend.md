@@ -441,7 +441,7 @@ Phase plan:
   routing gate in `spawn_session_runner` already routes `cgroup_attach`
   sessions away from the pool; SELinux confinement joins it. Cost: the
   cold start (~7 s vs ~1 s warm). Unconfined sessions still use the pool.
-* **Phase 4 (implemented, not yet run on a kernel): fork on demand.** A
+* **Phase 4 (shipped, verified on a kernel): fork on demand.** A
   freshly forked child has one thread, so it may `setcon`. When an SELinux
   session finds no idle slot of its boundary, the daemon asks the template
   for one with `FORK_SLOT <json>` (`context`, `private_tmp`,
@@ -601,7 +601,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
-| 4 | **implemented; two kernel runs (b8e2dc42, b5dcc98f), the fork-time log fix not yet re-run**: pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
+| 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
 ### What the phase 2a kernel run found
@@ -809,6 +809,19 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
 * **A dropped user's `~/.jaato/gc.json` reached the parent and not the
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
+
+### The third phase 4 kernel run (8874c5c0)
+
+* **Everything passes**: probe 67/67 at both uids, `--sessions 2` 13/13 as
+  root and as uid 1000, `--isolated rw` 11/11.
+* Each session wrote its own runner log, naming only its own session; no
+  write to the daemon's log was refused (the earlier runs: about 700,
+  then 54 to 357); no `PermissionError` at bootstrap.
+* Session start: a reused slot answers `session.new` in about 0.25 s. A
+  fresh daemon's first session takes about 19 s, about 15.7 s of it the
+  daemon's own first-session plugin load.
+* No AVC naming a jaato type in the pool runs; the isolated run shows
+  only the known existence probes.
 
 ### The second phase 4 kernel run (b5dcc98f)
 
