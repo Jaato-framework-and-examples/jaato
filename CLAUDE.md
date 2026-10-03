@@ -10439,6 +10439,27 @@ Guard: `jaato_server/shared/tests/test_a_tool_runs_once_1338.py`, three
 reversions. Every test passes a real `CancelToken`, and one drives the real
 cli plugin and counts the lines its command appends to a file.
 
+### A Backup Name Longer Than the Path Component Limit (#1485)
+
+`file_edit` backs a file up before every edit, into
+`<config_root>/sessions/<id>/backups/`. The backup was named after the
+resolved ABSOLUTE path flattened into one component plus
+`_<timestamp>.bak`, so a file whose path was over ~224 bytes got a name
+over ext4's 255-byte component limit, the write raised `ENAMETOOLONG`, and
+`updateFile` failed before editing anything. Whether a session hit it
+depended on where the workspace was checked out.
+
+| Piece | Where |
+|---|---|
+| the name: `{readable tail}~{sha256(resolved path)[:12]}_{timestamp}.bak`, at most `BACKUP_NAME_BUDGET` (200) UTF-8 bytes, collision counter included | `BackupManager._backup_stem` / `_backup_filename` in `file_edit/backup.py` |
+| the tail: workspace-relative where the file is inside the workspace, absolute otherwise, truncated from the FRONT at a character boundary | `_readable_tail`, `_truncate_tail_utf8` |
+| lookup by path: recompute the stem and compare whole stems, never re-flatten. The legacy flattened prefix is also accepted, so backups written before the change are still listed, undone and pruned | `_get_backups_for_file` |
+| `listBackups` with no path: the original path comes from the metadata file; a new-format name without metadata shows `.../<tail>` | `_describe_backup_name` |
+
+The digest, not the tail, identifies the file. Guard:
+`jaato_server/shared/tests/test_a_backup_name_fits_any_path_1485.py`, five
+reversions.
+
 ### Coreutils a Confined Session Could Not Run (#1342)
 
 On an Ubuntu 26.04 host, every confined session's `cli` failed `ls`, `head`,
