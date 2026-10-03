@@ -29,6 +29,10 @@ checks that the first is served by a pool slot forked into its boundary
 and every later one by that same slot (the profile sets
 ``unload_grace_seconds: 0`` so a slot returns to the pool at disconnect).
 
+``--pty`` runs the main session's command through ``interactive_shell``'s
+``shell_spawn`` (a pty, ``jaato_devpts_t``) instead of ``cli``, and checks
+that it got one; it needs ``jaato-server[interactive]`` in the venv.
+
 ``--as-uid`` gives the workspace to that uid and runs the daemon with
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
 children are that user, not root.  ``--trace-subprocess`` drops a
@@ -60,6 +64,9 @@ RESULTS: List[dict] = []
 OUTPUT: List[str] = []
 RUNNER_CONTEXTS: Dict[int, str] = {}
 COMMAND = "id -Z; echo probe > selinux-probe.txt && echo WSOK"
+#: --pty: the same command on a pseudo-terminal (interactive_shell, which
+#: needs jaato-server[interactive]); ``tty`` names the pty it got.
+PTY_COMMAND = "sh -c 'id -Z; tty; echo probe > selinux-probe.txt && echo WSOK'"
 ISO_FILE = "iso-probe.txt"
 CHILD_PROFILE = "selinux3child"
 
@@ -177,7 +184,8 @@ def type_of(context: Optional[str]) -> str:
     return parts[2] if len(parts) > 2 else ""
 
 
-def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str]) -> Path:
+def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str],
+             pty: bool = False) -> Path:
     """A fresh echo-provider workspace whose one tool call runs COMMAND, or
     (``isolated``) spawns an isolated subagent that writes ISO_FILE."""
     from jaato_sdk.conformance.daemon import echo_workspace
@@ -200,8 +208,10 @@ def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str]) -> Path
     else:
         # unload_grace_seconds 0: a disconnected session unloads at once, so
         # its pool slot is back for the next session (--sessions, phase 4).
-        echo_workspace(ws, tool_call={"name": "cli_based_tool", "args": {"command": COMMAND}},
-                       response="done", plugins=["cli"], name="selinux2b",
+        call = ({"name": "shell_spawn", "args": {"command": PTY_COMMAND}} if pty
+                else {"name": "cli_based_tool", "args": {"command": COMMAND}})
+        echo_workspace(ws, tool_call=call, response="done",
+                       plugins=["interactive_shell" if pty else "cli"], name="selinux2b",
                        runtime_limits={"unload_grace_seconds": 0})
     if as_uid is not None:
         for dirpath, dirnames, filenames in os.walk(ws):
@@ -313,6 +323,9 @@ def _check_processes(result: dict) -> str:
            type_of(child) == "jaato_child_t" and level_of(child) == level,
            f"id -Z said: {child!r}; output: {output!r}")
     record("the command wrote the workspace", "WSOK" in output, repr(output))
+    if result.get("pty"):
+        tty = next((l.strip() for l in output.splitlines() if l.strip().startswith("/dev/")), "")
+        record("the command ran on a pty", tty.startswith("/dev/pts/"), f"tty said: {tty!r}")
     record("the turn completed without errors", not result["errors"]
            and any(e["success"] for e in result["ends"]), json.dumps(result)[:600])
     modes = {s.get("sandbox_mode") for s in result["sessions"]}
@@ -447,6 +460,8 @@ def _parse() -> argparse.Namespace:
                     help="phase 3: spawn an isolated subagent instead of a cli command")
     ap.add_argument("--sessions", type=int, default=1,
                     help="phase 4: run N sessions in turn and check pool reuse")
+    ap.add_argument("--pty", action="store_true",
+                    help="run the command through interactive_shell (a pty)")
     return ap.parse_args()
 
 
@@ -465,7 +480,11 @@ def main() -> int:
         print("run as root", file=sys.stderr)
         return 2
     root = Path(args.root)
-    ws = _prepare(root, args.as_uid, args.isolated)
+    if args.pty and args.isolated:
+        print("--pty drives the main session's command; the isolated "
+              "sub-runner may exec nothing", file=sys.stderr)
+        return 2
+    ws = _prepare(root, args.as_uid, args.isolated, args.pty)
     rundir = Path("/run/jaato-2b")
     rundir.mkdir(parents=True, exist_ok=True)
     log = root / "d.out"
@@ -484,6 +503,7 @@ def main() -> int:
     if result is None:
         return _report(root, log, marker, {})
     result["isolated"] = args.isolated
+    result["pty"] = args.pty
     level = _check_processes(result)
     _check_pool(log, args.sessions, ws, marker)
     if args.isolated:

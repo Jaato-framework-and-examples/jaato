@@ -89,7 +89,9 @@ Reinstall the venv non-editable, as in 2b §2 (the code changed):
 ```bash
 rm -rf /opt/jaato/venv && python3.12 -m venv /opt/jaato/venv
 /opt/jaato/venv/bin/pip install -q -U pip
-/opt/jaato/venv/bin/pip install -q /root/jaato/jaato-sdk /root/jaato/jaato-server
+# [interactive] pulls in pexpect: without it interactive_shell is skipped and
+# no live session exercises the pty path (jaato_devpts_t).
+/opt/jaato/venv/bin/pip install -q /root/jaato/jaato-sdk '/root/jaato/jaato-server[interactive]'
 semanage fcontext -a -t lib_t '/opt/jaato/venv(/.*)?' 2>/dev/null || true
 restorecon -R /opt/jaato/venv
 ```

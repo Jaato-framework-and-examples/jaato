@@ -810,6 +810,23 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
 
+### The phase 4 pty run (8874c5c0, `jaato-server[interactive]`)
+
+* Every earlier phase 3 and 4 run installed jaato-server without the
+  `[interactive]` extra, so `interactive_shell` was skipped and no live
+  session used a pty. With `pexpect` installed and the command run through
+  `shell_spawn`, both pool-served sessions passed 13/13 as root and as uid
+  1000: the command ran in `jaato_child_t` on `/dev/pts/3` from a forked,
+  reused slot, with no jaato AVC.
+* In an isolated sub-runner, `shell_spawn` is refused at the exec of the
+  shell (`execute` on `shell_exec_t` by `jaato_isolated_t`). That is the
+  flat domain's design (it may exec nothing), and no pty denial appeared.
+  The refusal reaches the model as the tool's error and is not logged by
+  the sub-runner, so an operator sees only the AVC; that is what phase 5's
+  AVC-based denial hints are for.
+* The handoffs now install `jaato-server[interactive]`, and
+  `live_session.py --pty` makes the pty path a standing check.
+
 ### The third phase 4 kernel run (8874c5c0)
 
 * **Everything passes**: probe 67/67 at both uids, `--sessions 2` 13/13 as

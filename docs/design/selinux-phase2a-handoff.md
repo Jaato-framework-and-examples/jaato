@@ -106,7 +106,9 @@ read.
 ```bash
 python3.12 -m venv /opt/jaato/venv
 /opt/jaato/venv/bin/pip install -q -U pip
-/opt/jaato/venv/bin/pip install -q /root/jaato/jaato-sdk /root/jaato/jaato-server
+# [interactive] pulls in pexpect: without it interactive_shell is skipped and
+# no live session exercises the pty path (jaato_devpts_t).
+/opt/jaato/venv/bin/pip install -q /root/jaato/jaato-sdk '/root/jaato/jaato-server[interactive]'
 semanage fcontext -a -t lib_t '/opt/jaato/venv(/.*)?'
 restorecon -R /opt/jaato/venv
 ls -Zd /opt/jaato/venv /opt/jaato/venv/bin/python
