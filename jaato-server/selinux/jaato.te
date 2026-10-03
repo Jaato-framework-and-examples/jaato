@@ -1,4 +1,4 @@
-policy_module(jaato, 1.6.0)
+policy_module(jaato, 1.7.0)
 
 ########################################
 #
@@ -15,9 +15,10 @@ policy_module(jaato, 1.6.0)
 # "Deliberately absent" record those, and tests/test_policy_rules.py
 # asserts both what is granted and what is not.
 #
-# Scope of this version (phase 3): the runner, //child and isolated
-# sub-runner domains, and the file types they share. Not yet: the pool
-# template (jaato_template_t, phase 4).
+# Scope of this version (phase 4): the runner, //child and isolated
+# sub-runner domains, the file types they share, and the pool slot's
+# entry into the runner domain at fork (no template domain: the template
+# stays in the daemon's, as it stays unconfined under AppArmor).
 #
 
 gen_require(`
@@ -33,14 +34,16 @@ gen_require(`
 #
 
 ## The version marker. SELinuxBackend's readiness check asks whether
-## system_u:object_r:jaato_policy_v3_t:s0 is a valid context (no
+## system_u:object_r:jaato_policy_v4_t:s0 is a valid context (no
 ## privilege needed) and refuses an older module. Bump the number, and
 ## REQUIRED_POLICY_VERSION in server/confinement/selinux.py, together.
 ## v2 (phase 3): the isolated domains and the agent-config and prompts
 ## types; a workspace labelled for v1 is relabelled once.
 ## v3: jaato_runner_log_t, the isolated sub-runners' log files.
-type jaato_policy_v3_t;
-files_type(jaato_policy_v3_t)
+## v4 (phase 4): the daemon's domains may dyntransition into the runner
+## domain, which is how a pool slot enters it at fork.
+type jaato_policy_v4_t;
+files_type(jaato_policy_v4_t)
 
 ## The session runner (AppArmor: the base profile jaato-ws-<id>).
 type jaato_runner_t;
@@ -156,6 +159,19 @@ mcs_constrained(jaato_isolated_ro_t)
 allow unconfined_t jaato_runner_t:process transition;
 allow unconfined_service_t jaato_runner_t:process transition;
 corecmd_bin_entry_type(jaato_runner_t)
+
+# A pool slot (phase 4, §7.2): forked from the template, which runs in the
+# daemon's domain, it writes the runner's context to /proc/self/attr/current
+# while it still has one thread. The kernel refuses that in a threaded
+# process; a forked child has one. setcurrent is already held by every
+# unconfined domain (unconfined_domain_type); unconfined_t holds
+# dyntransition to every domain only under the unconfined_dyntrans_all
+# boolean, and unconfined_service_t not at all, so both are granted here.
+# The runner domain is mcs_constrained, the daemon's domains are not, so
+# the MCS constraint on dyntransition lets the slot pick any category
+# pair, as the exec transition does.
+allow unconfined_t jaato_runner_t:process dyntransition;
+allow unconfined_service_t jaato_runner_t:process dyntransition;
 
 # Inherited descriptors. The runner's RPC socketpair, stdio pipes and log
 # fd come from the daemon. Phase 0: without these the kernel closes them

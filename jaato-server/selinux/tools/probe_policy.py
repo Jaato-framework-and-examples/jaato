@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Probe the jaato SELinux module on an enforcing kernel (phases 2a to 3).
+"""Probe the jaato SELinux module on an enforcing kernel (phases 2a to 4).
 
 Run as root on an SELinux host with the module loaded
 (docs/design/selinux-phase2a-handoff.md).  Uses nothing from jaato: it
 labels two scratch workspaces at two MCS levels and execs small probes
 into ``jaato_runner_t``, ``jaato_child_t`` and the two isolated domains
-(phase 3) the way the runtime will
+(phase 3), and enters the runner domain at fork the way a pool slot does
+(phase 4, ``setcon`` in a forked child of a threaded process), the way the
+runtime will
 (``setexeccon`` then ``execve``), then checks each property
 ``tests/test_policy_rules.py`` asserts statically, this time against the
 kernel.  Prints one table and writes ``probe-results.json`` plus the AVC
@@ -437,6 +439,76 @@ attempt(lambda: os.unlink('{p['wsA']}/iso.txt'), False)"""))
                       py_in(dom, L1, TRY + f"attempt(lambda: open('{log}','w').write('x'), True)"))
 
 
+# A threaded parent, as the pool template is, and a forked child that
+# enters the runner domain while it has one thread (phase 4, design §7.2).
+# CHILD is the child's body; the parent prints the child's output.
+FORKED_SLOT = TRY + '''
+import threading, time
+threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+CTX = {ctx!r}
+AS_UID = {as_uid!r}
+{parent}
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r); os.dup2(w, 1); os.dup2(w, 2)
+    try:
+        if AS_UID is not None:
+            os.setgroups([]); os.setresgid(AS_UID, AS_UID, AS_UID)
+            os.setresuid(AS_UID, AS_UID, AS_UID)
+        setattr_unbuffered("current", CTX)
+{child}
+    except BaseException as e:
+        print("CHILD-ERROR", repr(e))
+    finally:
+        sys.stdout.flush(); os._exit(0)
+os.close(w)
+out = b""
+while True:
+    chunk = os.read(r, 4096)
+    if not chunk:
+        break
+    out += chunk
+os.waitpid(pid, 0)
+print(out.decode(), end="")
+'''
+
+
+def forked_slot(child: str, parent: str = "") -> subprocess.CompletedProcess:
+    """Run FORKED_SLOT unconfined, as the daemon's template runs."""
+    body = "\n".join("        " + line for line in child.strip().splitlines())
+    code = FORKED_SLOT.format(ctx=context("jaato_runner_t", L1), as_uid=AS_UID,
+                              parent=parent, child=body)
+    return subprocess.run([sys.executable, "-I", "-c", code],
+                          capture_output=True, text=True, timeout=60)
+
+
+def pool_probes(p: dict) -> None:
+    """Phase 4: a pool slot enters jaato_runner_t at fork (design §7.2).
+
+    The template runs in the daemon's domain and has threads; SELinux
+    refuses setcon there, and allows it in the single-threaded child a
+    fork produces, given the module's dyntransition rule.
+    """
+    target = context("jaato_runner_t", L1)
+    expect_denied("pool: a threaded process cannot setcon into the runner",
+                  forked_slot("pass", parent=f"attempt(lambda: setattr_unbuffered('current', CTX), True)"))
+    expect_ok("pool: a forked child enters jaato_runner_t at the workspace level",
+              forked_slot("print('OK', open('/proc/self/attr/current').read())"),
+              want=target)
+    expect_ok("pool: a thread the slot starts wears the same context",
+              forked_slot('''
+t = threading.Thread(target=time.sleep, args=(2,)); t.start()
+labels = {open(f"/proc/self/task/{x}/attr/current").read().strip("\\0\\n ") for x in os.listdir("/proc/self/task")}
+print("OK" if labels == {CTX} else f"LEAK {labels}")'''))
+    expect_ok("pool: the slot reads its own workspace",
+              forked_slot(f"attempt(lambda: open('{p['wsA']}/file.txt').read(), False)"))
+    expect_denied("pool: the slot cannot read another workspace (level)",
+                  forked_slot(f"attempt(lambda: open('{p['wsB']}/file.txt').read(), True)"))
+    expect_denied("pool: the slot cannot change its domain back",
+                  forked_slot(f"attempt(lambda: setattr_unbuffered('current', '{context('unconfined_t', 's0')}'), True)"))
+
+
 def auditd_running() -> bool:
     return subprocess.run(["pidof", "auditd"], capture_output=True).returncode == 0
 
@@ -493,6 +565,7 @@ def main() -> int:
         paths = setup(args.root)
         probes(paths, args.venv)
         isolated_probes(paths)
+        pool_probes(paths)
         time.sleep(1)
     finally:
         if ratelimit is not None:

@@ -63,6 +63,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_READY_TIMEOUT = 30.0
 
 
+def _fork_slot_line(entry: "Optional[dict]") -> bytes:
+    """The template control line for one fork request."""
+    if entry is None:
+        return b"FORK_SLOT\n"
+    import json
+
+    return f"FORK_SLOT {json.dumps(entry, separators=(',', ':'))}\n".encode("utf-8")
+
+
 class TemplateManager:
     """Owns the single template subprocess for the daemon's lifetime.
 
@@ -310,7 +319,7 @@ class TemplateManager:
             )
 
     def request_fork_slot(
-        self, timeout: float = 5.0,
+        self, timeout: float = 5.0, entry: "Optional[dict]" = None,
     ) -> "Optional[tuple[int, socket.socket]]":
         """Ask the template to fork a new pool slot (pool PR 3).
 
@@ -318,7 +327,11 @@ class TemplateManager:
 
         1. Create a socketpair (daemon_end, slot_end)
         2. Send ``FORK_SLOT\\n`` + ``slot_end`` FD via SCM_RIGHTS over
-           the template's control pipe
+           the template's control pipe.  With *entry* (phase 4, an
+           SELinux boundary: ``context``, ``private_tmp``,
+           ``runner_user``) the line is ``FORK_SLOT <json>``, and the
+           child enters that boundary before it starts a thread
+           (``runner_spawner.enter_slot_boundary_in_child``)
         3. Close daemon's copy of ``slot_end`` (the kernel keeps the
            refcount alive in the template's address space)
         4. Wait for the template's ``FORKED:<pid>\\n`` reply
@@ -369,7 +382,7 @@ class TemplateManager:
             # Step 2: send FORK_SLOT + slot_end FD via SCM_RIGHTS.
             try:
                 self.control_sock.sendmsg(
-                    [b"FORK_SLOT\n"],
+                    [_fork_slot_line(entry)],
                     [(
                         socket.SOL_SOCKET,
                         socket.SCM_RIGHTS,

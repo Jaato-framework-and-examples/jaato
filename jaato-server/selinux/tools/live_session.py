@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one confined jaato session on an SELinux host (phases 2b and 3).
+"""Run confined jaato sessions on an SELinux host (phases 2b to 4).
 
 Run as root, with the jaato venv's interpreter, on a host where the module
 is loaded (docs/design/selinux-phase2b-handoff.md).  It starts a jaato
@@ -23,6 +23,11 @@ workspace; ``ro`` adds ``isolated_read_only_workspace``.  It then checks
 that a sub-runner ran in ``jaato_isolated_t`` (or ``jaato_isolated_ro_t``)
 at the parent's level, and that the file was written (``rw``) or refused
 (``ro``).
+
+``--sessions N`` (phase 4) runs N sessions in turn in the one daemon, and
+checks that the first is served by a pool slot forked into its boundary
+and every later one by that same slot (the profile sets
+``unload_grace_seconds: 0`` so a slot returns to the pool at disconnect).
 
 ``--as-uid`` gives the workspace to that uid and runs the daemon with
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
@@ -83,10 +88,13 @@ def sample_runners(daemon_pid: int, stop: threading.Event) -> None:
                 cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ")
             except OSError:
                 continue
-            if b"server.runner" in cmd and b"template-mode" not in cmd:
-                ctx = context_of(pid)
-                if ctx:
-                    RUNNER_CONTEXTS[pid] = ctx
+            if b"server.runner" not in cmd:
+                continue
+            ctx = context_of(pid)
+            # A pool slot (phase 4) keeps the template's command line, so
+            # it is told apart by the domain it entered at fork.
+            if ctx and (b"template-mode" not in cmd or type_of(ctx).startswith("jaato_")):
+                RUNNER_CONTEXTS[pid] = ctx
         stop.wait(0.2)
 
 
@@ -190,8 +198,11 @@ def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str]) -> Path
             response="done", plugins=["file_edit"], name=CHILD_PROFILE,
             plugin_configs={"permission": {"policy": {"defaultPolicy": "allow"}}})
     else:
+        # unload_grace_seconds 0: a disconnected session unloads at once, so
+        # its pool slot is back for the next session (--sessions, phase 4).
         echo_workspace(ws, tool_call={"name": "cli_based_tool", "args": {"command": COMMAND}},
-                       response="done", plugins=["cli"], name="selinux2b")
+                       response="done", plugins=["cli"], name="selinux2b",
+                       runtime_limits={"unload_grace_seconds": 0})
     if as_uid is not None:
         for dirpath, dirnames, filenames in os.walk(ws):
             for name in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
@@ -226,7 +237,8 @@ def _install_trace_hook() -> Path:
 
 
 def _drive(root: Path, ws: Path, sock: Path, log: Path,
-           uid_policy: str, isolated: Optional[str] = None) -> Optional[dict]:
+           uid_policy: str, isolated: Optional[str] = None,
+           sessions: int = 1) -> Optional[dict]:
     """Start a private daemon, run the session, stop the daemon by group.
 
     The daemon runs in the foreground, where ``--log-file`` does not apply,
@@ -254,7 +266,14 @@ def _drive(root: Path, ws: Path, sock: Path, log: Path,
                    log.read_text(errors="replace")[-1500:])
             return None
         time.sleep(1.5)
-        return asyncio.run(run_session(sock, ws, isolated))
+        result = asyncio.run(run_session(sock, ws, isolated))
+        for _ in range(sessions - 1):
+            time.sleep(2.0)  # the unload returns the slot to the pool
+            later = asyncio.run(run_session(sock, ws, isolated))
+            result["errors"] += later["errors"]
+            if "refused" in later:
+                result["refused"] = later["refused"]
+        return result
     finally:
         stop.set()
         try:
@@ -300,6 +319,22 @@ def _check_processes(result: dict) -> str:
     record("the session record says sandbox_mode: selinux", "selinux" in modes,
            f"sandbox_mode values: {sorted(m for m in modes if m)}")
     return level
+
+
+def _check_pool(log: Path, sessions: int) -> None:
+    """Phase 4: a slot forked into the boundary, then reused (§7.2)."""
+    import re
+
+    text = log.read_text(errors="replace")
+    forked = re.findall(r"forked slot pid=(\d+) into SELinux boundary", text)
+    served = re.findall(r"served by pool slot pid=(\d+)", text)
+    record("the first session is served by a slot forked into its boundary",
+           bool(forked) and bool(served) and served[0] == forked[0],
+           f"forked: {forked}; served: {served}")
+    if sessions > 1:
+        record(f"the next {sessions - 1} session(s) reuse that slot",
+               len(served) == sessions and len(set(served)) == 1 and len(forked) == 1,
+               f"forked: {forked}; served: {served}")
 
 
 def _avcs_since(marker: str) -> List[str]:
@@ -402,6 +437,8 @@ def _parse() -> argparse.Namespace:
                     help="log a stack for every subprocess the runner starts")
     ap.add_argument("--isolated", choices=("rw", "ro"),
                     help="phase 3: spawn an isolated subagent instead of a cli command")
+    ap.add_argument("--sessions", type=int, default=1,
+                    help="phase 4: run N sessions in turn and check pool reuse")
     return ap.parse_args()
 
 
@@ -431,7 +468,7 @@ def main() -> int:
     try:
         result = _drive(root, ws, rundir / "d.sock", log,
                         "workspace-owner" if args.as_uid is not None else "daemon",
-                        args.isolated)
+                        args.isolated, args.sessions)
     finally:
         _ratelimit(old_rate)
         if hook is not None:
@@ -440,6 +477,7 @@ def main() -> int:
         return _report(root, log, marker, {})
     result["isolated"] = args.isolated
     level = _check_processes(result)
+    _check_pool(log, args.sessions)
     if args.isolated:
         _check_isolated(ws, level, args.isolated, marker)
     return _report(root, log, marker, _check_labels(ws, level, args.isolated))

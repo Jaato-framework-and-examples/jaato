@@ -7,7 +7,8 @@ means each of these is a value a test can hand in and read back:
   the backend to both transports;
 * IPC and WS provision with it, call the session confined, and record
   ``selinux`` / ``soft``;
-* an SELinux session never takes a pool slot, which cannot enter the domain;
+* (phase 4 moved pool routing to ``test_selinux_pool_4.py``: an SELinux
+  session takes a slot forked into its boundary, never a virgin one);
 * the cold-spawn child sets the exec context last, after the privilege
   drop, and tells the runner which context it entered;
 * the envelope carries the descriptor and the boundary id, and the runner
@@ -40,14 +41,6 @@ _RUNNER = "jaato-server/jaato_server/server/runner/session.py"
 _RUNNER_MAIN = "jaato-server/jaato_server/server/runner/__main__.py"
 
 REVERSIONS = [
-    Reversion(
-        target=_SPAWN,
-        find="            and cgroup_attach is None and not is_selinux(confinement))\n",
-        replace="            and cgroup_attach is None)\n",
-        test="test_an_selinux_session_never_takes_a_pool_slot",
-        because="a pool slot is threaded and cannot enter an SELinux domain; "
-                "the runner would refuse every such session",
-    ),
     Reversion(
         target=_SPAWNER,
         find="        _set_exec_context_in_child(exec_context)\n",
@@ -116,13 +109,6 @@ def _handle(backend="selinux", complain=False):
 
 
 # ------------------------------------------------------------------ spawn
-
-
-def test_an_selinux_session_never_takes_a_pool_slot(monkeypatch):
-    monkeypatch.delenv("JAATO_RUNNER_POOL_ENABLED", raising=False)
-    pool = object()
-    assert runner_spawn._pool_may_serve(pool, None, None) is True
-    assert runner_spawn._pool_may_serve(pool, None, _handle()) is False
 
 
 def test_the_session_tmpdir_is_keyed_on_the_handle():

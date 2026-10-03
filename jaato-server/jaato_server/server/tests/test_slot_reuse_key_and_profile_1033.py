@@ -397,6 +397,8 @@ class TestReuseKey:
             "profile_name",
             # #1168 step 3: a slot that dropped is that uid for life.
             "runner_uid",
+            # SELinux phase 4: a slot enters its domain at fork, for life.
+            "selinux_boundary",
         }
 
     def test_paths_are_compared_canonically(self, tmp_path) -> None:

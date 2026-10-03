@@ -159,6 +159,62 @@ def _set_exec_context_in_child(context: Optional[str]) -> None:
         os.close(fd)
 
 
+#: Exit status of a pool slot that could not enter its SELinux domain
+#: (phase 4).  Distinct from 125-127 so the cause is attributable from
+#: the status alone.
+SELINUX_ENTRY_EXIT_CODE = 124
+
+#: Where a task sets (and reads) its own context.
+_ATTR_CURRENT = "/proc/self/attr/current"
+
+
+def _enter_selinux_domain_in_child(context: str) -> None:
+    """``setcon(context)`` in a freshly forked pool slot, or exit (phase 4).
+
+    A forked child has one thread, and SELinux refuses ``setcon`` only in a
+    multi-threaded process (phase 0), so this is the one moment a slot can
+    enter the runner's domain without an exec.  Runs after the private
+    ``/tmp`` and the privilege drop, as the cold spawn's exec transition
+    does (Order A: the runner domain holds neither ``sys_admin`` nor
+    ``setuid``).  The write is read back: a slot that is not in *context*
+    must not serve a session, so a failure is named on stderr and exits
+    with :data:`SELINUX_ENTRY_EXIT_CODE`.
+    """
+    try:
+        fd = os.open(_ATTR_CURRENT, os.O_WRONLY)
+        try:
+            os.write(fd, context.encode("utf-8"))
+        finally:
+            os.close(fd)
+        with open(_ATTR_CURRENT, encoding="utf-8") as fh:
+            actual = fh.read().replace("\x00", "").strip()
+        if actual != context:
+            raise OSError(f"kernel reports {actual!r} after the write")
+    except OSError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to serve -- pool slot could not "
+                f"enter {context}: {exc} (selinux-backend.md §7.2)\n"
+            ).encode())
+        finally:
+            os._exit(SELINUX_ENTRY_EXIT_CODE)
+
+
+def enter_slot_boundary_in_child(entry: Dict[str, Any]) -> None:
+    """Put a freshly forked pool slot inside its session's boundary (phase 4).
+
+    *entry* is what :meth:`PoolManager.fork_slot_into` sent with the fork
+    request: ``context`` (required), ``private_tmp`` and ``runner_user``.
+    The order is the cold spawn's, before any thread starts: private
+    ``/tmp``, privilege drop, then the domain.  Each step exits the child
+    on failure (126, 125, 124), so the slot never serves outside the
+    boundary it was forked for.
+    """
+    _enter_private_tmp_in_child(entry.get("private_tmp") or None)
+    _drop_privileges_in_child(RunnerUser.from_dict(entry.get("runner_user")))
+    _enter_selinux_domain_in_child(entry["context"])
+
+
 class RunnerSpawner:
     """Forks ``python -m server.runner`` once per top-level session.
 

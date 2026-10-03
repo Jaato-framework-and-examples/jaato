@@ -395,11 +395,27 @@ RULES: Tuple[Rule, ...] = (
          find="fs_dontaudit_search_cgroup_dirs(jaato_runner_t)\n"),
 
     # --- the version marker the readiness check probes -----------------
-    Rule("marker type jaato_policy_v3_t exists",
-         lambda p: type_exists(p, "jaato_policy_v3_t"),
+    Rule("marker type jaato_policy_v4_t exists",
+         lambda p: type_exists(p, "jaato_policy_v4_t"),
          "SELinuxBackend refuses a host whose module lacks the marker",
-         find="type jaato_policy_v3_t;\nfiles_type(jaato_policy_v3_t)",
-         replace="type jaato_policy_v2_t;\nfiles_type(jaato_policy_v2_t)"),
+         find="type jaato_policy_v4_t;\nfiles_type(jaato_policy_v4_t)",
+         replace="type jaato_policy_v3_t;\nfiles_type(jaato_policy_v3_t)"),
+
+    # --- a pool slot enters the runner at fork (phase 4) ---------------
+    Rule("a daemon in unconfined_t may move a forked slot into the runner",
+         _allows("unconfined_t", "jaato_runner_t", "process", {"dyntransition"}),
+         "targeted grants it only under unconfined_dyntrans_all",
+         find="allow unconfined_t jaato_runner_t:process dyntransition;\n"),
+    Rule("a daemon in unconfined_service_t may move a forked slot into the runner",
+         _allows("unconfined_service_t", "jaato_runner_t", "process", {"dyntransition"}),
+         "targeted does not grant it; a systemd daemon's slots could not enter",
+         find="allow unconfined_service_t jaato_runner_t:process dyntransition;\n"),
+    Rule("no jaato domain may dyntransition into the runner",
+         lambda p: all(not granted(p, d, "jaato_runner_t", "process",
+                                   frozenset({"dyntransition"}))
+                       for d in ("jaato_child_t",) + ISOLATED),
+         "a child or an isolated sub-runner could otherwise become the runner",
+         append="allow jaato_child_t jaato_runner_t:process dyntransition;\n"),
 
     # --- entering the runner and //child -------------------------------
     Rule("the runner may exec-transition its children into jaato_child_t",
