@@ -55,8 +55,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_PLUGIN,
-        find="                refusal[REVISES_KEY] = ref_id\n",
-        replace="                pass\n",
+        find="            refusal[REVISES_KEY] = ref_id\n",
+        replace="            pass\n",
         because="a driver could not tell a collision from any other refusal without parsing prose",
         test="TestTheClaim::test_a_new_id_that_collides_names_the_revision_route",
     ),
