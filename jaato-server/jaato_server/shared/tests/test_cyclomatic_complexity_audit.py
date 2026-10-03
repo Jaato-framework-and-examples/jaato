@@ -137,7 +137,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/core.py::JaatoServer._start_model_thread.model_thread._finish_turn": 26,
     "jaato-server/jaato_server/server/core.py::JaatoServer.execute_command": 27,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize": 44,
-    "jaato-server/jaato_server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,
+    "jaato-server/jaato_server/server/core.py::JaatoServer.initialize._run_load_plugins": 16,
     "jaato-server/jaato_server/server/core.py::JaatoServer.shutdown": 30,
     "jaato-server/jaato_server/server/egress_proxy/config.py::validate_allowlist": 22,
     "jaato-server/jaato_server/server/ipc.py::JaatoIPCServer._handle_message": 30,

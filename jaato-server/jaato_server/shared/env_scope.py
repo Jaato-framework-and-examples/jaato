@@ -614,6 +614,9 @@ CATALOG: Dict[str, EnvClass] = {
     "KAGGLE_USERNAME": EnvClass(SESSION, None,
         "a credential with no typed key (see the credential "
         "policy)"),
+    "PERMISSION_CONFIG_PATH": EnvClass(SESSION, "plugin_configs.permission.config_path",
+        "names the project-layer permissions.json (#1474); the block's "
+        "config_path wins and the env var is its fallback"),
     "PERMISSION_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.permission.channel_config.auth_token",
         "config.get(auth_token) or os.environ -- the knob already WINS and "
         "the env var is its fallback"),

@@ -1588,7 +1588,34 @@ def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
     """
     if name == "references":
         return _reference_link_lines(), {"link_relations": _reference_link_rels()}
+    if name == "permission":
+        return _permission_policy_layers()
     return [], {}
+
+
+def _permission_policy_layers() -> Tuple[List[str], Dict[str, Any]]:
+    """Where a session's permission policy comes from (#1474).
+
+    Read from ``policy_layers`` -- the tables ``resolve_effective_policy``
+    is written against -- so this page cannot describe a precedence the
+    enforcer does not apply.
+    """
+    from jaato_server.shared.plugins.permission import policy_layers as PL
+    lines = ["  policy layers (lowest precedence first; the effective policy "
+             "is logged once per session):"]
+    for i, (layer, what) in enumerate(PL.POLICY_LAYERS, 1):
+        lines.append(f"    {i}. {layer:<10} {what}")
+    lines.append("  how they combine:")
+    lines.extend(f"    - {rule}" for rule in PL.MERGE_RULES)
+    lines.append("  a confined session cannot write <ws>/.jaato/permissions.json "
+                 "(AppArmor template v44, and the .jaato/ containment rule for "
+                 "file tools and cli); on an unconfined host it is writable "
+                 "like any config file")
+    data = {"policy_layers": [{"layer": layer, "source": what}
+                              for layer, what in PL.POLICY_LAYERS],
+            "policy_merge_rules": list(PL.MERGE_RULES),
+            "framework_default_policy": PL.FRAMEWORK_DEFAULT_POLICY}
+    return lines, data
 
 
 def plugin(name: str) -> Rendered:
@@ -4143,10 +4170,13 @@ def _profile_oversight(prof: Any) -> Dict[str, Any]:
 
 def _permission_line(perm: Dict[str, Any]) -> str:
     if not perm["declared"]:
-        return ("  DECIDE / OVERRIDE  NO permission policy declared -- the runtime "
-                "policy of the root session applies (a subagent inherits it)")
-    return (f"  DECIDE / OVERRIDE  permission policy declared: "
-            f"defaultPolicy={perm['defaultPolicy'] or 'ask'}, "
+        return ("  DECIDE / OVERRIDE  NO permission policy declared -- the "
+                "permissions.json files decide, else the framework default "
+                "(ask); a subagent inherits the root's (see `explain plugin "
+                "permission`)")
+    return (f"  DECIDE / OVERRIDE  permission policy declared (layered over "
+            f"permissions.json): "
+            f"defaultPolicy={perm['defaultPolicy'] or 'from the files, else ask'}, "
             f"{perm['whitelist_tools']} whitelisted, "
             f"{perm['blacklist_tools']} blacklisted, "
             f"channel={perm['channel_type'] or 'console'}")

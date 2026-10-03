@@ -1655,24 +1655,24 @@ def build_session_permission_plugin(
     persistence`` (#1412) -- after ``initialize()`` here has loaded
     ``permissions.json``, which is the order #706 requires.
 
-    The default policy mirrors the daemon side; a profile's
-    ``plugin_configs.permission`` block (Phase 4 §C) replaces top-level keys.
+    The init config comes from ``enforcer_init_config``, the one helper the
+    daemon-local builder calls too; the policy is resolved by
+    ``initialize`` from the framework default, ``~/.jaato/permissions.json``
+    (the snapshot the daemon shipped, #1465), the project
+    ``permissions.json`` and the profile's ``plugin_configs.permission``
+    block, in that order (#1474).
     """
     from jaato_server.shared.plugins.permission.plugin import PermissionPlugin
+    from jaato_server.shared.plugins.permission.policy_layers import (
+        enforcer_init_config,
+    )
 
-    permission_init_config: Dict[str, Any] = {
-        "channel_type": "queue",
-        "channel_config": {"use_colors": False},
-        "workspace_path": workspace_path,
-        "policy": {
-            "defaultPolicy": "ask",
-            "whitelist": {"tools": [], "patterns": []},
-            "blacklist": {"tools": [], "patterns": []},
-        },
-    }
-    profile_perm_config = (envelope.plugin_configs or {}).get("permission")
-    if profile_perm_config:
-        permission_init_config.update(profile_perm_config)
+    permission_init_config = enforcer_init_config(
+        (envelope.plugin_configs or {}).get("permission"),
+        workspace_path=workspace_path,
+        config_root=getattr(envelope, "config_root", None),
+        session_id=getattr(envelope, "session_id", None),
+    )
     permission_plugin = PermissionPlugin()
     permission_plugin.initialize(permission_init_config)
     return permission_plugin

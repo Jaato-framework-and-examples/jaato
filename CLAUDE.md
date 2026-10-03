@@ -3168,11 +3168,9 @@ Stated limits:
 - **On an unconfined runner the snapshot sits in the host `/tmp`** under
   the session's name. The next install on the same pool slot removes it;
   nothing removes it after a cold-spawned runner exits.
-- **A `permissions.json` policy still does not govern a daemon session.**
-  Both the daemon and the runner build the plugin with an inline default
-  `policy`, and an inline policy replaces the file's. The file is read
-  (now without crashing); its rules do not take effect. Older than this
-  change, and not changed by it.
+- **A `permissions.json` policy did not govern a daemon session** when this
+  shipped: an inline default `policy` replaced the file's. Fixed by #1474
+  (see [A Policy File Read and Thrown Away](#a-policy-file-read-and-thrown-away-1474)).
 
 Guard: `jaato_server/shared/tests/test_user_tier_ships_on_the_envelope_1465.py`,
 five reversions (the loader reading the real file, the credential check,
@@ -9293,6 +9291,61 @@ five reversions. It drives a real `RunnerRPCClient` over a socketpair to a
 real `RunnerRPC`, with the enforcer built by the bootstrap's own function:
 decide through the command path on runner A, save, revive on runner B, and
 B enforces both decisions and announces `allow`.
+
+### A Policy File Read and Thrown Away (#1474)
+
+`PermissionPlugin.initialize` loaded `permissions.json` and then let an
+inline `policy` key replace it, and both enforcer builders always passed one:
+a hard-coded `defaultPolicy: ask` dict, written out in
+`build_session_permission_plugin` and again in `JaatoServer.initialize`. So
+the file never decided anything in a daemon session, while
+`docs/jaato_permission_system.md` called it the STATIC layer. Reproduced on a
+live daemon (echo provider): a workspace file saying `deny` and no profile
+block produced a `PermissionRequestedEvent`.
+
+`shared/plugins/permission/policy_layers.py::resolve_effective_policy` is now
+the one place the policy is assembled, called by `initialize` (so by both
+builders) and by `set_scoped_policy` (#957):
+
+| # | Layer (lowest first) | |
+|---|---|---|
+| 1 | framework | `FRAMEWORK_DEFAULT_POLICY`: `ask`, empty lists. The only copy of that dict |
+| 2 | user | `~/.jaato/permissions.json` (on a runner, the #1465 snapshot) |
+| 3 | workspace | `<config_root>/permissions.json`, else `<ws>/.jaato/permissions.json`; `config_path` / `PERMISSION_CONFIG_PATH` names it |
+| 4 | profile | `plugin_configs.permission.policy`; a #957 subagent's own block for that subagent, still over the files |
+
+| Key | Rule |
+|---|---|
+| `defaultPolicy` | the highest layer that sets it; a file omitting it sets nothing |
+| `whitelist` / `blacklist` (`tools`, `patterns`, `arguments`) | UNION across layers; a profile adds, never replaces |
+| blacklist vs whitelist | blacklist wins (unchanged), so a deny in any layer survives a higher allow |
+| any other key (`sanitization`, `cwd`) | the highest layer that sets it replaces it whole |
+
+Both builders build their init config with `enforcer_init_config`, which
+carries no policy. Each session logs one INFO line with the effective
+`defaultPolicy` and the layer that decided it (`EffectivePolicy.describe`).
+
+**Upgrade consequence: a host whose `permissions.json` says `defaultPolicy:
+allow` starts auto-approving** every tool no list names. A file-sourced
+`allow` logs a WARNING per session naming the file, and `validate` reports
+`permission_file_allow` (warn) for the user and project files. Two smaller
+changes follow from the same rule: a #957 subagent block or an embedded
+`plugin_configs.permission` that names no `defaultPolicy` now gets the files'
+or the framework's (`ask`) instead of `PermissionPolicy.from_config`'s
+`deny`; and an invalid file fails permission initialisation as it always
+did on these paths.
+
+**Who can write it.** Template **v44** write-denies
+`<ws>/.jaato/permissions.json` in base, `tool_hat`, `//child` and the
+isolated sub-runner; `AUTHORED` marks it `confined=True`; the file tools and
+`cli` already refuse `.jaato/` paths. On an unconfined host the file is
+writable by the session like any config file, so a session there can widen
+the policy of later sessions. `explain plugin permission` prints the layers
+and rules from the module's own tables.
+
+Guard: `jaato_server/shared/tests/test_permissions_file_decides_a_session_1474.py`,
+nine reversions, through the real `build_session_permission_plugin`. Not
+verified on an enforcing kernel.
 
 ### A Memory Store Nobody Could See From the Browser (#1232)
 

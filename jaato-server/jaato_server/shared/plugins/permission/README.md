@@ -188,7 +188,8 @@ permission_config = {
     # Path to permissions.json file (optional)
     "config_path": "permissions.json",
 
-    # Inline policy - overrides file if provided (optional)
+    # Inline policy - layered OVER the files (#1474): lists unioned,
+    # defaultPolicy from the highest layer that sets it (optional)
     "policy": {
         "defaultPolicy": "ask",
         "blacklist": {...},
@@ -212,7 +213,7 @@ permission_config = {
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `config_path` | `str` | `None` | Path to `permissions.json` file |
-| `policy` | `dict` | `None` | Inline policy dict (overrides file) |
+| `policy` | `dict` | `None` | Inline policy dict, merged over `~/.jaato/permissions.json` and the project file (#1474: lists unioned, `defaultPolicy` from the highest layer that sets it) |
 | `channel_type` | `str` | `"console"` | Channel type for interactive approval |
 | `channel_config` | `dict` | `{}` | Channel-specific settings |
 
@@ -297,7 +298,7 @@ permission_plugin.initialize({
 })
 ```
 
-**Inline policy (no file needed):**
+**Inline policy (no file needed; any `permissions.json` found is still layered beneath it, #1474):**
 ```python
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize({

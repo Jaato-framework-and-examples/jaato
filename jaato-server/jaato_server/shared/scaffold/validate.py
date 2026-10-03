@@ -3152,6 +3152,7 @@ def validate_workspace(
     _check_memory_curation(result.profiles, out)
     _check_regulatory_declared(result.profiles, out)
     _check_reference_links(config_root, out)
+    _check_permission_files(ws, config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"
     out.extend(contributed_findings(
@@ -3241,6 +3242,37 @@ def _check_reference_links(config_root: str, out) -> None:
                     "in this workspace or ~/.jaato/references has.", where=where))
         sources.append(SimpleNamespace(id=data["id"], links=parse_links(data.get("links"))))
     out.extend(_supersedes_findings(LinkIndex(sources)))
+
+
+def _check_permission_files(ws: Path, config_root: str, out) -> None:
+    """``permission_file_allow``: a ``permissions.json`` sets ``allow``.
+
+    Since #1474 the file is a policy LAYER (``policy_layers``): the user
+    tier (``~/.jaato/permissions.json``) and the project file each set
+    ``defaultPolicy`` unless a higher layer does.  Before #1474 the file was
+    read and thrown away on every daemon session, so a host whose file says
+    ``allow`` starts auto-approving every tool no list names on upgrade.
+    The session logs that at WARNING; this says it before any session runs.
+
+    ``warn``: ``allow`` is a legitimate choice for a trusted single-user
+    host.  A profile's own ``defaultPolicy`` outranks the file, so the
+    message says which profiles would still ask.  Reads the files through
+    the same discovery the enforcer uses, so the two cannot name different
+    files.
+    """
+    from jaato_server.shared.plugins.permission.policy_layers import (
+        file_layers_setting_allow)
+    for path in file_layers_setting_allow(str(ws), config_root):
+        out.append(Diagnostic(
+            "warn", "permission_file_allow",
+            f"{path} sets `defaultPolicy: allow`.  Since #1474 permissions.json "
+            "is APPLIED: every session in this workspace whose profile does not "
+            "set its own `plugin_configs.permission.policy.defaultPolicy` "
+            "auto-approves every tool no blacklist names, without a prompt.  "
+            "Set it to `ask` or `deny` (or remove the key) to keep prompting; "
+            "`explain plugin permission` gives the precedence.",
+            profile=None, where=path,
+        ))
 
 
 def _check_regulatory_declared(profiles, out) -> None:

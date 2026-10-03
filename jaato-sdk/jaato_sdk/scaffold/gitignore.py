@@ -131,7 +131,8 @@ AUTHORED: Tuple[AuthoredEntry, ...] = (
                   "under confinement so savePrompt works)"),
     AuthoredEntry("gc.json", "the GC strategy and thresholds"),
     AuthoredEntry("pricing.json", "the operator pricing table"),
-    AuthoredEntry("permissions.json", "permission policy and channel"),
+    AuthoredEntry("permissions.json", "permission policy and channel "
+                  "(a policy layer since #1474)", confined=True),
     AuthoredEntry("reliability-policies.json", "per-tool reliability policies "
                   "(reliability.json, the plugin's STATE, stays ignored)"),
     AuthoredEntry("webhook.json", "webhook listener + routes (secret as "

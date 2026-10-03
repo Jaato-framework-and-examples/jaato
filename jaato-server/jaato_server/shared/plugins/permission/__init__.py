@@ -17,6 +17,7 @@ from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
 from .config_loader import load_config, validate_config, PermissionConfig
 from .channels import Channel, ConsoleChannel, WebhookChannel, ChannelResponse
 from .plugin import PermissionPlugin, create_plugin
+from .policy_layers import EffectivePolicy, resolve_effective_policy
 from .sanitization import (
     SanitizationConfig,
     SanitizationResult,
@@ -38,6 +39,8 @@ __all__ = [
     # Config
     'PermissionConfig',
     'load_config',
+    'EffectivePolicy',
+    'resolve_effective_policy',
     'validate_config',
     # Channels
     'Channel',

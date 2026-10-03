@@ -56,6 +56,7 @@ from jaato_server.shared import (
     active_cert_bundle,
 )
 from jaato_server.shared.dynamic_instructions import DynamicInstructionsError
+from jaato_server.shared.plugins.permission.policy_layers import enforcer_init_config
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from jaato_server.shared.instruction_budget import effective_input_limit
 from jaato_server.shared.instruction_token_cache import InstructionTokenCache
@@ -3421,22 +3422,19 @@ class JaatoServer:
 
                         with _s3.sub("permission_init"):
                             self.permission_plugin = PermissionPlugin()
-                            permission_init_config: Dict[str, Any] = {
-                                "channel_type": "queue",
-                                "channel_config": {"use_colors": False},
-                                "workspace_path": self._workspace_path,
-                                "policy": {
-                                    "defaultPolicy": "ask",
-                                    "whitelist": {"tools": [], "patterns": []},
-                                    "blacklist": {"tools": [], "patterns": []},
-                                },
-                            }
-                            if self._profile and self._profile.plugin_configs:
-                                profile_perm_config = (
-                                    self._profile.plugin_configs.get("permission")
-                                )
-                                if profile_perm_config:
-                                    permission_init_config.update(profile_perm_config)
+                            # One helper for both enforcer builders; the
+                            # policy is layered by ``initialize`` over the
+                            # permissions.json files (#1474).
+                            profile_perm_config = (
+                                (self._profile.plugin_configs or {}).get("permission")
+                                if self._profile else None
+                            )
+                            permission_init_config = enforcer_init_config(
+                                profile_perm_config,
+                                workspace_path=self._workspace_path,
+                                config_root=self._config_root,
+                                session_id=self._session_id,
+                            )
                             self.permission_plugin.initialize(permission_init_config)
                 except Exception as e:
                     _plugins_error = e
