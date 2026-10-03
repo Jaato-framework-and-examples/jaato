@@ -374,6 +374,41 @@ def catalog_dirs(base: str) -> List[Tuple[str, str]]:
     return dirs
 
 
+def _reference_files(directory: str) -> List[str]:
+    """The reference files directly in ``directory``: ``*.json``, not a
+    manifest, not a link."""
+    out = []
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(directory, name)
+        if (name.endswith(".json") and name not in _NON_SOURCE_FILES
+                and not os.path.islink(path) and os.path.isfile(path)):
+            out.append(path)
+    return out
+
+
+def _files_declaring(
+    root: str, ref_id: str,
+) -> List[Tuple[str, str, bytes, Dict[str, Any]]]:
+    """``[(bundle, path, bytes, data)]`` for each workspace catalog file
+    declaring ``ref_id``; ``[]`` when the catalog directory is absent or
+    resolves out of the workspace."""
+    base = os.path.join(root, ".jaato", "references")
+    real = os.path.realpath(base)
+    if not os.path.isdir(base) or (real != root and not real.startswith(root + os.sep)):
+        return []
+    found: List[Tuple[str, str, bytes, Dict[str, Any]]] = []
+    for bundle, directory in catalog_dirs(real):
+        for path in _reference_files(directory):
+            try:
+                raw = Path(path).read_bytes()
+                data = json.loads(raw.decode("utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("id") == ref_id:
+                found.append((bundle, path, raw, data))
+    return found
+
+
 def revision_target(
     workspace: str, ref_id: str,
 ) -> Tuple[Optional[Dict[str, Any]], str, str]:
@@ -393,24 +428,7 @@ def revision_target(
     to record the digest and by the daemon to check it at promotion.
     """
     root = os.path.realpath(workspace)
-    base = os.path.join(root, ".jaato", "references")
-    real = os.path.realpath(base)
-    if not os.path.isdir(base) or (real != root and not real.startswith(root + os.sep)):
-        return None, "not_found", f"'{ref_id}' is in no workspace catalog file"
-    found: List[Tuple[str, str, bytes, Dict[str, Any]]] = []
-    for bundle, directory in catalog_dirs(real):
-        for name in sorted(os.listdir(directory)):
-            path = os.path.join(directory, name)
-            if (not name.endswith(".json") or name in _NON_SOURCE_FILES
-                    or os.path.islink(path) or not os.path.isfile(path)):
-                continue
-            try:
-                raw = Path(path).read_bytes()
-                data = json.loads(raw.decode("utf-8"))
-            except (OSError, ValueError):
-                continue
-            if isinstance(data, dict) and data.get("id") == ref_id:
-                found.append((bundle, path, raw, data))
+    found = _files_declaring(root, ref_id)
     if not found:
         return None, "not_found", f"'{ref_id}' is in no workspace catalog file"
     if len(found) > 1:

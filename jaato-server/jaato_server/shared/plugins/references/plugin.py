@@ -3088,6 +3088,32 @@ class ReferencesPlugin(RunnerForwardingMixin):
             entry["stale"] = stale
         return entry
 
+    def _proposal_refusal(self, args: Dict[str, Any], errors: List[str]) -> Dict[str, Any]:
+        """The payload of a refused proposal.  A plain proposal of an id the
+        catalog holds also carries ``revises: <id>``: the call to make
+        instead, machine-readable for a driver (#1437)."""
+        refusal: Dict[str, Any] = {"error": "; ".join(errors), "errors": errors}
+        ref_id = args.get("id")
+        if (args.get(REVISES_KEY) is None and isinstance(ref_id, str)
+                and ref_id in {s.id for s in self._sources}):
+            refusal[REVISES_KEY] = ref_id
+        return refusal
+
+    @staticmethod
+    def _revision_target_for(
+        args: Dict[str, Any], entry: Dict[str, Any], workspace: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """``(target, refusal)`` for a revision: the catalog file and digest it
+        is written against (the stale guard promotion checks), or why it
+        cannot be revised.  ``(None, None)`` for a plain proposal."""
+        if args.get(REVISES_KEY) is None:
+            return None, None
+        target, _category, error = revision_target(workspace, entry["id"])
+        if target is None:
+            return None, {"error": f"cannot revise '{entry['id']}': {error}",
+                          "errors": [error]}
+        return target, None
+
     def _execute_propose(self, args: Dict[str, Any]) -> Any:
         """``proposeReference``: record a CLAIM, never a catalog entry.
 
@@ -3115,21 +3141,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             catalog_ids=[s.id for s in self._sources],
         )
         if entry is None:
-            refusal = {"error": "; ".join(errors), "errors": errors}
-            ref_id = args.get("id")
-            if (args.get(REVISES_KEY) is None and isinstance(ref_id, str)
-                    and ref_id in {s.id for s in self._sources}):
-                # Machine-readable route for a driver: re-call with this.
-                refusal[REVISES_KEY] = ref_id
+            return False, self._proposal_refusal(args, errors)
+        target, refusal = self._revision_target_for(args, entry, workspace)
+        if refusal is not None:
             return False, refusal
-        target = None
-        if args.get(REVISES_KEY) is not None:
-            # The digest the revision is written against: the stale guard
-            # promotion checks (``reference_curation``).
-            target, _category, error = revision_target(workspace, entry["id"])
-            if target is None:
-                return False, {"error": f"cannot revise '{entry['id']}': {error}",
-                               "errors": [error]}
         pending_claims, _skipped = load_claims(workspace)
         forward = forward_links(entry.get("links"), [s.id for s in self._sources],
                                 pending_claim_ids(pending_claims))
