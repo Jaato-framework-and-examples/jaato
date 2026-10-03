@@ -29,6 +29,7 @@ from .policy import (
 )
 from .evaluator import EvalContext, PolicyDecision as EvalDecision, load_evaluators
 from .config_loader import load_config, PermissionConfig
+from .policy_layers import announce_effective_policy, resolve_effective_policy
 from .channels import (
     Channel,
     ChannelDecision,
@@ -292,6 +293,14 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._agent_name: Optional[str] = None
         # Workspace path for evaluator resolution and EvalContext
         self._workspace_path: Optional[str] = None
+        # Where ``initialize`` resolved the permissions.json layers from,
+        # kept so ``set_scoped_policy`` reads the same files (#1474), and
+        # the resolution itself (``EffectivePolicy``: the merged policy and
+        # which layer decided each part).
+        self._config_root: Optional[str] = None
+        self._config_path: Optional[str] = None
+        self._session_id: Optional[str] = None
+        self._effective_policy: Optional[Any] = None
         # Permission lifecycle hooks for UI integration
         # on_requested: (tool_name, request_id, tool_args, response_options, call_id) -> None
         self._on_permission_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None
@@ -514,15 +523,28 @@ class PermissionPlugin(RunnerForwardingMixin):
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the permission plugin.
 
+        The policy is assembled by
+        :func:`~.policy_layers.resolve_effective_policy` from four layers,
+        lowest first: the framework default, ``~/.jaato/permissions.json``,
+        the project ``permissions.json`` and the inline ``policy`` (#1474).
+        ``defaultPolicy`` is taken from the highest layer that sets it, the
+        white/blacklists are UNIONED, so an inline policy adds to the files
+        rather than replacing them.  The effective policy and the layer that
+        decided it are logged once per session.
+
         Args:
-            config: Optional configuration dict. If not provided, loads from
-                   file specified by PERMISSION_CONFIG_PATH or default locations.
+            config: Optional configuration dict.
 
                    Config options:
-                   - config_path: Path to permissions.json file
+                   - config_path: an explicit project permissions.json
+                     (else PERMISSION_CONFIG_PATH, else discovered)
+                   - workspace_path / config_root: where the project file is
+                     discovered, and evaluators resolved
+                   - session_id: keys the once-per-session announcement
                    - channel_type: Type of channel ("console", "webhook", "file")
                    - channel_config: Configuration for the channel
-                   - policy: Inline policy dict (overrides file)
+                   - policy: Inline policy dict -- layer 4, merged ON TOP of
+                     the files (it no longer replaces them)
         """
         # Load configuration
         config = config or {}
@@ -536,20 +558,33 @@ class PermissionPlugin(RunnerForwardingMixin):
             config.get("emit_decision_events", False)
         )
 
-        # Try to load from file first
+        # The file's CHANNEL settings (type, endpoint, timeout).  Its
+        # policy half is read by ``resolve_effective_policy`` below.
         config_path = config.get("config_path")
         try:
             self._config = load_config(config_path)
         except FileNotFoundError:
-            # Use inline config or defaults
             self._config = PermissionConfig()
 
-        # Allow inline policy override
-        if "policy" in config:
-            policy_dict = config["policy"]
-            self._policy = PermissionPolicy.from_config(policy_dict)
-        else:
-            self._policy = PermissionPolicy.from_config(self._config.to_policy_dict())
+        # The policy: framework default < ~/.jaato/permissions.json <
+        # project permissions.json < the inline ``policy`` (#1474).  An
+        # inline policy used to REPLACE the file, and both enforcer
+        # builders always pass one, so the file never decided anything in
+        # a daemon session.  Remembered so ``set_scoped_policy`` layers a
+        # #957 subagent's block over the same files.
+        self._workspace_path = config.get("workspace_path") or self._workspace_path
+        self._config_root = config.get("config_root")
+        self._config_path = config_path
+        self._session_id = config.get("session_id")
+        effective = resolve_effective_policy(
+            config.get("policy"),
+            workspace_path=self._workspace_path,
+            config_root=self._config_root,
+            config_path=config_path,
+        )
+        self._effective_policy = effective
+        self._policy = PermissionPolicy.from_config(effective.policy)
+        announce_effective_policy(effective, session_id=self._session_id)
 
         # plugin_configs.permission.auto_allow_housekeeping (#1304 phase 3).
         # Off by default -- the same posture scrub_secret_env / allow_inline
@@ -609,6 +644,7 @@ class PermissionPlugin(RunnerForwardingMixin):
         if self._channel:
             self._channel.shutdown()
         self._policy = None
+        self._effective_policy = None
         self._scoped_policies.clear()
         self._auto_whitelisted.clear()
         self._channel = None
@@ -759,7 +795,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                 },
                 "policy": {
                     "type": "object",
-                    "description": "Permission policy rules",
+                    "description": "Permission policy rules -- layer 4, merged over ~/.jaato/permissions.json and the project permissions.json (lists unioned, defaultPolicy from the highest layer that sets it)",
                     "properties": {
                         "defaultPolicy": {
                             "type": "string",
@@ -988,7 +1024,20 @@ class PermissionPlugin(RunnerForwardingMixin):
                 executor's permission context will carry.
             config: The session's ``plugin_configs.permission`` block.
         """
-        policy = PermissionPolicy.from_config(config.get("policy") or {})
+        # The block is layer 4 FOR THIS SESSION, on top of the same
+        # permissions.json files the runtime policy reads (#1474): a
+        # subagent's own whitelist adds to the files, a file's blacklist
+        # still binds it, and a file it does not override still sets its
+        # defaultPolicy.
+        effective = resolve_effective_policy(
+            config.get("policy") or {},
+            workspace_path=self._workspace_path,
+            config_root=self._config_root,
+            config_path=config.get("config_path") or self._config_path,
+        )
+        announce_effective_policy(effective, session_id=self._session_id,
+                                  scope=f"scope:{scope}")
+        policy = PermissionPolicy.from_config(effective.policy)
         evaluator_config = config.get("evaluators")
         if evaluator_config and isinstance(evaluator_config, dict):
             evaluators = load_evaluators(
@@ -1558,13 +1607,19 @@ class PermissionPlugin(RunnerForwardingMixin):
             ("    [!seq]    - Match any character not in seq", "dim"),
             ("", ""),
             ("CONFIGURATION FILE", "bold"),
-            ("    Base permissions can be configured in .jaato/permissions.json:", ""),
+            ("    Base permissions can be configured in ~/.jaato/permissions.json", ""),
+            ("    and .jaato/permissions.json (applied since #1474):", ""),
             ("", ""),
             ('    {', "dim"),
-            ('      "default": "ask",', "dim"),
-            ('      "whitelist": ["introspection*", "todo*"],', "dim"),
-            ('      "blacklist": ["*dangerous*"]', "dim"),
+            ('      "defaultPolicy": "ask",', "dim"),
+            ('      "whitelist": {"tools": [], "patterns": ["git *"]},', "dim"),
+            ('      "blacklist": {"tools": [], "patterns": ["rm -rf *"]}', "dim"),
             ('    }', "dim"),
+            ("", ""),
+            ("    Layers, lowest first: framework default (ask) < ~/.jaato file <", ""),
+            ("    workspace file < profile plugin_configs.permission.policy.", ""),
+            ("    defaultPolicy: highest layer that sets it.  Lists: unioned.", ""),
+            ("    Blacklist beats whitelist, whichever layer wrote either.", ""),
         ])
 
     def _permissions_check(self, tool_name: str) -> str:

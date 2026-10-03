@@ -662,7 +662,15 @@ class AppArmorManager:
     #       so does the flat isolated sub-runner, whose subprocesses and
     #       in-process tools share one body: there a hand-written claim is
     #       still possible.
-    _TEMPLATE_VERSION = 43
+    #   v44: write-deny ``<ws>/.jaato/permissions.json`` in base,
+    #       ``tool_hat``, ``//child`` and the isolated sub-runner (#1474).
+    #       Before #1474 the file was read and never applied, so a session
+    #       that rewrote it changed nothing.  It is now a policy layer
+    #       (``policy_layers.resolve_effective_policy``): a confined session
+    #       that could write ``defaultPolicy: allow`` there would auto-
+    #       approve every tool of every later session in the workspace.
+    #       Reads stay allowed -- the runner reads the file in-process.
+    _TEMPLATE_VERSION = 44
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -714,6 +722,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
   audit deny "{workspace_path}/.jaato/services/*/"           wlk,
   audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+  # v44 (#1474): permissions.json is APPLIED now, so a confined
+  # session that rewrote it would widen the policy of every later
+  # session in this workspace.  Read stays allowed: the runner reads it.
+  audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
   audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
   audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
   audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -2010,6 +2022,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
   audit deny "{workspace_path}/.jaato/services/*/"           wlk,
   audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+  # v44 (#1474): permissions.json is APPLIED now, so a confined
+  # session that rewrote it would widen the policy of every later
+  # session in this workspace.  Read stays allowed: the runner reads it.
+  audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
   audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
   audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
   audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -3092,6 +3108,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
     audit deny "{workspace_path}/.jaato/services/*/"           wlk,
     audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+    # v44 (#1474): permissions.json is APPLIED now, so a confined
+    # session that rewrote it would widen the policy of every later
+    # session in this workspace.  Read stays allowed: the runner reads it.
+    audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
     audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
     audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
     audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -3346,6 +3366,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
     audit deny "{workspace_path}/.jaato/services/*/"           wlk,
     audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+    # v44 (#1474), mirrors base: every model-driven subprocess runs here,
+    # and a policy file it rewrote would decide later sessions.
+    audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
     audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
     audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
     audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
