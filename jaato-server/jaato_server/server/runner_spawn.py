@@ -197,6 +197,29 @@ def _boundary_label(profile_name: Optional[str], confinement: Any) -> str:
     return profile_name or "(none)"
 
 
+def runner_log_path(workspace_path: Optional[str], session_id: str) -> Optional[str]:
+    """The session's runner log, ``<ws>/.jaato/logs/runner-<id>.log``.
+
+    ``None`` without a workspace.  One definition for the two readers: the
+    cold spawn's child opens it before exec, and the envelope carries it so
+    every bootstrap, a pool slot's included, points fds 1 and 2 at it.
+    """
+    if not workspace_path:
+        return None
+    return os.path.join(workspace_path, ".jaato", "logs", f"runner-{session_id}.log")
+
+
+def _slot_boundary_note(profile_name: Optional[str], confinement: Any) -> str:
+    """How a pool slot ends up in its boundary, for the spawn log line."""
+    from jaato_server.server.confinement.base import is_selinux
+
+    if is_selinux(confinement):
+        return f"{confinement.label}, entered at fork"
+    if profile_name:
+        return f"{profile_name}, entered at bootstrap"
+    return "(unconfined)"
+
+
 def _pool_may_serve(pool_manager: Any, cgroup_attach: Any) -> bool:
     """May a pre-warm slot serve this session?
 
@@ -407,10 +430,7 @@ def spawn_session_runner(
             "start RunnerRPCClient"
         )
 
-    log_path: Optional[str] = None
-    if workspace_path:
-        log_dir = os.path.join(workspace_path, ".jaato", "logs")
-        log_path = os.path.join(log_dir, f"runner-{session_id}.log")
+    log_path = runner_log_path(workspace_path, session_id)
 
     # ----- The session's tmpdir, before either branch (#1171) -----
     # ``RunnerSpawner.spawn`` makes this directory before it forks,
@@ -506,10 +526,9 @@ def spawn_session_runner(
             server._pool_manager_ref = pool_manager
             logger.info(
                 "spawn_session_runner: session %s served by pool slot "
-                "pid=%d cascade=%s (warm imports inherited; slot will "
-                "self-confine to profile=%s)",
+                "pid=%d cascade=%s (warm imports inherited; boundary %s)",
                 session_id, slot.pid, slot.cascade_id or "(standalone)",
-                profile_name or "(unconfined)",
+                _slot_boundary_note(profile_name, confinement),
             )
         else:
             logger.info(
@@ -1512,6 +1531,9 @@ def build_session_envelope(
         runner_user=_runner_user_wire(server),
         # #1465: the user tier the runner reads and is not granted.
         user_tier_files=user_tier_snapshot(stashed_runner_user(server)),
+        # SELinux phase 4: where this session's runner logs, so a pool
+        # slot stops writing the daemon's log (which it may not).
+        runner_log_path=runner_log_path(workspace_path, session_id),
     )
 
 

@@ -20,6 +20,14 @@ The module is now **1.7.0** (marker `jaato_policy_v4_t`), and the daemon
 refuses an older one. A workspace labelled under an older module is
 relabelled once.
 
+**Second run (after the slot-log fix).** The first run passed everything
+and found that a pool slot wrote the daemon's log (refused under SELinux)
+instead of its own. Each bootstrap now points the runner's fds 1 and 2 at
+its session's `runner-<id>.log`. No policy change (still 1.7.0). Expect
+the live tool's two new checks to pass (each session wrote its own runner
+log; no runner write to the daemon's log was refused), and each
+`runner-<id>.log` to contain `runner-session bootstrap: logging to …`.
+
 CI checks the policy rules (Fedora container, setools) and the wiring with
 fakes. This run answers what CI cannot: **does the kernel let a forked
 child of the threaded template enter the runner domain, and does a real

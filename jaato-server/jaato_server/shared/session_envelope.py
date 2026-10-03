@@ -530,6 +530,13 @@ class SessionInitEnvelope:
     # then user tier, ``load_gc_from_file``'s order) when the profile
     # declares no ``gc:``; ``None`` = none found.
     gc_file: Optional[Dict[str, Any]] = None
+    # This session's runner log (``<ws>/.jaato/logs/runner-<id>.log``).  A
+    # cold-spawned runner's child already opened it onto fds 1 and 2 before
+    # exec; a pool slot inherited the template's, the daemon's own log,
+    # which a confined slot may not write (SELinux phase 4 kernel run).
+    # Every bootstrap points fds 1 and 2 here.  ``None`` = no workspace, or
+    # an older daemon: the fds stay as they are, so no schema_version bump.
+    runner_log_path: Optional[str] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -624,6 +631,7 @@ class SessionInitEnvelope:
             ),
             "config_resolved_by_daemon": self.config_resolved_by_daemon,
             "gc_file": dict(self.gc_file) if self.gc_file else None,
+            "runner_log_path": self.runner_log_path,
         }
 
     @classmethod
@@ -712,6 +720,7 @@ class SessionInitEnvelope:
             user_tier_files=_text_map(d.get("user_tier_files")),
             config_resolved_by_daemon=bool(d.get("config_resolved_by_daemon", False)),
             gc_file=_optional_dict(d.get("gc_file")),
+            runner_log_path=_optional_str(d.get("runner_log_path")),
         )
 
 

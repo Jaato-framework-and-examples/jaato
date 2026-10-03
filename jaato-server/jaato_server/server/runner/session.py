@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple,
@@ -612,6 +613,44 @@ def _install_confinement_grants(envelope: SessionInitEnvelope) -> None:
             "(profile=%s exec_scope=%s rules=%d)",
             installed.profile_name, installed.exec_scope, len(installed.rules),
         )
+
+
+def _point_log_at_session(envelope: SessionInitEnvelope) -> None:
+    """Point fds 1 and 2 at ``envelope.runner_log_path`` (step 1a).
+
+    A cold-spawned runner's child opened this file onto fds 1 and 2 before
+    exec, so for it this re-opens the same file.  A pool slot inherited
+    the template's fds, the daemon's own log: under AppArmor and unconfined
+    its lines landed there, and under SELinux ``jaato_runner_t`` may not
+    write it, so a slot's whole log was lost (phase 4 kernel run, ~700
+    denials per run).  Every bootstrap re-points them, so a reused slot's
+    next session gets a log of its own.  A slot logs through a stderr
+    handler (``_setup_logging(None)`` in the template), which now writes
+    here; a cold spawn's file handler is unaffected.
+
+    Best-effort, as the cold spawn's redirect is: a runner that cannot
+    open its log still serves, with the refusal written to whatever fd 2
+    still is.  ``None`` (no workspace, an older daemon) changes nothing.
+    """
+    path = envelope.runner_log_path
+    if not path:
+        return
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as exc:
+        logger.warning("runner-session bootstrap: cannot open the runner "
+                       "log %s (%s); logging stays on the inherited fds",
+                       path, exc)
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+    logger.info("runner-session bootstrap: logging to %s (session %s)",
+                path, envelope.session_id)
 
 
 def _install_user_tier(envelope: SessionInitEnvelope) -> None:
@@ -1687,6 +1726,10 @@ def bootstrap_session(
     except ValueError as exc:
         logger.error("runner-session bootstrap: validation failed: %s", exc)
         raise BootstrapError("validate", str(exc)) from exc
+
+    # ---- 1a. Log to this session's runner log (SELinux phase 4) ----
+    # Before anything else logs, so the whole bootstrap lands there.
+    _point_log_at_session(envelope)
 
     # ---- 1b. Apply daemon-resolved session env (PR #91 Y fix) ----
     # The daemon resolved workspace ``.env`` + profile.env +

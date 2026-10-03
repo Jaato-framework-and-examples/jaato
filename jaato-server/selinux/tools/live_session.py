@@ -321,8 +321,9 @@ def _check_processes(result: dict) -> str:
     return level
 
 
-def _check_pool(log: Path, sessions: int) -> None:
-    """Phase 4: a slot forked into the boundary, then reused (§7.2)."""
+def _check_pool(log: Path, sessions: int, ws: Path, marker: str) -> None:
+    """Phase 4: a slot forked into the boundary, then reused (§7.2), and
+    each session's runner log written by the runner, not the daemon's."""
     import re
 
     text = log.read_text(errors="replace")
@@ -335,6 +336,13 @@ def _check_pool(log: Path, sessions: int) -> None:
         record(f"the next {sessions - 1} session(s) reuse that slot",
                len(served) == sessions and len(set(served)) == 1 and len(forked) == 1,
                f"forked: {forked}; served: {served}")
+    logs = {p.name: p.stat().st_size for p in (ws / ".jaato" / "logs").glob("runner-*.log")
+            if "__sub_" not in p.name}
+    record(f"each of the {sessions} session(s) wrote its own runner log",
+           len(logs) == sessions and all(logs.values()), f"runner logs: {logs}")
+    refused = [a for a in _avcs_since(marker) if f'path="{log}"' in a]
+    record("no runner write to the daemon's log was refused",
+           not refused, f"{len(refused)} refused; first: {refused[:1]}")
 
 
 def _avcs_since(marker: str) -> List[str]:
@@ -477,7 +485,7 @@ def main() -> int:
         return _report(root, log, marker, {})
     result["isolated"] = args.isolated
     level = _check_processes(result)
-    _check_pool(log, args.sessions)
+    _check_pool(log, args.sessions, ws, marker)
     if args.isolated:
         _check_isolated(ws, level, args.isolated, marker)
     return _report(root, log, marker, _check_labels(ws, level, args.isolated))
