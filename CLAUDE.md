@@ -4737,6 +4737,35 @@ Guard:
 `shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,
 five reversions.
 
+### The Embedder Loads When It Can Be Used (#1482)
+
+`ReferencesPlugin.initialize` loaded the embedding provider whenever the
+workspace had any bundle. Since #1478 drivers create UNINDEXED bundles, so
+every later session paid the model load (`all-MiniLM-L6-v2`: ~13 s of
+imports, 30+ hub HEAD requests, a copy per runner) with nothing to match
+against, even under `tags_only`. Bootstraps went from ~10 s to ~30 s, two
+were refused at the 35 s deadline, and a 12 GB host OOM-killed a cascade.
+
+**The provider loads at bootstrap only when `lookup_strategy` is `hybrid`
+or `semantic_only` AND a loaded bundle (root included) has a vector
+index.** Otherwise it is deferred, and `_ensure_embedding_provider` is the
+one door every consumer goes through: `compute_embedding`, `embed_texts`
+(the daemon's promotion reconcile and its no-texts probe), `bundle
+create` / `index` / `reconcile` / `merge` / `unpack`, the entry handler's
+reconcile, and the #1145 catalog refresh when an index appears
+mid-session. Ranking and the veto run only where a matcher is attached,
+which needs a loaded provider. Memory does not share the provider.
+
+| Rule | Why |
+|---|---|
+| one discovery and one load, under `_embedding_lock` | tool calls run in parallel |
+| a failed load warns once and is not retried | callers degrade to tag lookup, as with no provider |
+| a cached model loads offline first (`embedding_load.py`): `local_files_only=True` when `load_model` takes it, and `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` for the call; online only when that fails | the provider is out of tree; this is how the framework asks it |
+| one INFO line at bootstrap: `embedding provider eager|deferred (strategy=…, indexed_bundles=n/m)` | the next incident can read the decision |
+
+Guard: `jaato_server/shared/tests/test_embedder_loads_only_when_usable_1482.py`,
+five reversions, with a counting fake provider.
+
 ### Pages Only From Catalog Templates
 
 A profile gates tools (`plugins:`, `tools:[...]` scopes), and that is the

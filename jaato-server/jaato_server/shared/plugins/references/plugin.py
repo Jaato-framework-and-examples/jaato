@@ -105,6 +105,7 @@ from .claims import (
     rendered_from,
     write_claim,
 )
+from .embedding_load import load_model_offline_first
 from .embedding_types import (
     EmbeddingProviderProtocol,
     SemanticMatcherProtocol,
@@ -329,6 +330,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # (no bundles in the workspace), ``_execute_compute_embedding``
         # uses this to lazy-load the provider on first call.
         self._cached_init_config: Optional[Dict[str, Any]] = None
+        # One load of the embedding model per plugin, whoever asks first
+        # (#1482): tool calls run in parallel, and each load costs seconds
+        # and hundreds of MB.  ``_embedding_load_failed`` stops a failed
+        # load being retried (and warned about) on every call.
+        self._embedding_lock = threading.Lock()
+        self._embedding_load_failed = False
         # Retained for back-compat with tests that directly inspect the
         # plugin state; points at the root bundle's matcher when present.
         # New code should iterate self._bundles instead.
@@ -560,10 +567,13 @@ class ReferencesPlugin(RunnerForwardingMixin):
         and the strategy uses one; with ``tags_only`` there is nothing to
         attach.
         """
-        if (
-            self._embedding_provider is not None
-            and self._lookup_strategy in ("hybrid", "semantic_only")
-        ):
+        if self._lookup_strategy not in ("hybrid", "semantic_only"):
+            return
+        # An index may have appeared since bootstrap (#1145): load the
+        # deferred provider then, and only then (#1482).
+        if self._embedding_provider is None and self._indexed_bundle_count():
+            self._ensure_embedding_provider()
+        if self._embedding_provider is not None:
             self._init_bundle_matchers(self._matcher_config)
 
     def _catalog_watch_paths(self, workspace: Optional[str] = None) -> List[str]:
@@ -1849,22 +1859,21 @@ class ReferencesPlugin(RunnerForwardingMixin):
         from .entry_handler import ReferencesEntryHandler
         _bundle_registry.register(ReferencesEntryHandler(self))
 
-        # Initialize the embedding provider only when bundles exist.
-        # Workspaces without bundles cannot run semantic matching (no
-        # sidecar to match against); the premium SentenceTransformer
-        # module load is deferred to first ``compute_embedding`` call —
-        # see ``_execute_compute_embedding``.  Saves the cold-runner
-        # bootstrap cost on profiles that don't use references for
-        # semantic queries (e.g. body-wired prefetch workflows).
-        if self._bundles:
+        # Load the embedding provider at bootstrap only when it can be
+        # USED (#1482): a semantic strategy AND at least one bundle with a
+        # vector index to match against.  An unindexed bundle (#1478) or
+        # ``tags_only`` has nothing to match, and the model load (~13 s of
+        # imports, hundreds of MB per runner) pushed bootstraps past their
+        # deadline.  Otherwise the load is deferred to the first caller
+        # that needs it -- see ``_ensure_embedding_provider``.
+        self._cached_init_config = config
+        self._embedding_load_failed = False
+        if self._embedder_needed_at_bootstrap():
             self._init_embedding_provider(config)
+            decision = "eager"
         else:
-            self._cached_init_config = config
-            self._trace(
-                "initialize: skipping embedding provider "
-                "(no bundles in workspace; will lazy-init on first "
-                "compute_embedding call)"
-            )
+            decision = "deferred"
+        self._log_embedder_decision(decision)
 
         # Reconcile drift (new/edited/removed references) against each
         # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
@@ -1883,6 +1892,63 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 f"initialize: semantic matching not configured "
                 f"(strategy={self._lookup_strategy}, bundles={len(self._bundles)})"
             )
+
+    def _indexed_bundle_count(self) -> int:
+        """How many loaded bundles (root included) carry a vector index."""
+        return sum(1 for b in self._bundles if b.has_index)
+
+    def _embedder_needed_at_bootstrap(self) -> bool:
+        """Whether a session could use the embedder before anyone asks (#1482)."""
+        return (self._lookup_strategy in ("hybrid", "semantic_only")
+                and self._indexed_bundle_count() > 0)
+
+    def _log_embedder_decision(self, decision: str) -> None:
+        """One line naming whether the embedder loaded at bootstrap, and why."""
+        line = (f"references: embedding provider {decision} at bootstrap "
+                f"(strategy={self._lookup_strategy}, indexed_bundles="
+                f"{self._indexed_bundle_count()}/{len(self._bundles)})")
+        logger.info(line)
+        self._trace(line)
+
+    def _provider_for(self, bundle: ReferenceBundle) -> Optional[EmbeddingProviderProtocol]:
+        """The provider a write into ``bundle`` needs: loaded only for an indexed one."""
+        if bundle.has_index:
+            return self._ensure_embedding_provider()
+        return self._embedding_provider
+
+    def _ensure_embedding_provider(self) -> Optional[EmbeddingProviderProtocol]:
+        """The embedding provider with its model loaded, or ``None``.
+
+        The one door every consumer that needs vectors goes through
+        (#1482): ``initialize()`` defers the load unless an indexed bundle
+        and a semantic strategy make it useful at bootstrap.  Thread-safe
+        -- concurrent first callers trigger ONE discovery and ONE model
+        load -- and the model is loaded offline first when it is already
+        cached (:func:`load_model_offline_first`).  A load that fails is
+        warned about once and not retried; callers degrade to tag lookup
+        as they do with no provider.
+        """
+        provider = self._embedding_provider
+        if provider is not None and provider.available:
+            return provider
+        with self._embedding_lock:
+            if self._embedding_load_failed:
+                return None
+            if self._embedding_provider is None and self._cached_init_config is not None:
+                self._init_embedding_provider(self._cached_init_config)
+            provider = self._embedding_provider
+            if provider is None:
+                return None
+            if not provider.available and not load_model_offline_first(
+                    provider, self._trace):
+                self._embedding_load_failed = True
+                self._embedding_provider = None
+                logger.warning(
+                    "references: embedding model '%s' failed to load; "
+                    "similarity matching is off for this session (tag lookup "
+                    "continues)", getattr(provider, "model_name", "?"))
+                return None
+            return provider
 
     def _init_embedding_provider(self, config: Dict[str, Any]) -> None:
         """Initialize the embedding provider via entry point discovery.
@@ -2086,7 +2152,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return
 
         if not self._embedding_provider.available:
-            self._embedding_provider.load_model()
+            load_model_offline_first(self._embedding_provider, self._trace)
 
         if not self._embedding_provider.available:
             self._trace(
@@ -3179,11 +3245,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "error": f"texts must be a list of at most "
                              f"{self.EMBED_TEXTS_MAX_COUNT} strings of at most "
                              f"{self.EMBED_TEXTS_MAX_CHARS} characters"}
-        if not self._embedding_provider and self._cached_init_config is not None:
-            self._init_embedding_provider(self._cached_init_config)
-        provider = self._embedding_provider
-        if provider is not None and not provider.available:
-            provider.load_model()
+        provider = self._ensure_embedding_provider()
         if provider is None or not provider.available:
             return {"ok": False, "category": "no_provider",
                     "error": "no embedding provider is available in this session"}
@@ -3222,10 +3284,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # the load now — the user may be generating embeddings for a
         # first bundle.  ``_init_embedding_provider`` is idempotent
         # (early return when provider already set).
-        if not self._embedding_provider and self._cached_init_config is not None:
-            self._init_embedding_provider(self._cached_init_config)
-
-        if not self._embedding_provider:
+        if self._ensure_embedding_provider() is None:
             return {
                 "error": (
                     "No embedding provider available. Install a package that "
@@ -3536,11 +3595,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         unindexed (#1478).  An error only when a provider exists and
         cannot say what it embeds with.
         """
-        if self._embedding_provider is None:
+        # Loads the deferred provider (#1482) so .dimensions is accurate.
+        if self._ensure_embedding_provider() is None:
             return None, None
-        # Ensure the provider has loaded its model so .dimensions is accurate.
-        if not self._embedding_provider.available:
-            self._embedding_provider.load_model()
         dimensions = getattr(self._embedding_provider, "dimensions", None)
         if not isinstance(dimensions, int) or dimensions <= 0:
             return None, ("embedding provider did not report a valid dimension; "
@@ -3661,7 +3718,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if hit.has_index:
             return {"error": f"bundle '{hit.qualified_ref}' already has an index "
                              f"({hit.embedding_model}); use 'bundle reconcile'"}
-        if self._embedding_provider is None:
+        if self._ensure_embedding_provider() is None:
             return {"error": "bundle index requires an embedding provider -- none is "
                              "configured in this session"}
         index_config, error = self._provider_index_config()
@@ -4106,6 +4163,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         reconciled_summaries: List[str] = []
         if self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
             for bundle in (source_bundle, target_bundle):
                 if bundle is None:
                     continue
@@ -4407,6 +4465,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "message": "No bundles to reconcile (no embedding_config.json discovered).",
             }
 
+        self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
         results: List[ReconcileResult] = []
         for bundle in candidates:
             results.append(
@@ -4608,7 +4667,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             source_bundle=source_bundle,
             source_sources=source_sources,
             target_sources=target_sources,
-            provider=self._embedding_provider,
+            provider=self._provider_for(target_bundle),
             options=options,
         )
 
@@ -4984,6 +5043,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._discover_and_load_bundles()
         reconciled = False
         if do_reconcile and self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
             new_bundle = next(
                 (
                     b for b in self._bundles

@@ -281,9 +281,9 @@ REVERSIONS = [
     ),
     Reversion(
         target=_PLUGIN,
-        find="        if self._embedding_provider is None:\n"
+        find="        if self._ensure_embedding_provider() is None:\n"
              "            return None, None\n",
-        replace="        if self._embedding_provider is None:\n"
+        replace="        if self._ensure_embedding_provider() is None:\n"
                 "            return None, \"bundle create requires an embedding provider\"\n",
         test="test_the_session_command_creates_an_unindexed_bundle_without_a_provider",
         because="a session with no embedding provider could not create a bundle at all",

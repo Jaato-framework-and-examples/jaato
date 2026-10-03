@@ -406,6 +406,17 @@ CATALOG: Dict[str, EnvClass] = {
         "knob"),
     "PATH": EnvClass(AMBIENT, None,
         "the host environment being read"),
+    "HF_HOME": EnvClass(AMBIENT, None,
+        "the Hugging Face cache location being read, to decide whether an "
+        "embedding model can load offline (#1482)"),
+    "HF_HUB_CACHE": EnvClass(AMBIENT, None,
+        "the Hugging Face hub cache being read, to decide whether an "
+        "embedding model can load offline (#1482)"),
+    "SENTENCE_TRANSFORMERS_HOME": EnvClass(AMBIENT, None,
+        "the sentence-transformers cache being read, to decide whether an "
+        "embedding model can load offline (#1482)"),
+    "XDG_CACHE_HOME": EnvClass(AMBIENT, None,
+        "the user cache root being read, to find the Hugging Face cache"),
     "PYTHONPATH": EnvClass(AMBIENT, None,
         "the host environment being read -- `explain dependencies` reports "
         "whether it is set, because importlib.metadata resolves a "
