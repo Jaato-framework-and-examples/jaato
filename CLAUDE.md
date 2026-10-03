@@ -11222,6 +11222,22 @@ when the runner is itself a venv, and an existing venv has it switched off in
 in-process, because the kernel imports it. Guard:
 `jaato_server/shared/tests/test_tool_venv_does_not_shadow_the_checkout_1322.py`.
 
+**The kernel's dirs go after the venv's own, before the OS's (#1457).** A
+venv runner's tool-venv keeps `--system-site-packages`, so OS packages stay
+available to the model, and on Debian/Ubuntu that brings
+`/usr/lib/python3/dist-packages` and the user site, with OS copies of jaato's
+dependencies. The bootstrap used to append the runner's dirs, so an old
+`typing_extensions` won and the kernel died before its first cell. It now
+inserts them right after the last `sys.path` entry inside the kernel's own
+`sys.prefix` (the venv's site-packages and `jaato-pip`): what the model
+installed into the venv still wins, the OS copies do not. A venv kernel with
+no workspace HOME also runs `-s`, so it ignores the daemon account's
+`~/.local`; with one, the user site is the workspace's and stays.
+`runner_site_dirs` names the runner's user site only when the runner reads
+it. A cell's child processes and `cli` still see the system and user site as
+before. Guard: `jaato_server/shared/tests/test_kernel_imports_the_runner_first_1457.py`,
+four reversions.
+
 **The managed venv (#1274) is the #1225 rule applied to `workspace_venv`.**
 Every workspace the web client creates is profile-less (a bare `.env`), so no
 `plugin_configs` channel reached it. Without a venv, `pip install` ran the

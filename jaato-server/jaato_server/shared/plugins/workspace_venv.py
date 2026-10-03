@@ -197,7 +197,10 @@ def runner_site_dirs() -> List[str]:
     :func:`kernel_import_dirs`) and to nothing else in the tool-venv.
     """
     dirs: List[str] = list(site.getsitepackages())
-    user = site.getusersitepackages()
+    # The user site only when the runner itself reads it.  A venv runner does
+    # not, and handing the daemon account's ``~/.local`` to the kernel would
+    # put packages the runner never imports ahead of the system site (#1457).
+    user = site.getusersitepackages() if site.ENABLE_USER_SITE else None
     if user:
         dirs.append(user)
     seen = set()
