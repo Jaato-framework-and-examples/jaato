@@ -330,9 +330,10 @@ class RunnerSpawner:
         child_sock.close()
         logger.info(
             "RunnerSpawner: spawned pid=%d for session %s (profile=%s, "
-            "cgroup_attach=%s)",
+            "cgroup_attach=%s, runs_as=%s)",
             pid, session_id, profile_name,
             "yes" if cgroup_attach is not None else "no",
+            runner_user.describe() if runner_user is not None else "daemon uid",
         )
         return SpawnedRunner(
             pid=pid,

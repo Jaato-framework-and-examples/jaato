@@ -533,7 +533,8 @@ def _selinux_checks(name: str, facts: Dict[str, Optional[str]]) -> List[Check]:
     from jaato_server.shared.lsm_label import parse_selinux_context
 
     checks = [Check(name, PASS,
-                    f"selinux — mode {facts['mode']}, runner domain "
+                    f"selinux — policy module v{facts['policy_version']}, "
+                    f"mode {facts['mode']}, runner domain "
                     f"{facts['runner_domain']}, interpreter "
                     f"{facts['interpreter']} ({facts['interpreter_label']})")]
     if "permissive" in (facts["mode"], facts["runner_domain"]):

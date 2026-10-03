@@ -17,7 +17,9 @@ import pytest
 from jaato_sdk import doctor
 from jaato_server.server import confinement
 from jaato_server.server.confinement.selection import BackendChoice
-from jaato_server.server.confinement.selinux import Readiness, SELinuxBackend
+from jaato_server.server.confinement.selinux import (
+    REQUIRED_POLICY_VERSION, Readiness, SELinuxBackend,
+)
 from jaato_server.shared.tests.reversion import Reversion
 
 _DOCTOR = "jaato-sdk/jaato_sdk/doctor.py"
@@ -64,6 +66,7 @@ def _facts(**over):
         "interpreter_label": "system_u:object_r:bin_t:s0",
         "user_dir": "/home/u/.jaato",
         "user_dir_label": "unconfined_u:object_r:jaato_user_dir_t:s0",
+        "policy_version": "2",
     }
     facts.update(over)
     return facts
@@ -111,6 +114,7 @@ def test_a_ready_selinux_host_passes(selinux_selected):
     checks = doctor.check_confinement()
     assert _statuses(checks) == [doctor.PASS]
     assert "selinux" in checks[0].detail and "enforcing" in checks[0].detail
+    assert "policy module v2" in checks[0].detail
 
 
 def test_a_permissive_runner_domain_is_a_warning(selinux_selected):
@@ -165,6 +169,7 @@ def test_host_facts_reads_the_kernel(tmp_path):
         "interpreter_label": "system_u:object_r:bin_t:s0",
         "user_dir": str(tmp_path / ".jaato"),
         "user_dir_label": "unconfined_u:object_r:jaato_user_dir_t:s0",
+        "policy_version": str(REQUIRED_POLICY_VERSION),
     }
 
 

@@ -18,6 +18,7 @@ import pytest
 from jaato_server.server.confinement import Boundary, select_backend
 from jaato_server.server.confinement.apparmor import AppArmorBackend
 from jaato_server.server.confinement.selinux import (
+    REQUIRED_POLICY_VERSION,
     RUNNER_PROBE_CONTEXT,
     SELinuxBackend,
     policy_marker_context,
@@ -177,7 +178,7 @@ class _FakeKernel:
 
 # The module loaded, with the runner domain authorized for the daemon's role.
 _POLICY = (
-    RUNNER_PROBE_CONTEXT, policy_marker_context(1),
+    RUNNER_PROBE_CONTEXT, policy_marker_context(REQUIRED_POLICY_VERSION),
     "system_u:system_r:jaato_runner_t:s0",
 )
 
@@ -198,7 +199,7 @@ def _selinux(kernel=None, enforcing=True, system="Linux", mounted=True):
     (_selinux(kernel=None), "libselinux"),
     (_selinux(_FakeKernel(_POLICY), enforcing=None), "could not be read"),
     (_selinux(_FakeKernel()), "not loaded"),
-    (_selinux(_FakeKernel([RUNNER_PROBE_CONTEXT])), "older than version 1"),
+    (_selinux(_FakeKernel([RUNNER_PROBE_CONTEXT])), f"older than version {REQUIRED_POLICY_VERSION}"),
     (_selinux(_FakeKernel(_POLICY, mls=False)), "MLS/MCS"),
     (_selinux(_FakeKernel(_POLICY, own=None)), "own context"),
     (_selinux(_FakeKernel(_POLICY, own="garbage")), "could not be parsed"),

@@ -2917,11 +2917,13 @@ class SubagentPlugin:
                 for name in profile_payload["plugins"]
             ]
 
-        # Get parent session_id — confused-deputy echo per Audit 5.
+        # Get parent session_id — confused-deputy echo per Audit 5.  The
+        # daemon id lives on ``JaatoSession._daemon_session_id`` (stamped
+        # from the envelope at bootstrap); the handler refuses an empty
+        # one, so reading any other name sent "" and refused every
+        # isolated spawn.
         parent_session_id = (
-            getattr(self._parent_session, "_session_id", None)
-            or getattr(self._parent_session, "session_id", None)
-            or ""
+            getattr(self._parent_session, "_daemon_session_id", None) or ""
         )
 
         try:

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Probe the jaato SELinux module on an enforcing kernel (phase 2a).
+"""Probe the jaato SELinux module on an enforcing kernel (phases 2a to 3).
 
 Run as root on an SELinux host with the module loaded
 (docs/design/selinux-phase2a-handoff.md).  Uses nothing from jaato: it
 labels two scratch workspaces at two MCS levels and execs small probes
-into ``jaato_runner_t`` and ``jaato_child_t`` the way the runtime will
+into ``jaato_runner_t``, ``jaato_child_t`` and the two isolated domains
+(phase 3) the way the runtime will
 (``setexeccon`` then ``execve``), then checks each property
 ``tests/test_policy_rules.py`` asserts statically, this time against the
 kernel.  Prints one table and writes ``probe-results.json`` plus the AVC
@@ -170,9 +171,15 @@ def setup(root: str) -> dict:
     for key in ("wsA", "wsB", "wsU"):
         os.makedirs(f"{paths[key]}/.jaato/agents", exist_ok=True)
         os.makedirs(f"{paths[key]}/.jaato/references-claims", exist_ok=True)
+        os.makedirs(f"{paths[key]}/.jaato/references", exist_ok=True)
+        os.makedirs(f"{paths[key]}/.jaato/prompts", exist_ok=True)
         os.makedirs(f"{paths[key]}/bin", exist_ok=True)
         open(f"{paths[key]}/file.txt", "w").write("workspace\n")
         open(f"{paths[key]}/.jaato/agents/a.md", "w").write("persona\n")
+        open(f"{paths[key]}/.jaato/references/r.json", "w").write("{}\n")
+        open(f"{paths[key]}/.jaato/prompts/p.md", "w").write("prompt\n")
+        os.makedirs(f"{paths[key]}/.jaato/logs", exist_ok=True)
+        open(f"{paths[key]}/.jaato/logs/runner-iso.log", "w").write("")
         shutil.copy("/usr/bin/true", f"{paths[key]}/bin/t")
     os.makedirs(paths["tmpA"], exist_ok=True)
     _setup_user_tier()
@@ -187,8 +194,14 @@ def setup(root: str) -> dict:
     chcon(paths["wsB"], "jaato_managed_ws_t", L2)
     chcon(paths["wsU"], "jaato_workspace_t", L1)
     for key, lvl in (("wsA", L1), ("wsB", L2), ("wsU", L1)):
-        chcon(f"{paths[key]}/.jaato/agents", "jaato_authored_t", lvl)
+        # v2: the persona layer is agent config, references stay authored.
+        chcon(f"{paths[key]}/.jaato/agents", "jaato_agent_config_t", lvl)
+        chcon(f"{paths[key]}/.jaato/references", "jaato_authored_t", lvl)
+        chcon(f"{paths[key]}/.jaato/prompts", "jaato_prompts_t", lvl)
         chcon(f"{paths[key]}/.jaato/references-claims", "jaato_claims_t", lvl)
+        # v3: an isolated sub-runner's log, as the daemon labels it.
+        chcon(f"{paths[key]}/.jaato/logs/runner-iso.log", "jaato_runner_log_t", lvl,
+              recursive=False)
     chcon(paths["tmpA"], "jaato_tmp_t", L1)
     return paths
 
@@ -230,8 +243,12 @@ attempt(lambda: os.mkdir('{p['wsA']}/d'), False)"""))
     expect_denied("runner: another workspace's files are refused by level",
                   py_in(R, L1, TRY + f"attempt(lambda: open('{p['wsB']}/file.txt').read(), True)"))
 
-    expect_ok("runner: reads authored config",
+    expect_ok("runner: reads agent config (.jaato/agents)",
               py_in(R, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/agents/a.md').read(), False)"))
+    expect_ok("runner: reads authored config (.jaato/references)",
+              py_in(R, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/references/r.json').read(), False)"))
+    expect_ok("runner: writes the prompt library (.jaato/prompts)",
+              py_in(R, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/prompts/new.md','w').write('x'), False)"))
     for what, code in (
             ("writes an authored file", f"open('{p['wsA']}/.jaato/agents/a.md','a').write('x')"),
             ("creates an authored file", f"open('{p['wsA']}/.jaato/agents/b.md','w').write('x')"),
@@ -360,6 +377,66 @@ print(p.stdout + p.stderr)
         record("runner: imports jaato_server.server.runner from the venv", None, "--venv not given")
 
 
+def isolated_probes(p: dict) -> None:
+    """Phase 3: the isolated sub-runner domains, at the parent's level (L1).
+
+    Translated from the AppArmor flat sub-profile: the parent's workspace
+    (read-write, or read only), the shared authored config, the session
+    tmpdir; never the persona config, the prompt library, the user tier,
+    another workspace, or anything to exec.
+    """
+    I, RO = "jaato_isolated_t", "jaato_isolated_ro_t"
+    expect_ok("isolated: enters jaato_isolated_t at the parent's level",
+              py_in(I, L1, "print('OK', open('/proc/self/attr/current').read())"),
+              want=f"{I}:{L1}")
+    expect_ok("isolated: reads and writes its parent's workspace",
+              py_in(I, L1, TRY + f"""
+attempt(lambda: open('{p['wsA']}/file.txt').read(), False)
+attempt(lambda: open('{p['wsA']}/iso.txt','w').write('x'), False)
+attempt(lambda: os.unlink('{p['wsA']}/iso.txt'), False)"""))
+    expect_ok("isolated: reads the shared authored config (.jaato/references)",
+              py_in(I, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/references/r.json').read(), False)"))
+    for what, code in (
+            ("a persona (.jaato/agents)", f"open('{p['wsA']}/.jaato/agents/a.md').read()"),
+            ("the agent-config directory listing", f"os.listdir('{p['wsA']}/.jaato/agents')"),
+            ("the prompt library (.jaato/prompts)", f"open('{p['wsA']}/.jaato/prompts/p.md').read()"),
+            ("another workspace (level)", f"open('{p['wsB']}/file.txt').read()"),
+            ("a user-tier persona (~/.jaato/agents)",
+             f"open('{probe_home()}/.jaato/agents/jaato-2a-probe.md').read()")):
+        expect_denied(f"isolated: reading {what} is refused",
+                      py_in(I, L1, TRY + f"attempt(lambda: {code}, True)"))
+    expect_denied("isolated: creating a missing .jaato/reactors.json is refused",
+                  py_in(I, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/reactors.json','w').write('{{}}'), True)"))
+    expect_denied("isolated: executing /bin/true is refused (the flat profile execs nothing)",
+                  py_in(I, L1, TRY + "import subprocess\nattempt(lambda: subprocess.run(['/bin/true']), True)"))
+    expect_denied("isolated: cannot set an exec context",
+                  py_in(I, L1, TRY + f"attempt(lambda: setattr_unbuffered('exec', '{context('unconfined_t', 's0')}'), True)"))
+    expect_ok("isolated: writes a reference claim",
+              py_in(I, L1, TRY + f"attempt(lambda: open('{p['wsA']}/.jaato/references-claims/i.json','w').write('x'), False)"))
+    expect_ok("isolated: writes its session tmpdir",
+              py_in(I, L1, TRY + f"attempt(lambda: open('{p['tmpA']}/i','w').write('x'), False)"))
+
+    expect_ok("isolated read-only: enters jaato_isolated_ro_t",
+              py_in(RO, L1, "print('OK', open('/proc/self/attr/current').read())"),
+              want=f"{RO}:{L1}")
+    expect_ok("isolated read-only: reads the workspace",
+              py_in(RO, L1, TRY + f"attempt(lambda: open('{p['wsA']}/file.txt').read(), False)"))
+    for what, code in (
+            ("writing a workspace file", f"open('{p['wsA']}/file.txt','a').write('x')"),
+            ("creating a workspace file", f"open('{p['wsA']}/ro.txt','w').write('x')"),
+            ("writing a reference claim", f"open('{p['wsA']}/.jaato/references-claims/ro.json','w').write('x')")):
+        expect_denied(f"isolated read-only: {what} is refused",
+                      py_in(RO, L1, TRY + f"attempt(lambda: {code}, True)"))
+    expect_ok("isolated read-only: writes its session tmpdir",
+              py_in(RO, L1, TRY + f"attempt(lambda: open('{p['tmpA']}/ro','w').write('x'), False)"))
+    log = f"{p['wsA']}/.jaato/logs/runner-iso.log"
+    for dom, name in ((I, "isolated"), (RO, "isolated read-only")):
+        expect_ok(f"{name}: appends to its log (jaato_runner_log_t)",
+                  py_in(dom, L1, TRY + f"attempt(lambda: open('{log}','a').write('x'), False)"))
+        expect_denied(f"{name}: truncating its log is refused",
+                      py_in(dom, L1, TRY + f"attempt(lambda: open('{log}','w').write('x'), True)"))
+
+
 def auditd_running() -> bool:
     return subprocess.run(["pidof", "auditd"], capture_output=True).returncode == 0
 
@@ -415,6 +492,7 @@ def main() -> int:
     try:
         paths = setup(args.root)
         probes(paths, args.venv)
+        isolated_probes(paths)
         time.sleep(1)
     finally:
         if ratelimit is not None:

@@ -194,7 +194,8 @@ profiles today.
 |---|---|---|
 | `jaato_runner_t` | base profile `jaato-ws-<id>` | cold spawn: `setexeccon` in the daemon's fork before `execve`; pool slot: `setcon` (section 7) |
 | `jaato_child_t` | `//child` | `setexeccon` in the `preexec_fn` of every model-driven subprocess |
-| `jaato_isolated_t` | isolated sub-runner profile | daemon `setexeccon` at sub-runner spawn |
+| `jaato_isolated_t` | isolated sub-runner profile | exec transition at sub-runner spawn (cold, like the runner) |
+| `jaato_isolated_ro_t` | isolated sub-runner profile with `isolated_read_only_workspace` | same |
 | `jaato_template_t` | (unconfined pool template) | only with pool support, section 7 |
 
 There is no `tool_hat` domain, and there cannot be one of the same shape.
@@ -231,10 +232,19 @@ empty output with exit status 0 (phase 0).
 |---|---|---|---|
 | `jaato_workspace_t` | the workspace tree | read, write, create, unlink, rename, lock, link | same |
 | `jaato_managed_ws_t` | a managed workspace's tree (under `workspace_root`) | as above, **plus execute** | same |
-| `jaato_authored_t` | `.jaato/{agents,profiles,scripts,services/*/,instructions,references,templates,plans,completion_schemas,spawn_schemas}` and `reactors.json`, `template_routing.yaml` | read, search | read, search |
+| `jaato_authored_t` | `.jaato/{services/*/,references,templates,plans}`, `template_routing.yaml` and the other authored entries | read, search | read, search |
+| `jaato_agent_config_t` | `.jaato/{agents,profiles,scripts,completion_schemas,spawn_schemas,instructions}` and `reactors.json` (phase 3) | read, search | read, search |
+| `jaato_prompts_t` | `.jaato/prompts/` (phase 3) | read, write | read, write |
 | `jaato_claims_t` | `.jaato/references-claims/` | read, write | read only (template v43's `//child` deny) |
 | `jaato_tmp_t` | session tmpdir and private `/tmp` | read, write, create | same |
+| `jaato_runner_log_t` | an isolated sub-runner's `.jaato/logs/runner-<id>.log` (phase 3, created by the daemon) | none | none (the isolated domains: open, append) |
 | `jaato_devpts_t` | a pty either domain opens (`type_transition` from `devpts_t`) | read, write, ioctl, setattr | same |
+
+`jaato_agent_config_t` and `jaato_prompts_t` exist only so the isolated
+domains (§5.3) can be refused them: they are what the AppArmor isolated
+sub-profile read-denies (`selinux_labels.ISOLATED_UNREADABLE` plus
+`prompts`, kept equal to that body by a test). For the runner and the child
+they behave as `jaato_authored_t` and as workspace files.
 
 The authored set is the one `jaato_sdk/scaffold/gitignore.py` `AUTHORED`
 already declares and `test_gitignore_authored_set_tracks_apparmor.py`
@@ -317,9 +327,26 @@ inputs that change what the runner may do are exactly those four.
 
 ### 5.3 Isolated sub-runners
 
-`jaato_isolated_t` at a **second** pair allocated for the sub-runner's own
-workspace. Its parent's files are then out of reach by level, as the
-isolated profile keeps them out of reach by path today.
+Phase 3. The AppArmor isolated sub-runner works in its **parent's**
+workspace (`_spawn_isolated_runner` passes the parent's `workspace_path`);
+what isolates it is what its flat sub-profile denies, not a separate tree.
+So the SELinux sub-runner runs at the **parent's** level, in its own domain:
+
+* `jaato_isolated_t`, or `jaato_isolated_ro_t` under
+  `isolated_read_only_workspace` (workspace list and read, no write);
+* flat: `child_label == label`, and neither domain may exec anything, as
+  the AppArmor body grants no exec (`ix`/`px`/`ux`) outside the interpreter;
+* refused: `jaato_agent_config_t`, `jaato_prompts_t`, the user tier, ptys,
+  `setexec`; allowed: the workspace, `jaato_authored_t`, claims (read-only
+  in the `ro` domain), its own `jaato_tmp_t`, TCP and DNS.
+
+`isolated_workspace_subpath` has no SELinux form (it would need the
+subpath labelled at another level, which the parent's runner could then not
+reach), so `_provision_isolated_selinux` refuses it by name, stage
+`sub_profile`, before anything is provisioned.
+
+An earlier draft of this section gave the sub-runner its own level for its
+own workspace. There is no such workspace.
 
 ## 6. Labelling a workspace
 
@@ -411,11 +438,11 @@ threads by the time it serves its first bootstrap.
 
 Phase plan:
 
-* **Phase 1: SELinux-confined sessions do not use the pool.** The
+* **Phase 2b (shipped): SELinux-confined sessions do not use the pool.** The
   routing gate in `spawn_session_runner` already routes `cgroup_attach`
   sessions away from the pool; SELinux confinement joins it. Cost: the
   cold start (~7 s vs ~1 s warm). Unconfined sessions still use the pool.
-* **Phase 3: bounded pool.** The template runs as
+* **Phase 4: bounded pool.** The template runs as
   `jaato_template_t:s0-s0:c0.c1023` with
   `typebounds jaato_template_t jaato_runner_t`, and each slot calls
   `setcon(jaato_runner_t:<level>)` on its main thread. Threads created
@@ -443,7 +470,8 @@ notebook kernel (#1323) take it through the existing
 |---|---|
 | per-session profile | per-workspace level + fixed domain |
 | `//child` | `jaato_child_t` via exec transition |
-| isolated sub-runner | `jaato_isolated_t` at its own level |
+| isolated sub-runner | `jaato_isolated_t` / `jaato_isolated_ro_t` at the parent's level, flat (§5.3) |
+| `isolated_workspace_subpath` | **refused** by name under SELinux |
 | complain mode (`JAATO_APPARMOR_COMPLAIN`) | per-domain permissive (`semanage permissive -a jaato_runner_t`), host-wide; the backend reads it and reports `selinux-permissive`, WARNING once, same as #1014 |
 | per-thread verification (#1023) | same code; label comparison via `lsm_label` |
 | mode check (#1014), `require_confinement` means enforce | same; enforcing and not permissive |
@@ -548,8 +576,8 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1a | **shipped**: `server/confinement/` (the protocol, `select_backend`, the AppArmor adapter, the SELinux readiness checks of §10), `shared/lsm_label.py` (SELinux contexts, the `selinux` / `selinux-permissive` sandbox modes). No call site uses them yet | none |
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
-| 2b | **implemented, not yet run on a kernel**: user-tier types and binds in the module (1.2.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. A kernel run follows ([handoff](selinux-phase2b-handoff.md)); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
-| 3 | Isolated sub-runner under `jaato_isolated_t` | isolated subagents confined on SELinux |
+| 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
+| 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
@@ -663,6 +691,155 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   from the code that settles on no kernel boundary: the daemon's selection
   line, and the WS server's startup when it was handed no SELinux backend
   (a standalone WS server runs no selection, so there it is still said).
+
+### What the phase 3 kernel run found (64020ec9)
+
+* **Probe 57/57** as root and as uid 1000, every refusal backed by an
+  enforced AVC: the agent-config and prompts types, another workspace's
+  level, the user tier, `reactors.json`, `execute_no_trans` on `bin_t`,
+  `setexec`, and the read-only domain's writes.
+* **The sub-runner entered `jaato_isolated_t` / `jaato_isolated_ro_t` at
+  the parent's level** in all four live runs (rw, ro; root, uid 1000), and
+  served RPC.
+* **Every live spawn then failed at `stage=forwarding` with a bare
+  `TimeoutError`, on a daemon defect, not SELinux.** The runner-RPC handler
+  (`async def handle`) called the synchronous `_spawn_isolated_runner` on
+  the daemon loop, which then waited 10 s on `rpc.start()`, a coroutine
+  only that loop could run (`LOOP_STALL` in every daemon log). Unreachable
+  before this branch, since the parent-id bug refused the spawn earlier.
+  Fixed: the handler hands it to `asyncio.to_thread` (the #1355 rule), the
+  #1355 guard lists `_spawn_isolated_runner`, and a test drives the real
+  handler on a running loop.
+* **The read-only sub-runner had no log**: three `append` denials on
+  `.jaato/logs/runner-<id>__sub_*.log`, 0-byte logs. Fixed with
+  `jaato_runner_log_t` (above).
+* **Fixed in the tools and messages:** `live_session.py --isolated` no
+  longer runs the child-file check, its read-only check needs the kernel's
+  refusal rather than an absent file, and it checks the sub-runner's log;
+  the spawn-failure message names what was actually rolled back (nothing,
+  on an SELinux host without cgroups) instead of "sub-cgroup + sub-AppArmor
+  profile"; `jaato-doctor` names the policy module version.
+
+### The second phase 3 kernel run (a1d59347)
+
+* **Probe 61/61** as root and as uid 1000; the four log checks pass, and
+  truncating the log is refused as a `write` on the `jaato_runner_log_t`
+  file. The doctor names policy module v3.
+* **The spawn no longer deadlocks**, and the sub-runner's log is created,
+  labelled and written by both domains (~6 KB).
+* **Every live session then failed in the sub-runner's bootstrap**: the
+  base-instructions loader asked `<ws>/.jaato/instructions` `is_dir()`,
+  the boundary denies that directory down to `getattr`, and
+  `Path.is_dir()` re-raises `EACCES`. The policy was right; the runner
+  probed config its boundary denies. With that one check patched in the
+  host's venv copy (diagnostic only), both domains passed 8/8 end to end,
+  the read-only one with the kernel refusing its write.
+* **GC was off in every isolated session** for the same reason
+  (`~/.jaato/gc.json` `exists()`), and the isolated envelope dropped every
+  number of a profile's `gc:` block but `type` (#1133 on this path).
+* **Fixed (your choice: the daemon supplies, the runner never looks):**
+  the isolated envelope carries `config_resolved_by_daemon` and, without
+  a profile `gc:`, the `gc.json` the daemon found (`gc_file`). The runner
+  builds its runtime with `read_config_tiers=False` (premium instructions
+  only, no workspace or user tier) and installs GC from the envelope,
+  never from disk. `gc:` crosses whole (`to_dict`).
+* **Not fixed, stated:** plugins and provider `env.py` files still list
+  `<ws>/.jaato` and `~/.jaato` through `resolve_config_search_path`, and
+  probe them. Every such caller tolerates the refusal (no warning, no
+  functional loss in the run's logs), but each probe is an AVC: 111 to
+  472 per live run, most of them `search` on `~/.jaato`.
+
+### The third phase 3 kernel run (573f1470)
+
+* **Probe 61/61** at both uids. **As root, both live modes pass 8/8**:
+  the sub-runner bootstraps, GC comes from the envelope, the read-write
+  domain writes `iso-probe.txt` and the read-only one is refused by the
+  kernel.
+* **Under `--as-uid 1000` the sub-runner ran as root.** The parent runner
+  dropped to the workspace owner (#1168), and the isolated spawn path
+  applied no uid policy at all: its spawn line had no `runs_as`, and its
+  write into the owner's workspace was refused for `dac_override`, which
+  the isolated domains withhold.
+* **Fixed:** the sub-runner inherits its parent's resolved `RunnerUser`
+  (re-resolving the policy cannot work under `peer`: a sub-runner has no
+  IPC peer). The daemon hands it the session tmpdir, the session storage
+  directory and its log before the spawn, the spawner drops to it, and the
+  envelope carries it with that user's user tier. The spawn line now names
+  `runs_as` for every runner.
+
+### The fourth phase 3 kernel run (79a0506a)
+
+* **Everything passes**: probe 61/61 at both uids, and live 8/8 in both
+  modes as root and as uid 1000. The sub-runner's spawn line and log name
+  the parent's user, and the `dac_override` denial is gone.
+* **A dropped isolated sub-runner lost `todo` and `filesystem_query`.**
+  Their loaders asked `~/.config/jaato/<plugin>.json` `exists()`. The
+  isolated domains are refused `search` on a user's home (105 AVCs per uid
+  run; `/root` is searchable, so the root runs were unaffected), pathlib
+  re-raises `EACCES`, and the registry dropped both plugins. **Fixed (your
+  choice: the daemon ships it):** `.config/jaato` joins
+  `~/.claude/skills` in the user-tier snapshot (`HOME_SHIPPED_DIRS`), and
+  the `todo`, `filesystem_query` and `references` loaders read it through
+  `user_tier.home_path`. Credential files there (`*_accounts.json`) are
+  refused as everywhere else. `references` loses the `OSError` catch it
+  carried for the same probe under AppArmor.
+* **A dropped user's `~/.jaato/gc.json` reached the parent and not the
+  sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
+  takes the runner user's home.
+
+### The fifth phase 3 kernel run (6aabd3d4)
+
+* **Everything passes, and root and uid-1000 sub-runners now match**: the
+  same domain, level, log, GC and plugin set. No plugin is dropped, and a
+  `gc.json` in only the dropped user's `~/.jaato` reaches the sub-runner.
+* **Not exercised on the kernel**: real files under `~/.config/jaato`
+  (the user had none), and the refusal of credential files there. Unit
+  tests cover both (`test_home_config_ships_on_the_envelope.py`).
+* **The home-level `search` AVCs did not drop**, against the handoff's
+  prediction. They are the `resolve_config_search_path` existence probes
+  (the known follow-up), refused at the user's home instead of at
+  `~/.jaato`. They are harmless, and their count varies widely between
+  identical runs.
+* The daemon now logs where it found the `gc.json` it ships to an
+  isolated sub-runner.
+
+### What phase 3 decided
+
+* **The parent's level, not a new one** (§5.3), because the sub-runner
+  works in the parent's workspace.
+* **Two domains, not a boolean**: read-only is a second domain with no
+  write on the workspace types, as the AppArmor `ro` tightening is a second
+  body.
+* **The read-denied config gets its own types** rather than one type for all
+  authored entries, because the isolated domain needs `references`,
+  `templates` and the rest, and AppArmor denies only the persona entries.
+  Relabelling is driven by the label stamp, which carries the policy
+  version, so a v1 workspace is relabelled once.
+* **Parity, stated where it is weak**: the isolated domain can write claims
+  (AppArmor's isolated body can too).
+* **The sub-runner's log has a type of its own** (`jaato_runner_log_t`,
+  module 1.6.0 / policy v3). The daemon creates `.jaato/logs/runner-<id>.log`
+  and labels it at the level before the spawn; both isolated domains may
+  open and append to it, and nothing more (no write, truncate, unlink or
+  rename). Without it the read-only domain was refused its inherited log
+  fds at exec and its log handler, and ran with no log (kernel run below).
+  A label failure refuses the spawn, as a session tmpdir does. Main runner
+  logs keep the workspace type.
+* **"Executes nothing" means its own entrypoint and nothing else.** The
+  isolated domains keep `execute` + `map` on `bin_t`: after the exec
+  transition the kernel maps the entry interpreter under the new domain,
+  so without them the domain cannot start. They have no
+  `execute_no_trans` and no `transition` of their own, and no `execute`
+  on shells, workspace or tmp files. Targeted gives every `domain`
+  `prelink_exec_t` execute (under `fips_mode`) and a transition to
+  `abrt_helper_t` (inert without execute on its entry type); the module
+  cannot remove those, and the runner and child carry them too.
+* **Found on the way, fixed here:** the runner's subagent plugin read the
+  parent id from `_session_id` / `session_id`, which `JaatoSession` does not
+  have (it is `_daemon_session_id`), so every isolated spawn on the runner
+  path was refused by the daemon (`parent_session_id must be a non-empty
+  str`) on any LSM. Its routing test faked the same wrong attribute on a
+  `MagicMock`. Found by driving `live_session.py --isolated` locally.
 
 ### What phase 2b decided
 

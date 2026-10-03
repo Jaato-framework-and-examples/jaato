@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from jaato_server.shared import user_tier
 from jaato_server.shared.path_utils import normalize_path
 from .bundle import REFERENCE_NON_SOURCE_FILENAMES
 from .models import ReferenceSource, SourceType, InjectionMode, VALID_CONTENTS_KEYS
@@ -615,7 +616,7 @@ def config_path_candidates(
     if workspace_path:
         ws = Path(workspace_path)
         out += [str(ws / "references.json"), str(ws / ".references.json")]
-    out.append(str(Path.home() / ".config" / "jaato" / "references.json"))
+    out.append(str(user_tier.home_path(".config/jaato/references.json")))
     return tuple(out)
 
 
@@ -651,17 +652,13 @@ def load_config(
 
     if path is None:
         # Try default locations — workspace-relative paths only if workspace is set
+        # The HOME candidate is the daemon's snapshot copy on a runner
+        # (``user_tier.home_path``), so a confined runner never probes a
+        # home directory its boundary denies.
         for default_path in map(Path, config_path_candidates(None, workspace_path, env_var="")):
-            try:
-                if default_path.exists():
-                    path = str(default_path)
-                    break
-            except OSError:
-                # A confined session is correctly denied this default location
-                # (e.g. ~/.config/jaato/references.json under AppArmor — exists()
-                # raises PermissionError for EACCES, it does not return False).
-                # Skip it and try the next candidate.
-                continue
+            if default_path.exists():
+                path = str(default_path)
+                break
 
     # Start with defaults
     config = ReferencesConfig(

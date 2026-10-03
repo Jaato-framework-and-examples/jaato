@@ -27,6 +27,7 @@ import pytest
 
 from jaato_server.server.confinement import Boundary
 from jaato_server.server.confinement.selinux import (
+    REQUIRED_POLICY_VERSION,
     RUNNER_PROBE_CONTEXT,
     SELinuxBackend,
     policy_marker_context,
@@ -115,7 +116,7 @@ def _session_tmpdirs_under_tmp_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         selinux, "session_tmpdir",
         lambda sid, cid=None: str(tmp_path / "systmp" / f"jaato-{cid}" / sid))
-_POLICY = {RUNNER_PROBE_CONTEXT, policy_marker_context(1),
+_POLICY = {RUNNER_PROBE_CONTEXT, policy_marker_context(REQUIRED_POLICY_VERSION),
            "unconfined_u:unconfined_r:jaato_runner_t:s0"}
 
 
@@ -216,8 +217,10 @@ def test_each_entry_gets_its_type(tmp_path):
     got = {os.path.relpath(p, ws): _type(l) for p, l in kernel.labels.items()}
     assert got["."] == "jaato_managed_ws_t"
     assert got["src/m.py"] == "jaato_managed_ws_t"
-    assert got[".jaato/agents"] == "jaato_authored_t"
-    assert got[".jaato/agents/a.md"] == "jaato_authored_t"
+    assert got[".jaato/agents"] == "jaato_agent_config_t"
+    assert got[".jaato/agents/a.md"] == "jaato_agent_config_t"
+    assert got[".jaato/templates"] == "jaato_authored_t"
+    assert got[".jaato/prompts"] == "jaato_prompts_t"
     assert got[".jaato/references-claims"] == "jaato_claims_t"
     assert got[".jaato/sessions"] == "jaato_managed_ws_t"
     assert got[".tmp"] == "jaato_tmp_t"
@@ -250,8 +253,11 @@ def test_missing_authored_dirs_are_created_before_the_walk(tmp_path):
     ws = tmp_path / "bare"
     ws.mkdir()
     _backend(kernel, tmp_path).provision("s1", Boundary(workspace_path=str(ws)))
-    for name in ("profiles", "instructions", "scripts", "templates"):
+    for name in ("profiles", "instructions", "scripts"):
+        assert _type(kernel.labels[str(ws / ".jaato" / name)]) == "jaato_agent_config_t"
+    for name in ("templates", "references"):
         assert _type(kernel.labels[str(ws / ".jaato" / name)]) == "jaato_authored_t"
+    assert _type(kernel.labels[str(ws / ".jaato" / "prompts")]) == "jaato_prompts_t"
 
 
 def test_a_home_directory_is_refused(tmp_path, monkeypatch):
