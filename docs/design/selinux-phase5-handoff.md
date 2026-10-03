@@ -16,6 +16,14 @@ Phase 5 adds two things ([design §9 and the feature map](selinux-backend.md)):
   `jaato_policy_v5_t`) grants `jaato_runner_t` `security:compute_av`, and
   no other jaato domain.
 
+**Second run (after 1f78ee65).** The first run passed the install
+command end to end and found that libselinux was loaded through
+`find_library` (now by its SONAME), that a program the child may not even
+`stat` read as "command not found" with no hint (now judged), and that the
+child's "cannot ask" is `EINVAL`. No policy change (still 1.8.0). The live
+hint runs are now `--hint exec` and `--hint see`; expect both to pass, no
+`ldconfig` AVC anywhere, and the probe at 69/69.
+
 CI checks the policy rules and the command's steps with fakes. This run
 answers what CI cannot: does `install` produce a ready host, and does a
 real refusal get a real hint? The output is one results file.
@@ -26,8 +34,8 @@ real refusal get a real hint? The output is one results file.
   - `probe_policy.py`: the phase 4 probe plus two hint checks (the runner
     may ask the policy, a child may not).
   - `live_session.py --hint`: the model runs a program on the PATH that is
-    labelled `var_t` for the run, which the child may not execute; the
-    tool checks that the result carries an SELinux `denial_hint`.
+    labelled `man_t` (`--hint exec`: seen, not executable) or `var_t`
+    (`--hint see`: not seen) for the run; the tool checks that the result carries an SELinux `denial_hint`.
 
 ## Rules for this run
 
@@ -104,10 +112,14 @@ file) and `hint: a child may not ask the policy` (`DENIED`).
 ```bash
 cd /root/jaato-phase5
 L=/root/jaato/jaato-server/selinux/tools/live_session.py
-/opt/jaato/venv/bin/python $L --root /srv/jaato-5 --hint | tee live-hint.txt
-cp /srv/jaato-5/live-session.json live-hint.json; cp /srv/jaato-5/d.out live-hint-d.out
-/opt/jaato/venv/bin/python $L --root /srv/jaato-5-uid --hint --as-uid 1000 | tee live-hint-uid.txt
-cp /srv/jaato-5-uid/live-session.json live-hint-uid.json
+for kind in exec see; do
+  /opt/jaato/venv/bin/python $L --root /srv/jaato-5-$kind --hint $kind | tee live-hint-$kind.txt
+  cp /srv/jaato-5-$kind/live-session.json live-hint-$kind.json
+  cp /srv/jaato-5-$kind/d.out live-hint-$kind-d.out
+  /opt/jaato/venv/bin/python $L --root /srv/jaato-5-$kind-uid --hint $kind --as-uid 1000 \
+    | tee live-hint-$kind-uid.txt
+  cp /srv/jaato-5-$kind-uid/live-session.json live-hint-$kind-uid.json
+done
 # regressions
 /opt/jaato/venv/bin/python $L --root /srv/jaato-5-pool --sessions 2 | tee live-pool.txt
 /opt/jaato/venv/bin/python $L --root /srv/jaato-5-iso --isolated rw | tee live-iso.txt
@@ -115,8 +127,8 @@ cp /srv/jaato-5-uid/live-session.json live-hint-uid.json
 
 | Check | What a FAIL means |
 |---|---|
-| the probe program was refused (it did not run) | the child may execute `var_t`, so there was nothing to explain |
-| the refused command's result carries an SELinux `denial_hint` | the runner could not ask the policy (an AVC on `security_t` `compute_av`), could not read the file's label, or the cli output was not recognised; quote the tool result from `live-hint.json` |
+| the probe program was refused (it did not run) | the child may execute `man_t` (exec) or see `var_t` (see), so there was nothing to explain |
+| the refused command's result carries an SELinux `denial_hint (exec)` / `(see)`; the `see` hint says the program exists and the shell cannot see it | the runner could not ask the policy (an AVC on `security_t` `compute_av`), could not read the file's label, or the cli output was not recognised; quote the tool result from `live-hint.json` |
 | the phase 2b to 4 checks in the other runs | a regression |
 
 Quote the `denial_hint` text in the results. `/usr/local/bin/jaato-hint-probe`

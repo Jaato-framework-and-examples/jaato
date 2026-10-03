@@ -33,10 +33,11 @@ and every later one by that same slot (the profile sets
 ``shell_spawn`` (a pty, ``jaato_devpts_t``) instead of ``cli``, and checks
 that it got one; it needs ``jaato-server[interactive]`` in the venv.
 
-``--hint`` (phase 5) installs a program on the PATH labelled ``var_t``,
-which ``jaato_child_t`` may not execute, has the model run it, and checks
-that the refused command's tool result carries an SELinux ``denial_hint``
-(read back with ``request_history``).  The program is removed afterwards.
+``--hint exec|see`` (phase 5) installs a program on the PATH that
+``jaato_child_t`` may see but not execute (``man_t``), or may not even see
+(``var_t``), has the model run it, and checks that the refused command's
+tool result carries an SELinux ``denial_hint`` (read back with
+``request_history``).  The program is removed afterwards.
 
 ``--as-uid`` gives the workspace to that uid and runs the daemon with
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
@@ -72,12 +73,15 @@ COMMAND = "id -Z; echo probe > selinux-probe.txt && echo WSOK"
 #: --pty: the same command on a pseudo-terminal (interactive_shell, which
 #: needs jaato-server[interactive]); ``tty`` names the pty it got.
 PTY_COMMAND = "sh -c 'id -Z; tty; echo probe > selinux-probe.txt && echo WSOK'"
-#: --hint (phase 5): a program on the PATH the child domain may not execute
-#: (labelled var_t for the run), so the kernel refuses it and the runner's
-#: denial_hint names SELinux.  On the PATH because cli refuses a program
-#: named by a path outside it before it runs.
+#: --hint (phase 5): a program on the PATH the child domain may not use, so
+#: the kernel refuses it and the runner's denial_hint names SELinux.  On the
+#: PATH because cli refuses a program named by a path outside it.  Its label
+#: per kind: ``exec`` = man_t (the child may see it, not execute it: the
+#: shell says Permission denied); ``see`` = var_t (the child may not even
+#: stat it: the shell says not found).
 HINT_PROGRAM = Path("/usr/local/bin/jaato-hint-probe")
 HINT_COMMAND = "id -Z; jaato-hint-probe; echo RC=$?"
+HINT_LABELS = {"exec": "man_t", "see": "var_t"}
 ISO_FILE = "iso-probe.txt"
 CHILD_PROFILE = "selinux3child"
 
@@ -343,9 +347,7 @@ def _check_processes(result: dict) -> str:
     record("the model's command runs in jaato_child_t at the same level",
            type_of(child) == "jaato_child_t" and level_of(child) == level,
            f"id -Z said: {child!r}; output: {output!r}")
-    record("the command wrote the workspace", "WSOK" in output, repr(output))
-    if result.get("pty"):
-        _check_pty(output)
+    _check_command(output, result)
     record("the turn completed without errors", not result["errors"]
            and any(e["success"] for e in result["ends"]), json.dumps(result)[:600])
     modes = {s.get("sandbox_mode") for s in result["sessions"]}
@@ -354,11 +356,11 @@ def _check_processes(result: dict) -> str:
     return level
 
 
-def _install_hint_program() -> None:
-    """A program on the PATH that jaato_child_t may not execute (var_t)."""
+def _install_hint_program(kind: str) -> None:
+    """A program on the PATH that jaato_child_t may not use (HINT_LABELS)."""
     HINT_PROGRAM.write_text("#!/bin/sh\necho HINT-PROBE-RAN\n")
     HINT_PROGRAM.chmod(0o755)
-    subprocess.run(["chcon", "-t", "var_t", str(HINT_PROGRAM)], check=True)
+    subprocess.run(["chcon", "-t", HINT_LABELS[kind], str(HINT_PROGRAM)], check=True)
 
 
 def _hints(history: list) -> List[str]:
@@ -372,15 +374,27 @@ def _hints(history: list) -> List[str]:
     return found
 
 
-def _check_hint(result: dict) -> None:
+def _check_hint(result: dict, kind: str) -> None:
     """--hint: the kernel refused the program, and the result says SELinux did."""
     output = "\n".join(OUTPUT)
     hints = _hints(result.get("history") or [])
+    want = "let execute" if kind == "exec" else "cannot see it"
     record("the probe program was refused (it did not run)",
            "HINT-PROBE-RAN" not in output, repr(output[-300:]))
-    record("the refused command's result carries an SELinux denial_hint",
-           any("SELinux refused this" in h and "jaato_child_t" in h for h in hints),
+    record(f"the refused command's result carries an SELinux denial_hint ({kind})",
+           any("SELinux refused this" in h and "jaato_child_t" in h
+               and HINT_LABELS[kind] in h and want in h
+               for h in hints),
            f"hints: {hints}")
+
+
+def _check_command(output: str, result: dict) -> None:
+    """The command's own output; a --hint command writes nothing (_check_hint)."""
+    if result.get("hint"):
+        return
+    record("the command wrote the workspace", "WSOK" in output, repr(output))
+    if result.get("pty"):
+        _check_pty(output)
 
 
 def _check_pty(output: str) -> None:
@@ -468,7 +482,8 @@ def _check_labels(ws: Path, level: str, isolated: Optional[str] = None) -> Dict[
     """The workspace, its authored config and a file the child created.
 
     In isolated mode no child runs a command, so the created-file check
-    is ``_check_isolated``'s, on ``ISO_FILE``.
+    is ``_check_isolated``'s, on ``ISO_FILE``; a --hint command creates no
+    file, so the caller passes its mode in *isolated* too.
     """
     labels = {str(p): _label(p) for p in (
         ws, ws / ".jaato" / "profiles", ws / "selinux-probe.txt")}
@@ -517,8 +532,9 @@ def _parse() -> argparse.Namespace:
                     help="phase 4: run N sessions in turn and check pool reuse")
     ap.add_argument("--pty", action="store_true",
                     help="run the command through interactive_shell (a pty)")
-    ap.add_argument("--hint", action="store_true",
-                    help="phase 5: run a program SELinux refuses, check the denial_hint")
+    ap.add_argument("--hint", choices=tuple(HINT_LABELS),
+                    help="phase 5: run a program SELinux refuses (exec) or hides "
+                         "(see), check the denial_hint")
     return ap.parse_args()
 
 
@@ -531,22 +547,29 @@ def _ratelimit(value: Optional[str]) -> str:
     return old
 
 
+def _refused_combination(args: argparse.Namespace) -> Optional[str]:
+    """Why these options cannot run together, or ``None``."""
+    if args.pty and args.isolated:
+        return ("--pty drives the main session's command; the isolated "
+                "sub-runner may exec nothing")
+    if args.hint and (args.pty or args.isolated):
+        return "--hint drives the main session's cli command"
+    return None
+
+
 def main() -> int:
     args = _parse()
     if os.geteuid() != 0:
         print("run as root", file=sys.stderr)
         return 2
     root = Path(args.root)
-    if args.pty and args.isolated:
-        print("--pty drives the main session's command; the isolated "
-              "sub-runner may exec nothing", file=sys.stderr)
+    refusal = _refused_combination(args)
+    if refusal:
+        print(refusal, file=sys.stderr)
         return 2
-    if args.hint and (args.pty or args.isolated):
-        print("--hint drives the main session's cli command", file=sys.stderr)
-        return 2
-    ws = _prepare(root, args.as_uid, args.isolated, args.pty, args.hint)
+    ws = _prepare(root, args.as_uid, args.isolated, args.pty, bool(args.hint))
     if args.hint:
-        _install_hint_program()
+        _install_hint_program(args.hint)
     rundir = Path("/run/jaato-2b")
     rundir.mkdir(parents=True, exist_ok=True)
     log = root / "d.out"
@@ -568,13 +591,15 @@ def main() -> int:
         return _report(root, log, marker, {})
     result["isolated"] = args.isolated
     result["pty"] = args.pty
+    result["hint"] = args.hint
     if args.hint:
-        _check_hint(result)
+        _check_hint(result, args.hint)
     level = _check_processes(result)
     _check_pool(log, args.sessions, ws, marker)
     if args.isolated:
         _check_isolated(ws, level, args.isolated, marker)
-    return _report(root, log, marker, _check_labels(ws, level, args.isolated))
+    return _report(root, log, marker,
+                   _check_labels(ws, level, args.isolated or args.hint))
 
 
 if __name__ == "__main__":

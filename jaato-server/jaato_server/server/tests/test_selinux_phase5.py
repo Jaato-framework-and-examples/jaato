@@ -29,8 +29,42 @@ _INSTALL = "jaato-server/jaato_server/server/confinement/selinux_install.py"
 _GRANTS = "jaato-server/jaato_server/shared/confinement_grants.py"
 _SELINUX = "jaato-server/jaato_server/server/confinement/selinux.py"
 _RUNNER = "jaato-server/jaato_server/server/runner/session.py"
+_LSM = "jaato-server/jaato_server/shared/lsm_label.py"
+_CLI = "jaato-server/jaato_server/shared/plugins/cli/plugin.py"
 
 REVERSIONS = [
+    Reversion(
+        target=_LSM,
+        find="        return ctypes.CDLL(LIBSELINUX_SONAME, use_errno=True)\n",
+        replace="        import ctypes.util\n"
+                "        return ctypes.CDLL(ctypes.util.find_library(\"selinux\") "
+                "or LIBSELINUX_SONAME, use_errno=True)\n",
+        test="test_libselinux_is_loaded_by_its_soname",
+        because="find_library runs ldconfig and gcc in a confined process "
+                "(phase 5 kernel run: the probe crashed, every hint paid an AVC)",
+    ),
+    Reversion(
+        target=_GRANTS,
+        find="        missing = _SHELL_NOT_FOUND.match(line)\n        if missing:\n",
+        replace="        missing = None\n        if missing:\n",
+        test="test_a_program_the_child_cannot_see_gets_a_hint",
+        because="a program SELinux hides reads as 'command not found' and the "
+                "model goes looking for it (phase 5 kernel run)",
+    ),
+    Reversion(
+        target=_CLI,
+        find="        if (\"Permission denied\" not in output and \"not found\" not in output\n",
+        replace="        if (\"Permission denied\" not in output\n",
+        test="test_the_cli_gate_lets_not_found_through",
+        because="the hint would never be asked for a hidden program",
+    ),
+    Reversion(
+        target=_INSTALL,
+        find="        return 0 if line.startswith(\"ready\") else 1\n",
+        replace="        return 0\n",
+        test="test_status_exits_one_when_not_ready",
+        because="a script could not test readiness by exit code",
+    ),
     Reversion(
         target=_INSTALL,
         find="    verb = \"-m\" if _fcontext_defined(run, spec) else \"-a\"\n",
@@ -61,7 +95,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_GRANTS,
-        find="        if not _dac_allows(resolved, refused):\n            continue\n",
+        find="        if refused != SEE and not _dac_allows(resolved, refused):\n            continue\n",
         replace="",
         test="test_a_mode_bit_refusal_gets_no_hint",
         because="a missing execute bit would be blamed on SELinux",
@@ -209,7 +243,7 @@ def policy(monkeypatch, tmp_path):
     prog = tmp_path / "tool"
     prog.write_text("#!/bin/sh\n")
     prog.chmod(0o755)
-    answers = {"execute": False, "execute_no_trans": False, "read": True}
+    answers = {"execute": False, "execute_no_trans": False, "read": True, "getattr": True}
     monkeypatch.setattr(lsm_label, "load_libselinux", lambda: object())
     monkeypatch.setattr(lsm_label, "selinux_file_context", lambda lib, p: _FILE)
     monkeypatch.setattr(lsm_label, "selinux_allowed",
@@ -282,3 +316,63 @@ def test_bootstrap_installs_the_child_context():
     assert cg.selinux_child_context() == _CHILD
     _install_confinement_grants(env(None))
     assert cg.selinux_child_context() is None
+
+
+# ------------------------------------------------------------------ kernel run 1 (1f78ee65)
+
+
+def test_libselinux_is_loaded_by_its_soname(monkeypatch):
+    import ctypes
+    import ctypes.util
+
+    asked = []
+    monkeypatch.setattr(ctypes.util, "find_library",
+                        lambda name: (_ for _ in ()).throw(AssertionError("find_library")))
+    monkeypatch.setattr(ctypes, "CDLL", lambda name, **kw: asked.append(name) or object())
+    assert lsm_label.load_libselinux() is not None
+    assert asked == ["libselinux.so.1"]
+
+
+def test_a_program_the_child_cannot_see_gets_a_hint(policy):
+    prog, answers = policy
+    answers["getattr"] = False
+    hint = cg.explain_denial(
+        command=prog.name, output=f"/bin/sh: line 1: {prog.name}: command not found",
+        returncode=127, search_path=str(prog.parent), cwd=None)
+    assert hint and "even see" in hint and "cannot see it" in hint
+
+
+def test_the_apparmor_path_does_not_judge_a_missing_program(policy):
+    prog, _ = policy
+    cg.set_confinement_grants({"profile_name": "p", "exec_scope": "unscoped", "rules": []})
+    try:
+        assert cg.explain_denial(
+            command=prog.name, output=f"sh: 1: {prog.name}: not found",
+            returncode=127, search_path=str(prog.parent), cwd=None) is None
+    finally:
+        cg.set_confinement_grants(None)
+
+
+def test_the_cli_gate_lets_not_found_through(monkeypatch):
+    from jaato_server.shared.plugins.cli import plugin as cli
+
+    seen = []
+    monkeypatch.setattr(cli, "explain_denial", lambda **kw: seen.append(kw) or "HINT")
+    p = cli.CLIToolPlugin()
+    p._apparmor_child_transition = lambda: None
+    monkeypatch.setattr(p, "_build_subprocess_env", lambda: ({"PATH": "/bin"}, None))
+    out = p._with_denial_hint({"returncode": 0, "stderr": "sh: 1: tool: not found"},
+                              {"command": "tool; echo RC=$?"})
+    assert seen and out["denial_hint"] == "HINT"
+
+
+def test_status_exits_one_when_not_ready(monkeypatch, capsys):
+    monkeypatch.setattr(selinux_install, "readiness_line", lambda: "not ready: x")
+    assert selinux_install.main(["status"]) == 1
+    monkeypatch.setattr(selinux_install, "readiness_line", lambda: "ready: y")
+    assert selinux_install.main(["status"]) == 0
+
+
+def test_a_home_without_a_user_tier_is_named(tmp_path):
+    assert selinux_install.relabel_homes(_Run(), [str(tmp_path)]) == [
+        f"skipped {tmp_path}: no ~/.jaato yet (relabel it with restorecon -R once it exists)"]

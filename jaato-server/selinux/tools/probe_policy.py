@@ -513,8 +513,8 @@ print("OK" if labels == {CTX} else f"LEAK {labels}")'''))
 # runner's denial hint does (phase 5). Prints OK and the decision, or DENIED
 # with the errno when the caller may not ask.
 ASK_POLICY = '''
-import ctypes, ctypes.util, errno
-lib = ctypes.CDLL(ctypes.util.find_library("selinux"), use_errno=True)
+import ctypes, errno
+lib = ctypes.CDLL("libselinux.so.1", use_errno=True)  # never find_library (ldconfig, gcc)
 class AV(ctypes.Structure):
     _fields_ = [("allowed", ctypes.c_uint32), ("decided", ctypes.c_uint32),
                 ("auditallow", ctypes.c_uint32), ("auditdeny", ctypes.c_uint32),
@@ -530,10 +530,10 @@ rc = lib.security_compute_av_flags({src!r}.encode(), {tgt!r}.encode(), cls, bit,
 err = ctypes.get_errno()
 if rc == 0:
     print("OK", "allowed" if av.allowed & bit else "refused")
-elif err in (errno.EACCES, errno.EPERM):
-    print("DENIED", errno.errorcode[err])
 else:
-    print("OSERROR", errno.errorcode.get(err, err))
+    # No answer.  A child is refused reading selinuxfs's class index,
+    # which libselinux reports as EINVAL (phase 5 kernel run).
+    print("DENIED", errno.errorcode.get(err, err))
 '''
 
 

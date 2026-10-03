@@ -36,7 +36,6 @@ before plugin discovery.
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import os
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -153,10 +152,22 @@ class AvDecision(ctypes.Structure):
 _SELINUX_AVD_FLAGS_PERMISSIVE = 0x0001
 
 
+#: libselinux's SONAME, the name the dynamic linker resolves.
+LIBSELINUX_SONAME = "libselinux.so.1"
+
+
 def load_libselinux() -> Optional[ctypes.CDLL]:
-    name = ctypes.util.find_library("selinux") or "libselinux.so.1"
+    """libselinux by its SONAME, or ``None`` when it is not installed.
+
+    Never ``ctypes.util.find_library``, for the reason
+    ``shared/private_tmp.py`` and the notebook backend give: it runs
+    ``ldconfig -p`` and, where that is refused (a confined runner),
+    compiles with gcc in a temp dir.  Phase 5 kernel run: the probe, which
+    has no writable temp dir, crashed there, and a live runner paid a
+    refused ``ldconfig`` and a gcc run on every denial hint.
+    """
     try:
-        return ctypes.CDLL(name, use_errno=True)
+        return ctypes.CDLL(LIBSELINUX_SONAME, use_errno=True)
     except OSError:
         return None
 

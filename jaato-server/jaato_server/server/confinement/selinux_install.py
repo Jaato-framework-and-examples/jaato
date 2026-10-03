@@ -8,6 +8,7 @@ was written for.  The steps are the ones every kernel handoff ran by hand:
     jaato-selinux install [--home DIR ...]   build, load, label (as root)
     jaato-selinux uninstall                  remove the module and the label
     jaato-selinux status                     what a daemon started now gets
+                                             (exit 0 ready, 1 not ready)
 
 ``install`` builds with the host's own ``selinux-policy-devel`` (a module
 compiled against another policy release is not guaranteed to load), loads
@@ -91,13 +92,16 @@ def label_venv(run: Runner, prefix: str) -> str:
 
 
 def relabel_homes(run: Runner, homes: Sequence[str]) -> List[str]:
-    """``restorecon -R`` each home's ``~/.jaato`` that exists."""
+    """``restorecon -R`` each home's ``~/.jaato``; one line per home."""
     done = []
     for home in homes:
         user_dir = os.path.join(home, ".jaato")
         if os.path.isdir(user_dir):
             _run(run, ["restorecon", "-R", user_dir])
-            done.append(user_dir)
+            done.append(f"relabelled {user_dir}")
+        else:
+            done.append(f"skipped {home}: no ~/.jaato yet (relabel it with "
+                        f"restorecon -R once it exists)")
     return done
 
 
@@ -125,7 +129,7 @@ def install(homes: Sequence[str], run: Runner = subprocess.run) -> List[str]:
         done.append("system interpreter: its label is the system's, left alone")
     else:
         done.append(f"labelled {label_venv(run, prefix)} lib_t")
-    done += [f"relabelled {d}" for d in relabel_homes(run, homes)]
+    done += relabel_homes(run, homes)
     return done
 
 
@@ -151,8 +155,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("status", help="what a daemon started now would get")
     args = ap.parse_args(argv)
     if args.cmd == "status":
-        print(readiness_line())
-        return 0
+        line = readiness_line()
+        print(line)
+        return 0 if line.startswith("ready") else 1
     if os.geteuid() != 0:
         print(f"jaato-selinux {args.cmd}: run as root", file=sys.stderr)
         return 2

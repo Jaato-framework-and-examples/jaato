@@ -391,10 +391,20 @@ _SHELL_DENIED = re.compile(
     r"(?P<path>.+?): Permission denied$"
 )
 
+#: ``sh: 1: tool: not found`` / ``bash: line 1: tool: command not found``: a
+#: SHELL that found no program by that name.  SELinux makes a program it
+#: will not let the session even ``stat`` look exactly like that (phase 5
+#: kernel run: ``jaato_child_t`` may not ``getattr`` a ``var_t`` file).
+_SHELL_NOT_FOUND = re.compile(
+    r"^(?:\S*/)?(?:bash|sh|dash|zsh|ksh|mksh)(?:: line \d+|: \d+)?: "
+    r"(?P<path>.+?): (?:command )?not found$"
+)
+
 #: What a candidate may be refused: exec, read (a script its interpreter
 #: could not open), or either (a shell names the script it tried to run,
-#: which the kernel refuses for exec, or its interpreter for read).
-EXEC, READ, EXEC_OR_READ = "x", "r", "x|r"
+#: which the kernel refuses for exec, or its interpreter for read); and,
+#: judged under SELinux only, seeing it at all (``getattr``).
+EXEC, READ, EXEC_OR_READ, SEE = "x", "r", "x|r", "see"
 
 
 def _denied_candidates(
@@ -404,6 +414,10 @@ def _denied_candidates(
     found: List[Tuple[str, str]] = []
     for line in text.splitlines():
         line = line.strip()
+        missing = _SHELL_NOT_FOUND.match(line)
+        if missing:
+            found.append((missing.group("path"), SEE))
+            continue
         if "Permission denied" not in line:
             continue
         read = _READ_DENIED.search(line)
@@ -566,7 +580,8 @@ def _dac_allows(path: str, refused: str) -> bool:
 
 #: The permissions SELinux checks for each refusal, in the child's own
 #: domain (a command a child runs stays in ``jaato_child_t``).
-_SELINUX_PERMS = {EXEC: ("execute", "execute_no_trans"), READ: ("read",)}
+_SELINUX_PERMS = {EXEC: ("execute", "execute_no_trans"), READ: ("read",),
+                  SEE: ("getattr",)}
 
 
 def _selinux_refusal(
@@ -582,7 +597,8 @@ def _selinux_refusal(
     if file_ctx is None:
         return None
     for refused in ((EXEC, READ) if kind == EXEC_OR_READ else (kind,)):
-        if not _dac_allows(resolved, refused):
+        # Seeing a file needs search on its directory, which the shell had.
+        if refused != SEE and not _dac_allows(resolved, refused):
             continue
         verdicts = [selinux_allowed(lib, child, file_ctx, "file", perm)
                     for perm in _SELINUX_PERMS[refused]]
@@ -595,14 +611,16 @@ def _selinux_hint(child: str, named: str, resolved: str, refused: str,
                   file_ctx: str) -> str:
     from jaato_server.shared.lsm_label import parse_selinux_context
 
-    verb = "execute" if refused == EXEC else "read"
+    verb = {EXEC: "execute", READ: "read", SEE: "even see"}[refused]
     shown = resolved if resolved == named else f"{resolved} (what {named} resolves to)"
     domain = parse_selinux_context(child)
     ftype = parse_selinux_context(file_ctx)
+    hidden = (" It exists: the shell reports it as not found because it "
+              "cannot see it." if refused == SEE else "")
     return (
         f"SELinux refused this: the session's commands run in "
         f"{domain.type if domain else child}, which the jaato policy does not "
-        f"let {verb} {shown} (labelled {ftype.type if ftype else file_ctx}). "
+        f"let {verb} {shown} (labelled {ftype.type if ftype else file_ctx}).{hidden} "
         f"The kernel will refuse it again however it is invoked, so do not "
         f"retry it or look for another route to the same file; tell the user "
         f"what was refused. An operator can label the file with a type the "

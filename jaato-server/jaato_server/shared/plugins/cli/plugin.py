@@ -1567,7 +1567,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             return result
         returncode = result.get('returncode')
         output = f"{result.get('stderr') or ''}\n{result.get('error') or ''}"
-        if "Permission denied" not in output and returncode != 126:
+        if ("Permission denied" not in output and "not found" not in output
+                and returncode != 126):
             return result
         registry = self._plugin_registry
         hint = explain_denial(

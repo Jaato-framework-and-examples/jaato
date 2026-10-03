@@ -604,7 +604,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
-| 5 | **implemented, not yet run on a kernel**: `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
+| 5 | **implemented; one kernel run (1f78ee65), its fixes not yet re-run**: `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
 
 ### What the phase 2a kernel run found
 
@@ -812,6 +812,37 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
 
+### What the phase 5 kernel run found (1f78ee65)
+
+* **`jaato-selinux` works as designed**: `status` named the remedy
+  before install; `install` (three times) ended `ready: policy module
+  v5`, with one venv rule however often it ran; `uninstall` removed the
+  module and the rule. Probe 67/67 on the earlier checks; pool and
+  isolated regressions 13/13 and 11/11.
+* **`load_libselinux` called `ctypes.util.find_library`**, which runs
+  `ldconfig` (refused) and then gcc in a temp dir: the probe, with no
+  writable temp dir, crashed there, and a live runner paid a refused
+  `ldconfig` and a gcc run on every hint. **Fixed:** libselinux is
+  loaded by its SONAME, `libselinux.so.1`, as `shared/private_tmp.py`
+  and the notebook backend already avoid `find_library`.
+* **The runner may ask the policy and a child may not**, checked by
+  hand: the child is refused one step before `compute_av`, reading
+  selinuxfs's class index (a `dontaudit`-ed denial), which libselinux
+  reports as `EINVAL`. The probe now counts any failed query from the
+  child as "cannot ask".
+* **A program SELinux will not let the child `stat` gets no hint**: the
+  shell reports `command not found` (127), not `Permission denied`.
+  `var_t`, the live tool's label, is such a type. **Fixed:** a shell's
+  `not found` line is a candidate too, judged under SELinux only against
+  `getattr`, and its hint says the program exists and the shell cannot
+  see it. The live tool's `--hint exec|see` labels its program `man_t`
+  (seen, not executable) or `var_t` (not seen).
+* With a `man_t` program (a diagnostic run) the hint was correct, as
+  root and as uid 1000, including a symlinked PATH entry.
+* `jaato-selinux status` now exits 1 when the host is not ready, and a
+  `--home` with no `~/.jaato` is named rather than skipped silently. In
+  `--hint` mode the live tool no longer runs normal-mode checks.
+
 ### What phase 5 decided
 
 * **An install command, not an RPM.** jaato-server ships through pip, so an
@@ -830,7 +861,9 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   domains are not. Plain permissions are judged from the mode bits, and a
   bare name is resolved by them, because `access(2)` asks the policy too.
   A question the kernel will not answer gives no hint.
-* **Coverage is the AppArmor hint's:** `cli` only. An isolated
+* **Coverage is the AppArmor hint's**, plus one refusal AppArmor has no
+  equivalent for (a program SELinux will not let the child see): `cli`
+  only. An isolated
   sub-runner's refused `shell_spawn` (`interactive_shell`) still shows
   only as an AVC.
 
