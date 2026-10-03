@@ -1148,10 +1148,12 @@ def _isolated_gc(profile: Any, workspace_path: str, runner_user: Any = None) -> 
     if path is None:
         return None, None
     try:
-        return None, json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         logger.warning("isolated subagent: %s not used: %s", path, exc)
         return None, None
+    logger.info("isolated subagent: shipping GC config from %s", path)
+    return None, data
 
 
 def _runner_user_wire(runner_user: Any) -> Optional[Dict[str, Any]]:

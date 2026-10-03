@@ -577,7 +577,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 1b | **shipped**: the WS pre-init hook, its post-init re-run and IPC provisioning go through `AppArmorBackend.provision(Boundary)`; envelope **v8** carries `confinement: {backend, label, child_label}`; the runner's self-confinement, `//child` callback and thread verification go through `server/runner/lsm_confine.py`, which refuses a backend it cannot enter | none (refactor) |
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
-| 3 | **implemented; four kernel runs (the last at 79a0506a: probe 61/61 and live 8/8 in both modes, as root and as uid 1000), two follow-up fixes not yet re-run**: `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
+| 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | Bounded pool slots | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
@@ -786,6 +786,22 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
 * **A dropped user's `~/.jaato/gc.json` reached the parent and not the
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
+
+### The fifth phase 3 kernel run (6aabd3d4)
+
+* **Everything passes, and root and uid-1000 sub-runners now match**: the
+  same domain, level, log, GC and plugin set. No plugin is dropped, and a
+  `gc.json` in only the dropped user's `~/.jaato` reaches the sub-runner.
+* **Not exercised on the kernel**: real files under `~/.config/jaato`
+  (the user had none), and the refusal of credential files there. Unit
+  tests cover both (`test_home_config_ships_on_the_envelope.py`).
+* **The home-level `search` AVCs did not drop**, against the handoff's
+  prediction. They are the `resolve_config_search_path` existence probes
+  (the known follow-up), refused at the user's home instead of at
+  `~/.jaato`. They are harmless, and their count varies widely between
+  identical runs.
+* The daemon now logs where it found the `gc.json` it ships to an
+  isolated sub-runner.
 
 ### What phase 3 decided
 
