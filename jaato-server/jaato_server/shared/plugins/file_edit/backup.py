@@ -11,9 +11,11 @@ Features:
 - Restore from any backup
 """
 
+import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +36,44 @@ BACKUP_COUNT_ENV_VAR = "JAATO_FILE_BACKUP_COUNT"
 
 # Default max session operations before auto-cleanup
 DEFAULT_SESSION_MAX_OPS = 100
+
+# Upper bound, in UTF-8 BYTES, on every backup file name this module
+# writes (#1485).  ext4/xfs/btrfs allow 255 bytes per path component;
+# the margin covers filesystems that store names in a wider encoding
+# and the ``-N`` collision counter.
+BACKUP_NAME_BUDGET = 200
+
+# Hex digits of the path digest that identify a file in a backup name.
+BACKUP_HASH_HEX = 12
+
+# Separates the readable tail from the digest in a new-format name.
+# Never produced by the legacy flattening (which only emits ``_``), so
+# a name carrying ``~<12 hex>_`` is unambiguously new-format.
+_HASH_SEP = "~"
+
+# Bytes a name spends beyond the readable tail: ``~`` + digest,
+# ``_`` + microsecond timestamp (26), a collision counter (``-NNNN``,
+# 5) and ``.bak`` (4).
+_FIXED_NAME_BYTES = 1 + BACKUP_HASH_HEX + 1 + 26 + 5 + 4
+_TAIL_BUDGET = BACKUP_NAME_BUDGET - _FIXED_NAME_BYTES
+
+_NEW_FORMAT_STEM_RE = re.compile(
+    r"^(?P<tail>.*)" + re.escape(_HASH_SEP) + r"(?P<digest>[0-9a-f]{%d})$" % BACKUP_HASH_HEX
+)
+
+
+def _truncate_tail_utf8(text: str, budget: int) -> str:
+    """Keep the END of ``text`` within ``budget`` UTF-8 bytes.
+
+    The end is kept because it holds the file name, the part a reader
+    recognises.  The cut never splits a multibyte character.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= budget:
+        return text
+    cut = encoded[len(encoded) - budget:]
+    # Drop continuation bytes left at the front by the cut.
+    return cut.decode("utf-8", errors="ignore").lstrip("_")
 
 
 @dataclass
@@ -71,8 +111,23 @@ logger = logging.getLogger(__name__)
 class BackupManager:
     """Manages file backups for the file_edit plugin.
 
-    Backups are stored in .jaato/backups/ with the naming convention:
-    {path_with_underscores}_{ISO_timestamp}.bak
+    Backups are stored in the base dir (``<config_root>/sessions/<id>/backups/``)
+    with the naming convention (#1485)::
+
+        {readable_tail}~{sha256(resolved path)[:12]}_{ISO_timestamp}.bak
+
+    ``readable_tail`` is the workspace-relative path (absolute path for a
+    file outside the workspace) with separators flattened to ``_`` and
+    truncated FROM THE FRONT so the whole name is at most
+    :data:`BACKUP_NAME_BUDGET` UTF-8 bytes.  The digest, not the tail,
+    identifies the file: lookup by path recomputes the stem.  The
+    original path is recorded in the metadata file.
+
+    Legacy names (``{absolute_path_with_underscores}_{ISO_timestamp}.bak``,
+    written before #1485) are still found by :meth:`_get_backups_for_file`
+    and parsed by :meth:`list_all_backups`, so an upgrade orphans nothing.
+    The legacy scheme put the whole absolute path into one component and
+    failed with ENAMETOOLONG for paths over ~224 bytes.
 
     The ISO timestamp is rendered with **microsecond resolution**
     (``%Y-%m-%dT%H-%M-%S-%f``).  Older backups produced before the
@@ -102,7 +157,8 @@ class BackupManager:
     def __init__(
         self,
         base_dir: Optional[Path] = None,
-        session_max_ops: Optional[int] = None
+        session_max_ops: Optional[int] = None,
+        workspace_root: Optional[str] = None,
     ):
         """Initialize the backup manager.
 
@@ -111,7 +167,14 @@ class BackupManager:
                      resolved as an absolute path from the current working directory.
             session_max_ops: Max operations before auto-cleanup. Defaults to 100.
                             Set to 0 to disable auto-cleanup.
+            workspace_root: Workspace root.  Only shapes the READABLE part of
+                a backup name (workspace-relative where the file is inside
+                it); the digest over the absolute path identifies the file,
+                so a changed root never loses a backup.
         """
+        self._workspace_root: Optional[Path] = (
+            Path(workspace_root).resolve() if workspace_root else None
+        )
         # Always resolve to absolute path to avoid issues with CWD changes
         if base_dir is not None:
             self._base_dir = Path(base_dir).resolve()
@@ -361,25 +424,72 @@ class BackupManager:
         return len(self.get_pending_backups()) > 0
 
     def _sanitize_path(self, file_path: Path) -> str:
-        """Convert a file path to a safe backup filename prefix.
+        """Return the LEGACY backup-name prefix for ``file_path``.
 
-        Replaces path separators with underscores to create a flat
-        backup namespace while preserving uniqueness.
+        The whole resolved absolute path flattened into one component.
+        No longer used to WRITE names (it is unbounded, #1485); kept so
+        backups written before the change are still found.
 
         Args:
             file_path: Original file path
 
         Returns:
-            Safe string for use in backup filename
+            The legacy prefix (without the trailing ``_``)
         """
-        # Resolve to absolute path for consistency
         resolved = file_path.resolve()
-        # Replace path separators with underscores
         safe_name = str(resolved).replace("/", "_").replace("\\", "_")
-        # Remove leading underscore if present (from absolute paths)
         if safe_name.startswith("_"):
             safe_name = safe_name[1:]
         return safe_name
+
+    @staticmethod
+    def _path_digest(resolved: Path) -> str:
+        """First :data:`BACKUP_HASH_HEX` hex digits of sha256 of the path."""
+        return hashlib.sha256(
+            str(resolved).encode("utf-8", errors="surrogateescape")
+        ).hexdigest()[:BACKUP_HASH_HEX]
+
+    def _readable_tail(self, resolved: Path) -> str:
+        """The human-readable part of a backup name, before truncation.
+
+        Workspace-relative when ``resolved`` lies under the workspace
+        root, absolute otherwise; separators flattened to ``_``.
+        """
+        shown = str(resolved)
+        if self._workspace_root is not None:
+            try:
+                shown = str(resolved.relative_to(self._workspace_root))
+            except ValueError:
+                pass
+        flat = shown.replace("/", "_").replace("\\", "_").lstrip("_")
+        # Never let the readable part fake the digest separator.
+        return flat.replace(_HASH_SEP, "-")
+
+    def _backup_stem(self, file_path: Path) -> str:
+        """The bounded, path-identifying stem of a new-format backup name.
+
+        ``{tail}~{digest}``; at most ``BACKUP_NAME_BUDGET`` bytes once the
+        timestamp, a collision counter and ``.bak`` are appended.
+        """
+        resolved = Path(file_path).resolve()
+        tail = _truncate_tail_utf8(
+            self._readable_tail(resolved), _TAIL_BUDGET,
+        )
+        return f"{tail}{_HASH_SEP}{self._path_digest(resolved)}"
+
+    @staticmethod
+    def _split_backup_name(name: str):
+        """Split a backup file name into ``(stem, timestamp_str)``.
+
+        Returns ``None`` when the name has no ``_`` separator.  Works for
+        both formats: timestamps (and the ``-N`` counter) contain no ``_``.
+        """
+        if name.endswith(".bak"):
+            name = name[:-4]
+        parts = name.rsplit("_", 1)
+        if len(parts) != 2:
+            return None
+        return parts[0], parts[1]
 
     # ISO 8601-like timestamp format used in backup filenames.
     # Microseconds (``%f``) appended after seconds so rapid-
@@ -404,9 +514,9 @@ class BackupManager:
         Returns:
             Backup filename with timestamp
         """
-        safe_name = self._sanitize_path(file_path)
+        stem = self._backup_stem(file_path)
         timestamp = datetime.now().strftime(self._BACKUP_TIMESTAMP_FMT)
-        return f"{safe_name}_{timestamp}.bak"
+        return f"{stem}_{timestamp}.bak"
 
     @classmethod
     def _parse_backup_timestamp(
@@ -508,11 +618,17 @@ class BackupManager:
         if not self._base_dir.exists():
             return []
 
-        safe_prefix = self._sanitize_path(file_path) + "_"
-        backups = [
-            f for f in self._base_dir.glob("*.bak")
-            if f.name.startswith(safe_prefix)
-        ]
+        file_path = Path(file_path)
+        # New-format stem (#1485) and the legacy flattened prefix, so a
+        # backup written before the upgrade is still found.  The remainder
+        # after the stem must be a bare timestamp (it contains no ``_``),
+        # which also stops ``/a/b`` matching backups of ``/a/b_c``.
+        stems = (self._backup_stem(file_path), self._sanitize_path(file_path))
+        backups = []
+        for f in self._base_dir.glob("*.bak"):
+            split = self._split_backup_name(f.name)
+            if split is not None and split[0] in stems:
+                backups.append(f)
         return sorted(backups, key=lambda p: p.stat().st_mtime)
 
     def create_backup(
@@ -711,6 +827,29 @@ class BackupManager:
 
         return removed
 
+    def _describe_backup_name(self, backup_path: Path, st_mtime: float):
+        """Return ``(original_path, timestamp)`` for a backup file.
+
+        The original path comes from the metadata file when it holds the
+        backup.  Otherwise it is reconstructed from the name: a new-format
+        name carries only a (possibly truncated) readable tail, shown as
+        ``.../<tail>``; a legacy name is approximated by turning ``_``
+        back into ``/``, as before.
+        """
+        split = self._split_backup_name(backup_path.name)
+        if split is None:
+            name = backup_path.name[:-4] if backup_path.name.endswith(".bak") else backup_path.name
+            return name, datetime.fromtimestamp(st_mtime)
+        stem, timestamp_str = split
+        timestamp = self._parse_backup_timestamp(timestamp_str, st_mtime)
+        info = self._backup_metadata.get(str(backup_path))
+        if info is not None:
+            return info.original_path, timestamp
+        match = _NEW_FORMAT_STEM_RE.match(stem)
+        if match:
+            return ".../" + match.group("tail"), timestamp
+        return "/" + stem.replace("_", "/"), timestamp
+
     def list_all_backups(self) -> List[BackupInfo]:
         """List all backup files across all original files.
 
@@ -726,29 +865,9 @@ class BackupManager:
             try:
                 stat = backup_path.stat()
 
-                # Parse original path from backup filename
-                # Format: {sanitized_path}_{timestamp}.bak
-                name = backup_path.name[:-4]  # Remove .bak
-                # Split at last underscore followed by timestamp pattern
-                parts = name.rsplit("_", 1)
-                if len(parts) == 2:
-                    sanitized_path = parts[0]
-                    timestamp_str = parts[1]
-
-                    # Reconstruct approximate original path
-                    # Note: This is an approximation since we can't fully reverse sanitization
-                    original_path = "/" + sanitized_path.replace("_", "/")
-
-                    # Parse timestamp.  Microsecond-resolution
-                    # format first (post flake-fix), legacy
-                    # seconds-only format second, st_mtime
-                    # fallback last.
-                    timestamp = self._parse_backup_timestamp(
-                        timestamp_str, stat.st_mtime,
-                    )
-                else:
-                    original_path = name
-                    timestamp = datetime.fromtimestamp(stat.st_mtime)
+                original_path, timestamp = self._describe_backup_name(
+                    backup_path, stat.st_mtime,
+                )
 
                 backups.append(BackupInfo(
                     backup_path=backup_path,
@@ -779,21 +898,9 @@ class BackupManager:
         try:
             stat = backup_path.stat()
 
-            # Parse original path from backup filename
-            name = backup_path.name[:-4] if backup_path.name.endswith(".bak") else backup_path.name
-            parts = name.rsplit("_", 1)
-
-            if len(parts) == 2:
-                sanitized_path = parts[0]
-                timestamp_str = parts[1]
-                original_path = "/" + sanitized_path.replace("_", "/")
-
-                timestamp = self._parse_backup_timestamp(
-                    timestamp_str, stat.st_mtime,
-                )
-            else:
-                original_path = name
-                timestamp = datetime.fromtimestamp(stat.st_mtime)
+            original_path, timestamp = self._describe_backup_name(
+                backup_path, stat.st_mtime,
+            )
 
             return BackupInfo(
                 backup_path=backup_path,

@@ -601,7 +601,9 @@ class FileEditPlugin(RunnerForwardingMixin):
                 "PluginRegistry.set_config_root has fired before "
                 "expose_all (cf. PR-146).",
             )
-        self._backup_manager = BackupManager(base)
+        self._backup_manager = BackupManager(
+            base, workspace_root=self._workspace_root,
+        )
 
         # Log .jaato symlink detection for visibility
         if self._workspace_root:
