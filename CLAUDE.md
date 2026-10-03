@@ -4604,6 +4604,40 @@ uncorrelated refusal was discarded and the call waited out its timeout
 `server/tests/test_reference_curation_without_a_session_1475.py`, three
 reversions, over a real `JaatoIPCServer` and `IPCClient`.
 
+**A Claim That Revises (#1437).** Promotion refuses an id already in the
+catalog (`collision`), so a claim could only ADD a reference. A **revision
+claim** is the route for a new version: `proposeReference` with
+`revises: <id>` (the `id` may be omitted) records the full new entry and
+`revises: {id, file, digest}`, the sha256 of the catalog file's bytes when
+the claim was written. `reference.promote` on it replaces that file in
+place (`reference_curation._promote_revision`).
+
+| Rule | Why |
+|---|---|
+| **what may change**: name, description, tags, the document (`path` / inline `content`), and `links` when given (`[]` removes them, absent keeps them) | `claims.build_revision`, the revision twin of `build_proposed_reference`, re-run at promotion; containment, the inline cap and the stamped origin apply as to any proposal |
+| **what may not**: the id, `origin`, `mode`, any other key | a rename is a new reference plus `supersedes` (refused by name); an `origin` argument is refused; `is_claim` rejects a claim file whose entry id differs from the id it revises; the promoted file keeps every key but the document's from the current file |
+| **only a workspace catalog reference**, `local` or `inline`, in exactly one file | `claims.revision_target` reads the catalog the way the loader does (root + sub-bundles, no links); a user-tier or `references.json` source is in no file this workspace's curator writes; two files is `ambiguous` |
+| **stale changes nothing** | promotion re-reads the file and compares its digest; any change since the claim (another revision promoted first, an edited edge, a hand edit, a vanished reference) is `stale`. Of two revisions, the first promoted wins |
+| **a record of who revised it** | `revisions[]` gains `{claim_id, at, curated_by, generated_by?, created_by?, witnessed_by?, rendered_from?}` -- the promotion origin's fields without `kind`, `curated_by` the daemon's own stamp |
+| **written where it lives; its index reconciled** | the outcome's `bundle` is the reference's own (another `bundle` is `invalid_request`), and `reconcile_destination` runs as for a new entry, since the embedding text may have changed; an unindexed bundle is `none` |
+| **the owner gate** | promotion's `may_curate` |
+| **a plain proposal of a catalog id points at `revises`** | the refusal names the revision call first and invites no other id, and carries `revises: <id>` for a driver to re-call with; told "propose a different id", a writer in a kbwiki cascade invented `-r2` ids and spent its budget, and the hand workaround (delete, rewrite, re-promote) left inbound links dangling meanwhile |
+
+The curator's view: a revision row in `ReferenceClaimsEvent` adds
+`revises`, `revises_file`, `current` (the reference's fields now, path
+workspace-relative), `links_replaced` and `stale` / `stale_reason`, decided
+at listing time; `ReferenceCurationResultEvent.revised` says the file was
+replaced. The web Proposals rail draws a revision as a field-by-field diff
+(inline content as a line diff), with no bundle selector, and a stale one
+marked with its reason and Promote disabled. `listReferences` shows a
+proposed revision with `revises` and `stale`. Additive fields and a new
+`stale` / `ambiguous` category on an existing verb: no protocol bump (an
+older daemon answers a revision `collision`). Running sessions see the
+replaced file through the #1145 refresh, which now also stamps each
+reference file (below). Guards:
+`server/tests/test_a_claim_revises_a_reference_1437.py` (eight reversions)
+and `shared/tests/test_an_agent_proposes_a_revision_1437.py` (five).
+
 ### Typed Links Between References (wikiLLM Seam 3)
 
 The only edge between references was a MENTION: an id or path that happens
@@ -4717,6 +4751,7 @@ watched path, and a reload runs only when one moved
 |---|---|
 | each bundle directory, each tier root, `<ws>/.jaato/references` | creating, deleting or renaming a file moves its directory's mtime, and every framework writer (`write_contained`, `reconcile`, `merge`) replaces a file by rename, so an edit is a rename; a new sub-bundle is a new directory in a tier root |
 | each `references.json` candidate, individually | the workspace root's own mtime moves with every file created there |
+| each `*.json` file directly in those directories, individually (#1437) | an in-place edit (an editor saving over the file, any writer that does not rename) moves no directory mtime; the file's own mtime and size move |
 
 | Rule | Why |
 |---|---|
@@ -4727,11 +4762,10 @@ watched path, and a reload runs only when one moved
 | **opt-out** | `plugin_configs.references.refresh_catalog: false` keeps the load-once snapshot |
 
 No daemon push: every read path checks, so no write can be missed by a
-session that did not hear about it. Stated limit: an in-place edit by
-another tool (an editor saving over the file without a rename) moves no
-directory mtime and is seen only when something else in that directory
-changes, or on `references reload`. The refresh reads only paths the plugin
-already reads, so its AppArmor contribution is unchanged.
+session that did not hear about it. A file written within 2 s of a check
+reloads at each check until it settles (the `UNSETTLED` rule, now per
+file). The refresh reads only paths the plugin already reads, so its
+AppArmor contribution is unchanged.
 
 Guard:
 `shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,

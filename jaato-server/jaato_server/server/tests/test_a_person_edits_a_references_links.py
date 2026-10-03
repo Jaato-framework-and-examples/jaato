@@ -46,6 +46,7 @@ from jaato_server.shared.tests.reversion import Reversion
 
 _CATALOG = "jaato-server/jaato_server/server/reference_catalog.py"
 _ROUTER = "jaato-server/jaato_server/server/command_router.py"
+_CLAIMS = "jaato-server/jaato_server/shared/plugins/references/claims.py"
 
 REVERSIONS = [
     Reversion(
@@ -81,7 +82,7 @@ REVERSIONS = [
         test="TestAnAmbiguousIdIsNotEdited::test_a_duplicate_id_is_refused",
     ),
     Reversion(
-        target=_CATALOG,
+        target=_CLAIMS,
         find="                and os.path.isfile(os.path.join(path, BUNDLE_MANIFEST_FILENAME))):\n",
         replace="                ):\n",
         because=(

@@ -192,7 +192,7 @@ class TestAPromotionReachesARunningSession:
     def test_nothing_changed_reloads_nothing(self, tmp_path, monkeypatch):
         ws = tmp_path / "ws"
         _write_ref(_refs(ws), "base")
-        _age(_refs(ws), _refs(ws).parent, ws)
+        _age(_refs(ws) / "base.json", _refs(ws), _refs(ws).parent, ws)
         running = _session(ws)
         calls = []
         real = running._reload_from_disk

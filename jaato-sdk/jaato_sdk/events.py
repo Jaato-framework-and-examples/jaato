@@ -2903,6 +2903,9 @@ class ReferenceCurationResultEvent(Event):
         category: ``""`` on success; else ``invalid_request``,
             ``no_workspace``, ``not_owner``, ``unknown_bundle``,
             ``not_found``, ``invalid_claim``, ``collision``,
+            ``stale`` (a revision claim written against a version of the
+            reference that has since changed; nothing is written),
+            ``ambiguous`` (the revised id is in two catalog files),
             ``unsafe_path`` or ``io_error``.  Branch on this, not on
             ``error``.
         error: The reason, for a person.
@@ -2920,6 +2923,11 @@ class ReferenceCurationResultEvent(Event):
             its row, similarity matching cannot find it.
         reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
             ``updated`` / ``clean``.
+        revised: ``True`` when the claim was a REVISION of a reference
+            already in the catalog (``proposeReference`` with ``revises``):
+            the catalog file was replaced in place, its ``origin`` kept and
+            a record appended to its ``revisions``.  Additive; an older
+            daemon never sends it (and answers a revision ``collision``).
     """
     type: EventType = Field(default=EventType.REFERENCE_CURATION_RESULT)
     request_id: str = ""
@@ -2934,6 +2942,7 @@ class ReferenceCurationResultEvent(Event):
     bundle: str = ""
     reconcile: str = ""
     reconcile_detail: str = ""
+    revised: bool = False
 
 
 class ReferenceClaimsEvent(Event):
@@ -2958,6 +2967,16 @@ class ReferenceClaimsEvent(Event):
     catalog, the file is gone), empty when it would pass.  ``name``,
     ``description`` and ``content`` were written by a MODEL and reviewed by
     nobody: a client shows them as text, never as markup.
+
+    A REVISION claim (``proposeReference`` with ``revises``: a new version
+    of a reference already in the catalog) also carries ``revises`` (the
+    id), ``revises_file`` (where it lives), ``current`` (its fields now:
+    ``name``, ``description``, ``tags``, ``type``, ``path`` or ``content``,
+    ``links``) for a client to diff against, ``links_replaced`` (whether
+    the revision sets the edges or keeps them) and ``stale`` with
+    ``stale_reason`` -- decided now: the reference changed since the claim
+    was written, so a promotion would be refused ``stale``.  Additive keys
+    on free-form rows; an older client shows the row as a new page.
 
     ``may_curate`` says whether THIS connection may promote or dismiss --
     the workspace-owner rule the daemon also enforces.

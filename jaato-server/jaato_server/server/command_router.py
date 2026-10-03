@@ -1027,7 +1027,8 @@ class CommandRouter:
             reference_file=outcome.reference_file,
             warnings=list(outcome.warnings), bundle=outcome.bundle,
             reconcile=outcome.reconcile,
-            reconcile_detail=outcome.reconcile_detail))
+            reconcile_detail=outcome.reconcile_detail,
+            revised=outcome.revised))
 
     def _workspace_embedder(
         self, client_id: str, session_id: Optional[str], workspace: str,

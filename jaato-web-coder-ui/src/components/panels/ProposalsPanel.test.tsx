@@ -115,6 +115,41 @@ describe("ProposalsPanel", () => {
     expect((screen.getByRole("button", { name: "Promote proposal Doc a" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("draws a revision as a diff against the current entry, not a new page", () => {
+    load([row("runbook", {
+      name: "Runbook", description: "current steps", type: "inline", path: undefined,
+      content: "step 1\nstep 2", revises: "runbook", revises_file: ".jaato/references/runbook.json",
+      links_replaced: false, stale: false,
+      current: { name: "Runbook", description: "old steps", tags: ["ops"], type: "inline", content: "step 1" },
+    })], true, [{ name: "ops", indexed: true }]);
+    render(<ProposalsPanel />);
+    expect(screen.getByTestId("proposal-revision").textContent).toBe("revision of");
+    expect(screen.getByTestId("proposal-changes").textContent).toContain("changes description, content");
+    expect(screen.queryByRole("combobox")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show proposal Runbook" }));
+    const diffs = screen.getAllByTestId("proposal-diff");
+    expect(diffs.map((d) => d.getAttribute("data-field"))).toEqual(["description", "content"]);
+    expect(diffs[0]!.querySelector('[data-op="-"]')?.textContent).toBe("- old steps");
+    expect(diffs[0]!.querySelector('[data-op="+"]')?.textContent).toBe("+ current steps");
+    expect(diffs[1]!.querySelector('[data-op="+"]')?.textContent).toBe("+ step 2");
+    expect(screen.queryByTestId("proposal-content")).toBeNull();
+    expect((screen.getByRole("button", { name: "Promote proposal Runbook" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("marks a stale revision, says why, and disables Promote", () => {
+    load([row("runbook", {
+      name: "Runbook", revises: "runbook", stale: true,
+      stale_reason: "'runbook' has changed since this revision was written",
+      current: { name: "Runbook", description: "", tags: ["ops"], type: "local", path: "docs/runbook.md" },
+    })], true);
+    render(<ProposalsPanel />);
+    expect(screen.getByTestId("proposal-stale").textContent).toContain("has changed since this revision was written");
+    const promoteBtn = screen.getByRole("button", { name: "Promote proposal Runbook" }) as HTMLButtonElement;
+    expect(promoteBtn.disabled).toBe(true);
+    fireEvent.click(promoteBtn);
+    expect(promote).not.toHaveBeenCalled();
+  });
+
   it("names files it could not show", () => {
     useJaato.setState({ sessionId: "s1", referenceClaims: { ...emptyReferenceClaims(), status: "loaded", unreadable: ["x.json"] } });
     render(<ProposalsPanel />);
