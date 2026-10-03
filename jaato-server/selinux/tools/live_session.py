@@ -33,6 +33,11 @@ and every later one by that same slot (the profile sets
 ``shell_spawn`` (a pty, ``jaato_devpts_t``) instead of ``cli``, and checks
 that it got one; it needs ``jaato-server[interactive]`` in the venv.
 
+``--hint`` (phase 5) installs a program on the PATH labelled ``var_t``,
+which ``jaato_child_t`` may not execute, has the model run it, and checks
+that the refused command's tool result carries an SELinux ``denial_hint``
+(read back with ``request_history``).  The program is removed afterwards.
+
 ``--as-uid`` gives the workspace to that uid and runs the daemon with
 ``--runner-uid-policy workspace-owner`` (#1168), so the runner and its
 children are that user, not root.  ``--trace-subprocess`` drops a
@@ -67,6 +72,12 @@ COMMAND = "id -Z; echo probe > selinux-probe.txt && echo WSOK"
 #: --pty: the same command on a pseudo-terminal (interactive_shell, which
 #: needs jaato-server[interactive]); ``tty`` names the pty it got.
 PTY_COMMAND = "sh -c 'id -Z; tty; echo probe > selinux-probe.txt && echo WSOK'"
+#: --hint (phase 5): a program on the PATH the child domain may not execute
+#: (labelled var_t for the run), so the kernel refuses it and the runner's
+#: denial_hint names SELinux.  On the PATH because cli refuses a program
+#: named by a path outside it before it runs.
+HINT_PROGRAM = Path("/usr/local/bin/jaato-hint-probe")
+HINT_COMMAND = "id -Z; jaato-hint-probe; echo RC=$?"
 ISO_FILE = "iso-probe.txt"
 CHILD_PROFILE = "selinux3child"
 
@@ -126,8 +137,8 @@ def _wait_for_isolated(ws: Path, mode: str) -> None:
 async def run_session(sock: Path, ws: Path, isolated: Optional[str] = None) -> dict:
     from jaato_sdk.client.ipc import IPCClient
     from jaato_sdk.events import (
-        ClientType, ErrorEvent, PermissionRequestedEvent, SessionInfoEvent,
-        ToolCallEndEvent, ToolOutputEvent, TurnCompletedEvent,
+        ClientType, ErrorEvent, HistoryEvent, PermissionRequestedEvent,
+        SessionInfoEvent, ToolCallEndEvent, ToolOutputEvent, TurnCompletedEvent,
     )
 
     c = IPCClient(socket_path=str(sock), client_type=ClientType.API,
@@ -135,6 +146,7 @@ async def run_session(sock: Path, ws: Path, isolated: Optional[str] = None) -> d
     assert await c.connect(timeout=60), "connect failed"
     out: dict = {"ends": [], "errors": [], "sessions": []}
     done = asyncio.Event()
+    got_history = asyncio.Event()
 
     async def collect() -> None:
         async for ev in c.events():
@@ -152,6 +164,9 @@ async def run_session(sock: Path, ws: Path, isolated: Optional[str] = None) -> d
                 done.set()
             elif isinstance(ev, TurnCompletedEvent):
                 done.set()
+            elif isinstance(ev, HistoryEvent):
+                out["history"] = getattr(ev, "history", None) or []
+                got_history.set()
 
     try:
         try:
@@ -168,6 +183,11 @@ async def run_session(sock: Path, ws: Path, isolated: Optional[str] = None) -> d
             out["errors"].append("timeout waiting for the turn")
         if isolated:
             await asyncio.to_thread(_wait_for_isolated, ws, isolated)
+        await c.request_history()
+        try:
+            await asyncio.wait_for(got_history.wait(), timeout=20)
+        except asyncio.TimeoutError:
+            out["errors"].append("timeout waiting for the history")
         await asyncio.sleep(1.0)
         task.cancel()
     finally:
@@ -185,7 +205,7 @@ def type_of(context: Optional[str]) -> str:
 
 
 def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str],
-             pty: bool = False) -> Path:
+             pty: bool = False, hint: bool = False) -> Path:
     """A fresh echo-provider workspace whose one tool call runs COMMAND, or
     (``isolated``) spawns an isolated subagent that writes ISO_FILE."""
     from jaato_sdk.conformance.daemon import echo_workspace
@@ -209,7 +229,8 @@ def _prepare(root: Path, as_uid: Optional[int], isolated: Optional[str],
         # unload_grace_seconds 0: a disconnected session unloads at once, so
         # its pool slot is back for the next session (--sessions, phase 4).
         call = ({"name": "shell_spawn", "args": {"command": PTY_COMMAND}} if pty
-                else {"name": "cli_based_tool", "args": {"command": COMMAND}})
+                else {"name": "cli_based_tool",
+                      "args": {"command": HINT_COMMAND if hint else COMMAND}})
         echo_workspace(ws, tool_call=call, response="done",
                        plugins=["interactive_shell" if pty else "cli"], name="selinux2b",
                        runtime_limits={"unload_grace_seconds": 0})
@@ -331,6 +352,35 @@ def _check_processes(result: dict) -> str:
     record("the session record says sandbox_mode: selinux", "selinux" in modes,
            f"sandbox_mode values: {sorted(m for m in modes if m)}")
     return level
+
+
+def _install_hint_program() -> None:
+    """A program on the PATH that jaato_child_t may not execute (var_t)."""
+    HINT_PROGRAM.write_text("#!/bin/sh\necho HINT-PROBE-RAN\n")
+    HINT_PROGRAM.chmod(0o755)
+    subprocess.run(["chcon", "-t", "var_t", str(HINT_PROGRAM)], check=True)
+
+
+def _hints(history: list) -> List[str]:
+    """Every denial_hint in the session's tool results."""
+    found = []
+    for msg in history:
+        for part in (msg.get("parts") or []) if isinstance(msg, dict) else []:
+            resp = part.get("response") if isinstance(part, dict) else None
+            if isinstance(resp, dict) and resp.get("denial_hint"):
+                found.append(resp["denial_hint"])
+    return found
+
+
+def _check_hint(result: dict) -> None:
+    """--hint: the kernel refused the program, and the result says SELinux did."""
+    output = "\n".join(OUTPUT)
+    hints = _hints(result.get("history") or [])
+    record("the probe program was refused (it did not run)",
+           "HINT-PROBE-RAN" not in output, repr(output[-300:]))
+    record("the refused command's result carries an SELinux denial_hint",
+           any("SELinux refused this" in h and "jaato_child_t" in h for h in hints),
+           f"hints: {hints}")
 
 
 def _check_pty(output: str) -> None:
@@ -467,6 +517,8 @@ def _parse() -> argparse.Namespace:
                     help="phase 4: run N sessions in turn and check pool reuse")
     ap.add_argument("--pty", action="store_true",
                     help="run the command through interactive_shell (a pty)")
+    ap.add_argument("--hint", action="store_true",
+                    help="phase 5: run a program SELinux refuses, check the denial_hint")
     return ap.parse_args()
 
 
@@ -489,7 +541,12 @@ def main() -> int:
         print("--pty drives the main session's command; the isolated "
               "sub-runner may exec nothing", file=sys.stderr)
         return 2
-    ws = _prepare(root, args.as_uid, args.isolated, args.pty)
+    if args.hint and (args.pty or args.isolated):
+        print("--hint drives the main session's cli command", file=sys.stderr)
+        return 2
+    ws = _prepare(root, args.as_uid, args.isolated, args.pty, args.hint)
+    if args.hint:
+        _install_hint_program()
     rundir = Path("/run/jaato-2b")
     rundir.mkdir(parents=True, exist_ok=True)
     log = root / "d.out"
@@ -505,10 +562,14 @@ def main() -> int:
         _ratelimit(old_rate)
         if hook is not None:
             hook.unlink()
+        if args.hint:
+            HINT_PROGRAM.unlink(missing_ok=True)
     if result is None:
         return _report(root, log, marker, {})
     result["isolated"] = args.isolated
     result["pty"] = args.pty
+    if args.hint:
+        _check_hint(result)
     level = _check_processes(result)
     _check_pool(log, args.sessions, ws, marker)
     if args.isolated:

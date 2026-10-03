@@ -161,6 +161,48 @@ def load_libselinux() -> Optional[ctypes.CDLL]:
         return None
 
 
+def selinux_file_context(lib: ctypes.CDLL, path: str) -> Optional[str]:
+    """``getfilecon``: *path*'s label (a link followed), ``None`` if unreadable."""
+    fn = lib.getfilecon
+    fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
+    fn.restype = ctypes.c_int
+    out = ctypes.c_char_p()
+    if fn(path.encode("utf-8"), ctypes.byref(out)) < 0 or not out.value:
+        return None
+    return out.value.decode("utf-8", "replace")
+
+
+def selinux_allowed(
+    lib: ctypes.CDLL, source: str, target: str, tclass: str, perm: str,
+) -> Optional[bool]:
+    """Does the policy allow *source* *perm* on *target*:*tclass*?
+
+    ``security_compute_av_flags``, the kernel's own decision.  ``None`` when
+    it cannot be asked: an unknown class or permission, or a caller the
+    policy does not let ask (``security:compute_av``).
+    """
+    lib.string_to_security_class.argtypes = [ctypes.c_char_p]
+    lib.string_to_security_class.restype = ctypes.c_uint16
+    lib.string_to_av_perm.argtypes = [ctypes.c_uint16, ctypes.c_char_p]
+    lib.string_to_av_perm.restype = ctypes.c_uint32
+    lib.security_compute_av_flags.argtypes = [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint16,
+        ctypes.c_uint32, ctypes.POINTER(AvDecision),
+    ]
+    lib.security_compute_av_flags.restype = ctypes.c_int
+    cls = lib.string_to_security_class(tclass.encode("ascii"))
+    bit = lib.string_to_av_perm(cls, perm.encode("ascii")) if cls else 0
+    if not bit:
+        return None
+    avd = AvDecision()
+    if lib.security_compute_av_flags(
+        source.encode("utf-8"), target.encode("utf-8"),
+        cls, bit, ctypes.byref(avd),
+    ) != 0:
+        return None
+    return bool(avd.allowed & bit)
+
+
 def selinux_domain_permissive(context: str) -> Optional[bool]:
     """Is *context*'s domain permissive?  ``None`` when it cannot be asked.
 

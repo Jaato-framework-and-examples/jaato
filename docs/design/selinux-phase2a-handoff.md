@@ -87,7 +87,7 @@ dnf -y install git python3.12 selinux-policy-devel policycoreutils-python-utils 
 cd /root && { [ -d jaato ] || git clone https://github.com/Jaato-framework-and-examples/jaato.git; }
 cd jaato && git fetch origin && git checkout claude/awesome-lovelace-bbca88 \
   && git pull --ff-only && git log --oneline -3
-cd jaato-server/selinux
+cd jaato-server/jaato_server/server/confinement/selinux_policy
 make -f /usr/share/selinux/devel/Makefile jaato.pp
 semodule -i jaato.pp
 semodule -l | grep '^jaato'                       # jaato  1.0.0

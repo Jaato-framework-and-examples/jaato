@@ -47,7 +47,10 @@ from typing import Callable, FrozenSet, Optional, Tuple
 import pytest
 
 ENV = "JAATO_SELINUX_POLICY_TESTS"
-MODULE_DIR = Path(__file__).resolve().parents[1]
+#: The module source, shipped inside the package so ``jaato-selinux install``
+#: builds exactly what this checkout carries (phase 5).
+MODULE_DIR = (Path(__file__).resolve().parents[2]
+              / "jaato_server" / "server" / "confinement" / "selinux_policy")
 DEVEL_MAKEFILE = "/usr/share/selinux/devel/Makefile"
 
 ENABLED = os.environ.get(ENV) == "1"
@@ -395,11 +398,23 @@ RULES: Tuple[Rule, ...] = (
          find="fs_dontaudit_search_cgroup_dirs(jaato_runner_t)\n"),
 
     # --- the version marker the readiness check probes -----------------
-    Rule("marker type jaato_policy_v4_t exists",
-         lambda p: type_exists(p, "jaato_policy_v4_t"),
+    Rule("marker type jaato_policy_v5_t exists",
+         lambda p: type_exists(p, "jaato_policy_v5_t"),
          "SELinuxBackend refuses a host whose module lacks the marker",
-         find="type jaato_policy_v4_t;\nfiles_type(jaato_policy_v4_t)",
-         replace="type jaato_policy_v3_t;\nfiles_type(jaato_policy_v3_t)"),
+         find="type jaato_policy_v5_t;\nfiles_type(jaato_policy_v5_t)",
+         replace="type jaato_policy_v4_t;\nfiles_type(jaato_policy_v4_t)"),
+
+    # --- the denial hint asks the policy (phase 5) ---------------------
+    Rule("the runner may ask the policy for a decision",
+         _allows("jaato_runner_t", "security_t", "security", {"compute_av"}),
+         "without it no SELinux refusal gets a denial_hint",
+         find="selinux_compute_access_vector(jaato_runner_t)\n"),
+    Rule("no other jaato domain may ask the policy",
+         lambda p: all(not granted(p, d, "security_t", "security",
+                                   frozenset({"compute_av"}))
+                       for d in ("jaato_child_t",) + ISOLATED),
+         "only the runner decides a hint; a child need not map the policy",
+         append="selinux_compute_access_vector(jaato_child_t)\n"),
 
     # --- a pool slot enters the runner at fork (phase 4) ---------------
     Rule("a daemon in unconfined_t may move a forked slot into the runner",

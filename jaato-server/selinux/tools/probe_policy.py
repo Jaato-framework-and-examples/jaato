@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe the jaato SELinux module on an enforcing kernel (phases 2a to 4).
+"""Probe the jaato SELinux module on an enforcing kernel (phases 2a to 5).
 
 Run as root on an SELinux host with the module loaded
 (docs/design/selinux-phase2a-handoff.md).  Uses nothing from jaato: it
@@ -509,6 +509,50 @@ print("OK" if labels == {CTX} else f"LEAK {labels}")'''))
                   forked_slot(f"attempt(lambda: setattr_unbuffered('current', '{context('unconfined_t', 's0')}'), True)"))
 
 
+# Ask the kernel one policy decision (security_compute_av_flags), as the
+# runner's denial hint does (phase 5). Prints OK and the decision, or DENIED
+# with the errno when the caller may not ask.
+ASK_POLICY = '''
+import ctypes, ctypes.util, errno
+lib = ctypes.CDLL(ctypes.util.find_library("selinux"), use_errno=True)
+class AV(ctypes.Structure):
+    _fields_ = [("allowed", ctypes.c_uint32), ("decided", ctypes.c_uint32),
+                ("auditallow", ctypes.c_uint32), ("auditdeny", ctypes.c_uint32),
+                ("seqno", ctypes.c_uint), ("flags", ctypes.c_uint)]
+lib.string_to_security_class.argtypes = [ctypes.c_char_p]
+lib.string_to_security_class.restype = ctypes.c_uint16
+lib.string_to_av_perm.argtypes = [ctypes.c_uint16, ctypes.c_char_p]
+lib.string_to_av_perm.restype = ctypes.c_uint32
+cls = lib.string_to_security_class(b"file")
+bit = lib.string_to_av_perm(cls, b"execute")
+av = AV()
+rc = lib.security_compute_av_flags({src!r}.encode(), {tgt!r}.encode(), cls, bit, ctypes.byref(av))
+err = ctypes.get_errno()
+if rc == 0:
+    print("OK", "allowed" if av.allowed & bit else "refused")
+elif err in (errno.EACCES, errno.EPERM):
+    print("DENIED", errno.errorcode[err])
+else:
+    print("OSERROR", errno.errorcode.get(err, err))
+'''
+
+
+def hint_probes(p: dict) -> None:
+    """Phase 5: the runner may ask the policy, a child may not.
+
+    The question asked is the hint's own: may the child context execute a
+    workspace file? The answer is "refused" (the child may not exec
+    workspace files); what is checked is that the runner gets an answer.
+    """
+    user, _ = own_user_role()
+    ask = ASK_POLICY.format(src=context("jaato_child_t", L1),
+                            tgt=f"{user}:object_r:jaato_workspace_t:{L1}")
+    expect_ok("hint: the runner may ask the policy (security_compute_av)",
+              py_in("jaato_runner_t", L1, ask), want="OK refused")
+    expect_denied("hint: a child may not ask the policy",
+                  py_in("jaato_child_t", L1, ask))
+
+
 def auditd_running() -> bool:
     return subprocess.run(["pidof", "auditd"], capture_output=True).returncode == 0
 
@@ -566,6 +610,7 @@ def main() -> int:
         probes(paths, args.venv)
         isolated_probes(paths)
         pool_probes(paths)
+        hint_probes(paths)
         time.sleep(1)
     finally:
         if ratelimit is not None:

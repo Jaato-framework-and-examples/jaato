@@ -603,8 +603,16 @@ def _install_confinement_grants(envelope: SessionInitEnvelope) -> None:
     ``profile_name``) installs none, whatever the envelope carries: no
     profile refused anything it ran.
     """
-    from jaato_server.shared.confinement_grants import set_confinement_grants
+    from jaato_server.shared.confinement_grants import (
+        set_confinement_grants, set_selinux_child_context,
+    )
 
+    # SELinux (phase 5): no rule list; the hint asks the policy about the
+    # context the session's commands run in.  Replaced every bootstrap.
+    confinement = getattr(envelope, "confinement", None)
+    descriptor = confinement if isinstance(confinement, dict) else {}
+    set_selinux_child_context(
+        descriptor.get("child_label") if descriptor.get("backend") == "selinux" else None)
     wire = getattr(envelope, "confinement_grants", None)
     installed = set_confinement_grants(wire if envelope.profile_name else None)
     if installed is not None:

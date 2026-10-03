@@ -1,4 +1,4 @@
-policy_module(jaato, 1.7.0)
+policy_module(jaato, 1.8.0)
 
 ########################################
 #
@@ -34,7 +34,7 @@ gen_require(`
 #
 
 ## The version marker. SELinuxBackend's readiness check asks whether
-## system_u:object_r:jaato_policy_v4_t:s0 is a valid context (no
+## system_u:object_r:jaato_policy_v5_t:s0 is a valid context (no
 ## privilege needed) and refuses an older module. Bump the number, and
 ## REQUIRED_POLICY_VERSION in server/confinement/selinux.py, together.
 ## v2 (phase 3): the isolated domains and the agent-config and prompts
@@ -42,8 +42,10 @@ gen_require(`
 ## v3: jaato_runner_log_t, the isolated sub-runners' log files.
 ## v4 (phase 4): the daemon's domains may dyntransition into the runner
 ## domain, which is how a pool slot enters it at fork.
-type jaato_policy_v4_t;
-files_type(jaato_policy_v4_t)
+## v5 (phase 5): the runner may ask the policy for a decision, which is how
+## a refused command's denial_hint is decided.
+type jaato_policy_v5_t;
+files_type(jaato_policy_v5_t)
 
 ## The session runner (AppArmor: the base profile jaato-ws-<id>).
 type jaato_runner_t;
@@ -212,6 +214,14 @@ fs_getattr_all_fs(jaato_runner_t)
 # process attribute it may set is the exec context of its children:
 allow jaato_runner_t self:process setexec;
 allow jaato_runner_t jaato_child_t:process transition;
+
+# Phase 5: a refused command's denial_hint. "Permission denied" reads the
+# same whether a mode bit or this policy refused it; the runner asks the
+# kernel whether its child context may execute or read the file's context
+# (security_compute_av), as #1348 asks the AppArmor rules. This discloses
+# policy decisions to the runner, and grants no access. The child and the
+# isolated domains are not given it.
+selinux_compute_access_vector(jaato_runner_t)
 
 ########################################
 #

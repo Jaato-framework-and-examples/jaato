@@ -56,7 +56,7 @@ SELinux up in exactly the order it gives. Proceed only when
 mkdir -p /root/jaato-phase2b && cd /root/jaato-phase2b
 cd /root/jaato && git fetch origin && git checkout claude/awesome-lovelace-bbca88 \
   && git pull --ff-only && git log --oneline -1
-cd jaato-server/selinux && make -f /usr/share/selinux/devel/Makefile jaato.pp \
+cd jaato-server/jaato_server/server/confinement/selinux_policy && make -f /usr/share/selinux/devel/Makefile jaato.pp \
   && semodule -i jaato.pp
 seinfo -t | grep -c '^ *jaato_'          # 12 types (1.3.0)
 ```

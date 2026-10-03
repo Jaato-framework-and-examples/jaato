@@ -30,9 +30,18 @@ runs, its interpreter cannot open it), and never for a path a reference
 selection authorized, because those grants are added after provisioning
 and are not in the record.
 
+**SELinux** (phase 5) has no rule list to match: the verdict is the
+kernel's own.  The runner installs its child context
+(:func:`set_selinux_child_context`), and :func:`explain_denial` asks the
+policy (``security_compute_av``) whether that context may execute or read
+the refused file's context, after the mode bits rule out a plain
+permission refusal.  A question the kernel will not answer (no
+``security:compute_av``, an unreadable label) gives no hint.
+
 Stdlib-only, like :mod:`jaato_server.shared.apparmor_label`, because the
 runner imports it before plugin discovery and ``shared`` cannot import
-``server``.
+``server``.  The SELinux query imports :mod:`.lsm_label` (ctypes) when it
+is asked.
 """
 
 from __future__ import annotations
@@ -41,6 +50,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Pattern, Tuple
@@ -336,6 +346,29 @@ def confinement_grants() -> Optional[ConfinementGrants]:
         return _CURRENT
 
 
+#: The SELinux context this session's model-driven commands run in, or
+#: ``None`` when the session is not SELinux-confined (phase 5).
+_SELINUX_CHILD: Optional[str] = None
+
+
+def set_selinux_child_context(context: Optional[str]) -> None:
+    """Install this session's child context; ``None`` clears it.
+
+    Called by the runner bootstrap for every session, beside
+    :func:`set_confinement_grants`, so a pool slot never judges a session
+    by the context of the one before it.
+    """
+    global _SELINUX_CHILD
+    with _LOCK:
+        _SELINUX_CHILD = context or None
+
+
+def selinux_child_context() -> Optional[str]:
+    """The installed child context, or ``None``."""
+    with _LOCK:
+        return _SELINUX_CHILD
+
+
 # ---------------------------------------------------------------------------
 # From a failed command to a hint
 # ---------------------------------------------------------------------------
@@ -403,12 +436,30 @@ def _first_word(command: str) -> Optional[str]:
     return None
 
 
-def _resolve(named: str, search_path: Optional[str], cwd: Optional[str]) -> Optional[str]:
+def _which_by_mode(named: str, search_path: Optional[str]) -> Optional[str]:
+    """``shutil.which`` judged by the mode bits, not ``access(2)``.
+
+    Under SELinux ``access(2)`` asks the policy too, so a program the policy
+    refuses would not resolve, and its refusal could never be explained.
+    """
+    for directory in (search_path or os.defpath).split(os.pathsep):
+        candidate = os.path.join(directory, named)
+        try:
+            st = os.stat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
+            return candidate
+    return None
+
+
+def _resolve(named: str, search_path: Optional[str], cwd: Optional[str],
+             which: Callable[..., Optional[str]] = shutil.which) -> Optional[str]:
     """The real path *named* refers to, or ``None`` when it does not resolve."""
     if "/" in named:
         path = named if os.path.isabs(named) else os.path.join(cwd or os.getcwd(), named)
     else:
-        path = shutil.which(named, path=search_path)
+        path = which(named, path=search_path)
         if path is None:
             return None
     try:
@@ -492,6 +543,93 @@ def _hint(grants: ConfinementGrants, named: str, resolved: str, refused: str) ->
     )
 
 
+def _dac_allows(path: str, refused: str) -> bool:
+    """Do the mode bits allow this process *refused* (``x`` / ``r``) on *path*?
+
+    Read from ``stat`` rather than ``os.access``: ``access(2)`` consults the
+    LSM too, so under SELinux it would report the policy's refusal as a
+    mode-bit one.  ACLs are not read; the verdict that follows is the
+    policy's own, so a hint is never given on mode bits alone.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    uid = os.geteuid()
+    if uid == 0:
+        return refused == READ or bool(st.st_mode & 0o111)
+    shift = (6 if st.st_uid == uid
+             else 3 if st.st_gid in {os.getegid(), *os.getgroups()} else 0)
+    bit = 0o1 if refused == EXEC else 0o4
+    return bool((st.st_mode >> shift) & bit)
+
+
+#: The permissions SELinux checks for each refusal, in the child's own
+#: domain (a command a child runs stays in ``jaato_child_t``).
+_SELINUX_PERMS = {EXEC: ("execute", "execute_no_trans"), READ: ("read",)}
+
+
+def _selinux_refusal(
+    child: str, resolved: str, kind: str,
+) -> Optional[Tuple[str, str]]:
+    """``(EXEC or READ, the file's context)`` when the policy refuses it."""
+    from jaato_server.shared.lsm_label import (
+        load_libselinux, selinux_allowed, selinux_file_context,
+    )
+
+    lib = load_libselinux()
+    file_ctx = selinux_file_context(lib, resolved) if lib is not None else None
+    if file_ctx is None:
+        return None
+    for refused in ((EXEC, READ) if kind == EXEC_OR_READ else (kind,)):
+        if not _dac_allows(resolved, refused):
+            continue
+        verdicts = [selinux_allowed(lib, child, file_ctx, "file", perm)
+                    for perm in _SELINUX_PERMS[refused]]
+        if None not in verdicts and False in verdicts:
+            return refused, file_ctx
+    return None
+
+
+def _selinux_hint(child: str, named: str, resolved: str, refused: str,
+                  file_ctx: str) -> str:
+    from jaato_server.shared.lsm_label import parse_selinux_context
+
+    verb = "execute" if refused == EXEC else "read"
+    shown = resolved if resolved == named else f"{resolved} (what {named} resolves to)"
+    domain = parse_selinux_context(child)
+    ftype = parse_selinux_context(file_ctx)
+    return (
+        f"SELinux refused this: the session's commands run in "
+        f"{domain.type if domain else child}, which the jaato policy does not "
+        f"let {verb} {shown} (labelled {ftype.type if ftype else file_ctx}). "
+        f"The kernel will refuse it again however it is invoked, so do not "
+        f"retry it or look for another route to the same file; tell the user "
+        f"what was refused. An operator can label the file with a type the "
+        f"policy grants (system programs are bin_t) or extend the jaato "
+        f"policy module."
+    )
+
+
+def explain_selinux_denial(
+    *, command: str, output: str, returncode: Optional[int],
+    search_path: Optional[str], cwd: Optional[str],
+) -> Optional[str]:
+    """The SELinux half of :func:`explain_denial` (phase 5)."""
+    child = selinux_child_context()
+    if child is None:
+        return None
+    for named, kind in _denied_candidates(command, output, returncode):
+        resolved = _resolve(named, search_path, cwd,
+                            which=lambda n, path: _which_by_mode(n, path))
+        if resolved is None:
+            continue
+        found = _selinux_refusal(child, resolved, kind)
+        if found:
+            return _selinux_hint(child, named, resolved, *found)
+    return None
+
+
 def explain_denial(
     *,
     command: str,
@@ -515,7 +653,9 @@ def explain_denial(
     """
     grants = confinement_grants()
     if grants is None:
-        return None
+        return explain_selinux_denial(
+            command=command, output=output, returncode=returncode,
+            search_path=search_path, cwd=cwd)
     for named, kind in _denied_candidates(command, output, returncode):
         resolved = _resolve(named, search_path, cwd)
         if resolved is None:

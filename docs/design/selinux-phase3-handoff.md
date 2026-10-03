@@ -95,7 +95,7 @@ and `id -Z` prints a real context.
 mkdir -p /root/jaato-phase3 && cd /root/jaato-phase3
 cd /root/jaato && git fetch origin && git checkout claude/selinux-phase3 \
   && git pull --ff-only && git log --oneline -1
-cd jaato-server/selinux && make -f /usr/share/selinux/devel/Makefile jaato.pp \
+cd jaato-server/jaato_server/server/confinement/selinux_policy && make -f /usr/share/selinux/devel/Makefile jaato.pp \
   && semodule -i jaato.pp
 semodule -l | grep jaato                 # jaato 1.6.0
 seinfo -t | grep -c '^ *jaato_'          # 17 types

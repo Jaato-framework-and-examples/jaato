@@ -43,9 +43,10 @@ from jaato_server.server.confinement_id import confinement_id as _confinement_id
 from jaato_server.server.confinement_id import session_tmpdir
 from jaato_server.shared.lsm_label import (
     BACKEND_SELINUX,
-    AvDecision,
     load_libselinux,
     parse_selinux_context,
+    selinux_allowed,
+    selinux_file_context,
     selinux_domain_permissive,
     selinux_host_enforcing,
 )
@@ -56,7 +57,8 @@ logger = logging.getLogger(__name__)
 #: isolated domains and the agent-config and prompts types (phase 3).
 #: v3: the sub-runner log type.  v4: the daemon's domains may
 #: dyntransition into the runner, how a pool slot enters it (phase 4).
-REQUIRED_POLICY_VERSION = 4
+#: v5: the runner may ask the policy for a decision (the denial hint).
+REQUIRED_POLICY_VERSION = 5
 
 #: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
 USER_DIR_TYPE = "jaato_user_dir_t"
@@ -75,6 +77,9 @@ ISOLATED_DOMAIN = "jaato_isolated_t"
 ISOLATED_RO_DOMAIN = "jaato_isolated_ro_t"
 
 SELINUX_MOUNT = "/sys/fs/selinux"
+
+#: How an operator gets the module this build needs (phase 5).
+INSTALL_REMEDY = "run (as root): jaato-selinux install"
 
 
 def policy_marker_context(version: int) -> str:
@@ -124,39 +129,13 @@ class _Kernel:
         return out.value.decode("utf-8", "replace")
 
     def file_context(self, path: str) -> Optional[str]:
-        fn = self._lib.getfilecon
-        fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
-        fn.restype = ctypes.c_int
-        out = ctypes.c_char_p()
-        if fn(path.encode("utf-8"), ctypes.byref(out)) < 0 or not out.value:
-            return None
-        return out.value.decode("utf-8", "replace")
+        return selinux_file_context(self._lib, path)
 
     def allowed(
         self, source: str, target: str, tclass: str, perm: str,
     ) -> Optional[bool]:
         """Does the policy allow *perm*?  ``None`` when it cannot be asked."""
-        lib = self._lib
-        lib.string_to_security_class.argtypes = [ctypes.c_char_p]
-        lib.string_to_security_class.restype = ctypes.c_uint16
-        lib.string_to_av_perm.argtypes = [ctypes.c_uint16, ctypes.c_char_p]
-        lib.string_to_av_perm.restype = ctypes.c_uint32
-        lib.security_compute_av_flags.argtypes = [
-            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint16,
-            ctypes.c_uint32, ctypes.POINTER(AvDecision),
-        ]
-        lib.security_compute_av_flags.restype = ctypes.c_int
-        cls = lib.string_to_security_class(tclass.encode("ascii"))
-        bit = lib.string_to_av_perm(cls, perm.encode("ascii")) if cls else 0
-        if not bit:
-            return None
-        avd = AvDecision()
-        if lib.security_compute_av_flags(
-            source.encode("utf-8"), target.encode("utf-8"),
-            cls, bit, ctypes.byref(avd),
-        ) != 0:
-            return None
-        return bool(avd.allowed & bit)
+        return selinux_allowed(self._lib, source, target, tclass, perm)
 
     def set_file_context(self, path: str, context: str) -> None:
         """``lsetfilecon``: label *path* itself, never a symlink's target."""
@@ -454,11 +433,12 @@ def _grants(plan: "selinux_labels.Plan", label: str,
 def _policy_problem(kernel: _Kernel) -> Optional[str]:
     """Checks 3 and 4: the module is loaded, recent enough, with MCS."""
     if not kernel.context_valid(RUNNER_PROBE_CONTEXT):
-        return "the jaato SELinux policy module is not loaded (jaato_runner_t is unknown)"
+        return ("the jaato SELinux policy module is not loaded (jaato_runner_t "
+                f"is unknown); {INSTALL_REMEDY}")
     if not kernel.context_valid(policy_marker_context(REQUIRED_POLICY_VERSION)):
         return (
             f"the loaded jaato policy module is older than version "
-            f"{REQUIRED_POLICY_VERSION}"
+            f"{REQUIRED_POLICY_VERSION}; {INSTALL_REMEDY}"
         )
     if not kernel.mls_enabled():
         return "the policy has no MLS/MCS support"

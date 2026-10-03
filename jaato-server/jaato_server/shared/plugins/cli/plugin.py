@@ -741,7 +741,7 @@ Use the returned stdout_offset for subsequent calls to get only new output.
 ERROR HANDLING:
 - A non-zero returncode indicates the command failed - always check stderr for details
 - "File exists" or "Directory exists" errors mean the goal is already achieved - consider the step successful and continue
-- "Permission denied" - if the result carries a denial_hint, the session's AppArmor profile refused it: do not retry or route around it, report what was refused. Otherwise try an alternative approach (different path, sudo if appropriate) or report as a blocker
+- "Permission denied" - if the result carries a denial_hint, the session's kernel confinement (AppArmor or SELinux) refused it: do not retry or route around it, report what was refused. Otherwise try an alternative approach (different path, sudo if appropriate) or report as a blocker
 - "Command not found" - check if the required tool is installed, or try an alternative command
 - "No such file or directory" - the path genuinely does not exist (the sandbox never reports a refusal this way) - verify the path before operating on it
 - "cli containment (workspace boundary): ..." - the SANDBOX refused the command before anything ran; the path was not checked and may well exist. Do not conclude a file or binary is missing. Work inside the workspace, run programs by bare name (an absolute path is accepted only when its directory is on PATH), and if a directory outside the workspace is genuinely needed, report that the operator must add it to plugin_configs.cli.extra_paths (binaries) or grant the path with `sandbox add` (files)
@@ -1546,13 +1546,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     def _with_denial_hint(
         self, result: Dict[str, Any], args: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Add ``denial_hint`` when the session's AppArmor profile refused the command (#1348).
+        """Add ``denial_hint`` when the session's confinement refused the command (#1348).
 
         ``Permission denied`` reads the same whether a mode bit or the
-        kernel's profile refused it, and only the kernel log says which.
-        The runner holds what the session's ``//child`` profile grants
-        (``confinement_grants``, from the session envelope), so a failure
-        whose own words name a path is checked against it; see
+        kernel's confinement refused it, and only the kernel log says which.
+        Under AppArmor the runner holds what the session's ``//child``
+        profile grants (``confinement_grants``, from the session envelope);
+        under SELinux it holds the child context and asks the policy (phase
+        5).  A failure whose own words name a path is checked against that;
+        see
         :func:`~jaato_server.shared.confinement_grants.explain_denial` for
         the rules, all of which need positive evidence.
 

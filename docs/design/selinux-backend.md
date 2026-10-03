@@ -180,10 +180,12 @@ for `apparmor-complain`.
 
 ## 4. The policy module
 
-Shipped as source under `jaato-server/selinux/` (`jaato.te`, `jaato.fc`,
-`jaato.if`), built with `make -f /usr/share/selinux/devel/Makefile`, and
-installed once by the operator (later: a `jaato-server-selinux` RPM, the
-`container-selinux` pattern). The module carries a version; the backend
+Shipped as source inside the package,
+`jaato_server/server/confinement/selinux_policy/` (`jaato.te`, `jaato.fc`,
+`jaato.if`), and installed once by the operator with `jaato-selinux
+install` (phase 5), which builds it with the host's
+`/usr/share/selinux/devel/Makefile`. The tests and kernel tools stay in
+`jaato-server/selinux/`. The module carries a version; the backend
 refuses (`unavailable_reason`) when the loaded version is older than the
 one the daemon was built for, the way `TEMPLATE_VERSION` gates AppArmor
 profiles today.
@@ -504,7 +506,7 @@ notebook kernel (#1323) take it through the existing
 | exec scoping (`exec_scope: scoped`) | **unsupported**: exec is by type, not by binary path; the grant record reports `exec_scope: unscoped` and a scoped request is refused with a clear reason if the profile demands it |
 | reference grants (`selectReferences`) | a reference inside the workspace needs nothing; one outside it is refused with a reason naming `jaato_shared_ro_t`, where AppArmor would add a fragment |
 | grant record (#1326) | `{backend, domain, level, child_domain, labelled_roots, policy_version, unsupported: [...]}` |
-| denial hints (#1348) | phase 1: none (verdict unknown). A later version can read the AVC from `audit` via the daemon; the runner cannot |
+| denial hints (#1348) | phase 5: the runner holds its child context and asks the policy (`security_compute_av`, granted to `jaato_runner_t` only) whether it may execute or read the refused file's context, after the mode bits rule out a plain permission refusal; `cli` only, as under AppArmor |
 | `/proc/*/environ` of the runner itself, read in-process | **not denied.** `self:file read` covers `/proc/self`; AppArmor denies it by path. The application check `is_sensitive_proc_path` still covers file tools. Stated, not hidden |
 | template version gate | policy module version gate |
 
@@ -516,17 +518,17 @@ reusing the AppArmor wording.
 
 ```bash
 dnf install selinux-policy-devel policycoreutils-python-utils
-make -C jaato-server/selinux -f /usr/share/selinux/devel/Makefile jaato.pp
-semodule -i jaato-server/selinux/jaato.pp
-semanage fcontext -a -t jaato_managed_ws_t '/srv/jaato/workspaces(/.*)?'
-restorecon -R /srv/jaato/workspaces
 # venv outside /home so jaato_runner_t can read site-packages:
-semanage fcontext -a -t lib_t '/opt/jaato/venv(/.*)?'
-restorecon -R /opt/jaato/venv
+python3.12 -m venv /opt/jaato/venv && /opt/jaato/venv/bin/pip install jaato-server
 # the user tier a runner may use (jaato.fc labels these; a runner can
 # never create them, since it has no add_name in ~/.jaato):
 mkdir -p ~/.jaato/{agents,profiles,references,services,memories,prompts,skills}
-restorecon -R ~/.jaato
+# build and load the module this release needs, label the venv lib_t and
+# relabel ~/.jaato (--home DIR for each other user a runner drops to):
+/opt/jaato/venv/bin/jaato-selinux install
+/opt/jaato/venv/bin/jaato-selinux status     # what a daemon started now gets
+semanage fcontext -a -t jaato_managed_ws_t '/srv/jaato/workspaces(/.*)?'
+restorecon -R /srv/jaato/workspaces
 JAATO_CONFINEMENT=selinux JAATO_REQUIRE_CONFINEMENT=1 \
   /opt/jaato/venv/bin/python -m jaato_server ...
 ```
@@ -602,7 +604,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
-| 5 | RPM packaging, AVC-based denial hints | operator convenience |
+| 5 | **implemented, not yet run on a kernel**: `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
 
 ### What the phase 2a kernel run found
 
@@ -809,6 +811,28 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
 * **A dropped user's `~/.jaato/gc.json` reached the parent and not the
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
+
+### What phase 5 decided
+
+* **An install command, not an RPM.** jaato-server ships through pip, so an
+  RPM would exist only for the policy, and a module built against one
+  `selinux-policy` release is not guaranteed to load on another. The
+  module source ships in the package and `jaato-selinux install` builds it
+  with the host's own `selinux-policy-devel`, so the module loaded and
+  the daemon requiring it come from one distribution. The readiness
+  reason names the command when the module is missing or older.
+  `install` labels a venv `lib_t`, never a system interpreter's prefix.
+* **The hint asks the policy.** There is no rule list to match, so the
+  runner asks the kernel whether its child context may `execute` and
+  `execute_no_trans` (or `read`) the file's context. `jaato_runner_t` is
+  granted `security:compute_av` (`selinux_compute_access_vector`), which
+  discloses policy decisions and grants no access; the child and isolated
+  domains are not. Plain permissions are judged from the mode bits, and a
+  bare name is resolved by them, because `access(2)` asks the policy too.
+  A question the kernel will not answer gives no hint.
+* **Coverage is the AppArmor hint's:** `cli` only. An isolated
+  sub-runner's refused `shell_spawn` (`interactive_shell`) still shows
+  only as an AVC.
 
 ### The phase 4 pty run (8874c5c0, `jaato-server[interactive]`)
 

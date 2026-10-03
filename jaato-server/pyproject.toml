@@ -128,6 +128,8 @@ all = [
 
 [project.scripts]
 jaato-server = "jaato_server.server.__main__:main"
+# Builds and loads the SELinux policy module this release needs (phase 5).
+jaato-selinux = "jaato_server.server.confinement.selinux_install:main"
 # jaato-scaffold is declared by jaato-sdk ONLY (#1267); this distribution
 # contributes its introspection verbs to it below.
 
@@ -194,6 +196,16 @@ cache_google_genai = "jaato_server.shared.plugins.cache_google_genai:create_plug
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["jaato_server*", "jaato_embedded*"]
+
+# The SELinux policy module source, which ``jaato-selinux install`` builds
+# with the host's selinux-policy-devel, so the module and the daemon that
+# requires it ship in one distribution and cannot disagree on its version.
+[tool.setuptools.package-data]
+"jaato_server.server.confinement" = [
+    "selinux_policy/jaato.te",
+    "selinux_policy/jaato.fc",
+    "selinux_policy/jaato.if",
+]
 
 [tool.pytest.ini_options]
 # Register custom marks so pytest doesn't warn on use.  ``apparmor``

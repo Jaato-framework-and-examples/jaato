@@ -158,7 +158,7 @@ jobs:
             jaato-server/jaato_server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
-  # The SELinux policy module (jaato-server/selinux/,
+  # The SELinux policy module (jaato_server/server/confinement/selinux_policy/,
   # docs/design/selinux-backend.md §11).  Compiled, linked into Fedora's
   # full `targeted` policy with `semodule -N -i` (no kernel needed), and
   # queried with setools: what a runner and //child may do, and what they
