@@ -54,7 +54,9 @@ logger = logging.getLogger(__name__)
 
 #: The policy module version this build needs (design §4).  v2: the
 #: isolated domains and the agent-config and prompts types (phase 3).
-REQUIRED_POLICY_VERSION = 3
+#: v3: the sub-runner log type.  v4: the daemon's domains may
+#: dyntransition into the runner, how a pool slot enters it (phase 4).
+REQUIRED_POLICY_VERSION = 4
 
 #: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
 USER_DIR_TYPE = "jaato_user_dir_t"
@@ -486,6 +488,11 @@ def _transition_problem(kernel: _Kernel, interpreter: str) -> Optional[str]:
         )
     if kernel.allowed(own, target, "process", "transition") is not True:
         return f"this process ({own}) may not transition into {RUNNER_DOMAIN}"
+    if kernel.allowed(own, target, "process", "dyntransition") is not True:
+        return (
+            f"this process ({own}) may not dyntransition into {RUNNER_DOMAIN}, "
+            "so a pool slot could not enter it (selinux-backend.md §7.2)"
+        )
     exe = kernel.file_context(interpreter)
     if exe is None:
         return f"the interpreter's label could not be read ({interpreter})"

@@ -159,6 +159,94 @@ def _set_exec_context_in_child(context: Optional[str]) -> None:
         os.close(fd)
 
 
+#: Exit status of a pool slot that could not enter its SELinux domain
+#: (phase 4).  Distinct from 125-127 so the cause is attributable from
+#: the status alone.
+SELINUX_ENTRY_EXIT_CODE = 124
+
+#: Where a task sets (and reads) its own context.
+_ATTR_CURRENT = "/proc/self/attr/current"
+
+#: Exit status of a pool slot that could not open its session's runner log
+#: (phase 4).  Fatal there, unlike the cold spawn's best-effort redirect:
+#: a slot that kept the template's fds would enter the domain holding the
+#: daemon's own log, which ``jaato_runner_t`` may not write, and the first
+#: flush at bootstrap would fail the session (phase 4 kernel run 2).
+SLOT_LOG_EXIT_CODE = 123
+
+
+def _redirect_output_in_child(log_path: str) -> None:
+    """Point a freshly forked slot's fds 1 and 2 at *log_path*, or exit.
+
+    What a cold spawn's child does before exec (``_exec_runner``), done
+    before the slot confines itself, so the file is opened while it still
+    may.  Bootstrap step 1a then re-points to the same file, and on a
+    reused slot to the next session's.
+    """
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to serve -- pool slot could not "
+                f"open its runner log {log_path}: {exc}\n"
+            ).encode())
+        finally:
+            os._exit(SLOT_LOG_EXIT_CODE)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+
+
+def _enter_selinux_domain_in_child(context: str) -> None:
+    """``setcon(context)`` in a freshly forked pool slot, or exit (phase 4).
+
+    A forked child has one thread, and SELinux refuses ``setcon`` only in a
+    multi-threaded process (phase 0), so this is the one moment a slot can
+    enter the runner's domain without an exec.  Runs after the private
+    ``/tmp`` and the privilege drop, as the cold spawn's exec transition
+    does (Order A: the runner domain holds neither ``sys_admin`` nor
+    ``setuid``).  The write is read back: a slot that is not in *context*
+    must not serve a session, so a failure is named on stderr and exits
+    with :data:`SELINUX_ENTRY_EXIT_CODE`.
+    """
+    try:
+        fd = os.open(_ATTR_CURRENT, os.O_WRONLY)
+        try:
+            os.write(fd, context.encode("utf-8"))
+        finally:
+            os.close(fd)
+        with open(_ATTR_CURRENT, encoding="utf-8") as fh:
+            actual = fh.read().replace("\x00", "").strip()
+        if actual != context:
+            raise OSError(f"kernel reports {actual!r} after the write")
+    except OSError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to serve -- pool slot could not "
+                f"enter {context}: {exc} (selinux-backend.md §7.2)\n"
+            ).encode())
+        finally:
+            os._exit(SELINUX_ENTRY_EXIT_CODE)
+
+
+def enter_slot_boundary_in_child(entry: Dict[str, Any]) -> None:
+    """Put a freshly forked pool slot inside its session's boundary (phase 4).
+
+    *entry* is what :meth:`PoolManager.fork_slot_into` sent with the fork
+    request: ``context`` (required), ``log_path``, ``private_tmp`` and
+    ``runner_user``.  The order is the cold spawn's, before any thread
+    starts: the output onto the session's log (so the slot never holds the
+    daemon's), private ``/tmp``, privilege drop, then the domain.  Each
+    step exits the child on failure (123, 126, 125, 124), so the slot never
+    serves outside the boundary it was forked for.
+    """
+    _redirect_output_in_child(entry["log_path"])
+    _enter_private_tmp_in_child(entry.get("private_tmp") or None)
+    _drop_privileges_in_child(RunnerUser.from_dict(entry.get("runner_user")))
+    _enter_selinux_domain_in_child(entry["context"])
+
+
 class RunnerSpawner:
     """Forks ``python -m server.runner`` once per top-level session.
 

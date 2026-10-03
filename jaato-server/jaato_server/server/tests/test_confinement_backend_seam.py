@@ -49,6 +49,15 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SELINUX,
+        find='    if kernel.allowed(own, target, "process", "dyntransition") is not True:\n',
+        replace="    if False:\n",
+        test="test_readiness_names_the_first_failing_check",
+        because="a daemon whose domain may not dyntransition into the runner "
+                "would read as ready, and every pool-served session would "
+                "then fail at fork (phase 4)",
+    ),
+    Reversion(
+        target=_SELINUX,
         find="    def is_available(self) -> bool:\n        return self.host_readiness().ready\n",
         replace="    def is_available(self) -> bool:\n        return True\n",
         test="test_an_unready_host_is_not_available",
@@ -148,11 +157,12 @@ class _FakeKernel:
     """A policy in which only what the fields grant is allowed."""
 
     def __init__(self, contexts=(), mls=True, own=_OWN, transition=True,
-                 entrypoint=True, exe=_EXE):
+                 entrypoint=True, exe=_EXE, dyntransition=True):
         self.contexts = set(contexts)
         self.mls = mls
         self.own = own
         self.transition = transition
+        self.dyntransition = dyntransition
         self.entrypoint = entrypoint
         self.exe = exe
 
@@ -171,6 +181,8 @@ class _FakeKernel:
     def allowed(self, source, target, tclass, perm):
         if (tclass, perm) == ("process", "transition"):
             return self.transition
+        if (tclass, perm) == ("process", "dyntransition"):
+            return self.dyntransition
         if (tclass, perm) == ("file", "entrypoint"):
             return self.entrypoint if target == self.exe else False
         return False
@@ -206,6 +218,7 @@ def _selinux(kernel=None, enforcing=True, system="Linux", mounted=True):
     (_selinux(_FakeKernel(_POLICY, own="unconfined_u:unconfined_r:unconfined_t:s0")),
      "unconfined_u:unconfined_r are not authorized"),
     (_selinux(_FakeKernel(_POLICY, transition=None)), "may not transition"),
+    (_selinux(_FakeKernel(_POLICY, dyntransition=False)), "may not dyntransition"),
     (_selinux(_FakeKernel(_POLICY, exe=None)), "label could not be read"),
     (_selinux(_FakeKernel(_POLICY, entrypoint=False)), "as an entrypoint"),
 ])

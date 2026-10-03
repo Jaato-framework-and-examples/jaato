@@ -494,7 +494,7 @@ class _FakePoolManager:
 
     def acquire_slot(self, cascade_driver_id=None, config_root=None,
                      workspace_root=None, profile_name=None,
-                     runner_uid=None):
+                     runner_uid=None, selinux_boundary=None):
         self.acquire_calls += 1
         self.last_cascade_id = cascade_driver_id
         # #1033: the whole key, so a test can assert the spawn path

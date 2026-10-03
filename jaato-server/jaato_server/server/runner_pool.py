@@ -126,6 +126,15 @@ class PoolSlot:
     #: fails — so this is a property the next session cannot change and is
     #: in the key for that reason.  Stamped by :meth:`SlotKey.stamp`.
     runner_uid: Optional[int] = None
+    #: The SELinux boundary (its ``confinement_id``) this slot was forked
+    #: into (phase 4, selinux-backend.md §7.2), ``None`` for a slot that
+    #: was not.  A slot enters an SELinux domain only at fork, while it
+    #: has one thread, and never leaves it: the runner domain holds no
+    #: ``dyntransition``.  So a slot carrying a boundary fits only that
+    #: boundary, and a slot carrying none never fits an SELinux session.
+    #: Kept out of ``profile_name``, whose last wearer's death unloads an
+    #: AppArmor profile of that name (:meth:`PoolManager._reap_slot_profile`).
+    selinux_boundary: Optional[str] = None
     last_session_end_ts: Optional[float] = None
     # Phase 3 cascade-sharing (server 0.6.146+): identifier of the
     # most recent session this slot served.  Set when the slot
@@ -210,6 +219,9 @@ class SlotKey:
     the uid the process runs as (#1168)     ``runner_uid`` — a dropped
                                             slot can never become root
                                             or anyone else again
+    the SELinux domain and level (phase 4)  ``selinux_boundary`` — the
+                                            domain is entered at fork
+                                            and never left
     ======================================  ==========================
 
     ``runner_uid`` (#1168 step 3): ``None`` is the daemon's own uid.  A
@@ -258,6 +270,7 @@ class SlotKey:
     workspace_root: Optional[str] = None
     profile_name: Optional[str] = None
     runner_uid: Optional[int] = None
+    selinux_boundary: Optional[str] = None
 
     @classmethod
     def build(
@@ -267,6 +280,7 @@ class SlotKey:
         workspace_root: Optional[str] = None,
         profile_name: Optional[str] = None,
         runner_uid: Optional[int] = None,
+        selinux_boundary: Optional[str] = None,
     ) -> "SlotKey":
         """Normalize the caller's values into a comparable key.
 
@@ -280,6 +294,7 @@ class SlotKey:
             workspace_root=_canonical_path(workspace_root),
             profile_name=profile_name or None,
             runner_uid=runner_uid,
+            selinux_boundary=selinux_boundary or None,
         )
 
     @classmethod
@@ -291,6 +306,7 @@ class SlotKey:
             workspace_root=_canonical_path(slot.workspace_root),
             profile_name=slot.profile_name or None,
             runner_uid=getattr(slot, "runner_uid", None),
+            selinux_boundary=getattr(slot, "selinux_boundary", None) or None,
         )
 
     def stamp(self, slot: "PoolSlot") -> None:
@@ -311,6 +327,7 @@ class SlotKey:
         slot.workspace_root = self.workspace_root
         slot.profile_name = self.profile_name
         slot.runner_uid = self.runner_uid
+        slot.selinux_boundary = self.selinux_boundary
         slot.has_served = True
 
     def accepts_unaffined(self, slot: "PoolSlot") -> bool:
@@ -373,9 +390,15 @@ class SlotKey:
         "unconfined" must not read as two boundaries.
         """
         if not slot.has_served:
-            return True
+            # A virgin slot is threaded and in the template's domain, so
+            # it can enter an AppArmor profile at bootstrap and never an
+            # SELinux domain (phase 0: setcon refused in a threaded
+            # process).  An SELinux session takes a slot forked into its
+            # boundary (:meth:`PoolManager.fork_slot_into`) or this one's.
+            return self.selinux_boundary is None
         return (
             (slot.profile_name or None) == self.profile_name
+            and (getattr(slot, "selinux_boundary", None) or None) == self.selinux_boundary
             and self.uid_fits(slot)
         )
 
@@ -629,6 +652,10 @@ class PoolManager:
         self._counters: Dict[str, int] = {
             # Number of times ``acquire_slot`` returned a real handle.
             "pool_slot_acquired_total": 0,
+            # Phase 4: slots forked INTO an SELinux boundary for a session
+            # no idle slot fitted, and the requests the template refused.
+            "pool_selinux_fork_total": 0,
+            "pool_selinux_fork_failures_total": 0,
             # Number of times ``acquire_slot`` returned None (pool
             # empty when called).  Sessions in this state fall back
             # to cold-spawn — useful for sizing decisions.
@@ -894,6 +921,7 @@ class PoolManager:
         workspace_root: Optional[str] = None,
         profile_name: Optional[str] = None,
         runner_uid: Optional[int] = None,
+        selinux_boundary: Optional[str] = None,
     ) -> Optional[PoolSlot]:
         """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
 
@@ -962,6 +990,10 @@ class PoolManager:
                 ``None`` for the daemon's own.  A served slot of another
                 uid is passed over and counted in
                 ``pool_uid_mismatch_skips_total``.
+            selinux_boundary: The SELinux boundary's ``confinement_id``
+                (phase 4), ``None`` when the session is not SELinux-
+                confined.  Only a slot forked into that boundary fits; on
+                a miss the caller forks one (:meth:`fork_slot_into`).
 
         Returns:
             A :class:`PoolSlot` carrying the requested key and a LIVE
@@ -973,6 +1005,7 @@ class PoolManager:
             workspace_root=workspace_root,
             profile_name=profile_name,
             runner_uid=runner_uid,
+            selinux_boundary=selinux_boundary,
         )
         mismatch_skips = 0
         uid_skips = 0
@@ -1048,6 +1081,39 @@ class PoolManager:
                 key.profile_name or "(unconfined)",
             )
         self._incr("pool_slot_acquired_total")
+        return slot
+
+    def fork_slot_into(
+        self, key: SlotKey, entry: Dict[str, Any],
+    ) -> Optional[PoolSlot]:
+        """Fork a slot that enters an SELinux boundary at fork (phase 4).
+
+        For a session :meth:`acquire_slot` had no slot for: a virgin slot
+        is threaded and cannot ``setcon`` (selinux-backend.md §7.2), so
+        the template forks one for this session, and the child enters
+        *entry* (``context``, ``private_tmp``, ``runner_user``) before it
+        starts a thread.  The returned slot is checked out to the caller,
+        stamped with *key*, and returns to the pool like any other, where
+        it fits only *key*'s boundary and uid.
+
+        ``None`` when the template could not fork (dead, timed out); the
+        caller cold-spawns, as on any miss.  A child that cannot ENTER the
+        boundary exits instead (``SELINUX_ENTRY_EXIT_CODE``), which the
+        caller sees as a bootstrap that failed, not as a miss: a session
+        whose boundary cannot be entered must not run anywhere else.
+        """
+        raw = self._template_manager.request_fork_slot(entry=entry)
+        if raw is None:
+            self._incr("pool_selinux_fork_failures_total")
+            return None
+        pid, sock = raw
+        slot = PoolSlot(pid=pid, sock=sock)
+        key.stamp(slot)
+        self._incr("pool_selinux_fork_total")
+        logger.info(
+            "PoolManager: forked slot pid=%d into SELinux boundary %s "
+            "(context %s)", pid, key.selinux_boundary, entry.get("context"),
+        )
         return slot
 
     def return_slot_after_session(self, slot: PoolSlot) -> bool:
@@ -1267,7 +1333,12 @@ class PoolManager:
           - ``pool_acquire_miss_total``: ``acquire_slot`` returned
             None.  Sessions fell back to cold-spawn.  If this is
             growing fast, raise ``target_size`` or check
-            ``pool_replenish_failures_total``.
+            ``pool_replenish_failures_total``.  An SELinux session's
+            miss is followed by :meth:`fork_slot_into`, not a cold
+            spawn.
+          - ``pool_selinux_fork_total`` / ``..._failures_total`` (phase
+            4): slots forked into an SELinux boundary, and the requests
+            the template could not fork.
           - ``pool_stale_reservation_evicted_total``: a cascade-affined
             idle slot was dropped at the ceiling to admit a returning
             slot of a live cascade.  Its cascade pays a cold plugin

@@ -137,6 +137,25 @@ def _ensure_session_tmpdir(
         )
 
 
+def _ensure_runner_log_dir(log_path: Optional[str]) -> None:
+    """Create ``<ws>/.jaato/logs`` before either spawn branch.
+
+    Best-effort and audible, as :func:`_ensure_session_tmpdir` is.  Created
+    before the runner user is resolved, so the hand-over (#1168) finds it
+    owned by the daemon and gives it to that user.  ``None`` does nothing.
+    """
+    if not log_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "spawn_session_runner: failed to create the runner log "
+            "directory for %s (%s: %s) — the runner will have no log",
+            log_path, type(exc).__name__, exc,
+        )
+
+
 def resolve_session_private_tmp(
     server: Any,
     workspace_path: Optional[str],
@@ -197,18 +216,81 @@ def _boundary_label(profile_name: Optional[str], confinement: Any) -> str:
     return profile_name or "(none)"
 
 
-def _pool_may_serve(pool_manager: Any, cgroup_attach: Any, confinement: Any) -> bool:
-    """May a pre-warm slot serve this session?
+def runner_log_path(workspace_path: Optional[str], session_id: str) -> Optional[str]:
+    """The session's runner log, ``<ws>/.jaato/logs/runner-<id>.log``.
 
-    Not with a cgroup to attach (a slot is already in the daemon's), and
-    not under SELinux: a slot is a forked, threaded process, and SELinux
-    refuses ``setcon`` there (phase 0), so the domain can only be entered
-    by the exec a cold spawn does (selinux-backend.md §7.2).
+    ``None`` without a workspace.  One definition for the two readers: the
+    cold spawn's child opens it before exec, and the envelope carries it so
+    every bootstrap, a pool slot's included, points fds 1 and 2 at it.
     """
+    if not workspace_path:
+        return None
+    return os.path.join(workspace_path, ".jaato", "logs", f"runner-{session_id}.log")
+
+
+def _slot_boundary_note(profile_name: Optional[str], confinement: Any) -> str:
+    """How a pool slot ends up in its boundary, for the spawn log line."""
     from jaato_server.server.confinement.base import is_selinux
 
+    if is_selinux(confinement):
+        return f"{confinement.label}, entered at fork"
+    if profile_name:
+        return f"{profile_name}, entered at bootstrap"
+    return "(unconfined)"
+
+
+def _pool_may_serve(pool_manager: Any, cgroup_attach: Any) -> bool:
+    """May a pre-warm slot serve this session?
+
+    Not with a cgroup to attach (a slot is already in the daemon's).  An
+    SELinux session may (phase 4): it is served by a slot forked into its
+    boundary, see :func:`_acquire_pool_slot`.
+    """
     return (pool_manager is not None and _pool_enabled()
-            and cgroup_attach is None and not is_selinux(confinement))
+            and cgroup_attach is None)
+
+
+def _acquire_pool_slot(
+    pool_manager: Any, server: Any, *, cascade_driver_id: Optional[str],
+    workspace_path: Optional[str], profile_name: Optional[str],
+    runner_user: Any, confinement: Any, log_path: Optional[str] = None,
+) -> Any:
+    """A pool slot for this session, or ``None`` (cold spawn).
+
+    The key: a slot's warm plugin state was built from ITS config root;
+    its threads are stuck in the AppArmor profile it was last confined to
+    (#1023); a dropped slot is that uid for life (#1168); and an SELinux
+    slot is in the domain it was forked into (phase 4).  See
+    ``runner_pool.SlotKey``.  Passed raw; ``SlotKey.build`` folds ``""``
+    to ``None``.
+
+    An SELinux session no idle slot fits gets a slot forked into its
+    boundary (selinux-backend.md §7.2): the child points its output at
+    *log_path* (the session's runner log), then enters the private
+    ``/tmp``, the uid and the domain while it has one thread.
+    """
+    from jaato_server.server.confinement.base import is_selinux
+    from jaato_server.server.runner_pool import SlotKey
+
+    selinux = is_selinux(confinement)
+    fields = dict(
+        cascade_driver_id=cascade_driver_id,
+        config_root=getattr(server, "config_root", None),
+        workspace_root=workspace_path,
+        profile_name=profile_name,
+        runner_uid=runner_uid_of(runner_user),
+        selinux_boundary=confinement.confinement_id if selinux else None,
+    )
+    slot = pool_manager.acquire_slot(**fields)
+    if slot is not None or not selinux:
+        return slot
+    entry = {
+        "context": confinement.label,
+        "log_path": log_path,
+        "private_tmp": session_private_tmp(server, profile_name, confinement),
+        "runner_user": runner_user.to_dict() if runner_user is not None else None,
+    }
+    return pool_manager.fork_slot_into(SlotKey.build(**fields), entry)
 
 
 def session_private_tmp(
@@ -369,10 +451,7 @@ def spawn_session_runner(
             "start RunnerRPCClient"
         )
 
-    log_path: Optional[str] = None
-    if workspace_path:
-        log_dir = os.path.join(workspace_path, ".jaato", "logs")
-        log_path = os.path.join(log_dir, f"runner-{session_id}.log")
+    log_path = runner_log_path(workspace_path, session_id)
 
     # ----- The session's tmpdir, before either branch (#1171) -----
     # ``RunnerSpawner.spawn`` makes this directory before it forks,
@@ -395,6 +474,11 @@ def spawn_session_runner(
     # which is #1171 itself — so this must not fail silently, and must
     # not take down a session that would otherwise run.
     _ensure_session_tmpdir(session_id, profile_name, confinement)
+    # ...and the runner log's directory, for the same reason: a cold
+    # spawn's child made it before exec, a pool slot never did, so the
+    # first pool-served session of a fresh workspace had nowhere to log
+    # (SELinux phase 4 kernel run).
+    _ensure_runner_log_dir(log_path)
 
     # ----- The session's workspace HOME, before either branch (#1225) -----
     # The daemon creates ``<ws>/.home/`` (+ its ``*`` gitignore) here, for
@@ -441,24 +525,12 @@ def spawn_session_runner(
     # to envelope.profile_name in bootstrap_session step 1c.)
     spawned: Optional[SpawnedRunner] = None
     pool_served = False
-    if _pool_may_serve(pool_manager, cgroup_attach, confinement):
-        slot = pool_manager.acquire_slot(
-            cascade_driver_id=cascade_driver_id,
-            # A slot's warm plugin state was built from ITS config root.
-            # Reusing across roots hands the next session whatever the first
-            # one's bootstrap derived -- profiles, agents, prompt library,
-            # permission config.
-            config_root=getattr(server, "config_root", None),
-            # ...and its THREADS are stuck in the AppArmor profile it was
-            # last confined to, which grants one workspace and cannot be
-            # changed for the threads that already exist (#1023).  Both
-            # are part of the reuse key; see ``runner_pool.SlotKey``.
-            # Passed raw; ``SlotKey.build`` folds "" to None so that
-            # "unconfined" and "no workspace" each have one spelling.
-            workspace_root=workspace_path,
-            profile_name=profile_name,
-            # #1168: a slot that dropped is that uid for life.
-            runner_uid=runner_uid_of(runner_user),
+    if _pool_may_serve(pool_manager, cgroup_attach):
+        slot = _acquire_pool_slot(
+            pool_manager, server, cascade_driver_id=cascade_driver_id,
+            workspace_path=workspace_path, profile_name=profile_name,
+            runner_user=runner_user, confinement=confinement,
+            log_path=log_path,
         )
         if slot is not None:
             spawned = SpawnedRunner(
@@ -481,10 +553,9 @@ def spawn_session_runner(
             server._pool_manager_ref = pool_manager
             logger.info(
                 "spawn_session_runner: session %s served by pool slot "
-                "pid=%d cascade=%s (warm imports inherited; slot will "
-                "self-confine to profile=%s)",
+                "pid=%d cascade=%s (warm imports inherited; boundary %s)",
                 session_id, slot.pid, slot.cascade_id or "(standalone)",
-                profile_name or "(unconfined)",
+                _slot_boundary_note(profile_name, confinement),
             )
         else:
             logger.info(
@@ -1487,6 +1558,9 @@ def build_session_envelope(
         runner_user=_runner_user_wire(server),
         # #1465: the user tier the runner reads and is not granted.
         user_tier_files=user_tier_snapshot(stashed_runner_user(server)),
+        # SELinux phase 4: where this session's runner logs, so a pool
+        # slot stops writing the daemon's log (which it may not).
+        runner_log_path=runner_log_path(workspace_path, session_id),
     )
 
 

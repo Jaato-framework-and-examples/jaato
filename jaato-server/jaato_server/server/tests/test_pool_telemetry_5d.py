@@ -45,6 +45,8 @@ def test_telemetry_starts_at_zero() -> None:
     counters = pool.get_telemetry()
     assert counters == {
         "pool_slot_acquired_total": 0,
+        "pool_selinux_fork_total": 0,
+        "pool_selinux_fork_failures_total": 0,
         "pool_acquire_miss_total": 0,
         "pool_replenish_success_total": 0,
         "pool_replenish_failures_total": 0,

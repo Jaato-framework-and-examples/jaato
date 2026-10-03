@@ -192,11 +192,10 @@ profiles today.
 
 | Domain | AppArmor equivalent | Entered by |
 |---|---|---|
-| `jaato_runner_t` | base profile `jaato-ws-<id>` | cold spawn: `setexeccon` in the daemon's fork before `execve`; pool slot: `setcon` (section 7) |
+| `jaato_runner_t` | base profile `jaato-ws-<id>` | cold spawn: `setexeccon` in the daemon's fork before `execve`; pool slot: `setcon` in the freshly forked, single-threaded child (section 7.2) |
 | `jaato_child_t` | `//child` | `setexeccon` in the `preexec_fn` of every model-driven subprocess |
 | `jaato_isolated_t` | isolated sub-runner profile | exec transition at sub-runner spawn (cold, like the runner) |
 | `jaato_isolated_ro_t` | isolated sub-runner profile with `isolated_read_only_workspace` | same |
-| `jaato_template_t` | (unconfined pool template) | only with pool support, section 7 |
 
 There is no `tool_hat` domain, and there cannot be one of the same shape.
 A per-call hat would need `setcon` on a worker thread: into a tool domain
@@ -442,17 +441,41 @@ Phase plan:
   routing gate in `spawn_session_runner` already routes `cgroup_attach`
   sessions away from the pool; SELinux confinement joins it. Cost: the
   cold start (~7 s vs ~1 s warm). Unconfined sessions still use the pool.
-* **Phase 4: bounded pool.** The template runs as
-  `jaato_template_t:s0-s0:c0.c1023` with
-  `typebounds jaato_template_t jaato_runner_t`, and each slot calls
-  `setcon(jaato_runner_t:<level>)` on its main thread. Threads created
-  before the transition keep the template label, so #1023's
-  `recycle_worker_pools` + `verify_thread_confinement` apply unchanged
-  (the scan reads `/proc/self/task/*/attr/current`, which SELinux fills
-  with a context string). The slot key already contains the label via
-  `confinement_id`, so #1033 and #1100 need no change. To be verified:
-  whether `typebounds` constrains a Python runtime's template enough to be
-  worth it, since the template must hold every permission any runner has.
+* **Phase 4 (shipped, verified on a kernel): fork on demand.** A
+  freshly forked child has one thread, so it may `setcon`. When an SELinux
+  session finds no idle slot of its boundary, the daemon asks the template
+  for one with `FORK_SLOT <json>` (`context`, `private_tmp`,
+  `runner_user`); the child enters the private `/tmp`, drops to the
+  runner user and writes `jaato_runner_t:<level>` to
+  `/proc/self/attr/current`, in that order and before it starts any
+  thread (`runner_spawner.enter_slot_boundary_in_child`, the cold spawn's
+  order). A failure exits the child (124 for the domain), so the session's
+  bootstrap fails rather than running elsewhere. The slot's bootstrap
+  then only confirms (steps 1b2, 1b3 and 1c find the work done), and
+  every thread is born in the domain, so #1023's verification passes with
+  nothing to retire. The slot returns to the pool and is reused by the
+  next session of the same boundary and uid: `SlotKey.selinux_boundary`
+  (the boundary's `confinement_id`) is in the key, and a virgin slot never
+  fits a key that names one.
+  * **No template domain.** The template stays in the daemon's domain, as
+    it stays unconfined under AppArmor; it runs only the daemon's code,
+    and a slot leaves it before any session code runs. The module grants
+    `unconfined_t` and `unconfined_service_t` `dyntransition` into
+    `jaato_runner_t` (targeted grants it to `unconfined_t` only under
+    `unconfined_dyntrans_all`, and not to `unconfined_service_t`);
+    `setcurrent` they already hold. The daemon's domains are not
+    `mcs_constrained`, so the MCS constraint on `dyntransition` lets the
+    slot take any category pair. Readiness check 5 asks for the
+    permission, and the module is 1.7.0 (marker `jaato_policy_v4_t`).
+  * **Rejected: the bounded pre-forked pool** (`typebounds
+    jaato_template_t jaato_runner_t`, `setcon` on a threaded slot's main
+    thread). The template would need every permission any runner has, at
+    every level, and the pre-existing threads would stay in the template
+    domain and have to be retired. Fork on demand needs neither.
+  * **Cost:** a boundary's first session waits for a fork (tens of ms)
+    instead of finding a pre-forked slot; later sessions of that boundary
+    reuse the slot. A served SELinux slot counts as idle capacity, as a
+    served AppArmor slot does, though it fits one boundary.
 
 ### 7.3 Model-driven subprocesses
 
@@ -578,7 +601,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
-| 4 | Bounded pool slots | confined sessions warm again |
+| 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
 ### What the phase 2a kernel run found
@@ -787,6 +810,97 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
 
+### The phase 4 pty run (8874c5c0, `jaato-server[interactive]`)
+
+* Every earlier phase 3 and 4 run installed jaato-server without the
+  `[interactive]` extra, so `interactive_shell` was skipped and no live
+  session used a pty. With `pexpect` installed and the command run through
+  `shell_spawn`, both pool-served sessions passed 13/13 as root and as uid
+  1000: the command ran in `jaato_child_t` on `/dev/pts/3` from a forked,
+  reused slot, with no jaato AVC.
+* In an isolated sub-runner, `shell_spawn` is refused at the exec of the
+  shell (`execute` on `shell_exec_t` by `jaato_isolated_t`). That is the
+  flat domain's design (it may exec nothing), and no pty denial appeared.
+  The refusal reaches the model as the tool's error and is not logged by
+  the sub-runner, so an operator sees only the AVC; that is what phase 5's
+  AVC-based denial hints are for.
+* The handoffs now install `jaato-server[interactive]`, and
+  `live_session.py --pty` makes the pty path a standing check.
+
+### The third phase 4 kernel run (8874c5c0)
+
+* **Everything passes**: probe 67/67 at both uids, `--sessions 2` 13/13 as
+  root and as uid 1000, `--isolated rw` 11/11.
+* Each session wrote its own runner log, naming only its own session; no
+  write to the daemon's log was refused (the earlier runs: about 700,
+  then 54 to 357); no `PermissionError` at bootstrap.
+* Session start: a reused slot answers `session.new` in about 0.25 s. A
+  fresh daemon's first session takes about 19 s, about 15.7 s of it the
+  daemon's own first-session plugin load.
+* No AVC naming a jaato type in the pool runs; the isolated run shows
+  only the known existence probes.
+
+### The second phase 4 kernel run (b5dcc98f)
+
+* **The log fix refused pool-served sessions.** At bootstrap the runner
+  flushed stdout and stderr before re-pointing them, and in a forked
+  slot those were still the daemon's log, which `jaato_runner_t` may not
+  write: the flush raised `PermissionError` (no path) and the bootstrap
+  failed. The log file was created and stayed empty. The fake-based test
+  could not see it, because a test's stdout is writable.
+* **The first session of a fresh workspace had no `.jaato/logs`** when
+  the runner was the daemon's uid: a cold spawn's child creates it, the
+  uid hand-over creates it, the pool path did neither.
+* With the flush tolerated in the host's venv copy (diagnostic only),
+  both sessions ran and the uid run's logs were the intended ones; one
+  session's buffered lines then opened the next session's log, and about
+  7 writes per run were still refused between the fork and the bootstrap.
+* **Fixed at the source:** the fork request carries the session's log
+  path, and the child points fds 1 and 2 at it before it enters the
+  domain (`runner_spawner._redirect_output_in_child`), as a cold spawn's
+  child does before exec. A confined slot therefore never holds the
+  daemon's log, so the bootstrap's flush (kept, so nothing carries over)
+  always writes a file it may write, and the window before the bootstrap
+  is closed. A slot that cannot open its log exits (123); a fork request
+  without a log path is malformed. The daemon creates `.jaato/logs`
+  before either spawn branch.
+* A refused session's slot is discarded, not returned to the pool, which
+  is why the uid run forked a second slot: correct, since that slot's
+  state is unknown.
+
+### What the phase 4 kernel run found (b8e2dc42)
+
+* **§7.2 holds on the kernel.** Probe 67/67 at both uids: a threaded
+  process is refused `setcon` with `EPERM` before any policy check, a
+  forked child enters `jaato_runner_t` at the workspace level, its threads
+  wear the same context, and its refusals are exactly the cold runner's.
+  Live: `--sessions 2` passed 11/11 as root and as uid 1000 (the first
+  session on a slot forked into its boundary, the second on that slot),
+  and the isolated sub-runner is still cold spawned (9/9).
+* **Runner start, on that WSL host:** cold spawn 16 to 18 s, a forked
+  slot about 1.5 s, a reused slot about 0.1 s. A daemon's first session
+  still spends about 15 s loading the daemon's own plugins first.
+* **A pool slot had no log of its own, on any backend.** It kept the
+  template's stdout and stderr, the daemon's log; under SELinux every
+  write was refused (about 700 AVCs per run) and the slot's log was lost.
+  **Fixed (your choice: per session, at bootstrap):** the envelope carries
+  `runner_log_path`, and bootstrap step 1a points fds 1 and 2 at it on
+  every session, so a reused slot's next session gets its own
+  `runner-<id>.log`. This moves AppArmor and unconfined slots' lines out
+  of the daemon's log too. Not yet run on a kernel: the slot opens the
+  file after it is confined, where a cold spawn only proved writing an
+  inherited one.
+* **`JAATO_RUNNER_POOL_SIZE=0` does not mean cold spawn under SELinux.**
+  The pool is still consulted, a slot is forked per session, and none is
+  kept (the ceiling is twice the size). `JAATO_RUNNER_POOL_ENABLED=false`
+  is the switch that restores cold spawn.
+* `unconfined_dyntrans_all` was on there, so the module's `unconfined_t`
+  rule was redundant on that host; it is kept for hosts where the boolean
+  is off. The `unconfined_service_t` rule is needed everywhere.
+* The pool-served spawn line said a slot "will self-confine to
+  profile=(unconfined)" under SELinux; it now names the boundary and how
+  it was entered.
+
 ### The fifth phase 3 kernel run (6aabd3d4)
 
 * **Everything passes, and root and uid-1000 sub-runners now match**: the
@@ -860,11 +974,12 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   before the PID file. Only an SELinux choice is stored; AppArmor keeps its
   per-transport managers. An unknown `JAATO_CONFINEMENT`, or a required
   backend that is unavailable, exits with the reason.
-* **SELinux sessions are cold spawned.** `_pool_may_serve` refuses them a
-  slot; the child writes the runner's context to `/proc/self/attr/exec`
-  after the privilege drop (#1168) and before `execve`, and the runner
-  confirms it (step 1c and the cold-spawn entry point) rather than
-  transitioning. Pool support is phase 4.
+* **SELinux sessions were cold spawned until phase 4.** The child writes
+  the runner's context to `/proc/self/attr/exec` after the privilege drop
+  (#1168) and before `execve`, and the runner confirms it (step 1c and the
+  cold-spawn entry point) rather than transitioning. Since phase 4 a pool
+  slot forked into the boundary serves them (§7.2), and a cold spawn
+  happens only when the pool is off or the template cannot fork.
 * **The daemon labels everything the runner cannot create**: the
   workspace tree once (stamped in `~/.jaato/selinux_levels.json`, outside
   the workspace), the private `<ws>/.tmp`, and the session tmpdir under
@@ -904,8 +1019,9 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   loopback ports is open for 2b.
 
 * **The module stops at the two domains phase 2b needs.** `jaato_isolated_t`
-  (phase 3) and `jaato_template_t` (phase 4) are not declared; declaring
-  them before anything enters them would be policy nobody tests.
+  (phase 3) and `jaato_template_t` (then planned for phase 4) are not
+  declared; declaring them before anything enters them would be policy
+  nobody tests. Phase 4 then needed no template domain (§7.2).
 * **A presence check counts only unconditional rules.** Targeted grants
   `domain domain:fd use` under the boolean `domain_fd_use` (default on),
   so "the runner may use the daemon's fds" held with the module's own line
@@ -1027,9 +1143,9 @@ users on WSL:
    `relabelfrom/relabelto` and `process transition`; granting those to an
    `unconfined_t` service user is policy the operator must accept. Section 9
    assumes root, as the private `/tmp` does.
-3. **Bounded pool.** Whether the template can be written as a bound
-   (a superset domain) tight enough to be worth it, or whether confined
-   sessions should simply always cold-spawn on SELinux.
+3. **Bounded pool.** Answered by phase 4: neither a bound nor always
+   cold-spawning. A slot forked on demand enters the domain while it has
+   one thread (§7.2).
 4. **Shared read-only data.** Whether `jaato_shared_ro_t` (operator-labelled,
    readable by every runner at any level) is the right way to express
    "read `/srv/corpus`", given that it is global rather than per workspace.
