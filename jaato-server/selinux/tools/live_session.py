@@ -324,14 +324,19 @@ def _check_processes(result: dict) -> str:
            f"id -Z said: {child!r}; output: {output!r}")
     record("the command wrote the workspace", "WSOK" in output, repr(output))
     if result.get("pty"):
-        tty = next((l.strip() for l in output.splitlines() if l.strip().startswith("/dev/")), "")
-        record("the command ran on a pty", tty.startswith("/dev/pts/"), f"tty said: {tty!r}")
+        _check_pty(output)
     record("the turn completed without errors", not result["errors"]
            and any(e["success"] for e in result["ends"]), json.dumps(result)[:600])
     modes = {s.get("sandbox_mode") for s in result["sessions"]}
     record("the session record says sandbox_mode: selinux", "selinux" in modes,
            f"sandbox_mode values: {sorted(m for m in modes if m)}")
     return level
+
+
+def _check_pty(output: str) -> None:
+    """--pty: ``tty`` named a pseudo-terminal (interactive_shell)."""
+    tty = next((l.strip() for l in output.splitlines() if l.strip().startswith("/dev/")), "")
+    record("the command ran on a pty", tty.startswith("/dev/pts/"), f"tty said: {tty!r}")
 
 
 def _check_pool(log: Path, sessions: int, ws: Path, marker: str) -> None:
