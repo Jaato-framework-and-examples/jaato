@@ -604,7 +604,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
-| 5 | **implemented; two kernel runs (1f78ee65, a0b58a3f), the hidden-program and probe fixes not yet re-run**: `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
+| 5 | **shipped, verified on a kernel** (three runs, the last at a99d310c: probe 69/69 and every live check, `--hint exec` and `--hint see` at both uids, no `ldconfig` AVC): `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
 
 ### What the phase 2a kernel run found
 
@@ -811,6 +811,16 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
 * **A dropped user's `~/.jaato/gc.json` reached the parent and not the
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
+
+### The third phase 5 kernel run (a99d310c)
+
+* **Everything passes**: `jaato-selinux` through install, a second
+  install, uninstall and install again; probe 69/69 at both uids (the
+  child's query is refused with `EACCES`); `--hint exec` and `--hint see`
+  12/12 each, as root and as uid 1000; pool and isolated regressions.
+* The `see` hint costs one AVC per refusal: the runner's own refused
+  `stat`, which is the evidence it is inferred from. No label read is
+  attempted. No `ldconfig` AVC anywhere.
 
 ### The second phase 5 kernel run (a0b58a3f)
 
