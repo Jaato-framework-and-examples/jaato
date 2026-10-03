@@ -212,6 +212,25 @@ def setup(root: str) -> dict:
 # probes
 # ----------------------------------------------------------------------
 
+def child_from_runner() -> str:
+    """Runner code that execs ``CMD`` (replaced by the caller) in //child.
+
+    The way ``cli`` enters it, and the only way a child's output reaches the
+    probe: a child entered straight from the probe (``unconfined_t``) may
+    not write the probe's pipes (phase 5 kernel run 2), so its verdict is
+    lost; the runner's pipes it may write.
+    """
+    return f"""
+import os, subprocess
+def pre():
+    fd = os.open('/proc/self/attr/exec', os.O_WRONLY)
+    os.write(fd, b'{context("jaato_child_t", L1)}')
+    os.close(fd)
+p = subprocess.run(CMD, preexec_fn=pre, capture_output=True, text=True)
+print(p.stdout + p.stderr)
+"""
+
+
 def spawn_child_create(target: str) -> str:
     """Runner code that execs a child shell which tries to create *target*."""
     child_ctx = context("jaato_child_t", L1)
@@ -331,16 +350,7 @@ attempt(lambda: os.mkdir('{p['wsA']}/d'), False)"""))
         record("runner: resolves DNS and connects out over TCP", None, "host is offline")
 
     # //child, entered the way cli will enter it: from inside the runner.
-    child_ctx = context(C, L1)
-    spawn = f"""
-import os, subprocess
-def pre():
-    fd = os.open('/proc/self/attr/exec', os.O_WRONLY)
-    os.write(fd, b'{child_ctx}')
-    os.close(fd)
-p = subprocess.run(CMD, preexec_fn=pre, capture_output=True, text=True)
-print(p.stdout + p.stderr)
-"""
+    spawn = child_from_runner()
     expect_ok("child: the runner execs /bin/sh into jaato_child_t",
               py_in(R, L1, spawn.replace("CMD", "['/bin/sh','-c','cat /proc/self/attr/current; echo; echo OK']")),
               want=f"{C}:{L1}")
@@ -550,7 +560,8 @@ def hint_probes(p: dict) -> None:
     expect_ok("hint: the runner may ask the policy (security_compute_av)",
               py_in("jaato_runner_t", L1, ask), want="OK refused")
     expect_denied("hint: a child may not ask the policy",
-                  py_in("jaato_child_t", L1, ask))
+                  py_in("jaato_runner_t", L1, child_from_runner().replace(
+                      "CMD", repr([sys.executable, "-I", "-c", ask]))))
 
 
 def auditd_running() -> bool:

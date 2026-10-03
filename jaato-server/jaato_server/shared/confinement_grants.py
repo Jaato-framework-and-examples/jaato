@@ -36,7 +36,10 @@ kernel's own.  The runner installs its child context
 policy (``security_compute_av``) whether that context may execute or read
 the refused file's context, after the mode bits rule out a plain
 permission refusal.  A question the kernel will not answer (no
-``security:compute_av``, an unreadable label) gives no hint.
+``security:compute_av``, an unreadable label) gives no hint.  A program the
+shell reports as not found is judged from the runner's own refused
+``stat`` instead: the session cannot see it, so neither can the runner read
+its label.
 
 Stdlib-only, like :mod:`jaato_server.shared.apparmor_label`, because the
 runner imports it before plugin discovery and ``shared`` cannot import
@@ -403,7 +406,9 @@ _SHELL_NOT_FOUND = re.compile(
 #: What a candidate may be refused: exec, read (a script its interpreter
 #: could not open), or either (a shell names the script it tried to run,
 #: which the kernel refuses for exec, or its interpreter for read); and,
-#: judged under SELinux only, seeing it at all (``getattr``).
+#: judged under SELinux only, seeing it at all: from the runner's own
+#: refused ``stat`` (:func:`_hidden_in_path`), because the label of a file
+#: the session may not see cannot be read to ask the policy about it.
 EXEC, READ, EXEC_OR_READ, SEE = "x", "r", "x|r", "see"
 
 
@@ -563,7 +568,8 @@ def _dac_allows(path: str, refused: str) -> bool:
     Read from ``stat`` rather than ``os.access``: ``access(2)`` consults the
     LSM too, so under SELinux it would report the policy's refusal as a
     mode-bit one.  ACLs are not read; the verdict that follows is the
-    policy's own, so a hint is never given on mode bits alone.
+    policy's own, so a hint is never given on mode bits alone.  For a
+    directory, ``x`` is search.
     """
     try:
         st = os.stat(path)
@@ -580,8 +586,7 @@ def _dac_allows(path: str, refused: str) -> bool:
 
 #: The permissions SELinux checks for each refusal, in the child's own
 #: domain (a command a child runs stays in ``jaato_child_t``).
-_SELINUX_PERMS = {EXEC: ("execute", "execute_no_trans"), READ: ("read",),
-                  SEE: ("getattr",)}
+_SELINUX_PERMS = {EXEC: ("execute", "execute_no_trans"), READ: ("read",)}
 
 
 def _selinux_refusal(
@@ -597,8 +602,7 @@ def _selinux_refusal(
     if file_ctx is None:
         return None
     for refused in ((EXEC, READ) if kind == EXEC_OR_READ else (kind,)):
-        # Seeing a file needs search on its directory, which the shell had.
-        if refused != SEE and not _dac_allows(resolved, refused):
+        if not _dac_allows(resolved, refused):
             continue
         verdicts = [selinux_allowed(lib, child, file_ctx, "file", perm)
                     for perm in _SELINUX_PERMS[refused]]
@@ -611,20 +615,67 @@ def _selinux_hint(child: str, named: str, resolved: str, refused: str,
                   file_ctx: str) -> str:
     from jaato_server.shared.lsm_label import parse_selinux_context
 
-    verb = {EXEC: "execute", READ: "read", SEE: "even see"}[refused]
+    verb = "execute" if refused == EXEC else "read"
     shown = resolved if resolved == named else f"{resolved} (what {named} resolves to)"
     domain = parse_selinux_context(child)
     ftype = parse_selinux_context(file_ctx)
-    hidden = (" It exists: the shell reports it as not found because it "
-              "cannot see it." if refused == SEE else "")
     return (
         f"SELinux refused this: the session's commands run in "
         f"{domain.type if domain else child}, which the jaato policy does not "
-        f"let {verb} {shown} (labelled {ftype.type if ftype else file_ctx}).{hidden} "
+        f"let {verb} {shown} (labelled {ftype.type if ftype else file_ctx}). "
         f"The kernel will refuse it again however it is invoked, so do not "
         f"retry it or look for another route to the same file; tell the user "
         f"what was refused. An operator can label the file with a type the "
         f"policy grants (system programs are bin_t) or extend the jaato "
+        f"policy module."
+    )
+
+
+def _hidden_in_path(named: str, search_path: Optional[str],
+                    cwd: Optional[str]) -> Optional[str]:
+    """Where a program the shell did not find exists and the policy hides it.
+
+    A program the child may not ``stat`` the runner may not ``stat`` either
+    (phase 5 kernel run 2: no program type the child cannot see is one the
+    runner can), so its label cannot be read and the policy cannot be asked
+    about it.  The evidence is the runner's own refused ``stat``: ``EACCES``
+    on a path whose directory the mode bits let this uid search means the
+    kernel's policy hid an existing file; ``ENOENT`` means it is absent.
+    """
+    if "/" in named:
+        candidates = [named if os.path.isabs(named)
+                      else os.path.join(cwd or os.getcwd(), named)]
+    else:
+        candidates = [os.path.join(d, named)
+                      for d in (search_path or os.defpath).split(os.pathsep) if d]
+    for candidate in candidates:
+        try:
+            os.stat(candidate)
+        except PermissionError:
+            directory = os.path.dirname(candidate) or "."
+            if _dac_allows(directory, EXEC):
+                # The directory is visible, so a symlinked PATH entry
+                # (Fedora's /usr/local/sbin -> bin) is named as resolved.
+                return os.path.join(os.path.realpath(directory),
+                                    os.path.basename(candidate))
+        except OSError:
+            continue
+        else:
+            return None  # the runner sees it: the shell's "not found" is not SELinux
+    return None
+
+
+def _selinux_hidden_hint(child: str, named: str, path: str) -> str:
+    from jaato_server.shared.lsm_label import parse_selinux_context
+
+    domain = parse_selinux_context(child)
+    return (
+        f"SELinux hid this: a program named {named} exists at {path}, but the "
+        f"jaato policy does not let {domain.type if domain else child} (the "
+        f"domain the session's commands run in) even see it, so the shell "
+        f"reports it as not found. Do not look for it elsewhere or retry it; "
+        f"tell the user what was hidden. An operator can label it with a type "
+        f"the policy grants (system programs are bin_t) or extend the jaato "
         f"policy module."
     )
 
@@ -638,6 +689,11 @@ def explain_selinux_denial(
     if child is None:
         return None
     for named, kind in _denied_candidates(command, output, returncode):
+        if kind == SEE:
+            hidden = _hidden_in_path(named, search_path, cwd)
+            if hidden:
+                return _selinux_hidden_hint(child, named, hidden)
+            continue
         resolved = _resolve(named, search_path, cwd,
                             which=lambda n, path: _which_by_mode(n, path))
         if resolved is None:

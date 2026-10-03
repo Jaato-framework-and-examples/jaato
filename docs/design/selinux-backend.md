@@ -604,7 +604,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
-| 5 | **implemented; one kernel run (1f78ee65), its fixes not yet re-run**: `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
+| 5 | **implemented; two kernel runs (1f78ee65, a0b58a3f), the hidden-program and probe fixes not yet re-run**: `jaato-selinux install|uninstall|status` (the module source ships in the package; built with the host's selinux-policy-devel), and SELinux denial hints in `cli` (module 1.8.0, marker `jaato_policy_v5_t`, `security:compute_av` for the runner). Runbook: [handoff](selinux-phase5-handoff.md) | install is one command; a refused command says SELinux refused it |
 
 ### What the phase 2a kernel run found
 
@@ -812,6 +812,27 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
 
+### The second phase 5 kernel run (a0b58a3f)
+
+* **`jaato-selinux` passes every step**, now with `status` exiting 1
+  when not ready and a skipped `--home` named. **No `ldconfig` AVC
+  anywhere**: the SONAME fix holds. `--hint exec` passes 12/12 as root
+  and as uid 1000, with the policy's own verdict naming `man_t`. Pool
+  and isolated regressions pass.
+* **The probe's "child may not ask" check lost its answer**: it entered
+  `jaato_child_t` straight from the probe, whose pipes the child may not
+  write. The policy was right (the child is refused selinuxfs's class
+  index and `access`). **Fixed:** the check is spawned from a runner, as
+  every other child check is (`child_from_runner`).
+* **The "see" hint could not fire.** No program file the child may not
+  `stat` is one the runner may `stat`, so the hidden program never
+  resolved and its label could not be read. **Fixed (your choice: infer
+  from the refused stat):** the runner stats each PATH entry itself;
+  `EACCES` where the mode bits let this uid search the directory means
+  the policy hid an existing file (`ENOENT` means it is absent). The
+  hint names the path, resolved through a symlinked PATH entry, and no
+  label, which cannot be read. The `getattr` policy query is gone.
+
 ### What the phase 5 kernel run found (1f78ee65)
 
 * **`jaato-selinux` works as designed**: `status` named the remedy
@@ -862,8 +883,9 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
   bare name is resolved by them, because `access(2)` asks the policy too.
   A question the kernel will not answer gives no hint.
 * **Coverage is the AppArmor hint's**, plus one refusal AppArmor has no
-  equivalent for (a program SELinux will not let the child see): `cli`
-  only. An isolated
+  equivalent for (a program SELinux will not let the child see, judged
+  from the runner's own refused `stat`, since the policy cannot be asked
+  about a label nobody may read): `cli` only. An isolated
   sub-runner's refused `shell_spawn` (`interactive_shell`) still shows
   only as an AVC.
 

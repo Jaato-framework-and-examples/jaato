@@ -16,6 +16,15 @@ Phase 5 adds two things ([design §9 and the feature map](selinux-backend.md)):
   `jaato_policy_v5_t`) grants `jaato_runner_t` `security:compute_av`, and
   no other jaato domain.
 
+**Third run (after a0b58a3f).** The second run passed everything but two
+things: the probe's "child may not ask" check, which lost the child's
+answer (it is now spawned from a runner), and `--hint see`, which could
+not fire because the runner cannot see a hidden program either. A hidden
+program is now inferred from the runner's own refused `stat`, and its
+hint begins `SELinux hid this:` and names the path, with no label. No
+policy change (still 1.8.0). Expect the probe at 69/69, and `--hint see`
+to pass as root and as uid 1000.
+
 **Second run (after 1f78ee65).** The first run passed the install
 command end to end and found that libselinux was loaded through
 `find_library` (now by its SONAME), that a program the child may not even

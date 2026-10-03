@@ -378,13 +378,15 @@ def _check_hint(result: dict, kind: str) -> None:
     """--hint: the kernel refused the program, and the result says SELinux did."""
     output = "\n".join(OUTPUT)
     hints = _hints(result.get("history") or [])
-    want = "let execute" if kind == "exec" else "cannot see it"
+    # exec: the policy's own verdict, naming the file's type.  see: the
+    # runner cannot read a hidden file's label either, so the hint names
+    # the path the runner's refused stat found (phase 5 kernel run 2).
+    wants = ((f"SELinux refused this", "let execute", HINT_LABELS[kind])
+             if kind == "exec" else ("SELinux hid this", str(HINT_PROGRAM)))
     record("the probe program was refused (it did not run)",
            "HINT-PROBE-RAN" not in output, repr(output[-300:]))
     record(f"the refused command's result carries an SELinux denial_hint ({kind})",
-           any("SELinux refused this" in h and "jaato_child_t" in h
-               and HINT_LABELS[kind] in h and want in h
-               for h in hints),
+           any("jaato_child_t" in h and all(w in h for w in wants) for h in hints),
            f"hints: {hints}")
 
 

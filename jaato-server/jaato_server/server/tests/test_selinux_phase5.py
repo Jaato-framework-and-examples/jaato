@@ -52,6 +52,21 @@ REVERSIONS = [
                 "model goes looking for it (phase 5 kernel run)",
     ),
     Reversion(
+        target=_GRANTS,
+        find="        except PermissionError:\n            directory = os.path.dirname(candidate) or \".\"\n",
+        replace="        except PermissionError:\n            continue\n            directory = os.path.dirname(candidate) or \".\"\n",
+        test="test_a_program_the_child_cannot_see_gets_a_hint",
+        because="the runner's refused stat is the only evidence a hidden "
+                "program leaves (phase 5 kernel run 2)",
+    ),
+    Reversion(
+        target=_GRANTS,
+        find="            if _dac_allows(directory, EXEC):\n",
+        replace="            if True:\n",
+        test="test_a_directory_the_mode_bits_close_gets_no_hint",
+        because="a directory closed by its mode bits would be blamed on SELinux",
+    ),
+    Reversion(
         target=_CLI,
         find="        if (\"Permission denied\" not in output and \"not found\" not in output\n",
         replace="        if (\"Permission denied\" not in output\n",
@@ -95,7 +110,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_GRANTS,
-        find="        if refused != SEE and not _dac_allows(resolved, refused):\n            continue\n",
+        find="        if not _dac_allows(resolved, refused):\n            continue\n",
         replace="",
         test="test_a_mode_bit_refusal_gets_no_hint",
         because="a missing execute bit would be blamed on SELinux",
@@ -333,13 +348,48 @@ def test_libselinux_is_loaded_by_its_soname(monkeypatch):
     assert asked == ["libselinux.so.1"]
 
 
-def test_a_program_the_child_cannot_see_gets_a_hint(policy):
-    prog, answers = policy
-    answers["getattr"] = False
-    hint = cg.explain_denial(
+def _hidden(prog, monkeypatch, error=PermissionError):
+    """The runner's stat of *prog* refused, as the kernel refused it (run 2)."""
+    real = os.stat
+
+    def stat(path, *a, **kw):
+        if str(path) == str(prog):
+            raise error(13 if error is PermissionError else 2, "refused", str(path))
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(os, "stat", stat)
+    return cg.explain_denial(
         command=prog.name, output=f"/bin/sh: line 1: {prog.name}: command not found",
         returncode=127, search_path=str(prog.parent), cwd=None)
-    assert hint and "even see" in hint and "cannot see it" in hint
+
+
+def test_a_program_the_child_cannot_see_gets_a_hint(policy, monkeypatch):
+    prog, _ = policy
+    hint = _hidden(prog, monkeypatch)
+    assert hint and "SELinux hid this" in hint and str(prog) in hint
+    assert "jaato_child_t" in hint
+
+
+def test_an_absent_program_gets_no_hint(policy, monkeypatch):
+    prog, _ = policy
+    assert _hidden(prog, monkeypatch, error=FileNotFoundError) is None
+
+
+def test_a_program_the_runner_sees_gets_no_hidden_hint(policy):
+    prog, _ = policy
+    assert cg.explain_denial(
+        command=prog.name, output=f"sh: 1: {prog.name}: not found",
+        returncode=127, search_path=str(prog.parent), cwd=None) is None
+
+
+def test_a_directory_the_mode_bits_close_gets_no_hint(policy, monkeypatch):
+    prog, _ = policy
+    prog.parent.chmod(0o700)
+    monkeypatch.setattr(os, "geteuid", lambda: 4242)
+    try:
+        assert _hidden(prog, monkeypatch) is None
+    finally:
+        prog.parent.chmod(0o755)
 
 
 def test_the_apparmor_path_does_not_judge_a_missing_program(policy):
