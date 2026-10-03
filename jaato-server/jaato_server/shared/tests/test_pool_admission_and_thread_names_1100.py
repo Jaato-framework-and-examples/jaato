@@ -77,11 +77,14 @@ _RPC = "jaato-server/jaato_server/server/runner/rpc.py"
 REVERSIONS = [
     Reversion(
         target=_POOL,
-        find=("        if not slot.has_served:\n"
-              "            return True\n"
+        # SELinux phase 4 put the SELinux-boundary short-circuit in the
+        # virgin branch; the defect is the served branch reading a falsy
+        # profile_name as "virgin", so that is what is put back.
+        find=("            return self.selinux_boundary is None\n"
               "        return (\n"
               "            (slot.profile_name or None) == self.profile_name\n"),
-        replace=("        return (\n"
+        replace=("            return self.selinux_boundary is None\n"
+                 "        return (\n"
                  "            (not slot.profile_name\n"
                  "             or slot.profile_name == self.profile_name)\n"),
         test=("TestAdmission::"
@@ -92,9 +95,9 @@ REVERSIONS = [
     ),
     Reversion(
         target=_POOL,
-        find=("        slot.runner_uid = self.runner_uid\n"
+        find=("        slot.selinux_boundary = self.selinux_boundary\n"
               "        slot.has_served = True"),
-        replace="        slot.runner_uid = self.runner_uid",
+        replace="        slot.selinux_boundary = self.selinux_boundary",
         test=("TestAdmission::"
               "test_a_slot_that_served_unconfined_is_not_offered_a_profile"),
         because=("the claim never being recorded, which leaves every slot "

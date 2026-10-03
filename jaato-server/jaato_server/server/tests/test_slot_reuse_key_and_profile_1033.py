@@ -76,8 +76,8 @@ REVERSIONS = [
         # profile half and keeps the uid half, so only the profile is
         # ignored and only this test can notice.
         find=("            (slot.profile_name or None) == self.profile_name\n"
-              "            and self.uid_fits(slot)\n"),
-        replace="            self.uid_fits(slot)\n",
+              "            and (getattr(slot, \"selinux_boundary\", None) or None) == self.selinux_boundary\n"),
+        replace="            (getattr(slot, \"selinux_boundary\", None) or None) == self.selinux_boundary\n",
         test=("TestReuseKey::"
               "test_a_pure_idle_slot_is_not_handed_across_profiles"),
         because=("the unaffined acquire path handing out a slot that is "
