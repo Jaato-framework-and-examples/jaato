@@ -20,6 +20,15 @@ The module is now **1.7.0** (marker `jaato_policy_v4_t`), and the daemon
 refuses an older one. A workspace labelled under an older module is
 relabelled once.
 
+**Third run (after b5dcc98f).** The second run's log fix refused every
+pool-served session: the bootstrap flushed output that was still on the
+daemon's log. Now the forked slot points its output at the session's log
+before it confines itself, and the daemon creates `.jaato/logs` first. No
+policy change. Expect every live check to pass in all three runs, both
+sessions' `runner-<id>.log` to be non-empty with
+`runner-session bootstrap: logging to …`, no `PermissionError` at
+bootstrap, and no refused write on the daemon's log.
+
 **Second run (after the slot-log fix).** The first run passed everything
 and found that a pool slot wrote the daemon's log (refused under SELinux)
 instead of its own. Each bootstrap now points the runner's fds 1 and 2 at

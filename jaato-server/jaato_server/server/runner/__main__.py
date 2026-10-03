@@ -345,7 +345,8 @@ def _fork_slot_entry(cmd: str) -> Any:
 
     ``None`` for a bare ``FORK_SLOT`` (a virgin slot, as before phase 4);
     :data:`_MALFORMED` for a payload that is not a JSON object naming a
-    ``context``, which is refused rather than forked unconfined.
+    ``context`` and a ``log_path``, which is refused rather than forked
+    unconfined or holding the daemon's log.
     """
     import json
 
@@ -356,7 +357,7 @@ def _fork_slot_entry(cmd: str) -> Any:
         entry = json.loads(payload)
     except ValueError:
         return _MALFORMED
-    if not isinstance(entry, dict) or not entry.get("context"):
+    if not isinstance(entry, dict) or not entry.get("context") or not entry.get("log_path"):
         return _MALFORMED
     return entry
 

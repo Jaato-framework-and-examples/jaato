@@ -601,7 +601,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2a | **shipped**: the policy module (`jaato-server/selinux/jaato.{te,fc,if}`, `jaato_runner_t`, `jaato_child_t`, the five file types, marker `jaato_policy_v1_t`), and the `selinux-policy` CI job that links it into the targeted policy in a Fedora container and checks 39 properties with setools, each with its reversion. A kernel run is a [handoff](selinux-phase2a-handoff.md) (`jaato-server/selinux/tools/probe_policy.py`). No code loads the module | none |
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
-| 4 | **implemented; one kernel run (b8e2dc42: probe 67/67, live 11/11 at both uids), the slot-log fix not yet re-run**: pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
+| 4 | **implemented; two kernel runs (b8e2dc42, b5dcc98f), the fork-time log fix not yet re-run**: pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
 ### What the phase 2a kernel run found
@@ -809,6 +809,34 @@ Run 2026-10-02 at 33bfe22b on Fedora 44 / WSL2, enforcing.
 * **A dropped user's `~/.jaato/gc.json` reached the parent and not the
   sub-runner**: the daemon looked in its own home. Fixed: `find_gc_file`
   takes the runner user's home.
+
+### The second phase 4 kernel run (b5dcc98f)
+
+* **The log fix refused pool-served sessions.** At bootstrap the runner
+  flushed stdout and stderr before re-pointing them, and in a forked
+  slot those were still the daemon's log, which `jaato_runner_t` may not
+  write: the flush raised `PermissionError` (no path) and the bootstrap
+  failed. The log file was created and stayed empty. The fake-based test
+  could not see it, because a test's stdout is writable.
+* **The first session of a fresh workspace had no `.jaato/logs`** when
+  the runner was the daemon's uid: a cold spawn's child creates it, the
+  uid hand-over creates it, the pool path did neither.
+* With the flush tolerated in the host's venv copy (diagnostic only),
+  both sessions ran and the uid run's logs were the intended ones; one
+  session's buffered lines then opened the next session's log, and about
+  7 writes per run were still refused between the fork and the bootstrap.
+* **Fixed at the source:** the fork request carries the session's log
+  path, and the child points fds 1 and 2 at it before it enters the
+  domain (`runner_spawner._redirect_output_in_child`), as a cold spawn's
+  child does before exec. A confined slot therefore never holds the
+  daemon's log, so the bootstrap's flush (kept, so nothing carries over)
+  always writes a file it may write, and the window before the bootstrap
+  is closed. A slot that cannot open its log exits (123); a fork request
+  without a log path is malformed. The daemon creates `.jaato/logs`
+  before either spawn branch.
+* A refused session's slot is discarded, not returned to the pool, which
+  is why the uid run forked a second slot: correct, since that slot's
+  state is unknown.
 
 ### What the phase 4 kernel run found (b8e2dc42)
 

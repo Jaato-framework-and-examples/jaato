@@ -70,6 +70,23 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SPAWNER,
+        find="    _redirect_output_in_child(entry[\"log_path\"])\n",
+        replace="",
+        test="test_the_child_enters_tmp_then_uid_then_domain",
+        because="a confined slot would hold the daemon's log on fds 1 and 2, "
+                "and the bootstrap's first flush would fail the session "
+                "(phase 4 kernel run 2)",
+    ),
+    Reversion(
+        target=_SPAWN,
+        find="    _ensure_runner_log_dir(log_path)\n",
+        replace="",
+        test="test_the_spawn_path_makes_the_log_directory_first",
+        because="a fresh workspace's first pool-served session would have "
+                "no .jaato/logs to log into (phase 4 kernel run 2)",
+    ),
+    Reversion(
+        target=_SPAWNER,
         find="    _enter_private_tmp_in_child(entry.get(\"private_tmp\") or None)\n"
              "    _drop_privileges_in_child(RunnerUser.from_dict(entry.get(\"runner_user\")))\n"
              "    _enter_selinux_domain_in_child(entry[\"context\"])\n",
@@ -161,11 +178,12 @@ def test_an_selinux_miss_forks_a_slot_into_the_boundary():
     pool.acquire_slot.return_value = None
     runner_spawn._acquire_pool_slot(
         pool, _server(), cascade_driver_id=None, workspace_path="/w",
-        profile_name="", runner_user=_USER, confinement=_handle())
+        profile_name="", runner_user=_USER, confinement=_handle(),
+        log_path="/w/.jaato/logs/runner-s1.log")
     key, entry = pool.fork_slot_into.call_args.args
     assert key.selinux_boundary == "ws-b1" and key.runner_uid == 1000
-    assert entry == {"context": _CTX, "private_tmp": "/w/.tmp",
-                     "runner_user": _USER.to_dict()}
+    assert entry == {"context": _CTX, "log_path": "/w/.jaato/logs/runner-s1.log",
+                     "private_tmp": "/w/.tmp", "runner_user": _USER.to_dict()}
 
 
 def test_an_unconfined_miss_is_a_cold_spawn():
@@ -181,13 +199,15 @@ def test_an_unconfined_miss_is_a_cold_spawn():
 
 
 def test_the_template_line_round_trips():
-    entry = {"context": _CTX, "private_tmp": None, "runner_user": None}
+    entry = {"context": _CTX, "log_path": "/w/l.log", "private_tmp": None,
+             "runner_user": None}
     line = _fork_slot_line(entry).decode().strip()
     assert runner_main._fork_slot_entry(line) == entry
     assert runner_main._fork_slot_entry(_fork_slot_line(None).decode().strip()) is None
 
 
-@pytest.mark.parametrize("cmd", ["FORK_SLOT {bad", "FORK_SLOT []", 'FORK_SLOT {"x":1}'])
+@pytest.mark.parametrize("cmd", ["FORK_SLOT {bad", "FORK_SLOT []", 'FORK_SLOT {"x":1}',
+                                 'FORK_SLOT {"context":"c"}'])
 def test_a_malformed_boundary_is_refused(cmd):
     assert runner_main._fork_slot_entry(cmd) is runner_main._MALFORMED
 
@@ -216,6 +236,8 @@ def test_the_child_enters_the_boundary_before_slot_mode(monkeypatch):
 
 def test_the_child_enters_tmp_then_uid_then_domain(monkeypatch):
     order = []
+    monkeypatch.setattr(runner_spawner, "_redirect_output_in_child",
+                        lambda p: order.append(("log", p)))
     monkeypatch.setattr(runner_spawner, "_enter_private_tmp_in_child",
                         lambda d: order.append(("tmp", d)))
     monkeypatch.setattr(runner_spawner, "_drop_privileges_in_child",
@@ -223,8 +245,51 @@ def test_the_child_enters_tmp_then_uid_then_domain(monkeypatch):
     monkeypatch.setattr(runner_spawner, "_enter_selinux_domain_in_child",
                         lambda c: order.append(("domain", c)))
     runner_spawner.enter_slot_boundary_in_child(
-        {"context": _CTX, "private_tmp": "/w/.tmp", "runner_user": _USER.to_dict()})
-    assert order == [("tmp", "/w/.tmp"), ("uid", 1000), ("domain", _CTX)]
+        {"context": _CTX, "log_path": "/w/l.log", "private_tmp": "/w/.tmp",
+         "runner_user": _USER.to_dict()})
+    assert order == [("log", "/w/l.log"), ("tmp", "/w/.tmp"), ("uid", 1000),
+                     ("domain", _CTX)]
+
+
+_REDIRECT = """
+import sys
+from jaato_server.server import runner_spawner
+runner_spawner._redirect_output_in_child(sys.argv[1])
+print("AFTER", flush=True)
+sys.stderr.write("ERR-AFTER\\n")
+"""
+
+
+def test_the_slot_output_goes_to_its_log(tmp_path):
+    import subprocess, sys
+    log = tmp_path / "runner-s1.log"
+    p = subprocess.run([sys.executable, "-c", _REDIRECT, str(log)],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0 and p.stdout == "" and p.stderr == ""
+    assert "AFTER" in log.read_text() and "ERR-AFTER" in log.read_text()
+
+
+def test_a_log_the_slot_cannot_open_exits_it(tmp_path):
+    import subprocess, sys
+    p = subprocess.run([sys.executable, "-c", _REDIRECT, str(tmp_path / "no" / "x.log")],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == runner_spawner.SLOT_LOG_EXIT_CODE
+    assert "could not open its runner log" in p.stderr
+
+
+def test_the_spawn_path_makes_the_log_directory_first(tmp_path):
+    import ast
+    from pathlib import Path
+
+    log = tmp_path / ".jaato" / "logs" / "runner-s1.log"
+    runner_spawn._ensure_runner_log_dir(str(log))
+    assert log.parent.is_dir()
+    tree = ast.parse(Path(runner_spawn.__file__).read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "spawn_session_runner")
+    calls = [n.func.id for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert calls.index("_ensure_runner_log_dir") < calls.index("_prepare_runner_user")
 
 
 def _attr(tmp_path, monkeypatch, reads_back):

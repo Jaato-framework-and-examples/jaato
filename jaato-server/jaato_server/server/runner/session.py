@@ -628,6 +628,15 @@ def _point_log_at_session(envelope: SessionInitEnvelope) -> None:
     handler (``_setup_logging(None)`` in the template), which now writes
     here; a cold spawn's file handler is unaffected.
 
+    The flush writes what is buffered to the CURRENT fds, so one session's
+    lines never open the next session's log.  That is safe because a
+    confined slot never holds the daemon's log: an SELinux slot's child
+    pointed fds 1 and 2 at its session's log before it entered the domain
+    (``runner_spawner._redirect_output_in_child``), and an AppArmor or
+    unconfined slot may write the daemon's log.  Before that existed the
+    flush wrote to the daemon's log, was refused, and the bootstrap failed
+    (phase 4 kernel run 2).
+
     Best-effort, as the cold spawn's redirect is: a runner that cannot
     open its log still serves, with the refusal written to whatever fd 2
     still is.  ``None`` (no workspace, an older daemon) changes nothing.

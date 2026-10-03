@@ -137,6 +137,25 @@ def _ensure_session_tmpdir(
         )
 
 
+def _ensure_runner_log_dir(log_path: Optional[str]) -> None:
+    """Create ``<ws>/.jaato/logs`` before either spawn branch.
+
+    Best-effort and audible, as :func:`_ensure_session_tmpdir` is.  Created
+    before the runner user is resolved, so the hand-over (#1168) finds it
+    owned by the daemon and gives it to that user.  ``None`` does nothing.
+    """
+    if not log_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "spawn_session_runner: failed to create the runner log "
+            "directory for %s (%s: %s) — the runner will have no log",
+            log_path, type(exc).__name__, exc,
+        )
+
+
 def resolve_session_private_tmp(
     server: Any,
     workspace_path: Optional[str],
@@ -234,7 +253,7 @@ def _pool_may_serve(pool_manager: Any, cgroup_attach: Any) -> bool:
 def _acquire_pool_slot(
     pool_manager: Any, server: Any, *, cascade_driver_id: Optional[str],
     workspace_path: Optional[str], profile_name: Optional[str],
-    runner_user: Any, confinement: Any,
+    runner_user: Any, confinement: Any, log_path: Optional[str] = None,
 ) -> Any:
     """A pool slot for this session, or ``None`` (cold spawn).
 
@@ -246,7 +265,8 @@ def _acquire_pool_slot(
     to ``None``.
 
     An SELinux session no idle slot fits gets a slot forked into its
-    boundary (selinux-backend.md §7.2): the child enters the private
+    boundary (selinux-backend.md §7.2): the child points its output at
+    *log_path* (the session's runner log), then enters the private
     ``/tmp``, the uid and the domain while it has one thread.
     """
     from jaato_server.server.confinement.base import is_selinux
@@ -266,6 +286,7 @@ def _acquire_pool_slot(
         return slot
     entry = {
         "context": confinement.label,
+        "log_path": log_path,
         "private_tmp": session_private_tmp(server, profile_name, confinement),
         "runner_user": runner_user.to_dict() if runner_user is not None else None,
     }
@@ -453,6 +474,11 @@ def spawn_session_runner(
     # which is #1171 itself — so this must not fail silently, and must
     # not take down a session that would otherwise run.
     _ensure_session_tmpdir(session_id, profile_name, confinement)
+    # ...and the runner log's directory, for the same reason: a cold
+    # spawn's child made it before exec, a pool slot never did, so the
+    # first pool-served session of a fresh workspace had nowhere to log
+    # (SELinux phase 4 kernel run).
+    _ensure_runner_log_dir(log_path)
 
     # ----- The session's workspace HOME, before either branch (#1225) -----
     # The daemon creates ``<ws>/.home/`` (+ its ``*`` gitignore) here, for
@@ -504,6 +530,7 @@ def spawn_session_runner(
             pool_manager, server, cascade_driver_id=cascade_driver_id,
             workspace_path=workspace_path, profile_name=profile_name,
             runner_user=runner_user, confinement=confinement,
+            log_path=log_path,
         )
         if slot is not None:
             spawned = SpawnedRunner(
