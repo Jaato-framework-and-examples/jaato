@@ -1469,6 +1469,72 @@ def _stamp_daemon_identity(envelope: SessionInitEnvelope, session: Any) -> None:
         session.set_client_user_id(created_by)
 
 
+#: The composed ``//child`` preexec per envelope (#1503), so the seccomp plan
+#: is built, logged and recorded once even though both the pre-arm (#1357)
+#: and step 4 ask for the callback.  One entry: a runner hosts one session.
+_CHILD_PREEXEC_CACHE: Dict[int, Tuple[Any, Callable[[], None]]] = {}
+
+
+def _child_preexec(
+    envelope: SessionInitEnvelope, confinement: Any,
+) -> Callable[[], None]:
+    """The ``preexec_fn`` step every model-driven subprocess gets (#1503).
+
+    The LSM ``//child`` transition (AppArmor ``changeprofile`` / SELinux
+    ``setexeccon``), then ``PR_SET_NO_NEW_PRIVS`` and the seccomp filter,
+    composed by :func:`shared.seccomp_filter.compose_child_preexec`.  This
+    is the one place the filter enters the chain: ``cli``,
+    ``interactive_shell`` and the notebook kernel all receive this callable
+    through ``set_apparmor_child_transition_callback``, and append their
+    cgroup attach / parent-death signal after it.
+
+    The filter is compiled here, in the runner, once per session; the
+    forked child only makes two ``prctl`` calls.  The posture is recorded
+    by :func:`shared.seccomp_filter.plan_for_session` whatever it is.
+    """
+    from jaato_server.shared import seccomp_filter
+    from . import lsm_confine
+
+    cached = _CHILD_PREEXEC_CACHE.get(id(envelope))
+    if cached is not None and cached[0] is envelope:
+        return cached[1]
+    lsm_cb = lsm_confine.child_transition_callback(
+        confinement.backend, confinement.label, confinement.child_label,
+    )
+    limits = _runtime_limits_from_envelope(envelope)
+    plan = seccomp_filter.plan_for_session(
+        getattr(limits, "seccomp", None),
+        getattr(limits, "seccomp_allow", None),
+        boundary_active=True,
+    )
+    composed = seccomp_filter.compose_child_preexec(lsm_cb, plan.installer)
+    _CHILD_PREEXEC_CACHE.clear()
+    _CHILD_PREEXEC_CACHE[id(envelope)] = (envelope, composed)
+    return composed
+
+
+def _record_seccomp_without_filter(
+    envelope: SessionInitEnvelope, *, sub_runner: bool,
+) -> None:
+    """Record the posture of a session whose subprocesses get no filter.
+
+    An unconfined session is ``unconfined``: no kernel boundary, so no
+    filter is invented for it.  An isolated sub-runner wears a flat
+    sub-profile with no ``//child`` transition to compose a filter after,
+    so it is recorded ``absent`` with that reason (a stated limit of #1503,
+    never a silent one).
+    """
+    from jaato_server.shared import seccomp_filter
+    if not sub_runner:
+        seccomp_filter.plan_for_session(None, None, boundary_active=False)
+        return
+    seccomp_filter.record_plan(seccomp_filter.SeccompPlan(
+        seccomp_filter.POSTURE_ABSENT,
+        reason="isolated sub-runner: no //child transition to install a "
+               "filter after",
+    ))
+
+
 def _prearm_child_callback(
     envelope: SessionInitEnvelope, runtime: Any,
 ) -> Optional[Callable[[], None]]:
@@ -1498,9 +1564,7 @@ def _prearm_child_callback(
     if not runner_profile or "//" in runner_profile:
         return None
     try:
-        child_cb = lsm_confine.child_transition_callback(
-            confinement.backend, confinement.label, confinement.child_label,
-        )
+        child_cb = _child_preexec(envelope, confinement)
         registry = getattr(runtime, "_registry", None)
         for name in (registry.list_exposed() if registry else ()):
             plugin = registry.get_plugin(name)
@@ -1582,6 +1646,8 @@ def _maybe_install_child_callback(
     from . import lsm_confine
     confinement = lsm_confine.resolve(envelope)
     runner_profile = confinement.label if confinement else ""
+    if not runner_profile or "//" in runner_profile:
+        _record_seccomp_without_filter(envelope, sub_runner=bool(runner_profile))
     if not runner_profile:
         logger.info(
             "runner-session bootstrap: envelope.profile_name empty; "
@@ -1605,9 +1671,7 @@ def _maybe_install_child_callback(
     # Case 3: main runner, install required + audibly failing.
     try:
         if child_cb is None:
-            child_cb = lsm_confine.child_transition_callback(
-                confinement.backend, confinement.label, confinement.child_label,
-            )
+            child_cb = _child_preexec(envelope, confinement)
         executor = getattr(session, "_executor", None)
         if executor is None or not hasattr(
             executor, "set_apparmor_child_transition_callback",

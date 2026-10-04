@@ -841,9 +841,17 @@ class ToolExecutor:
         so the forked child enters the per-session ``//child``
         sub-profile before the new program starts.
 
+        Since #1503 the callable the runner passes is the whole ``//child``
+        preexec step, not only the LSM write: the LSM transition, then
+        ``PR_SET_NO_NEW_PRIVS`` and the session's seccomp-bpf filter
+        (:func:`shared.seccomp_filter.compose_child_preexec`, built once per
+        session by ``server.runner.session._child_preexec``).  Plugins append
+        their cgroup attach after it, so every subprocess path gets the
+        filter from this one place.
+
         Forwarded to plugins that implement
         ``set_apparmor_child_transition_callback`` (cli,
-        interactive_shell) via the same mechanism as
+        interactive_shell, notebook) via the same mechanism as
         :meth:`set_runtime_limits`'s forwarding loop.  Plugins that
         don't implement the method (file_edit, todo, etc.) stay
         unaffected — only subprocess-spawning plugins care.

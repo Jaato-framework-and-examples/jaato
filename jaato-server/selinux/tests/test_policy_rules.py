@@ -275,6 +275,16 @@ WRITE = frozenset({"write", "append", "create", "unlink", "rename"})
 LOGIN_PTYS = ("user_devpts_t", "sshd_devpts_t")
 
 RULES: Tuple[Rule, ...] = (
+    # --- seccomp (#1503) ------------------------------------------------
+    Rule("the child transition survives no_new_privs",
+         _allows("jaato_runner_t", "jaato_child_t", "process2",
+                 {"nnp_transition", "nosuid_transition"}),
+         because="the seccomp step sets NO_NEW_PRIVS before execve, and "
+                 "without nnp_transition the exec into jaato_child_t is "
+                 "refused: every model-driven subprocess fails to start",
+         find="allow jaato_runner_t jaato_child_t:process2 "
+              "{ nnp_transition nosuid_transition };\n",
+         replace=""),
     # --- ptys (phase 2a kernel run) -------------------------------------
     Rule("a pty the runner opens is born jaato_devpts_t",
          lambda p: born_as(p, "jaato_runner_t", "devpts_t", "chr_file") == {"jaato_devpts_t"},

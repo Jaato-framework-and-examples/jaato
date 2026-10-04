@@ -1806,10 +1806,16 @@ class RunnerRPC:
                 "registry.runner_rpc_client (Step 7.2)",
             )
 
+        # #1503: the seccomp posture the bootstrap decided for this
+        # session's subprocesses, so the daemon records it beside
+        # ``sandbox_mode`` (``filter`` / ``off`` / ``absent`` /
+        # ``unconfined``).  An older daemon ignores the key.
+        from jaato_server.shared.seccomp_filter import current_posture
         return True, {
             "ok": True,
             "ready": host.is_ready,
             "session_id": host.session_id,
+            "seccomp": current_posture(),
         }
 
     def _handle_session_health_check(self) -> "tuple[bool, Any]":
@@ -2089,6 +2095,12 @@ class RunnerRPC:
         except Exception as exc:  # noqa: BLE001 -- diagnostics must not raise
             consumption = {"error": f"{type(exc).__name__}: {exc}"}
 
+        # #1503: the seccomp posture this runner installs in its
+        # subprocesses, read live beside the LSM probe so "LSM yes,
+        # seccomp no" is visible in the same answer.
+        if isinstance(probe, dict):
+            from jaato_server.shared.seccomp_filter import current_posture
+            probe["seccomp"] = current_posture()
         return True, {
             "probe": probe,
             "notebook_boundary_kind": notebook_boundary_kind,

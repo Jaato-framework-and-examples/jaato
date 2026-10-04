@@ -36,7 +36,7 @@ application-enforced) is documented on the class itself.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 
 # cgroup v2 cpu.weight bounds (kernel: include/uapi/linux/cgroupv2.h).
@@ -225,6 +225,36 @@ def _in_range(name: str, value: Any, low: int, high: int) -> None:
         raise ValueError(f"{name}={value} out of range [{low}, {high}]")
 
 
+#: ``runtime_limits.seccomp`` values (mirrors ``shared.seccomp_filter.MODES``,
+#: restated so this module keeps its zero-import shape; a test pins the two
+#: equal).
+SECCOMP_MODES = ("default", "off")
+
+
+def _seccomp_fields(limits: "RuntimeLimits") -> None:
+    """Validate ``seccomp`` / ``seccomp_allow`` and normalise the list.
+
+    The mode is a closed vocabulary and refused at parse time.  Family
+    NAMES are not judged here: an unknown one stays denied at runtime (the
+    safe direction) and ``jaato-scaffold validate`` reports it, so a typo
+    surfaces without making the whole profile fail to load.
+    """
+    mode = limits.seccomp
+    if mode is not None and mode not in SECCOMP_MODES:
+        raise ValueError(
+            f"seccomp={mode!r} must be one of {', '.join(SECCOMP_MODES)}")
+    allow = limits.seccomp_allow
+    if allow is None:
+        return
+    if isinstance(allow, str) or not isinstance(allow, (list, tuple)):
+        raise ValueError(
+            f"seccomp_allow={allow!r} must be a list of family names")
+    if not all(isinstance(a, str) and a for a in allow):
+        raise ValueError(
+            f"seccomp_allow={allow!r} must hold non-empty strings")
+    object.__setattr__(limits, "seccomp_allow", tuple(allow))
+
+
 @dataclass(frozen=True)
 class RuntimeLimits:
     """Per-session resource consumption caps.
@@ -315,6 +345,22 @@ class RuntimeLimits:
     #: whose profile declared nothing.  ``0`` = no grace, i.e. the pre-#1106
     #: behaviour, and is the TIGHTEST value here rather than "unbounded".
     unload_grace_seconds: Optional[float] = None
+    #: The seccomp-bpf filter installed in every model-driven subprocess
+    #: (#1503): ``"default"`` or ``"off"``.  ``None`` means ``default``
+    #: whenever a kernel boundary (an LSM child transition) is active, and
+    #: no filter when the session is unconfined.  Kernel-enforced, but by
+    #: seccomp rather than by the cgroup, so it is not one of
+    #: :meth:`has_kernel_limits`' fields.  ``off`` is announced at WARNING.
+    #: Resolved MOST-RESTRICTIVE-WINS across ``inherits:``: ``default``
+    #: beats ``off``.
+    seccomp: Optional[str] = None
+    #: Deny-list families allowed back for this session's subprocesses
+    #: (``shared.seccomp_filter.FAMILIES``: ``ptrace`` for a debugging
+    #: stage, ...).  An unknown name stays denied (the safe side) and is a
+    #: ``validate`` error.  Resolved by INTERSECTION across the layers that
+    #: declare one, so a child can narrow what a parent allowed back and
+    #: never reopen a family a parent kept closed.
+    seccomp_allow: Optional[Tuple[str, ...]] = None
 
     # Future-proof: forward-compat passthrough for fields the runtime
     # doesn't recognise yet.  Profile schema validation should reject
@@ -344,6 +390,7 @@ class RuntimeLimits:
         _non_negative_number("max_session_seconds", self.max_session_seconds)
         _non_negative_number("max_orphan_seconds", self.max_orphan_seconds)
         _non_negative_number("unload_grace_seconds", self.unload_grace_seconds)
+        _seccomp_fields(self)
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "RuntimeLimits":
@@ -358,7 +405,8 @@ class RuntimeLimits:
         known_fields = {"memory_max_mb", "pids_max", "cpu_weight",
                         "tool_timeout_seconds", "max_output_bytes",
                         "max_parallel_tools", "max_session_seconds",
-                        "max_orphan_seconds", "unload_grace_seconds"}
+                        "max_orphan_seconds", "unload_grace_seconds",
+                        "seccomp", "seccomp_allow"}
         kwargs: Dict[str, Any] = {k: data[k] for k in known_fields if k in data}
         extra = {k: v for k, v in data.items() if k not in known_fields}
         return cls(extra=extra, **kwargs)

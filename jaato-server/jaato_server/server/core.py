@@ -939,6 +939,10 @@ class JaatoServer:
         # nobody, so session creation carried on and discovered the dead
         # runner at whichever ``session.*`` verb happened to come first.
         self._runner_bootstrap_error: Optional[str] = None
+        # #1503: the seccomp posture the runner reported in its
+        # ``session.bootstrap`` answer, ``None`` until one did (or with no
+        # runner at all).  See :meth:`note_seccomp_posture`.
+        self.seccomp_posture: Optional[Dict[str, Any]] = None
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -8101,6 +8105,18 @@ class JaatoServer:
                 when the bootstrap acknowledged.
         """
         self._runner_bootstrap_error = error or None
+
+    def note_seccomp_posture(self, posture: Any) -> None:
+        """Record the seccomp posture the runner reported (#1503).
+
+        Called from ``runner_spawn.dispatch_bootstrap_envelope`` with the
+        ``seccomp`` key of the runner's bootstrap answer: ``{posture, ...}``
+        where ``posture`` is ``filter`` / ``off`` / ``absent`` /
+        ``unconfined``.  Saved on the session record beside
+        ``sandbox_mode`` and shown by the diagnostics verb.  Anything that is
+        not a dict (an older runner sends nothing) records ``None``.
+        """
+        self.seccomp_posture = dict(posture) if isinstance(posture, dict) else None
 
     @property
     def runner_bootstrap_error(self) -> Optional[str]:

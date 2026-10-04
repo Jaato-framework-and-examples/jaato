@@ -154,6 +154,19 @@ class SessionState:
     None on old records / never-confined sessions (unchanged behavior).
     """
 
+    seccomp: Optional[Dict[str, Any]] = None
+    """The seccomp-bpf posture of the session's model-driven subprocesses
+    (#1503), as the runner reported it at bootstrap: ``{posture, ...}``
+    where ``posture`` is ``filter`` / ``off`` / ``absent`` / ``unconfined``.
+
+    Beside :attr:`sandbox_mode` because the two answer the two halves of
+    one question: the LSM decides what a subprocess may TOUCH, the filter
+    which kernel entry points it may REACH, and "LSM yes, seccomp no" must
+    be readable from the record rather than silent.  An additive key (an
+    older reader ignores it), so the record version is not bumped; ``None``
+    on older records and sessions with no runner.
+    """
+
     agent_name: Optional[str] = None
     """Agent/persona identity (``--agent <name>``) the session was
     spawned with.

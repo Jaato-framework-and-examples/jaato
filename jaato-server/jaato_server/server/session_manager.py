@@ -605,6 +605,20 @@ class RuntimeSessionInfo:
     end_reason: Optional[str] = None
 
 
+def _seccomp_for_record(session: Any) -> Optional[Dict[str, Any]]:
+    """The seccomp posture a session record should carry (#1503).
+
+    The running server's value (the runner's own report at bootstrap)
+    wins; otherwise the value restored from the record is kept, so a save
+    made while no runner is attached does not erase it.
+    """
+    live = getattr(getattr(session, "server", None), "seccomp_posture", None)
+    if isinstance(live, dict):
+        return dict(live)
+    restored = getattr(session, "seccomp", None)
+    return dict(restored) if isinstance(restored, dict) else None
+
+
 def session_picker_fields(info: Any) -> Dict[str, Any]:
     """The session-picker keys every client-facing session row carries.
 
@@ -698,6 +712,11 @@ class Session:
     #: boundary") rather than by equality — those are different questions and
     #: the string used to be able to answer only the first.
     sandbox_mode: Optional[str] = None
+    #: The seccomp posture of the session's subprocesses (#1503), restored
+    #: from the record; the running server's ``seccomp_posture`` (reported
+    #: by the runner at bootstrap) supersedes it.  See
+    #: :func:`_seccomp_for_record`.
+    seccomp: Optional[Dict[str, Any]] = None
     # The UNRESOLVED inline-profile spec (dict), for sessions created from
     # an inline profile rather than a named one.  Carried so _save_session
     # can persist it (SessionState.profile_spec) → disk-restore reconstructs
@@ -13142,6 +13161,8 @@ class SessionManager:
             runner_identity=RunnerIdentity.from_dict(
                 getattr(state, "runner_identity", None), stale=True),
             sandbox_mode=getattr(state, "sandbox_mode", None),
+            # #1503: kept until the new runner reports its own posture.
+            seccomp=getattr(state, "seccomp", None),
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
             inline_profile_spec=getattr(state, "profile_spec", None),
@@ -13937,6 +13958,8 @@ class SessionManager:
                     # the SAME AppArmor mode on runner re-spawn (else the revive read
                     # of state.sandbox_mode was always None → unconfined revive).
                     sandbox_mode=session.sandbox_mode,
+                    # #1503: the seccomp half of the boundary, beside it.
+                    seccomp=_seccomp_for_record(session),
                     agent_name=agent_name,
                     metadata=subagent_metadata,
                     budget_state=budget_state,
@@ -15404,6 +15427,9 @@ class SessionManager:
             sess = session_lookup.get(s.session_id)
             if sess and sess.sandbox_mode:
                 entry["sandbox_mode"] = sess.sandbox_mode
+            seccomp = _seccomp_for_record(sess) if sess else None
+            if seccomp:
+                entry["seccomp"] = seccomp.get("posture")
             sessions_data.append(entry)
 
         # Get tools list from the session's server

@@ -212,6 +212,12 @@ fs_getattr_all_fs(jaato_runner_t)
 # process attribute it may set is the exec context of its children:
 allow jaato_runner_t self:process setexec;
 allow jaato_runner_t jaato_child_t:process transition;
+# #1503: a model-driven subprocess sets PR_SET_NO_NEW_PRIVS and installs a
+# seccomp filter between setexeccon and execve. Under no_new_privs the
+# kernel refuses a domain transition at exec unless the policy grants
+# nnp_transition (and nosuid_transition for a nosuid mount), so without
+# this line every subprocess of a confined session would fail to start.
+allow jaato_runner_t jaato_child_t:process2 { nnp_transition nosuid_transition };
 
 ########################################
 #
