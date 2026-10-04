@@ -13,6 +13,7 @@ them; it derives none of them a second time:
 | profile, exec scope, exec roots | the session's ``//child`` grant record, via :mod:`jaato_server.shared.confinement_grants` (#1348) |
 | subprocess ``PATH``, ``HOME``, ``XDG_*``, tool-venv | ``CLIToolPlugin._build_subprocess_env()`` on the session's own ``cli`` instance |
 | bound toolchains | ``<workspace>/.jaato/environment.json`` (#1344), when present |
+| ``seccomp`` | the posture the runner recorded at bootstrap, via :mod:`jaato_server.shared.seccomp_filter` (#1503) |
 | ``notebook.imports_daemon_jaato`` | :mod:`jaato_server.shared.jaato_self_shadowing` (#1413), only when the workspace holds jaato's own source |
 
 The ``PATH`` is the one ``cli`` builds for its next command, not a
@@ -210,6 +211,30 @@ def private_tmp_report() -> Dict[str, Any]:
     }
 
 
+def seccomp_report() -> Dict[str, Any]:
+    """The seccomp posture of this session's subprocesses (#1503).
+
+    Read from what the bootstrap recorded in this process, so it reports
+    the filter the next ``cli`` command actually gets.  ``filter`` lists
+    the families still denied; any other posture says why there is none.
+    """
+    from jaato_server.shared import seccomp_filter
+    posture = seccomp_filter.current_posture()
+    if posture is None:
+        return {"posture": "unknown",
+                "note": "no session bootstrap has recorded a posture here"}
+    report = dict(posture)
+    if report.get("posture") == seccomp_filter.POSTURE_FILTER:
+        allowed = set(report.get("allowed_families") or ())
+        report["denied_families"] = [
+            name for name in seccomp_filter.FAMILIES if name not in allowed]
+        report["note"] = (
+            "these syscall families answer EPERM in cli / interactive_shell "
+            "/ notebook subprocesses; retrying or routing around it will not "
+            "help")
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Bound toolchains
 # ---------------------------------------------------------------------------
@@ -307,6 +332,7 @@ def runtime_report(
         report["subprocess"] = subprocess_report(cli)
         workspace = workspace or getattr(cli, "_workspace_root", None)
     report["private_tmp"] = private_tmp_report()
+    report["seccomp"] = seccomp_report()
     report["toolchains"] = toolchains_report(workspace)
     venv = (report["subprocess"].get("tool_venv") or {}).get("path")
     shadow = notebook_shadowing_report(workspace, [venv])
@@ -353,6 +379,9 @@ def runtime_summary(report: Dict[str, Any]) -> Dict[str, str]:
     lines = {"confinement": _confinement_line(report["confinement"])}
     lines.update(_subprocess_lines(report["subprocess"]))
     lines["private_tmp"] = _private_tmp_line(report.get("private_tmp") or {})
+    seccomp = report.get("seccomp") or {}
+    lines["seccomp"] = seccomp.get("posture", "unknown") + (
+        f" ({seccomp['reason']})" if seccomp.get("reason") else "")
     chains = report["toolchains"]
     lines["toolchains"] = chains["status"]
     if "notebook" in report:

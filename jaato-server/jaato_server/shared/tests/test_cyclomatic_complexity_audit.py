@@ -166,7 +166,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/runner_rpc_handlers/spawn_isolated_runner.py::SpawnIsolatedRunnerHandler.handle": 26,
     "jaato-server/jaato_server/server/runner_spawn.py::build_session_envelope": 36,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._build_isolated_envelope": 18,
-    "jaato-server/jaato_server/server/session_manager.py::SessionManager._build_session_info_event": 21,
+    "jaato-server/jaato_server/server/session_manager.py::SessionManager._build_session_info_event": 19,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._cascade_teardown_isolated_subagents": 20,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._create_session_impl": 52,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._expand_prompt_references": 18,

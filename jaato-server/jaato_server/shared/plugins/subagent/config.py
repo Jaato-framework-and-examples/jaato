@@ -3896,6 +3896,43 @@ _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
     _MIN_WINS_RUNTIME_LIMIT_FIELDS + _MIN_WINS_ZERO_TIGHTEST_FIELDS
 )
 
+#: The seccomp fields (#1503), resolved MOST-RESTRICTIVE-WINS but not by
+#: ``min()``: the mode by "``default`` beats ``off``", the allow-back list by
+#: INTERSECTION.  Normalised out of the ceilings agreement test like the
+#: min-wins fields, so two parents differing only here are resolved.
+_RESTRICTIVE_WINS_SECCOMP_FIELDS = ("seccomp", "seccomp_allow")
+
+
+def _merged_seccomp_fields(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Dict[str, Any]:
+    """Resolve ``seccomp`` / ``seccomp_allow`` across every declaring layer.
+
+    A child may narrow the filter and never widen it: ``seccomp: off`` in a
+    child does not survive a parent that declared ``default``, and a family
+    the child allows back stays denied unless every layer that declares an
+    allow-back list names it.  A layer that declares nothing has no opinion,
+    the reading every min-wins field here takes.
+
+    Returns:
+        ``{"seccomp": ..., "seccomp_allow": ...}``, each ``None`` when no
+        layer declares it.
+    """
+    layers = [p.runtime_limits for p in (*parents, child)
+              if p.runtime_limits is not None]
+    modes = [lim.seccomp for lim in layers if lim.seccomp is not None]
+    mode = None
+    if modes:
+        mode = "default" if "default" in modes else "off"
+    allows = [lim.seccomp_allow for lim in layers
+              if lim.seccomp_allow is not None]
+    allow = None
+    if allows:
+        kept = set(allows[0]).intersection(*allows[1:])
+        allow = tuple(a for a in allows[0] if a in kept)
+    return {"seccomp": mode, "seccomp_allow": allow}
+
 
 def _merged_min_wins_limit(
     parents: List['SubagentProfile'],
@@ -3976,7 +4013,8 @@ def _resolve_runtime_limit_ceilings(
     declaring = [p for p in parents if p.runtime_limits is not None]
     if not declaring:
         return None, []
-    normalise = {f: None for f in _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS}
+    normalise = {f: None for f in (_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS
+                                   + _RESTRICTIVE_WINS_SECCOMP_FIELDS)}
     comparable = {
         p.name: replace(p.runtime_limits, **normalise)
         for p in declaring
@@ -4005,7 +4043,10 @@ def _merge_runtime_limits(
       across every layer that declares them
       (:func:`_merged_min_wins_limit`).  The last one reads ``0`` as the
       tightest value rather than as "unbounded"; see
-      :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`.
+      :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`;
+    * ``seccomp`` / ``seccomp_allow`` (#1503) — **most-restrictive-wins**
+      (:func:`_merged_seccomp_fields`): ``default`` beats ``off``, and the
+      allow-back list is the intersection of the declared ones.
 
     Args:
         parents: The resolved parent profiles, in declaration order.
@@ -4025,6 +4066,7 @@ def _merge_runtime_limits(
             parents, child, name, zero_is_unbounded=False)
         for name in _MIN_WINS_ZERO_TIGHTEST_FIELDS
     })
+    min_wins.update(_merged_seccomp_fields(parents, child))
     base, conflicts = _resolve_runtime_limit_ceilings(parents, child)
     if base is None and all(v is None for v in min_wins.values()):
         return None, conflicts

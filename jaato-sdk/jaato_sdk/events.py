@@ -2436,6 +2436,13 @@ class DiagnosticsResultEvent(Event):
             it).  ``recorded: False`` when the profile was loaded before
             this daemon started or was never loaded here.  ``None`` (the
             whole field) when the session is not AppArmor-confined.
+        ``seccomp`` (#1503, additive): the seccomp-bpf posture the
+            session's model-driven subprocesses get, as the runner
+            reported it at bootstrap -- ``{posture, allowed_families?,
+            reason?, required?, libseccomp?, spawns_refused?}`` where
+            ``posture`` is ``filter`` / ``off`` / ``absent`` /
+            ``unconfined``.  ``None`` from a daemon or runner that does not
+            report it.  The live value rides ``probe["seccomp"]``.
 
     **Live** (measured fresh, at the moment of this call, on the runner --
     never a cached value):
@@ -2476,6 +2483,7 @@ class DiagnosticsResultEvent(Event):
     server_version: str = ""
     probe: Optional[Dict[str, Any]] = None
     apparmor_grants: Optional[Dict[str, Any]] = None
+    seccomp: Optional[Dict[str, Any]] = None
 
 
 class SandboxPathsEvent(Event):

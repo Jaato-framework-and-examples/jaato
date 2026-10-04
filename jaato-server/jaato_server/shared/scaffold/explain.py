@@ -668,6 +668,11 @@ _RUNTIME_LIMIT_FIELDS = (
     ("unload_grace_seconds", "daemon",
      "wall-clock the daemon holds an unwatched session in memory before "
      "UNLOADING it (a reconnect inside it costs nothing); 0 = no grace"),
+    ("seccomp", "kernel (seccomp)",
+     "syscall deny-list in every cli / shell / notebook subprocess: "
+     "default | off (off is announced at WARNING)"),
+    ("seccomp_allow", "kernel (seccomp)",
+     "deny-list families allowed back for this stage, e.g. [ptrace]"),
 )
 
 
@@ -697,6 +702,9 @@ def _runtime_limits_report() -> Dict[str, Any]:
         "unload_grace_seconds": (
             f"{rl.DEFAULT_UNLOAD_GRACE_SECONDS:g}s (framework default)"
         ),
+        "seccomp": "default while a kernel boundary is active; no filter "
+                   "when unconfined",
+        "seccomp_allow": "none (every family denied)",
     }
     iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
     return {
@@ -722,8 +730,20 @@ def _runtime_limits_report() -> Dict[str, Any]:
                 "MIN across every layer that declares it (0 is the TIGHTEST "
                 "value here, not 'unbounded')"
             ),
+            "seccomp": "'default' beats 'off' across every layer that "
+                       "declares it",
+            "seccomp_allow": "INTERSECTION across every layer that declares "
+                             "one",
         },
+        "seccomp_families": _seccomp_families(),
     }
+
+
+def _seccomp_families() -> List[Dict[str, Any]]:
+    """The deny-list families, read from :mod:`shared.seccomp_filter`."""
+    from jaato_server.shared.seccomp_filter import FAMILIES
+    return [{"name": f.name, "syscalls": list(f.syscalls), "note": f.note}
+            for f in FAMILIES.values()]
 
 
 def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
@@ -756,6 +776,15 @@ def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
     lines.append(
         "               may only ever narrow what it was spawned under."
     )
+    lines.append(
+        "  seccomp is MOST-RESTRICTIVE-WINS too: 'default' beats 'off', and"
+    )
+    lines.append(
+        "  seccomp_allow is the intersection of every declared list (#1503)."
+    )
+    lines.append("  seccomp families (each answers EPERM unless allowed back):")
+    for fam in report.get("seccomp_families", ()):
+        lines.append(f"    {fam['name']:<12} {fam['note']}")
     lines.append(
         "  the 'daemon' layer is enforced by the SessionManager watchdog, not"
     )

@@ -28,7 +28,7 @@
 import { useEffect } from "react";
 import { useJaato } from "@/store/store";
 import type { DiagnosticsGrants, DiagnosticsThread } from "@/store/types";
-import { grantsSummary, refreshDiagnostics } from "@/app/diagnostics";
+import { grantsSummary, refreshDiagnostics, seccompLine } from "@/app/diagnostics";
 
 function since(ms: number | null): string {
   if (ms == null) return "";
@@ -135,6 +135,7 @@ export function DiagnosticsPanel() {
             <div className="flex flex-col gap-1">
               <Row label="confinement" value={d.confinementId || "(none requested)"} />
               <Row label="sandbox mode" value={d.sandboxMode ?? "(none)"} />
+              <Row label="seccomp" value={seccompLine(d.seccomp)} />
               <Row label="runner" value={runnerLine(d.runnerIdentity)} />
               <Row label="notebook boundary" value={d.notebookBoundaryKind ?? "(no notebook plugin)"} />
               <Row label="protocol" value={d.protocolVersion} />

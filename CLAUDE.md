@@ -3001,6 +3001,70 @@ here was run against an enforcing kernel. Guard:
 `jaato_server/shared/tests/test_a_refused_command_names_its_cause_1348.py`,
 ten reversions.
 
+### A Boundary on What a Payload Reaches, Not Only What It Touches (#1503)
+
+The LSM a confined session wears (AppArmor `//child`, SELinux
+`jaato_child_t`) decides what a tool subprocess may TOUCH. It does not
+decide which kernel entry points the payload may REACH: `bpf`, `keyctl`,
+`userfaultfd`, `io_uring_setup`, `unshare(CLONE_NEWUSER)` were all callable
+from inside the boundary, and a kernel bug reachable before the LSM hook is
+reachable from there. Every model-driven subprocess (`cli`,
+`interactive_shell`, the notebook kernel) now runs under a seccomp-bpf
+deny-list.
+
+| Piece | Where |
+|---|---|
+| the deny-list, by family (`kernel`, `mount`, `namespaces`, `bpf`, `perf`, `userfaultfd`, `io_uring`, `keyring`, `fanotify`, `ptrace`, `handles`, `personality`) | `shared/seccomp_filter.py::FAMILIES` |
+| compiled ONCE per session in the runner through libseccomp (ctypes, `libseccomp.so.2`), exported as raw BPF | `compile_filter` |
+| the forked child makes two calls, `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP` | `CompiledFilter.install` |
+| composed into the `//child` callable the three plugins already receive: LSM transition, then the filter; the plugins append the cgroup attach | `compose_child_preexec`, `server/runner/session.py::_child_preexec` (used by the #1357 pre-arm and step 4) |
+| posture `filter` / `off` / `absent` / `unconfined`, recorded in the runner, returned in the `session.bootstrap` answer, stored on `JaatoServer.seccomp_posture` and the session record (`SessionState.seccomp`, additive) | `plan_for_session`, `runner_spawn._note_seccomp_posture`, `session_manager._seccomp_for_record` |
+| shown | `get_environment(aspect="runtime")` (`seccomp`, with the denied families), `DiagnosticsResultEvent.seccomp` (cached) and `probe["seccomp"]` (live), `session.list` rows |
+
+| Rule | Why |
+|---|---|
+| denied calls answer `EPERM`; `clone3` answers `ENOSYS`; `clone` / `unshare` are denied only with a `CLONE_NEW*` flag; `personality` only for a non-default persona | a tool fails with a readable error; libc falls back from `clone3` to `clone`, whose flags seccomp can read |
+| a foreign-architecture syscall (i386 `int 0x80`, x32) kills the process (`KILL_PROCESS` bad-arch action) | the syscall-number bypass; `EPERM` would leave a 32-bit binary failing every call in a loop |
+| `io_uring_*` answers `EPERM` | the answer the 6.6+ `io_uring_disabled` sysctl and Docker's profile give; measured: node 22 with `UV_USE_IO_URING=1` probes it and falls back |
+| never installed in the runner | the filter cannot be removed; the forked child is single-threaded, so no `TSYNC` (#1023's per-task lesson) |
+| a session with no kernel boundary gets no filter, and says so (`unconfined`) | one is not invented |
+| no filter buildable (libseccomp missing, kernel without seccomp): WARNING and `absent`, or, when `JAATO_REQUIRE_CONFINEMENT` / `JAATO_REQUIRE_APPARMOR` is set, every spawn refused | "LSM yes, seccomp no" is never silent |
+
+Configured in `runtime_limits`, delivered on the v7 envelope so pool slots
+and cold spawn get the same thing:
+
+```yaml
+runtime_limits:
+  seccomp: default          # default | off (off is announced at WARNING)
+  seccomp_allow: [ptrace]   # families allowed back for a debugging stage
+```
+
+Both are most-restrictive-wins across `inherits:`: `default` beats `off`,
+and the allow-back list is the intersection of the declared ones.
+`explain runtime` names the enforcer `kernel (seccomp)` and lists the
+families; `validate` reports `seccomp_unknown_family` (error: the family
+stays denied) and `seccomp_disabled` (warn; error under `risk_class:
+high`).
+
+Must-checks: `//child` exec rules are all `ix`, which NO_NEW_PRIVS allows (a
+guard fails on a `Px`/`Cx`/`Ux` rule; a user fragment adding one would be
+refused under NNP). SELinux needs `allow jaato_runner_t
+jaato_child_t:process2 { nnp_transition nosuid_transition };` in
+`jaato.te`, asserted by the `selinux-policy` job. A setuid binary
+(`sudo`, `ping` with file caps) gains nothing in a subprocess.
+
+Stated limits: an isolated sub-runner's subprocesses get no filter (no
+`//child` transition to compose with; recorded `absent` with that reason).
+A seccomp `EPERM` is not distinguishable from another `EPERM` in a
+command's output, so the #1348 denial hint does not name it; the runtime
+aspect lists the denied families instead. Cost: ~5 ms to compile once per
+session; ~0.1-0.5 ms per spawn for the attach (the kernel converts and JITs
+the 108-instruction program), inside spawn noise. Not verified on an
+enforcing AppArmor or SELinux kernel.
+
+Guard: `jaato_server/shared/tests/test_seccomp_child_filter_1503.py`, nine
+reversions, installing the real filter in real children.
+
 ### Three Things a Fresh Workspace Told the Model Wrongly (#1357, #1358, #1359)
 
 Found by an assessment run in a new web-coder workspace (MiniMax-M3). Each

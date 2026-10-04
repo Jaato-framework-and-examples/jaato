@@ -1729,6 +1729,7 @@ def dispatch_bootstrap_envelope(
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)
+        _note_seccomp_posture(server, result)
         session_new_timing.mark("bootstrap_acked", session_id=session_id)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
@@ -1794,6 +1795,24 @@ def dispatch_bootstrap_envelope(
                 "post-bootstrap tool-id re-emit failed for %s",
                 session_id, exc_info=True,
             )
+
+
+def _note_seccomp_posture(server: Any, result: Any) -> None:
+    """Record the runner's reported seccomp posture on *server* (#1503).
+
+    Best-effort, like :func:`_note_bootstrap_outcome`: a recorder must not
+    turn an acknowledged bootstrap into a failed one.
+    """
+    note = getattr(server, "note_seccomp_posture", None)
+    if not callable(note):
+        return
+    try:
+        posture = result.get("seccomp") if isinstance(result, dict) else None
+        note(posture)
+        if isinstance(posture, dict):
+            logger.info("runner seccomp posture: %s", posture)
+    except Exception:  # noqa: BLE001 — a recorder must not fail the path
+        logger.debug("note_seccomp_posture raised", exc_info=True)
 
 
 def _note_bootstrap_outcome(server: Any, error: Optional[str]) -> None:

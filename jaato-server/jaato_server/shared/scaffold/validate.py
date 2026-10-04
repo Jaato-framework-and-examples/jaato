@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from jaato_server.shared.plugins.model_provider.base import KNOB_LAYERS
 # The wire-type predicate lives with the contract it enforces, so this
@@ -755,6 +755,7 @@ def validate_profile(
 
     # --- secret env scrub (#863) -----------------------------------------
     _check_secret_scrub(profile, add)
+    _check_seccomp(profile, add)
 
     # --- gc strategy -----------------------------------------------------
     gc = getattr(profile, "gc", None)
@@ -856,6 +857,7 @@ HIGH_RISK_ESCALATED_CODES = frozenset({
     "budget_control_absent",
     "budget_limits_without_abort",
     "secret_scrub_disabled",
+    "seccomp_disabled",
     "missing_description",
     "permission_rule_without_plugin",
     "unknown_tool",
@@ -1989,6 +1991,34 @@ def _check_secret_scrub(profile, add):
                 "the daemon holds is readable by any command the model runs "
                 f"(`env`, `echo $GITHUB_TOKEN`).  {SCRUB_HINT}.",
                 where=where)
+
+
+def _check_seccomp(profile: Any, add: Callable[..., None]) -> None:
+    """``runtime_limits.seccomp`` / ``seccomp_allow`` (#1503).
+
+    An unknown family name in ``seccomp_allow`` is an ERROR: the runner
+    ignores it, so the family the author meant to allow back stays denied
+    and the stage fails at its first such syscall with an ``EPERM`` nothing
+    explains.  ``seccomp: off`` is a WARNING, the posture
+    ``secret_scrub_disabled`` takes: a legitimate choice, announced.
+    """
+    from jaato_server.shared.seccomp_filter import FAMILIES, unknown_families
+    limits = getattr(profile, "runtime_limits", None)
+    if limits is None:
+        return
+    for name in unknown_families(getattr(limits, "seccomp_allow", None)):
+        add("error", "seccomp_unknown_family",
+            f"runtime_limits.seccomp_allow names {name!r}, which is not a "
+            f"seccomp family ({', '.join(FAMILIES)}) — it is ignored and "
+            "nothing is allowed back for it",
+            where="runtime_limits.seccomp_allow")
+    if getattr(limits, "seccomp", None) == "off":
+        add("warn", "seccomp_disabled",
+            "runtime_limits.seccomp is 'off': model-driven subprocesses reach "
+            "the whole syscall table (bpf, io_uring, unshare, keyctl, ...) "
+            "behind the LSM boundary alone.  Allow back only the family a "
+            "stage needs with seccomp_allow instead.",
+            where="runtime_limits.seccomp")
 
 
 # A declared type token → the predicate a value must satisfy.  Two
