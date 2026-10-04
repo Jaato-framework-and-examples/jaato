@@ -285,10 +285,13 @@ why `//child` exists: a subprocess must not inherit a profile it can leave
 (#1323). Since phase 2 the runner never restores itself, so under SELinux
 `jaato_runner_t` gets **no** `dyntransition` and **no** `setcurrent`. Code
 running in the runner cannot change its own domain, and `setexec` is
-constrained by `process transition` to `jaato_child_t` only. The notebook
-kernel's check (#1323: "a kernel that finds itself in a profile it could
-leave does not count it") therefore passes for the runner domain too, not
-only for `jaato_child_t`.
+constrained by `process transition` to `jaato_child_t` only. A cell in the
+runner domain therefore could not leave it either; the notebook kernel still
+claims the kernel tier only in `jaato_child_t` (#1519), because a kernel found
+in `jaato_runner_t` missed the `setexeccon` step it is always given. Neither
+domain can read the host's enforcing switch or ask whether it is permissive,
+so the daemon attests both at provisioning (`"enforcing"` on the envelope
+descriptor) and the kernel requires that attestation.
 
 ## 5. MCS levels
 

@@ -280,7 +280,8 @@ def test_the_envelope_names_the_isolated_domain():
     assert envelope.profile_name == ""
     assert envelope.confinement == {
         "backend": "selinux", "label": handle.label,
-        "child_label": handle.label, "confinement_id": "cid"}
+        "child_label": handle.label, "confinement_id": "cid",
+        "enforcing": False}
 
 
 def test_the_runner_accepts_the_isolated_descriptor():

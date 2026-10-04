@@ -60,7 +60,8 @@ class NotebookBackend(ABC):
           (``_inprocess_exec_allowed``): an explicit opt-in only; AppArmor
           does not bound an in-process cell (#1323).
         - ``SubprocessKernelBackend`` — the kernel started in AppArmor's
-          ``//child`` sub-profile, else the kernel's audit-hook workspace
+          ``//child`` sub-profile or SELinux's ``jaato_child_t`` domain
+          (#1519), else the kernel's audit-hook workspace
           containment, else an explicit opt-out.
         - ``KaggleBackend`` — the code never touches this host.
 

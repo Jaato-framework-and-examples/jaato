@@ -1997,17 +1997,10 @@ class RunnerRPC:
         backend): a caller reading ``None`` cannot tell those apart, which
         is fine here -- neither is a confinement claim this verb owns.
         """
-        try:
-            notebook = registry.get_plugin("notebook") if registry else None
-            if notebook is None:
-                return None
-            backend = notebook._backends.get(notebook._active_backend_name)
-            if backend is None:
-                return None
-            kind = backend.boundary_kind()
-            return str(kind) if kind else None
-        except Exception:  # noqa: BLE001 -- a probe must not raise
-            return None
+        from jaato_server.shared.plugins.environment.runtime import (
+            notebook_boundary_kind,
+        )
+        return notebook_boundary_kind(registry)
 
     def _handle_session_diagnostics(
         self, args: Dict[str, Any],

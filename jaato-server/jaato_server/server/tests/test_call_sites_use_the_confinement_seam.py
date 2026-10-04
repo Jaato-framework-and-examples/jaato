@@ -195,7 +195,8 @@ def test_the_envelope_builder_names_the_backend() -> None:
         confinement_id="ws-abc", child_label="u:r:jaato_child_t:s0:c1,c2")
     assert runner_spawn._envelope_descriptor_of("", handle) == {
         "backend": "selinux", "label": "u:r:jaato_runner_t:s0:c1,c2",
-        "child_label": "u:r:jaato_child_t:s0:c1,c2", "confinement_id": "ws-abc"}
+        "child_label": "u:r:jaato_child_t:s0:c1,c2", "confinement_id": "ws-abc",
+        "enforcing": False}
 
 
 # ------------------------------------------------------------ the runner

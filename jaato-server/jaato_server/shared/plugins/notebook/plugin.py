@@ -1017,7 +1017,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
           for imports and for spawning. Everything else a model needs it can
           find out by running a cell.
         - **The answer is stable within a session.** Each backend's
-          ``boundary_kind`` derives from the process's AppArmor state, the
+          ``boundary_kind`` derives from the process's AppArmor or SELinux state, the
           operator's opt-out and whether a workspace resolved, none of which
           changes under a running daemon. A kernel that respawns under a
           different posture is the case this cannot cover, and is exactly

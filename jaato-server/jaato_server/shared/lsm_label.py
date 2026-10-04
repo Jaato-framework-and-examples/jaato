@@ -35,11 +35,10 @@ before plugin discovery.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import os
+import threading
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from jaato_server.shared.apparmor_label import (
     SANDBOX_MODE_APPARMOR,
@@ -137,23 +136,50 @@ def selinux_host_enforcing(path: str = SELINUX_ENFORCE_PATH) -> Optional[bool]:
     return None
 
 
-class AvDecision(ctypes.Structure):
-    """libselinux's ``struct av_decision``."""
-
-    _fields_ = [
-        ("allowed", ctypes.c_uint32),
-        ("decided", ctypes.c_uint32),
-        ("auditallow", ctypes.c_uint32),
-        ("auditdeny", ctypes.c_uint32),
-        ("seqno", ctypes.c_uint),
-        ("flags", ctypes.c_uint),
-    ]
-
-
 _SELINUX_AVD_FLAGS_PERMISSIVE = 0x0001
 
+#: ``ctypes`` is imported lazily, on the first call that needs libselinux,
+#: and never at module import.  The notebook kernel imports this module
+#: (#1519) BEFORE it installs its audit hook, and on the audit tier a
+#: ``ctypes`` already in ``sys.modules`` would hand every cell
+#: ``ctypes.pythonapi`` without the ``dlopen(None)`` the hook refuses
+#: (#1011).  ``AvDecision`` is still importable by name; it is built on
+#: first access.
+_AV_DECISION: Any = None
 
-def load_libselinux() -> Optional[ctypes.CDLL]:
+
+def _av_decision_type() -> Any:
+    """libselinux's ``struct av_decision``, built on first use."""
+    global _AV_DECISION
+    if _AV_DECISION is None:
+        import ctypes
+
+        class AvDecision(ctypes.Structure):
+            """libselinux's ``struct av_decision``."""
+
+            _fields_ = [
+                ("allowed", ctypes.c_uint32),
+                ("decided", ctypes.c_uint32),
+                ("auditallow", ctypes.c_uint32),
+                ("auditdeny", ctypes.c_uint32),
+                ("seqno", ctypes.c_uint),
+                ("flags", ctypes.c_uint),
+            ]
+
+        _AV_DECISION = AvDecision
+    return _AV_DECISION
+
+
+def __getattr__(name: str) -> Any:
+    if name == "AvDecision":
+        return _av_decision_type()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def load_libselinux() -> Any:
+    import ctypes
+    import ctypes.util
+
     name = ctypes.util.find_library("selinux") or "libselinux.so.1"
     try:
         return ctypes.CDLL(name, use_errno=True)
@@ -172,6 +198,9 @@ def selinux_domain_permissive(context: str) -> Optional[bool]:
     lib = load_libselinux()
     if lib is None:
         return None
+    import ctypes
+
+    AvDecision = _av_decision_type()
     try:
         to_class = lib.string_to_security_class
         to_class.argtypes = [ctypes.c_char_p]
@@ -306,3 +335,133 @@ def sandbox_mode_is_kernel(mode: Optional[str]) -> bool:
 def sandbox_mode_is_kernel_enforced(mode: Optional[str]) -> bool:
     """Did this session run behind an enforced kernel boundary?"""
     return mode in (SANDBOX_MODE_APPARMOR, SANDBOX_MODE_SELINUX)
+
+
+# ---------------------------------------------------------------------
+# The notebook kernel's SELinux boundary (#1519)
+# ---------------------------------------------------------------------
+
+#: Where a task reads its own label.  The same file AppArmor's reader uses;
+#: on an SELinux host it holds the task's security context.
+PROC_SELF_ATTR_CURRENT = "/proc/self/attr/current"
+
+#: The jaato domain model-driven subprocesses exec into (design §4.1).
+SELINUX_CHILD_DOMAIN = "jaato_child_t"
+
+#: The domains that bound a notebook cell: code running in them cannot
+#: leave them.  The SELinux counterpart of #1323's rule that only a profile
+#: a cell cannot unconfine itself from counts.  ``jaato_child_t`` has no
+#: ``setexec``, ``setcurrent`` or ``dyntransition`` (the ``selinux-policy``
+#: CI job checks it).  ``jaato_runner_t`` is deliberately NOT here although
+#: it cannot change its own domain either: it is the runner's domain, the
+#: kernel is supposed to be started out of it, and a kernel found in it means
+#: the ``setexeccon`` step did not happen.
+SELINUX_CELL_BOUNDARY_DOMAINS = frozenset({SELINUX_CHILD_DOMAIN})
+
+
+def read_own_context(path: str = PROC_SELF_ATTR_CURRENT) -> Optional[str]:
+    """This task's raw label, NUL and whitespace stripped; ``None`` if unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read().replace("\x00", "").strip()
+    except OSError:
+        return None
+
+
+@dataclass(frozen=True)
+class SELinuxSessionBoundary:
+    """What the daemon provisioned for this runner's session, SELinux only.
+
+    Recorded by the runner bootstrap from ``SessionInitEnvelope.confinement``
+    and read by the notebook backend when it spawns a kernel (#1519).
+
+    Attributes:
+        label: The runner's context (``…:jaato_runner_t:<level>``).
+        child_label: The context subprocesses exec into
+            (``…:jaato_child_t:<level>``).
+        enforcing_attested: The DAEMON saw the host enforcing and neither the
+            runner nor the child domain permissive when it provisioned the
+            boundary.  A confined task cannot ask that itself: neither jaato
+            domain may read ``/sys/fs/selinux`` or compute an access vector.
+            ``False`` when the daemon did not say (an older daemon).
+    """
+
+    label: str
+    child_label: str
+    enforcing_attested: bool = False
+
+
+_SESSION_BOUNDARY: Optional[SELinuxSessionBoundary] = None
+_SESSION_BOUNDARY_LOCK = threading.Lock()
+
+
+def set_selinux_session_boundary(
+    boundary: Optional[SELinuxSessionBoundary],
+) -> None:
+    """Record (or, with ``None``, clear) this process's SELinux session boundary.
+
+    Process-wide like ``confinement_grants``: a runner hosts one session at
+    a time, and the bootstrap sets or clears it on every session so a pool
+    slot never reports a previous session's boundary.
+    """
+    global _SESSION_BOUNDARY
+    with _SESSION_BOUNDARY_LOCK:
+        _SESSION_BOUNDARY = boundary
+
+
+def selinux_session_boundary() -> Optional[SELinuxSessionBoundary]:
+    """The boundary :func:`set_selinux_session_boundary` recorded, if any."""
+    with _SESSION_BOUNDARY_LOCK:
+        return _SESSION_BOUNDARY
+
+
+def selinux_cell_boundary(
+    *,
+    expected_label: Optional[str] = None,
+    enforcing_attested: bool = False,
+    raw: Optional[str] = None,
+    backend: Optional[str] = None,
+    host_enforcing: Optional[Callable[[], Optional[bool]]] = None,
+) -> Optional[str]:
+    """The context bounding code this process runs, or ``None`` (#1519).
+
+    Positive evidence only (#1014).  A context is returned when ALL hold:
+
+    * the active LSM is SELinux;
+    * this task's own context is readable and its domain is in
+      :data:`SELINUX_CELL_BOUNDARY_DOMAINS`;
+    * it is the ``expected_label`` the spawner set, when one is given;
+    * the kernel enforces it: the host's switch, when this task can read it,
+      must say enforcing; whether the DOMAIN is permissive cannot be asked
+      from inside it, so that half is the daemon's attestation
+      (``enforcing_attested``).  A host switch read as ``0`` refuses
+      whatever was attested; an unreadable switch leaves the attestation to
+      decide.
+
+    Never asks libselinux, so it never imports ``ctypes``: the notebook
+    kernel calls this before installing its audit hook (see
+    :data:`_AV_DECISION`).
+
+    Args:
+        expected_label: The child context the spawner wrote to
+            ``/proc/self/attr/exec``.
+        enforcing_attested: The daemon's observation (see
+            :class:`SELinuxSessionBoundary`).
+        raw: The context to judge; read from ``/proc/self/attr/current`` when
+            ``None``.  A parameter so tests need no SELinux kernel.
+        backend: The active LSM; :func:`active_lsm_backend` when ``None``.
+        host_enforcing: Reads the host switch;
+            :func:`selinux_host_enforcing` when ``None``.
+    """
+    if (backend or active_lsm_backend()) != BACKEND_SELINUX:
+        return None
+    context_raw = read_own_context() if raw is None else raw
+    context = parse_selinux_context(context_raw)
+    if context is None or context.type not in SELINUX_CELL_BOUNDARY_DOMAINS:
+        return None
+    cleaned = (context_raw or "").replace("\x00", "").strip()
+    if expected_label and cleaned != expected_label:
+        return None
+    if (host_enforcing or selinux_host_enforcing)() is False:
+        return None
+    return cleaned if enforcing_attested else None

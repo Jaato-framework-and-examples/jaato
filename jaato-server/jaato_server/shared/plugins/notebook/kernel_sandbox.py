@@ -16,9 +16,9 @@ could step around by asking the notebook to do the same thing in Python.
 The boundary, in order of strength
 ==================================
 
-1. **A kernel-enforced AppArmor profile.**  The runner's per-session profile
-   grants ``ix`` on the interpreters it may exec, so the kernel subprocess runs
-   under the *same* profile as its parent and its syscalls are bounded by the
+1. **A kernel-enforced LSM boundary the cell cannot leave**: the AppArmor
+   ``//child`` sub-profile (#1323), or the SELinux ``jaato_child_t`` domain
+   (#1519) the runner exec's the kernel into.  Its syscalls are bounded by the
    kernel whatever the cell attempts.  Nothing in this module is installed on
    that path — there is a real boundary already, and a second, weaker one in
    userspace would only add failure modes.
@@ -91,7 +91,7 @@ permitted and every other rule intact, ``import numpy`` succeeds.  Only the
 stdlib ``ctypes`` module's own initialization line fails.
 
 The remedies are all *other surfaces*, which is why :func:`boundary_notice`
-exists: the AppArmor tier installs no hook at all, and a spawned child is not
+exists: the AppArmor and SELinux tiers install no hook at all, and a spawned child is not
 audited, so the same ``import numpy`` succeeds through ``cli`` or ``!python``.
 A model that is not told this reads one refusal as "the sandbox forbids native
 code" and stops — the failure #1011 and #1012 were filed for.
@@ -131,6 +131,10 @@ import threading
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from jaato_server.shared.apparmor_label import try_read_label
+# Imports no ``ctypes`` at module level (and selinux_cell_boundary never asks
+# libselinux): this module is imported by the kernel BEFORE the audit hook is
+# installed, and a ``ctypes`` already loaded would bypass the hook (#1011).
+from jaato_server.shared import lsm_label
 from jaato_server.shared.plugins.sandbox_utils import check_path_with_jaato_containment
 
 logger = logging.getLogger(__name__)
@@ -138,13 +142,17 @@ logger = logging.getLogger(__name__)
 # ---- boundary kinds reported to the runner (READY frame) and traced ---------
 
 BOUNDARY_APPARMOR = "apparmor"
+#: An enforcing SELinux ``jaato_child_t`` context (#1519): the SELinux
+#: counterpart of the AppArmor tier, a kernel boundary with no hook installed.
+BOUNDARY_SELINUX = "selinux"
 BOUNDARY_AUDIT = "audit"
 BOUNDARY_OPT_OUT = "opt-out"
 BOUNDARY_NONE = "none"
 
 #: Prefix on every refusal this module raises into a cell.  Names the tier,
 #: because the hook is installed on the audit tier and on no other: a cell that
-#: sees this text is proof the session did NOT get the AppArmor boundary.  On a
+#: sees this text is proof the session did NOT get a kernel (AppArmor or
+#: SELinux) boundary.  On a
 #: deployment whose operator believes AppArmor is enforced that is a
 #: misconfiguration (``JAATO_REQUIRE_APPARMOR=1`` turns it into a refusal to
 #: start), and before #1012 the only evidence was a runner log line nobody
@@ -167,6 +175,14 @@ _BOUNDARY_NOTICES: Dict[str, Tuple[str, ...]] = {
         "`import ctypes`, numpy, pandas and the rest of the scientific stack "
         "import normally.",
         "Reach outside the profile is refused by the kernel, not by Python, "
+        "and applies to subprocesses too.",
+    ),
+    BOUNDARY_SELINUX: (
+        "Cells are bounded by an enforcing SELinux domain (`jaato_child_t`). "
+        "No Python audit hook is installed, so Python itself is "
+        "unrestricted: `import ctypes`, numpy, pandas and the rest of the "
+        "scientific stack import normally.",
+        "Reach outside the domain is refused by the kernel, not by Python, "
         "and applies to subprocesses too.",
     ),
     BOUNDARY_AUDIT: (
@@ -313,6 +329,30 @@ def cell_boundary_profile() -> Optional[str]:
     """
     profile = apparmor_enforced_profile()
     return None if profile_can_leave_itself(profile) else profile
+
+
+def _warn_unbounding_selinux_domain(
+    expected_label: Optional[str], attested: bool,
+) -> None:
+    """Say why a kernel in a jaato SELinux domain is not trusted as the boundary.
+
+    Silent off SELinux and outside jaato's domains: there is nothing to
+    explain there.  Otherwise the kernel is in ``jaato_runner_t`` (the
+    ``setexeccon`` step did not happen), in a context other than the one it
+    was exec'd into, or without positive evidence the kernel enforces it
+    (#1014), and it falls back to the audit hook.
+    """
+    if lsm_label.active_lsm_backend() != lsm_label.BACKEND_SELINUX:
+        return
+    raw = lsm_label.read_own_context()
+    context = lsm_label.parse_selinux_context(raw)
+    if context is None or context.type not in lsm_label.JAATO_SELINUX_DOMAINS:
+        return
+    logger.warning(
+        "Notebook kernel: running in SELinux context %s (expected %s, "
+        "enforcement attested: %s), which is not an enforcing jaato_child_t "
+        "boundary; containing cells with the audit hook instead.",
+        raw, expected_label or "(none)", attested)
 
 
 def env_truthy(name: str) -> bool:
@@ -807,6 +847,8 @@ def establish_containment(
     extra_read_paths: Sequence[str] = (),
     extra_write_paths: Sequence[str] = (),
     opt_out: bool = False,
+    selinux_child_label: Optional[str] = None,
+    selinux_enforcing_attested: bool = False,
 ) -> Tuple[str, str]:
     """Decide and install this process's boundary, strongest available first.
 
@@ -819,10 +861,15 @@ def establish_containment(
         extra_write_paths: Paths that must also be writable — a
             ``workspace_venv`` outside the workspace, which ``!pip`` writes.
         opt_out: The operator accepted an uncontained notebook.
+        selinux_child_label: The context the spawner exec'd this kernel
+            into (``--selinux-child-label``), checked against the one the
+            kernel reads for itself.
+        selinux_enforcing_attested: The daemon attested the kernel enforces
+            the domain (#1519); see :func:`shared.lsm_label.selinux_cell_boundary`.
 
     Returns:
         ``(kind, description)`` where ``kind`` is one of
-        :data:`BOUNDARY_APPARMOR`, :data:`BOUNDARY_AUDIT`,
+        :data:`BOUNDARY_APPARMOR`, :data:`BOUNDARY_SELINUX`, :data:`BOUNDARY_AUDIT`,
         :data:`BOUNDARY_OPT_OUT` or :data:`BOUNDARY_NONE`.  Only
         :data:`BOUNDARY_NONE` means "refuse to run cells"; the caller enforces
         that, because this function's job is to establish a boundary, not to
@@ -841,6 +888,13 @@ def establish_containment(
             "writing changeprofile unconfined; containing cells with the "
             "audit hook instead.  The kernel should have been started in "
             "//child.", escapable)
+    context = lsm_label.selinux_cell_boundary(
+        expected_label=selinux_child_label,
+        enforcing_attested=selinux_enforcing_attested,
+    )
+    if context:
+        return BOUNDARY_SELINUX, f"SELinux-enforced domain {context}"
+    _warn_unbounding_selinux_domain(selinux_child_label, selinux_enforcing_attested)
     if opt_out:
         logger.warning(
             "Notebook kernel: running cells with NO filesystem boundary "

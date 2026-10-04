@@ -58,12 +58,17 @@ class RunnerConfinement:
         confinement_id: The boundary's id, carried for SELinux (which has
             no profile name to read it out of); ``""`` for AppArmor, whose
             id is read from the profile name.
+        enforcing_attested: SELinux only: the daemon attested the kernel
+            enforces both domains (``descriptor["enforcing"]``, #1519).
+            Only a literal ``True`` counts; absent (an older daemon) is
+            ``False``.
     """
 
     backend: str
     label: str
     child_label: str
     confinement_id: str = ""
+    enforcing_attested: bool = False
 
 
 def _refuse(message: str) -> Exception:
@@ -132,7 +137,8 @@ def _resolve_selinux(label: str, profile: str,
             "child_label; refusing to guess the domains")
     return RunnerConfinement(
         backend=BACKEND_SELINUX, label=label, child_label=child,
-        confinement_id=str(descriptor.get("confinement_id") or ""))
+        confinement_id=str(descriptor.get("confinement_id") or ""),
+        enforcing_attested=descriptor.get("enforcing") is True)
 
 
 def _own_selinux_label() -> str:

@@ -14,6 +14,7 @@ them; it derives none of them a second time:
 | subprocess ``PATH``, ``HOME``, ``XDG_*``, tool-venv | ``CLIToolPlugin._build_subprocess_env()`` on the session's own ``cli`` instance |
 | bound toolchains | ``<workspace>/.jaato/environment.json`` (#1344), when present |
 | ``seccomp`` | the posture the runner recorded at bootstrap, via :mod:`jaato_server.shared.seccomp_filter` (#1503) |
+| ``notebook.boundary`` | the active notebook backend's ``boundary_kind()`` (#1012, #1519): ``apparmor``, ``selinux``, ``audit``, ``opt-out`` or ``none`` |
 | ``notebook.imports_daemon_jaato`` | :mod:`jaato_server.shared.jaato_self_shadowing` (#1413), only when the workspace holds jaato's own source |
 
 The ``PATH`` is the one ``cli`` builds for its next command, not a
@@ -293,6 +294,36 @@ def notebook_shadowing_report(
     }
 
 
+def notebook_boundary_kind(registry: Any) -> Optional[str]:
+    """The active notebook backend's execution boundary, or ``None``.
+
+    ``backend.boundary_kind()`` on whichever backend is active: the same
+    fact ``NotebookPlugin`` renders into the system prompt, so this aspect,
+    the diagnostics verb and the prompt cannot disagree.  ``None`` when the
+    notebook plugin is not loaded or the backend claims no tier.
+    """
+    try:
+        notebook = registry.get_plugin("notebook") if registry else None
+        if notebook is None:
+            return None
+        backend = notebook._backends.get(notebook._active_backend_name)
+        if backend is None:
+            return None
+        kind = backend.boundary_kind()
+        return str(kind) if kind else None
+    except Exception:  # noqa: BLE001 -- a report must not raise
+        return None
+
+
+def notebook_boundary_report(registry: Any) -> Optional[Dict[str, Any]]:
+    """``{"boundary": kind, "boundary_notice": [...]}``, or ``None``."""
+    kind = notebook_boundary_kind(registry)
+    if kind is None:
+        return None
+    from jaato_server.shared.plugins.notebook.kernel_sandbox import boundary_notice
+    return {"boundary": kind, "boundary_notice": list(boundary_notice(kind))}
+
+
 # ---------------------------------------------------------------------------
 # The aspect
 # ---------------------------------------------------------------------------
@@ -338,6 +369,9 @@ def runtime_report(
     shadow = notebook_shadowing_report(workspace, [venv])
     if shadow:
         report["notebook"] = shadow
+    boundary = notebook_boundary_report(registry)
+    if boundary:
+        report.setdefault("notebook", {}).update(boundary)
     return report
 
 
@@ -384,7 +418,10 @@ def runtime_summary(report: Dict[str, Any]) -> Dict[str, str]:
         f" ({seccomp['reason']})" if seccomp.get("reason") else "")
     chains = report["toolchains"]
     lines["toolchains"] = chains["status"]
-    if "notebook" in report:
-        lines["notebook"] = report["notebook"]["note"]
+    notebook = report.get("notebook") or {}
+    if "boundary" in notebook:
+        lines["notebook_boundary"] = notebook["boundary"]
+    if "note" in notebook:
+        lines["notebook"] = notebook["note"]
     lines["detail"] = "get_environment(aspect='runtime') for the full report"
     return lines
