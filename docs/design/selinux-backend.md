@@ -229,7 +229,7 @@ empty output with exit status 0 (phase 0).
 
 | Type | Labels | `jaato_runner_t` | `jaato_child_t` |
 |---|---|---|---|
-| `jaato_workspace_t` | the workspace tree | read, write, create, unlink, rename, lock, link | same |
+| `jaato_workspace_t` | the workspace tree | read, write, create, unlink, rename, lock, link, map | same |
 | `jaato_managed_ws_t` | a managed workspace's tree (under `workspace_root`) | as above, **plus execute** | same |
 | `jaato_authored_t` | `.jaato/{services/*/,references,templates,plans}`, `template_routing.yaml` and the other authored entries | read, search | read, search |
 | `jaato_agent_config_t` | `.jaato/{agents,profiles,scripts,completion_schemas,spawn_schemas,instructions}` and `reactors.json` (phase 3) | read, search | read, search |
@@ -255,6 +255,23 @@ workspace (#1273/#1274: `node_modules/.bin`, the tool venv, `.home/.local/bin`)
 is executable, a user's own checkout is not. Two types rather than a
 boolean, because a boolean would be global and the distinction is per
 workspace.
+
+**`map` is granted wherever a domain may read a file; `execute` is not
+(#1520, module 1.8.0).** `read` and `write` do not cover `mmap(2)`: the
+kernel asks for `map` separately, and Fedora grants it to every domain only
+under the `domain_can_mmap_files` boolean, off by default. Without it `git`
+could not run in a confined workspace at all (it mmaps `.git/config`, so even
+`git init` was refused), nor could sqlite or `numpy.load(mmap_mode=...)`.
+So `map` sits beside `read` on every workspace, authored, prompt, claims and
+user-tier type, for the runner, the child and the isolated domains, and the
+`selinux-policy` job asserts each one unconditionally, so a grant cannot rest
+on the boolean. What it does not open: a mapping with `PROT_EXEC` also needs
+`execute` on the file, which `jaato_workspace_t` still does not grant, and
+`execmod` / `execmem` are separate permissions this module grants nowhere.
+The payload still cannot run a binary it wrote into a user's own checkout
+(#1511's "by design" property), and a job assertion says so. Related and
+separate: `execmem` for JIT runtimes (#1521) and `search` on a `user_tmp_t`
+parent of a workspace under `/tmp` (#1522).
 
 ### 4.3 Everything else, as type rules
 
@@ -602,6 +619,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 2b | **shipped, verified on a kernel** (three runs, the last at 025dd212: probe 36/36 and live sessions 9/9 under a root and a uid-1000 runner, the pty path included): user-tier types, binds and authored-file transitions in the module (1.4.0); `SELinuxBackend.provision` (levels, labelling, tmpdir); daemon selection; IPC and WS provisioning; cold spawn by exec transition; the runner confirms its domain and moves children into `jaato_child_t`. Runbook: [handoff](selinux-phase2b-handoff.md); `jaato-doctor` reports the backend and the host facts | RHEL hosts get a kernel boundary; confined sessions skip the pool |
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
+| 4.1 | **shipped, not yet verified on a kernel**: module 1.8.0, `map` beside every read of a jaato file type (#1520), so `git` runs in a confined workspace; marker unchanged (`jaato_policy_v4_t`): an older module still confines, it only refuses `mmap`. `probe_policy.py` runs `git init` / `commit` / `log` in a child and checks a `PROT_EXEC` mapping of the checkout stays refused | git in confined sessions |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
 ### What the phase 2a kernel run found
