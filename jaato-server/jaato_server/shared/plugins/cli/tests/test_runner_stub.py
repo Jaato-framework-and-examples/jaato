@@ -178,7 +178,8 @@ def test_stub_returns_domain_failure_dict_unchanged(
         ),
     )
 
-    result = plugin.get_executors()["cli_based_tool"]({"command": "no-such"})
+    ok, result = plugin.get_executors()["cli_based_tool"]({"command": "no-such"})
+    assert ok is False  # #1510: an error dict is an explicit failure
     assert "not found in PATH" in result["error"]
     assert "Configure extra_paths" in result["hint"]
 
@@ -199,6 +200,7 @@ def test_stub_surfaces_rpc_transport_error_as_tool_error(
     plugin, rpc = cli_plugin_with_fake_rpc
     rpc.next_raise = RunnerCallError("runner RPC closed before response arrived")
 
-    result = plugin.get_executors()["cli_based_tool"]({"command": "echo hi"})
+    ok, result = plugin.get_executors()["cli_based_tool"]({"command": "echo hi"})
+    assert ok is False  # #1510: an error dict is an explicit failure
     assert "runner RPC failed" in result["error"]
     assert "RunnerCallError" in result["error"]

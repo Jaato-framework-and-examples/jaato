@@ -1488,9 +1488,15 @@ def _child_preexec(
     through ``set_apparmor_child_transition_callback``, and append their
     cgroup attach / parent-death signal after it.
 
-    The filter is compiled here, in the runner, once per session; the
-    forked child only makes two ``prctl`` calls.  The posture is recorded
-    by :func:`shared.seccomp_filter.plan_for_session` whatever it is.
+    The filter is NOT compiled here (#1508): the daemon compiled it
+    (``runner_spawn.seccomp_program_of``) and it arrives as raw BPF on
+    ``envelope.seccomp_program``, the same way for a pool slot and a cold
+    spawn.  This runner only checks the architecture and shape
+    (:func:`shared.seccomp_filter.load_shipped`), so a confined runner needs
+    neither libseccomp nor a memfd; the forked child makes two calls.  The
+    posture is recorded by :func:`shared.seccomp_filter.plan_for_session`
+    whatever it is: a missing, foreign-arch or malformed program is
+    ``absent``, or every spawn refused when confinement is required.
     """
     from jaato_server.shared import seccomp_filter
     from . import lsm_confine
@@ -1506,6 +1512,7 @@ def _child_preexec(
         getattr(limits, "seccomp", None),
         getattr(limits, "seccomp_allow", None),
         boundary_active=True,
+        shipped=getattr(envelope, "seccomp_program", None),
     )
     composed = seccomp_filter.compose_child_preexec(lsm_cb, plan.installer)
     _CHILD_PREEXEC_CACHE.clear()

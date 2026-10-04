@@ -31,7 +31,9 @@ from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGG
 from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback
-from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
+from jaato_server.shared.plugins.runner_forwarding import (
+    RunnerForwardingMixin, failures_explicit,
+)
 from ..workspace_venv import pip_apparmor_rules, resolve_venv_path
 from jaato_server.shared.session_context import get_workspace_root
 from ..workspace_home import home_exec_apparmor_rules
@@ -838,14 +840,16 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         runner's AppArmor profile.  Falls through to in-process
         otherwise.
         """
-        return self.wrap_executors_for_runner_forwarding({
+        # #1510: an error dict is a failure, so a refused spawn is not
+        # reported as a success (``runner_forwarding.failures_explicit``).
+        return failures_explicit(self.wrap_executors_for_runner_forwarding({
             "notebook_execute": self._execute_code,
             "notebook_create": self._create_notebook,
             "notebook_variables": self._get_variables,
             "notebook_reset": self._reset_notebook,
             "notebook_list": self._list_notebooks,
             "notebook_backends": self._list_backends,
-        })
+        }))
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for notebook tools.

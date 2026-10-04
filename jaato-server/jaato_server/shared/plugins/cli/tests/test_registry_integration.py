@@ -191,8 +191,9 @@ class TestRegistryCLIExecution:
         registry.expose_tool("cli")
 
         executors = registry.get_exposed_executors()
-        result = executors["cli_based_tool"]({"command": "nonexistent_command_xyz"})
+        ok, result = executors["cli_based_tool"]({"command": "nonexistent_command_xyz"})
 
+        assert ok is False  # #1510: an error dict is an explicit failure
         assert "error" in result
 
         registry.unexpose_tool("cli")
