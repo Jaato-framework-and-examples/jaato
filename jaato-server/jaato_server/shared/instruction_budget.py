@@ -321,6 +321,12 @@ class InstructionBudget:
     #: on the last response that reported usage; ``None`` until one did.
     provider_prompt_tokens: Optional[int] = None
     reserved_output: int = 0  # Output cap each request reserves (#1444)
+    #: The estimate of the request most recently built for the wire, taken
+    #: when it was built (#1514): what the next provider-reported prompt
+    #: size is compared with.  Written by :meth:`note_sent_estimate`,
+    #: consumed (reset to ``None``) by :meth:`calibrate` and
+    #: :meth:`discard_sent_estimate`; ``None`` when no request is pending.
+    sent_estimate_tokens: Optional[int] = None
 
     # Sources excluded from context window calculations (output-only tokens)
     _NON_CONTEXT_SOURCES = frozenset({InstructionSource.THINKING})
@@ -368,7 +374,8 @@ class InstructionBudget:
         """The context size the GC threshold is judged on (#1440).
 
         :meth:`total_tokens` is this budget's own estimate.  When the last
-        response's provider-reported prompt exceeded it by more than
+        response's provider-reported prompt exceeded the estimate of THAT
+        SAME request (#1514) by more than
         :data:`CALIBRATION_MARGIN`, the estimate is known to be short, and
         a denominator known to be wrong must not decide on its own: the
         estimate is scaled by :attr:`calibration_factor`, which is the
@@ -388,30 +395,63 @@ class InstructionBudget:
         """True when :meth:`effective_total_tokens` exceeds the raw estimate."""
         return self.calibration_factor > 1.0
 
+    def note_sent_estimate(self, tokens: int) -> None:
+        """Record the estimate of the request about to go on the wire (#1514).
+
+        Called each time a request is built, with this budget's sizing of
+        exactly the messages, system instruction and tools that request
+        carries.  The next :meth:`calibrate` compares the provider's figure
+        with THIS number, never with :meth:`total_tokens` at the moment the
+        answer arrives: content appended between the two (a tool result
+        joining the history before the request that carries it was sized)
+        is a change in the request, not an error in the estimate.  A retry
+        rebuilds the same request and overwrites the snapshot with it.
+        """
+        self.sent_estimate_tokens = int(tokens) if tokens > 0 else None
+
+    def discard_sent_estimate(self) -> None:
+        """Drop the pending snapshot without measuring anything.
+
+        For a response that reported no usage (#688): its request is
+        answered, so its snapshot must not be paired with a later figure.
+        """
+        self.sent_estimate_tokens = None
+
     def calibrate(self, reported_prompt_tokens: int) -> Optional[float]:
-        """Compare the provider's prompt size with this budget's estimate.
+        """Compare the provider's prompt size with the estimate of the SAME request.
 
         Called once per response that reported usage.  Records the
-        reported figure and sets :attr:`calibration_factor`: the ratio
-        ``reported / estimate`` when it exceeds ``1 + CALIBRATION_MARGIN``,
-        else 1.0 (the estimate is used when the two agree, and when the
-        budget is the LARGER figure, which already is the larger of the
-        two).  Each call re-measures, so a factor never outlives the next
-        response that disagrees with it less.
+        reported figure and, when :meth:`note_sent_estimate` recorded the
+        estimate of the request just answered, sets
+        :attr:`calibration_factor`: the ratio ``reported / estimate`` when
+        it exceeds ``1 + CALIBRATION_MARGIN``, else 1.0 (the estimate is
+        used when the two agree, and when the budget is the LARGER figure,
+        which already is the larger of the two).  Each call re-measures,
+        so a factor never outlives the next response that disagrees with
+        it less.
+
+        The snapshot is consumed.  With none pending (nothing was sized
+        for this answer) nothing is compared and the factor is left as it
+        was (#1514): comparing with the budget's CURRENT total instead
+        once read a 228k-token tool result that joined after the
+        estimate as an estimation error of 2.38x, and GC fired at ~45%.
 
         Args:
             reported_prompt_tokens: The provider's prompt size for the
                 request just answered, cache reads and writes included.
 
         Returns:
-            The raw ratio ``reported / estimate``, or ``None`` when either
-            side is not a positive number (nothing was compared, and the
-            factor is left as it was).
+            The raw ratio ``reported / estimate``, or ``None`` when no
+            snapshot was pending or either side is not a positive number
+            (nothing was compared, and the factor is left as it was).
         """
-        estimate = self.total_tokens()
-        if reported_prompt_tokens <= 0 or estimate <= 0:
+        estimate = self.sent_estimate_tokens
+        self.sent_estimate_tokens = None
+        if reported_prompt_tokens <= 0:
             return None
         self.provider_prompt_tokens = int(reported_prompt_tokens)
+        if not estimate or estimate <= 0:
+            return None
         ratio = reported_prompt_tokens / estimate
         self.calibration_factor = (
             ratio if ratio > 1.0 + self.CALIBRATION_MARGIN else 1.0)

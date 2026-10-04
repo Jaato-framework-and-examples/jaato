@@ -9527,7 +9527,54 @@ NOTES
         """
         gated = self._gate_history_for_active_modalities(
             self._history.messages)
-        return repair_history(gated, trace_fn=self._trace)
+        wire = repair_history(gated, trace_fn=self._trace)
+        self._note_send_estimate(wire)
+        return wire
+
+    def _note_send_estimate(self, wire: List['Message']) -> None:
+        """Snapshot the budget's estimate of the request being built (#1514).
+
+        The calibration of #1440 compares the provider's prompt size for a
+        request with the budget's estimate, and the two must describe the
+        SAME request.  The budget's conversation entry is refreshed at
+        points that do not coincide with the send: on the tool-results
+        path it is refreshed before the results are appended, so a 228k
+        tool result rode on a request whose estimate (161k) never saw it,
+        and the factor came out 2.38x.  So the estimate is taken here, from
+        the very list handed to ``provider.complete()``: the budget's
+        non-conversation sources (system, plugins, tool schemas -- what the
+        request carries beside the history) plus every wire message sized
+        by :meth:`_message_budget_tokens`, the rule the conversation entry
+        itself uses.  Stored messages use its cache; a per-request copy
+        (a gated or repaired message) is counted directly, so the cache
+        keeps describing the stored message.
+
+        Never raises: an estimate that cannot be taken leaves no snapshot,
+        and the response it would have measured changes nothing.
+        """
+        budget = getattr(self, '_instruction_budget', None)
+        if budget is None:
+            return
+        try:
+            include_thought = self._wire_replays_reasoning()
+            conv_entry = budget.get_entry(InstructionSource.CONVERSATION)
+            conv_tracked = conv_entry.total_tokens() if conv_entry else 0
+            others = budget.total_tokens() - conv_tracked
+            stored = {id(m) for m in self._history.messages}
+            conversation = 0
+            for msg in wire:
+                if id(msg) in stored:
+                    conversation += self._message_budget_tokens(
+                        msg, include_thought)
+                else:
+                    conversation += sum(
+                        self._count_tokens(t) for t in message_wire_texts(
+                            msg, include_thought=include_thought))
+                    conversation += message_media_tokens(msg)
+            budget.note_sent_estimate(others + conversation)
+        except Exception:  # noqa: BLE001 - sizing must not fail a send
+            logger.debug("send estimate snapshot failed", exc_info=True)
+            budget.discard_sent_estimate()
 
     def _gate_history_for_active_modalities(
         self, messages: List['Message']
@@ -11485,6 +11532,15 @@ NOTES
         #688) is not a measurement and is skipped, as is a reported prompt
         of zero, which no real request has.
 
+        The figure is compared with the estimate :meth:`_note_send_estimate`
+        took of the SAME request when it was built (#1514), never with the
+        budget's total now: content appended since is not estimation
+        error.  With no snapshot pending, or for an unreported usage, the
+        factor is left as it was.  Each comparison is logged at INFO
+        (``BUDGET_CALIBRATION``) with the snapshot, the figure and the
+        factor, so a factor can always be traced to the request it came
+        from.
+
         :meth:`InstructionBudget.calibrate` records the figure and, beyond
         its margin, makes the GC threshold judge the LARGER of the two.
         A difference beyond the margin in either direction is logged at
@@ -11498,7 +11554,12 @@ NOTES
         # getattr: sessions built with ``__new__`` (duck-typed tests of
         # the accumulator) never ran ``__init__``.
         budget = getattr(self, '_instruction_budget', None)
-        if budget is None or not getattr(usage, 'reported', True):
+        if budget is None:
+            return
+        if not getattr(usage, 'reported', True):
+            # The request is answered; its snapshot must not be paired
+            # with a later response's figure (#1514).
+            budget.discard_sent_estimate()
             return
         try:
             reported = (
@@ -11506,20 +11567,34 @@ NOTES
                 + int(usage.cache_read_tokens or 0)
                 + int(usage.cache_creation_tokens or 0)
             )
-            estimate = budget.total_tokens()
+            estimate = budget.sent_estimate_tokens
             ratio = budget.calibrate(reported)
         except Exception:  # noqa: BLE001 - reporting must not fail a turn
             logger.debug("budget calibration failed", exc_info=True)
             return
-        if ratio is None or getattr(self, '_budget_drift_warned', False):
+        if ratio is None:
+            logger.debug(
+                "BUDGET_CALIBRATION[%s] skipped: sent_estimate=%s provider=%d "
+                "factor=%.3f kept (#1514)",
+                self._agent_id, estimate, reported, budget.calibration_factor,
+            )
+            return
+        # Attributable: which request's estimate met which figure (#1514).
+        logger.info(
+            "BUDGET_CALIBRATION[%s] sent_estimate=%d provider=%d ratio=%.3f "
+            "factor=%.3f",
+            self._agent_id, estimate, reported, ratio,
+            budget.calibration_factor,
+        )
+        if getattr(self, '_budget_drift_warned', False):
             return
         if abs(ratio - 1.0) <= budget.CALIBRATION_MARGIN:
             return
         self._budget_drift_warned = True
         logger.warning(
             "[session:%s] instruction budget estimate %d tokens differs from "
-            "the provider's reported prompt %d tokens (%.0f%%); the GC "
-            "threshold uses the larger figure (#1440)",
+            "the provider's reported prompt %d tokens for the same request "
+            "(%.0f%%); the GC threshold uses the larger figure (#1440)",
             self._agent_id, estimate, reported, (ratio - 1.0) * 100,
         )
 
@@ -13570,6 +13645,7 @@ NOTES
             if self._instruction_budget is not None:
                 self._instruction_budget.calibration_factor = 1.0
                 self._instruction_budget.provider_prompt_tokens = None
+                self._instruction_budget.discard_sent_estimate()
             # On true fresh reset, clear pinned references and remove their
             # content from the system instruction.  GC resets (history provided)
             # preserve pinned references — they stay in the system instruction.

@@ -213,7 +213,10 @@ def test_a_larger_provider_prompt_decides_the_threshold(caplog):
     usage = TokenUsage(prompt_tokens=1000, cache_read_tokens=reported - 1000,
                        output_tokens=50)
     with caplog.at_level(logging.WARNING):
+        # Each response measures the request built for it (#1514).
+        s._history_for_provider()
         s._calibrate_budget_against_provider(usage)
+        s._history_for_provider()
         s._calibrate_budget_against_provider(usage)
     drift = [r for r in caplog.records if "#1440" in r.getMessage()]
     assert len(drift) == 1
