@@ -3027,8 +3027,9 @@ deny-list.
 | Piece | Where |
 |---|---|
 | the deny-list, by family (`kernel`, `mount`, `namespaces`, `bpf`, `perf`, `userfaultfd`, `io_uring`, `keyring`, `fanotify`, `ptrace`, `handles`, `personality`) | `shared/seccomp_filter.py::FAMILIES` |
-| compiled ONCE per session in the runner through libseccomp (ctypes, `libseccomp.so.2`), exported as raw BPF | `compile_filter` |
-| the forked child makes two calls, `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP` | `CompiledFilter.install` |
+| compiled once per session IN THE DAEMON through libseccomp (ctypes, loaded by soname `libseccomp.so.2`, never `find_library`), exported as raw BPF and shipped on `SessionInitEnvelope.seccomp_program` with its architecture (#1508) | `runner_spawn.seccomp_program_of`, `compile_for_envelope` |
+| the runner checks the architecture and the program's shape and keeps the bytes; it never loads libseccomp or creates a memfd | `load_shipped` |
+| the forked child makes two calls, `PR_SET_NO_NEW_PRIVS` and `seccomp(SECCOMP_SET_MODE_FILTER)` (raw `syscall()`, number shipped by the daemon) | `CompiledFilter.install` |
 | composed into the `//child` callable the three plugins already receive: LSM transition, then the filter; the plugins append the cgroup attach | `compose_child_preexec`, `server/runner/session.py::_child_preexec` (used by the #1357 pre-arm and step 4) |
 | posture `filter` / `off` / `absent` / `unconfined`, recorded in the runner, returned in the `session.bootstrap` answer, stored on `JaatoServer.seccomp_posture` and the session record (`SessionState.seccomp`, additive) | `plan_for_session`, `runner_spawn._note_seccomp_posture`, `session_manager._seccomp_for_record` |
 | shown | `get_environment(aspect="runtime")` (`seccomp`, with the denied families), `DiagnosticsResultEvent.seccomp` (cached) and `probe["seccomp"]` (live), `session.list` rows |
@@ -3040,7 +3041,9 @@ deny-list.
 | `io_uring_*` answers `EPERM` | the answer the 6.6+ `io_uring_disabled` sysctl and Docker's profile give; measured: node 22 with `UV_USE_IO_URING=1` probes it and falls back |
 | never installed in the runner | the filter cannot be removed; the forked child is single-threaded, so no `TSYNC` (#1023's per-task lesson) |
 | a session with no kernel boundary gets no filter, and says so (`unconfined`) | one is not invented |
-| no filter buildable (libseccomp missing, kernel without seccomp): WARNING and `absent`, or, when `JAATO_REQUIRE_CONFINEMENT` / `JAATO_REQUIRE_APPARMOR` is set, every spawn refused | "LSM yes, seccomp no" is never silent |
+| no filter buildable or loadable (libseccomp missing on the daemon host, kernel without seccomp, no program on the envelope, a program for another architecture or malformed): WARNING and `absent`, or, when `JAATO_REQUIRE_CONFINEMENT` / `JAATO_REQUIRE_APPARMOR` is set, every spawn refused | "LSM yes, seccomp no" is never silent |
+| the daemon log says it: WARNING for `absent` / `off`, ERROR when every spawn will be refused, each naming the session (#1510) | the runner's own WARNING is in the runner log, which is not read first |
+| a refused or failed spawn is a FAILED tool call: every `cli` / `interactive_shell` / `notebook` executor goes through `runner_forwarding.failures_explicit`, so an `{"error": ...}` dict is `(False, payload)`, and an opaque `Exception occurred in preexec_fn.` gains `refused_by` naming the seccomp refusal (#1510) | `out of pty devices` and refused spawns were `success: true`; #1053's rule |
 
 Configured in `runtime_limits`, delivered on the v7 envelope so pool slots
 and cold spawn get the same thing:
@@ -3065,17 +3068,37 @@ jaato_child_t:process2 { nnp_transition nosuid_transition };` in
 `jaato.te`, asserted by the `selinux-policy` job. A setuid binary
 (`sudo`, `ping` with file caps) gains nothing in a subprocess.
 
+**Why the daemon compiles (#1508).** Compiling in the runner meant
+exporting through a memfd, which is `tmpfs_t` under SELinux and which
+`jaato_runner_t` may not write, so every SELinux session was `absent`; and
+`find_library` execs `ldconfig`, which both LSMs refuse a confined runner.
+The daemon is unconfined and reads the same `runtime_limits` block it puts
+on the envelope, so it compiles per session and ships the bytes. No SELinux
+policy was widened. The `selinux-policy` job's `nnp_transition` rule is now
+reachable on a kernel (the filter is installed after the `//child`
+transition), and is in the PR's re-verify checklist.
+
 Stated limits: an isolated sub-runner's subprocesses get no filter (no
 `//child` transition to compose with; recorded `absent` with that reason).
+The `-stream` variant of `notebook_execute` reports a stream that started,
+whatever its first chunk says.
 A seccomp `EPERM` is not distinguishable from another `EPERM` in a
 command's output, so the #1348 denial hint does not name it; the runtime
 aspect lists the denied families instead. Cost: ~5 ms to compile once per
-session; ~0.1-0.5 ms per spawn for the attach (the kernel converts and JITs
+session, in the daemon; ~0.1-0.5 ms per spawn for the attach (the kernel converts and JITs
 the 108-instruction program), inside spawn noise. Not verified on an
 enforcing AppArmor or SELinux kernel.
 
-Guard: `jaato_server/shared/tests/test_seccomp_child_filter_1503.py`, nine
-reversions, installing the real filter in real children.
+Guards: `jaato_server/shared/tests/test_seccomp_child_filter_1503.py`, ten
+reversions, installing the real filter in real children; a child must show
+`NoNewPrivs: 1` and one more `Seccomp_filters` than its parent, because
+`Seccomp: 2` alone is already true beneath a host-wide filter (WSL2's PID 1),
+which one case simulates (#1510).
+`test_seccomp_compiled_by_the_daemon_1508.py` (six reversions: the runner
+installs with libseccomp, the memfd and `find_library` all made to fail; a
+foreign-arch or malformed program is `absent` or refused) and
+`test_seccomp_refusals_are_loud_1510.py` (seven: the daemon-log levels, and
+refused spawns and `out of pty devices` as failures).
 
 ### Three Things a Fresh Workspace Told the Model Wrongly (#1357, #1358, #1359)
 

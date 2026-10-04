@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
-from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
+from jaato_server.shared.plugins.runner_forwarding import (
+    RunnerForwardingMixin, failures_explicit,
+)
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     EditableContent,
@@ -655,9 +657,11 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         shared ``RunnerForwardingMixin`` — same wire path, same
         cancellation contract, less per-plugin duplication.
         """
-        return self.wrap_executors_for_runner_forwarding({
+        # #1510: an error dict is a failure, so a refused spawn is not
+        # reported as a success (``runner_forwarding.failures_explicit``).
+        return failures_explicit(self.wrap_executors_for_runner_forwarding({
             'cli_based_tool': self._execute,
-        })
+        }))
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the CLI tool."""

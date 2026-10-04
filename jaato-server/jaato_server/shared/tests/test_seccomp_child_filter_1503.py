@@ -9,7 +9,7 @@ LSM transition, then ``PR_SET_NO_NEW_PRIVS`` and ``PR_SET_SECCOMP``, then
 
 These tests install the real filter in real forked children.  They skip
 where this kernel or libseccomp cannot build one (the posture tests still
-run, with the compiler substituted).  No AppArmor or SELinux kernel is
+run, with a synthetic shipped program).  No AppArmor or SELinux kernel is
 needed: the LSM transition is replaced by a no-op, which is exactly the part
 the filter does not depend on.
 """
@@ -49,6 +49,14 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SF,
+        find="        lsm_transition()\n        installer()\n",
+        replace="        lsm_transition()\n",
+        test="test_the_filter_is_counted_beneath_an_inherited_one",
+        because="beneath a host-wide filter (WSL2) a child with no jaato "
+                "filter still reads Seccomp: 2; only the count tells (#1510)",
+    ),
+    Reversion(
+        target=_SF,
         find='    Family("keyring", ("keyctl", "add_key", "request_key"),',
         replace='    Family("keyring", ("add_key", "request_key"),',
         test="test_inside_cli_the_denied_families_answer_eperm",
@@ -84,7 +92,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SPAWN,
-        find="        _note_seccomp_posture(server, result)\n",
+        find="        _note_seccomp_posture(server, result, session_id)\n",
         replace="",
         test="test_the_posture_reaches_the_daemon_record",
         because="the daemon never records what the runner installed",
@@ -106,11 +114,49 @@ REVERSIONS = [
 ]
 
 
+def _wire_or_skip(allow=()) -> Dict[str, Any]:
+    """The daemon's half: the envelope's ``seccomp_program`` (#1508)."""
+    wire = sf.compile_for_envelope(None, allow)
+    if wire is None or wire.get("unavailable"):
+        pytest.skip(f"no seccomp filter can be built here: {wire}")
+    return wire
+
+
 def _filter_or_skip(allow=()) -> sf.CompiledFilter:
-    try:
-        return sf.compile_filter(allow)
-    except sf.SeccompUnavailable as exc:
-        pytest.skip(f"no seccomp filter can be built here: {exc}")
+    """A filter as the RUNNER holds it: compiled daemon-side, loaded from
+    the wire, installed through the raw ``seccomp(2)`` syscall."""
+    return sf.load_shipped(_wire_or_skip(allow), tuple(sorted(allow)))
+
+
+def _status_fields(text: str) -> Dict[str, int]:
+    """``NoNewPrivs`` / ``Seccomp`` / ``Seccomp_filters`` from a status dump."""
+    out: Dict[str, int] = {}
+    for key in ("NoNewPrivs", "Seccomp", "Seccomp_filters"):
+        m = re.search(rf"^{key}:\s*(\d+)", text, re.MULTILINE)
+        if m:
+            out[key] = int(m.group(1))
+    return out
+
+
+def _assert_child_filtered(child_status: str, parent_status: str) -> None:
+    """The child carries THIS filter, not only an inherited one (#1510).
+
+    ``Seccomp: 2`` is already true of every process on a host whose PID 1
+    has a filter (WSL2, some systemd units), so it proved nothing there.
+    What the jaato filter adds is NO_NEW_PRIVS and one more filter than the
+    parent had.  Older kernels have no ``Seccomp_filters`` line; then
+    ``Seccomp: 2`` beneath a parent at 0 is the only evidence left.
+    """
+    child, parent = _status_fields(child_status), _status_fields(parent_status)
+    assert child.get("NoNewPrivs") == 1, (child, parent)
+    if "Seccomp_filters" in child and "Seccomp_filters" in parent:
+        assert child["Seccomp_filters"] > parent["Seccomp_filters"], (child, parent)
+    else:
+        assert child.get("Seccomp") == 2 and parent.get("Seccomp") == 0, (child, parent)
+
+
+def _own_status() -> str:
+    return Path("/proc/self/status").read_text()
 
 
 def _noop() -> None:
@@ -130,10 +176,13 @@ def _composed_via_runner(monkeypatch, limits: Optional[Dict[str, Any]] = None):
     from jaato_server.server.runner import lsm_confine
     from jaato_server.server.runner import session as runner_session
 
-    _filter_or_skip()
+    from jaato_server.shared.runtime_limits import RuntimeLimits
+    lim = RuntimeLimits.from_dict(limits) if limits else None
+    wire = _wire_or_skip(getattr(lim, "seccomp_allow", None) or ())
     monkeypatch.setattr(lsm_confine, "child_transition_callback",
                         lambda *a, **k: _noop)
-    envelope = SimpleNamespace(runtime_limits=limits)
+    # #1508: the program arrives compiled, on the envelope.
+    envelope = SimpleNamespace(runtime_limits=limits, seccomp_program=wire)
     confinement = SimpleNamespace(backend="apparmor", label="jaato-ws-x",
                                   child_label="")
     return runner_session._child_preexec(envelope, confinement)
@@ -160,8 +209,45 @@ def test_a_cli_subprocess_runs_under_the_filter(cli, monkeypatch, tmp_path):
         "print(open('/proc/self/status').read())\n")
     result = _cli(cli, "python3 status.py")
     assert result.get("returncode") == 0, result
-    assert re.search(r"Seccomp:\s*2", result["stdout"]), result
+    _assert_child_filtered(result["stdout"], _own_status())
     assert sf.current_posture()["posture"] == sf.POSTURE_FILTER
+
+
+_INHERITED = textwrap.dedent("""
+    import ctypes, json, struct, subprocess, sys
+    from jaato_server.shared import seccomp_filter as sf
+    flt = sf.load_shipped(json.loads(sys.argv[1]), ())
+    # The filter a WSL2 / systemd PID 1 leaves on every process: allow-all.
+    libc = ctypes.CDLL(None, use_errno=True)
+    buf = (sf._SockFilter * 1).from_buffer_copy(
+        struct.pack("=HBBI", 0x06, 0, 0, 0x7FFF0000))
+    prog = sf._SockFprog(1, ctypes.cast(buf, ctypes.POINTER(sf._SockFilter)))
+    assert libc.prctl(38, 1, 0, 0, 0) == 0
+    assert libc.prctl(22, 2, ctypes.byref(prog), 0, 0) == 0
+    parent = open("/proc/self/status").read()
+    child = subprocess.run(
+        [sys.executable, "-c", "print(open('/proc/self/status').read())"],
+        preexec_fn=sf.compose_child_preexec(lambda: None, flt.install),
+        capture_output=True, text=True, check=True).stdout
+    print(json.dumps([parent, child]))
+""")
+
+
+def test_the_filter_is_counted_beneath_an_inherited_one():
+    """#1510: on a host whose every process already has a filter, the guard
+    above used to pass with the filter gone, because it read ``Seccomp: 2``.
+
+    Simulated here without root: an intermediate process sets NO_NEW_PRIVS
+    and installs an allow-all filter (what WSL2's PID 1 leaves), then spawns
+    through the composed preexec.  The child must carry one filter MORE.
+    """
+    import json
+    wire = _wire_or_skip()
+    out = _run([sys.executable, "-c", _INHERITED, json.dumps(wire)], None)
+    assert out.returncode == 0, out.stderr[-2000:]
+    parent, child = json.loads(out.stdout)
+    assert _status_fields(parent)["Seccomp"] == 2  # the false-pass condition
+    _assert_child_filtered(child, parent)
 
 
 def test_the_notebook_kernel_runs_under_the_filter(monkeypatch, tmp_path):
@@ -179,10 +265,10 @@ def test_the_notebook_kernel_runs_under_the_filter(monkeypatch, tmp_path):
     be.set_apparmor_child_transition(composed)
     try:
         nb = be.create_notebook("t")
-        r = be.execute(nb.notebook_id, "print([l.split()[1] for l in "
-                       "open('/proc/self/status') if l.startswith('Seccomp:')])")
+        r = be.execute(nb.notebook_id,
+                       "print(open('/proc/self/status').read())")
         text = "".join(str(getattr(o, "content", "")) for o in r.outputs or [])
-        assert "['2']" in text, (r.status, text, r.error_message)
+        _assert_child_filtered(text, _own_status())
     finally:
         be.shutdown()
 
@@ -282,18 +368,36 @@ def test_clone3_answers_enosys_and_threads_still_start():
 # ------------------------------------------------------------- posture
 
 
-def _fake_compiler(_allow):
-    return SimpleNamespace(install=_noop, program=b"\0" * 8, libseccomp="t")
+_FAKE_AUDIT_ARCH = 0xC000003E
 
 
-def _missing(_allow):
-    raise sf.SeccompUnavailable("libseccomp not found (tried libseccomp.so.2)")
+def _fake_wire(allow=()) -> Dict[str, Any]:
+    """A well-formed shipped program, built without libseccomp.
+
+    ``ld [4]; jeq #AUDIT_ARCH, 0, 1; ret ALLOW; ret KILL``: the shape
+    :func:`seccomp_filter.load_shipped` checks.  The posture tests never
+    install it, so they run on a host with no libseccomp.
+    """
+    import base64
+    import struct
+    prog = b"".join(struct.pack("=HBBI", *i) for i in (
+        (0x20, 0, 0, 4), (0x15, 0, 1, _FAKE_AUDIT_ARCH),
+        (0x06, 0, 0, 0x7FFF0000), (0x06, 0, 0, 0x80000000)))
+    return {"format": sf.WIRE_FORMAT, "arch": sf.native_arch(),
+            "audit_arch": _FAKE_AUDIT_ARCH, "seccomp_nr": None,
+            "program_b64": base64.b64encode(prog).decode(),
+            "allowed": sorted(allow), "libseccomp": "t"}
+
+
+_MISSING = {"format": sf.WIRE_FORMAT,
+            "unavailable": "libseccomp not found (tried libseccomp.so.2)",
+            "allowed": []}
 
 
 def test_off_is_announced_and_installs_nothing(caplog):
     with caplog.at_level(logging.WARNING, logger=sf.__name__):
         plan = sf.plan_for_session("off", None, boundary_active=True,
-                                   required=False, compiler=_fake_compiler)
+                                   required=False, shipped=_fake_wire())
     assert plan.posture == sf.POSTURE_OFF and plan.installer is None
     assert any("'off'" in r.getMessage() for r in caplog.records)
     assert sf.compose_child_preexec(_noop, plan.installer) is _noop
@@ -303,7 +407,7 @@ def test_allow_back_is_announced_and_unknown_names_stay_denied(caplog):
     with caplog.at_level(logging.WARNING, logger=sf.__name__):
         plan = sf.plan_for_session("default", ["ptrace", "ptarce"],
                                    boundary_active=True, required=False,
-                                   compiler=_fake_compiler)
+                                   shipped=_fake_wire(["ptrace"]))
     assert plan.posture == sf.POSTURE_FILTER
     assert plan.allowed == ("ptrace",)
     text = " ".join(r.getMessage() for r in caplog.records)
@@ -312,7 +416,7 @@ def test_allow_back_is_announced_and_unknown_names_stay_denied(caplog):
 
 def test_an_unconfined_session_gets_no_filter_and_says_so():
     plan = sf.plan_for_session(None, None, boundary_active=False, required=False,
-                               compiler=_fake_compiler)
+                               shipped=_fake_wire())
     assert plan.posture == sf.POSTURE_UNCONFINED and plan.installer is None
     assert "no kernel boundary" in plan.reason
 
@@ -320,7 +424,7 @@ def test_an_unconfined_session_gets_no_filter_and_says_so():
 def test_libseccomp_missing_best_effort_warns_and_records_absent(caplog):
     with caplog.at_level(logging.WARNING, logger=sf.__name__):
         plan = sf.plan_for_session(None, None, boundary_active=True,
-                                   required=False, compiler=_missing)
+                                   required=False, shipped=_MISSING)
     assert plan.posture == sf.POSTURE_ABSENT and plan.installer is None
     assert sf.current_posture() == {"posture": "absent",
                                     "reason": plan.reason}
@@ -329,7 +433,7 @@ def test_libseccomp_missing_best_effort_warns_and_records_absent(caplog):
 
 def test_libseccomp_missing_when_required_refuses_every_spawn():
     plan = sf.plan_for_session(None, None, boundary_active=True,
-                               required=True, compiler=_missing)
+                               required=True, shipped=_MISSING)
     assert plan.posture == sf.POSTURE_ABSENT
     assert sf.current_posture()["spawns_refused"] is True
     with pytest.raises(subprocess.SubprocessError):
@@ -339,7 +443,6 @@ def test_libseccomp_missing_when_required_refuses_every_spawn():
 
 def test_a_missing_library_is_found_missing(monkeypatch):
     monkeypatch.setattr(sf, "LIBSECCOMP_NAMES", ("libseccomp-absent.so.9",))
-    monkeypatch.setattr(sf.ctypes.util, "find_library", lambda _n: None)
     if not sf.kernel_supports_seccomp():
         pytest.skip("kernel has no seccomp")
     with pytest.raises(sf.SeccompUnavailable, match="libseccomp not found"):
@@ -355,7 +458,7 @@ def test_required_reads_both_env_vars():
 def test_the_posture_reaches_the_runtime_aspect():
     from jaato_server.shared.plugins.environment import runtime
     sf.plan_for_session("default", ["ptrace"], boundary_active=True,
-                        required=False, compiler=_fake_compiler)
+                        required=False, shipped=_fake_wire(["ptrace"]))
     report = runtime.seccomp_report()
     assert report["posture"] == "filter"
     assert "ptrace" not in report["denied_families"]

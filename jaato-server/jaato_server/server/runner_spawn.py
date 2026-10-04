@@ -1553,6 +1553,12 @@ def build_session_envelope(
         # one value every spawn path already carries -- and cannot disagree
         # with it (the runner refuses a descriptor that does).
         confinement=_envelope_descriptor_of(profile_name, confinement),
+        # #1508: the session's seccomp filter, compiled HERE (the daemon is
+        # unconfined); the runner only installs the bytes.
+        seccomp_program=seccomp_program_of(
+            _envelope_descriptor_of(profile_name, confinement),
+            _profile_runtime_limits(profile),
+        ),
         # #1168: the user the runner drops to at step 1b3 (a pool slot) or
         # already dropped to before exec (a cold spawn), or ``None``.
         runner_user=_runner_user_wire(server),
@@ -1562,6 +1568,32 @@ def build_session_envelope(
         # slot stops writing the daemon's log (which it may not).
         runner_log_path=runner_log_path(workspace_path, session_id),
     )
+
+
+def seccomp_program_of(
+    descriptor: Optional[Dict[str, Any]], limits: Optional[RuntimeLimits],
+) -> Optional[Dict[str, Any]]:
+    """``SessionInitEnvelope.seccomp_program`` for one session (#1508).
+
+    Compiled per session, because the program depends on the profile's
+    ``runtime_limits.seccomp`` and ``seccomp_allow``.  Compiled HERE, in the
+    unconfined daemon, because the confined runner may neither load
+    libseccomp by search (``find_library`` execs ``ldconfig``) nor write
+    the memfd libseccomp exports through (``tmpfs_t`` under SELinux).
+    Both spawn paths, cold and pool slot, read the envelope at bootstrap,
+    so both receive it.
+
+    ``None`` when the session has no kernel boundary (the runner records
+    ``unconfined``) or is a ``//`` sub-profile (an isolated sub-runner,
+    recorded ``absent``), and for ``seccomp: off``.
+    """
+    from jaato_server.shared import seccomp_filter
+
+    label = (descriptor or {}).get("label") or ""
+    if not label or "//" in label:
+        return None
+    return seccomp_filter.compile_for_envelope(
+        getattr(limits, "seccomp", None), getattr(limits, "seccomp_allow", None))
 
 
 def _apparmor_descriptor(profile_name: str) -> Optional[Dict[str, str]]:
@@ -1729,7 +1761,7 @@ def dispatch_bootstrap_envelope(
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)
-        _note_seccomp_posture(server, result)
+        _note_seccomp_posture(server, result, session_id)
         session_new_timing.mark("bootstrap_acked", session_id=session_id)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
@@ -1797,11 +1829,30 @@ def dispatch_bootstrap_envelope(
             )
 
 
-def _note_seccomp_posture(server: Any, result: Any) -> None:
+def _note_seccomp_posture(
+    server: Any, result: Any, session_id: str = "",
+) -> None:
     """Record the runner's reported seccomp posture on *server* (#1503).
 
-    Best-effort, like :func:`_note_bootstrap_outcome`: a recorder must not
-    turn an acknowledged bootstrap into a failed one.
+    And say it in the DAEMON log at the level it deserves (#1510): the
+    runner logs its own WARNING, but in the runner's log, which is not the
+    one an operator reads first.
+
+    ======================================  =========  ====================
+    posture                                 level      says
+    ======================================  =========  ====================
+    ``filter``, ``unconfined``              INFO       the posture
+    ``off``                                 WARNING    no syscall filter
+    ``absent``, best effort                 WARNING    no filter, and why
+    ``absent`` with ``spawns_refused``      ERROR      every model-driven
+                                                       subprocess spawn in
+                                                       this session will be
+                                                       refused, and why
+    ======================================  =========  ====================
+
+    Each names the session.  Best-effort, like
+    :func:`_note_bootstrap_outcome`: a recorder must not turn an
+    acknowledged bootstrap into a failed one.
     """
     note = getattr(server, "note_seccomp_posture", None)
     if not callable(note):
@@ -1810,9 +1861,36 @@ def _note_seccomp_posture(server: Any, result: Any) -> None:
         posture = result.get("seccomp") if isinstance(result, dict) else None
         note(posture)
         if isinstance(posture, dict):
-            logger.info("runner seccomp posture: %s", posture)
+            _log_seccomp_posture(session_id, posture)
     except Exception:  # noqa: BLE001 — a recorder must not fail the path
         logger.debug("note_seccomp_posture raised", exc_info=True)
+
+
+def _log_seccomp_posture(session_id: str, posture: Dict[str, Any]) -> None:
+    """The daemon-log line for one session's seccomp posture (#1510)."""
+    from jaato_server.shared import seccomp_filter as sf
+
+    kind = posture.get("posture")
+    reason = posture.get("reason") or "no reason given"
+    if kind == sf.POSTURE_ABSENT and posture.get("spawns_refused"):
+        logger.error(
+            "seccomp: session %s: the filter is REQUIRED and unavailable "
+            "(%s) -- every model-driven subprocess spawn in this session "
+            "(cli, interactive_shell, notebook) will be refused",
+            session_id, reason)
+    elif kind == sf.POSTURE_ABSENT:
+        logger.warning(
+            "seccomp: session %s: posture absent (%s) -- model-driven "
+            "subprocesses run behind the LSM boundary with no syscall filter",
+            session_id, reason)
+    elif kind == sf.POSTURE_OFF:
+        logger.warning(
+            "seccomp: session %s: posture off (%s) -- model-driven "
+            "subprocesses reach the whole syscall table behind the LSM "
+            "boundary alone", session_id, reason)
+    else:
+        logger.info("seccomp: session %s: runner posture %s",
+                    session_id, posture)
 
 
 def _note_bootstrap_outcome(server: Any, error: Optional[str]) -> None:

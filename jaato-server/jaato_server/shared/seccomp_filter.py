@@ -11,19 +11,30 @@ model-driven subprocess, between the LSM transition and ``exec``.
 
 Where it runs
 -------------
-Never in the runner.  The runner builds the filter ONCE per session, in the
-parent, through libseccomp (which resolves syscall numbers for the native
-architecture and emits the architecture check), exports it as a raw BPF
-program, and keeps it in a ctypes buffer.  The forked child then makes two
-``prctl`` calls and nothing else::
+Compiled in the DAEMON, installed in the forked child, and never touched by
+libseccomp in the runner (#1508).  The daemon is unconfined; the runner is
+not, and both LSMs refused what compiling there needed: libseccomp exports
+through an fd, the memfd it used is ``tmpfs_t`` (which ``jaato_runner_t``
+may not write), and ``ctypes.util.find_library`` execs ``ldconfig``.  So:
 
-    prctl(PR_SET_NO_NEW_PRIVS, 1)
-    prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
+1. :func:`compile_for_envelope` (daemon, per session, from the profile's
+   ``runtime_limits.seccomp`` / ``seccomp_allow``) builds the program
+   through libseccomp, loaded by soname, and returns its wire form: the raw
+   BPF (base64), the architecture it was compiled for and the ``seccomp``
+   syscall number.  It rides ``SessionInitEnvelope.seccomp_program``, so a
+   pool slot and a cold spawn receive the same thing at bootstrap.
+2. :func:`load_shipped` (runner) checks the architecture against its own and
+   the program's shape, and keeps it in a ctypes buffer.  It imports nothing
+   but ``ctypes`` and loads libc only.
+3. The forked child makes two calls and nothing else::
 
-So nothing in the child allocates through libseccomp after a fork of a
-threaded process, and the per-spawn cost is two syscalls.  No ``TSYNC``: the
-forked child has one thread.  The filter is inherited by everything the
-payload forks and can only be tightened.
+       prctl(PR_SET_NO_NEW_PRIVS, 1)
+       syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog)
+
+So nothing in the child allocates after a fork of a threaded process, and
+the per-spawn cost is two syscalls.  No ``TSYNC``: the forked child has one
+thread.  The filter is inherited by everything the payload forks and can
+only be tightened.
 
 What it denies
 --------------
@@ -59,9 +70,10 @@ diagnostics probe read it:
 ========== =================================================================
 filter     the filter is installed in every model-driven subprocess
 off        the profile said ``seccomp: off`` (announced at WARNING)
-absent     a kernel boundary is active and no filter could be built
-           (libseccomp missing, kernel without seccomp); WARNING, or every
-           spawn refused when confinement is REQUIRED
+absent     a kernel boundary is active and no filter could be built or
+           loaded (libseccomp missing on the daemon host, kernel without
+           seccomp, a program for another architecture or malformed);
+           WARNING, or every spawn refused when confinement is REQUIRED
 unconfined no kernel boundary, so no filter: one is not invented
 ========== =================================================================
 
@@ -71,12 +83,13 @@ it before plugin discovery.
 
 from __future__ import annotations
 
+import base64
 import ctypes
-import ctypes.util
 import errno
 import logging
 import os
 import platform
+import struct
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -250,11 +263,14 @@ LIBSECCOMP_NAMES: Tuple[str, ...] = ("libseccomp.so.2",)
 
 
 def _load_libseccomp() -> Any:
-    """Load libseccomp, or raise :class:`SeccompUnavailable`."""
+    """Load libseccomp by soname, or raise :class:`SeccompUnavailable`.
+
+    By soname only: ``ctypes.util.find_library`` execs ``ldconfig`` (and
+    ``gcc``) to search, which is a process spawn per call and which both
+    LSMs refuse a confined runner (#1508).  The daemon is the only caller,
+    and every distribution that ships libseccomp ships ``libseccomp.so.2``.
+    """
     names = list(LIBSECCOMP_NAMES)
-    found = ctypes.util.find_library("seccomp")
-    if found and found not in names:
-        names.append(found)
     for name in names:
         try:
             lib = ctypes.CDLL(name, use_errno=True)
@@ -271,6 +287,8 @@ def _load_libseccomp() -> Any:
             ctypes.POINTER(_ArgCmp)]
         lib.seccomp_export_bpf.argtypes = [ctypes.c_void_p, ctypes.c_int]
         lib.seccomp_export_pfc.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.seccomp_arch_native.restype = ctypes.c_uint32
+        lib.seccomp_arch_native.argtypes = []
         return lib
     raise SeccompUnavailable(
         f"libseccomp not found (tried {', '.join(names)}); install the "
@@ -346,6 +364,11 @@ def _build_ctx(lib: Any, allow: frozenset) -> Any:
 
 
 def _export(lib: Any, ctx: Any, exporter: str) -> bytes:
+    """libseccomp's export of *ctx* through an anonymous fd.
+
+    DAEMON-side only (#1508): the memfd is ``tmpfs_t`` under SELinux, which
+    ``jaato_runner_t`` may not write, so the runner never reaches this.
+    """
     fd = os.memfd_create("jaato-seccomp", 0)
     try:
         rc = getattr(lib, exporter)(ctx, fd)
@@ -363,54 +386,126 @@ def _export(lib: Any, ctx: Any, exporter: str) -> bytes:
         os.close(fd)
 
 
+#: The wire format :func:`compile_for_envelope` writes and
+#: :func:`load_shipped` reads.  A runner refuses any other value, so a format
+#: change is a bump here, never a silent reinterpretation of old bytes.
+WIRE_FORMAT = "jaato-seccomp-bpf/1"
+
+# Classic BPF opcodes libseccomp's program opens with: load the
+# ``seccomp_data.arch`` word, then compare it with the native AUDIT_ARCH.
+_BPF_LD_W_ABS = 0x20
+_BPF_JMP_JEQ_K = 0x15
+_SECCOMP_DATA_ARCH_OFFSET = 4
+#: ``BPF_MAXINSNS``: the kernel refuses a longer classic program.
+_BPF_MAXINSNS = 4096
+SECCOMP_SET_MODE_FILTER = 1
+
+
+def native_arch() -> str:
+    """This interpreter's architecture, as the wire records it.
+
+    ``machine/bits``: the same machine with a 32-bit interpreter (an i386
+    Python on an x86_64 kernel) issues another architecture's syscalls, and
+    the program's arch check would kill every one of them.  Stdlib only, so
+    daemon and runner compute it the same way without libseccomp.
+    """
+    return f"{platform.machine()}/{struct.calcsize('P') * 8}"
+
+
 @dataclass
 class CompiledFilter:
-    """A filter built in the parent, installable in a forked child.
+    """A filter built by the daemon, installable in a forked child.
 
     Attributes:
         allowed: The families allowed back.
         program: The raw BPF program (``struct sock_filter[]``).
         libseccomp: The libseccomp version that compiled it.
+        arch: :func:`native_arch` of the process that compiled it.
+        audit_arch: The ``AUDIT_ARCH_*`` value the program checks first.
+        seccomp_nr: The ``seccomp`` syscall number on that architecture
+            (resolved by libseccomp), or ``None``, in which case
+            :meth:`install` uses ``prctl(PR_SET_SECCOMP)`` instead.
     """
 
     allowed: Tuple[str, ...]
     program: bytes
     libseccomp: str = "unknown"
+    arch: str = ""
+    audit_arch: Optional[int] = None
+    seccomp_nr: Optional[int] = None
     _buf: Any = field(default=None, repr=False)
     _prog: Any = field(default=None, repr=False)
     _prctl: Any = field(default=None, repr=False)
+    _syscall: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         count = len(self.program) // ctypes.sizeof(_SockFilter)
-        if count == 0 or count > 0xFFFF:
-            raise SeccompUnavailable(f"exported filter has {count} instructions")
+        if (count == 0 or count > _BPF_MAXINSNS
+                or len(self.program) % ctypes.sizeof(_SockFilter)):
+            raise SeccompUnavailable(
+                f"the filter program has {len(self.program)} bytes, not "
+                f"1..{_BPF_MAXINSNS} instructions of 8")
         self._buf = (_SockFilter * count).from_buffer_copy(self.program)
         self._prog = _SockFprog(count, ctypes.cast(
             self._buf, ctypes.POINTER(_SockFilter)))
         libc = ctypes.CDLL(None, use_errno=True)
         self._prctl = libc.prctl
+        self._syscall = libc.syscall
+        self._syscall.restype = ctypes.c_long
+
+    @property
+    def instructions(self) -> int:
+        """Number of BPF instructions in the program."""
+        return len(self.program) // ctypes.sizeof(_SockFilter)
 
     def install(self) -> None:
         """``PR_SET_NO_NEW_PRIVS`` then the filter, in the CURRENT process.
 
         Called as (part of) a ``preexec_fn``, between ``fork`` and ``exec``.
-        Never call it in the runner: the filter cannot be removed.
+        Never call it in the runner: the filter cannot be removed.  The
+        filter goes in through the raw ``seccomp(2)`` syscall when the
+        daemon shipped its number, else through ``prctl(PR_SET_SECCOMP)``;
+        both take the same program.
 
         Raises:
-            OSError: either ``prctl`` failed; the spawn fails with it.
+            OSError: either call failed; the spawn fails with it.
         """
-        prctl = self._prctl
-        if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        if self._prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
             err = ctypes.get_errno()
             raise OSError(err, f"PR_SET_NO_NEW_PRIVS: {os.strerror(err)}")
-        if prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
-                 ctypes.byref(self._prog), 0, 0) != 0:
+        if self.seccomp_nr is not None:
+            rc = self._syscall(ctypes.c_long(self.seccomp_nr),
+                               ctypes.c_uint(SECCOMP_SET_MODE_FILTER),
+                               ctypes.c_uint(0), ctypes.byref(self._prog))
+            what = "seccomp(SECCOMP_SET_MODE_FILTER)"
+        else:
+            rc = self._prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
+                             ctypes.byref(self._prog), 0, 0)
+            what = "PR_SET_SECCOMP"
+        if rc != 0:
             err = ctypes.get_errno()
-            raise OSError(err, f"PR_SET_SECCOMP: {os.strerror(err)}")
+            raise OSError(err, f"{what}: {os.strerror(err)}")
+
+    def to_wire(self) -> Dict[str, Any]:
+        """The ``SessionInitEnvelope.seccomp_program`` form (#1508)."""
+        return {
+            "format": WIRE_FORMAT,
+            "arch": self.arch,
+            "audit_arch": self.audit_arch,
+            "seccomp_nr": self.seccomp_nr,
+            "program_b64": base64.b64encode(self.program).decode("ascii"),
+            "instructions": self.instructions,
+            "allowed": list(self.allowed),
+            "libseccomp": self.libseccomp,
+        }
 
 
 def compile_filter(allow: Iterable[str] = ()) -> CompiledFilter:
     """Build the deny-list filter, minus the families in *allow*.
+
+    DAEMON-side (#1508): it loads libseccomp and exports through a memfd,
+    neither of which a confined runner may do.  The runner receives the
+    result through :func:`compile_for_envelope` / :func:`load_shipped`.
 
     Raises:
         SeccompUnavailable: libseccomp is missing, the kernel has no
@@ -427,8 +522,11 @@ def compile_filter(allow: Iterable[str] = ()) -> CompiledFilter:
             program = _export(lib, ctx, "seccomp_export_bpf")
         finally:
             lib.seccomp_release(ctx)
+        nr = lib.seccomp_syscall_resolve_name(b"seccomp")
         return CompiledFilter(
-            tuple(sorted(allowed)), program, _libseccomp_version(lib))
+            tuple(sorted(allowed)), program, _libseccomp_version(lib),
+            arch=native_arch(), audit_arch=int(lib.seccomp_arch_native()),
+            seccomp_nr=int(nr) if nr >= 0 else None)
     except (OSError, AttributeError) as exc:
         # memfd_create refused, a libseccomp missing a symbol: no filter
         # can be built here, which is what SeccompUnavailable says.
@@ -436,14 +534,110 @@ def compile_filter(allow: Iterable[str] = ()) -> CompiledFilter:
             f"could not build the filter: {type(exc).__name__}: {exc}") from exc
 
 
-def filter_pseudocode(allow: Iterable[str] = ()) -> str:
-    """libseccomp's PFC rendering of the filter, for review and tests."""
-    lib = _load_libseccomp()
-    ctx = _build_ctx(lib, frozenset(a for a in allow if a in FAMILIES))
+def compile_for_envelope(
+    mode: Optional[str],
+    allow: Optional[Iterable[str]],
+    *,
+    compiler: Callable[[Iterable[str]], CompiledFilter] = compile_filter,
+) -> Optional[Dict[str, Any]]:
+    """The daemon's half (#1508): compile this session's filter for the wire.
+
+    Args:
+        mode: ``runtime_limits.seccomp``; ``off`` ships nothing.
+        allow: ``runtime_limits.seccomp_allow``.  Unknown names are dropped
+            (they stay denied), as :func:`plan_for_session` does.
+        compiler: Test seam for :func:`compile_filter`.
+
+    Returns:
+        ``None`` for ``seccomp: off``; ``{"unavailable": reason}`` when no
+        filter can be built on this host, so the runner records ``absent``
+        with the daemon's reason; else :meth:`CompiledFilter.to_wire`.
+    """
+    if (mode or MODE_DEFAULT) == MODE_OFF:
+        return None
+    allowed = tuple(sorted({a for a in (allow or ()) if a in FAMILIES}))
     try:
-        return _export(lib, ctx, "seccomp_export_pfc").decode("utf-8", "replace")
-    finally:
-        lib.seccomp_release(ctx)
+        return compiler(allowed).to_wire()
+    except SeccompUnavailable as exc:
+        return {"format": WIRE_FORMAT, "unavailable": str(exc),
+                "allowed": list(allowed)}
+
+
+def _check_wire(shipped: Any, allowed: Sequence[str]) -> None:
+    """Refuse a shipped program that is absent, unbuilt, foreign or mismatched."""
+    if shipped is None:
+        raise SeccompUnavailable(
+            "the daemon shipped no compiled filter on the envelope")
+    if not isinstance(shipped, dict) or shipped.get("format") != WIRE_FORMAT:
+        raise SeccompUnavailable(
+            f"malformed filter on the envelope: format is not {WIRE_FORMAT!r}")
+    if shipped.get("unavailable"):
+        raise SeccompUnavailable(
+            f"the daemon could not build the filter: {shipped['unavailable']}")
+    arch = shipped.get("arch")
+    if arch != native_arch():
+        raise SeccompUnavailable(
+            f"the shipped filter was compiled for {arch!r} and this runner "
+            f"is {native_arch()!r}")
+    if sorted(shipped.get("allowed") or ()) != sorted(allowed):
+        raise SeccompUnavailable(
+            "the shipped filter allows back "
+            f"{sorted(shipped.get('allowed') or ())}, the session's "
+            f"runtime_limits {sorted(allowed)}")
+    audit_arch, nr = shipped.get("audit_arch"), shipped.get("seccomp_nr")
+    if not isinstance(audit_arch, int) or not (nr is None or isinstance(nr, int)):
+        raise SeccompUnavailable(
+            "malformed filter on the envelope: audit_arch / seccomp_nr")
+
+
+def _check_opens_with_arch(compiled: CompiledFilter) -> None:
+    """Refuse a program that does not open with libseccomp's arch check.
+
+    ``ld [4]; jeq #AUDIT_ARCH``: every program libseccomp exports starts so,
+    and a program that does not is not one the daemon compiled.
+    """
+    buf = compiled._buf
+    first = buf[0]
+    second = buf[1] if compiled.instructions > 1 else None
+    if (first.code != _BPF_LD_W_ABS or first.k != _SECCOMP_DATA_ARCH_OFFSET
+            or second is None or second.code != _BPF_JMP_JEQ_K
+            or second.k != compiled.audit_arch):
+        raise SeccompUnavailable(
+            "malformed filter on the envelope: it does not open with the "
+            f"architecture check for AUDIT_ARCH 0x{compiled.audit_arch:08x}")
+
+
+def load_shipped(
+    shipped: Any, allowed: Sequence[str],
+) -> CompiledFilter:
+    """The runner's half (#1508): turn the envelope's program into a filter.
+
+    Imports nothing beyond ``ctypes`` and loads libc only: no libseccomp, no
+    memfd, no ``find_library``.
+
+    Args:
+        shipped: ``SessionInitEnvelope.seccomp_program``.
+        allowed: The families the runner's own reading of
+            ``runtime_limits`` allows back; the program must agree.
+
+    Raises:
+        SeccompUnavailable: nothing was shipped, the daemon could not build
+            one, or the program is for another architecture or malformed.
+            The caller applies the posture rules (refuse when required).
+    """
+    _check_wire(shipped, allowed)
+    try:
+        program = base64.b64decode(shipped.get("program_b64") or "",
+                                   validate=True)
+    except (ValueError, TypeError) as exc:
+        raise SeccompUnavailable(
+            f"malformed filter on the envelope: {exc}") from exc
+    compiled = CompiledFilter(
+        tuple(sorted(allowed)), program, str(shipped.get("libseccomp") or ""),
+        arch=shipped["arch"], audit_arch=shipped["audit_arch"],
+        seccomp_nr=shipped.get("seccomp_nr"))
+    _check_opens_with_arch(compiled)
+    return compiled
 
 
 # ------------------------------------------------------------------ plan
@@ -494,6 +688,23 @@ def current_posture() -> Optional[Dict[str, Any]]:
     return None if _current is None else _current.as_dict()
 
 
+def spawn_refusal_reason() -> Optional[str]:
+    """Why every model-driven spawn in this process is refused, or ``None``.
+
+    Set only when the recorded posture is ``absent`` with confinement
+    REQUIRED, where the ``//child`` preexec raises :class:`SeccompRefused`
+    in every forked child.  ``subprocess`` reports that as the bare
+    ``"Exception occurred in preexec_fn."``, which says nothing; the
+    subprocess plugins attach this to their failure result (#1510) so the
+    model and the client see the cause.
+    """
+    if _current is None or _current.posture != POSTURE_ABSENT:
+        return None
+    if not _current.required:
+        return None
+    return f"seccomp filter required but unavailable: {_current.reason}"
+
+
 def record_plan(plan: SeccompPlan) -> SeccompPlan:
     """Record *plan* as this process's posture and return it."""
     global _current
@@ -516,8 +727,8 @@ def plan_for_session(
     allow: Optional[Sequence[str]],
     *,
     boundary_active: bool,
+    shipped: Any = None,
     required: Optional[bool] = None,
-    compiler: Callable[[Iterable[str]], CompiledFilter] = compile_filter,
 ) -> SeccompPlan:
     """Decide and record this session's seccomp posture.
 
@@ -527,9 +738,13 @@ def plan_for_session(
             with a WARNING (the family then stays closed, the safe side).
         boundary_active: A kernel boundary (LSM ``//child`` transition) is
             installed for this session's subprocesses.
+        shipped: ``SessionInitEnvelope.seccomp_program``, the program the
+            daemon compiled (#1508).  Loaded by :func:`load_shipped`; never
+            compiled here.  Absent, malformed or for another architecture,
+            it is treated as no filter: ``absent``, or every spawn refused
+            when *required*.
         required: Whether a kernel boundary is required; ``None`` reads
             :data:`REQUIRE_ENV_VARS`.
-        compiler: Test seam for :func:`compile_filter`.
 
     Returns:
         The recorded :class:`SeccompPlan`.
@@ -555,7 +770,7 @@ def plan_for_session(
             unknown, ", ".join(FAMILIES))
     allowed = tuple(sorted({a for a in (allow or ()) if a in FAMILIES}))
     try:
-        compiled = compiler(allowed)
+        compiled = load_shipped(shipped, allowed)
     except SeccompUnavailable as exc:
         reason = str(exc)
         if required:
@@ -576,7 +791,7 @@ def plan_for_session(
     logger.info(
         "seccomp: filter armed for model-driven subprocesses "
         "(%d instructions, libseccomp %s, allowed back: %s)",
-        len(compiled.program) // 8, compiled.libseccomp,
+        compiled.instructions, compiled.libseccomp or "unknown",
         ", ".join(allowed) or "none")
     return _record(SeccompPlan(
         POSTURE_FILTER, installer=compiled.install, allowed=allowed,

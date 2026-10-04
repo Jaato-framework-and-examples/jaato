@@ -537,6 +537,19 @@ class SessionInitEnvelope:
     # Every bootstrap points fds 1 and 2 here.  ``None`` = no workspace, or
     # an older daemon: the fds stay as they are, so no schema_version bump.
     runner_log_path: Optional[str] = None
+    # #1508: the seccomp-bpf filter for this session's model-driven
+    # subprocesses, COMPILED BY THE DAEMON
+    # (``shared.seccomp_filter.compile_for_envelope``): the raw BPF in
+    # base64, the architecture it was compiled for, the ``seccomp`` syscall
+    # number, and the families allowed back.  ``{"unavailable": reason}``
+    # when the daemon host could not build one.  The runner only installs
+    # the bytes (``load_shipped``), because a confined runner may neither
+    # load libseccomp (``find_library`` execs ``ldconfig``) nor write the
+    # memfd it exports through (SELinux ``tmpfs_t``).  ``None`` = no
+    # boundary, ``seccomp: off``, or an older daemon; with a boundary the
+    # runner then records ``absent`` (or refuses spawns when confinement is
+    # required).  Additive, same-build daemon+runner: no schema_version bump.
+    seccomp_program: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -632,6 +645,9 @@ class SessionInitEnvelope:
             "config_resolved_by_daemon": self.config_resolved_by_daemon,
             "gc_file": dict(self.gc_file) if self.gc_file else None,
             "runner_log_path": self.runner_log_path,
+            "seccomp_program": (
+                dict(self.seccomp_program) if self.seccomp_program else None
+            ),
         }
 
     @classmethod
@@ -721,6 +737,7 @@ class SessionInitEnvelope:
             config_resolved_by_daemon=bool(d.get("config_resolved_by_daemon", False)),
             gc_file=_optional_dict(d.get("gc_file")),
             runner_log_path=_optional_str(d.get("runner_log_path")),
+            seccomp_program=_optional_dict(d.get("seccomp_program")),
         )
 
 
