@@ -60,10 +60,10 @@ REVERSIONS = [
     ),
     Reversion(
         target=_POOL,
-        find=("                if not candidate.has_served:\n"
-              "                    if virgin_idx is None:"),
-        replace=("                if False:\n"
-                 "                    if virgin_idx is None:"),
+        find=("            if not candidate.has_served:\n"
+              "                if virgin_idx is None:"),
+        replace=("            if False:\n"
+                 "                if virgin_idx is None:"),
         test=("TestTheFloorCountsVirginSlots::"
               "test_a_fitting_served_slot_is_spent_before_a_virgin"),
         because=("a virgin taken when a served slot of the right posture "

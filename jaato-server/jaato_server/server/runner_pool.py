@@ -1145,25 +1145,8 @@ class PoolManager:
             # can serve any, so spending the served one keeps the floor
             # of virgins intact and avoids a fork.
             self._posture_last_demand[posture_of_key(key)] = time.monotonic()
-            pure_idle_idx = None
-            virgin_idx = None
-            served_skips = 0
-            for i, candidate in enumerate(self._idle_slots):
-                if candidate.cascade_id is not None:
-                    continue
-                if not key.accepts_unaffined(candidate):
-                    uid_skips += not key.uid_fits(candidate)
-                    served_skips += candidate.has_served
-                    mismatch_skips += 1
-                    continue
-                if not candidate.has_served:
-                    if virgin_idx is None:
-                        virgin_idx = i
-                    continue
-                pure_idle_idx = i
-                break
-            if pure_idle_idx is None:
-                pure_idle_idx = virgin_idx
+            pure_idle_idx, mismatch_skips, uid_skips, served_skips = (
+                self._pick_unaffined_locked(key))
             if uid_skips:
                 self._incr("pool_uid_mismatch_skips_total", uid_skips)
             if pure_idle_idx is None:
@@ -1204,6 +1187,34 @@ class PoolManager:
             )
         self._incr("pool_slot_acquired_total")
         return slot
+
+    def _pick_unaffined_locked(
+        self, key: SlotKey,
+    ) -> Tuple[Optional[int], int, int, int]:
+        """Path (2) of :meth:`acquire_slot`: which PURE IDLE slot *key* gets.
+
+        Caller holds ``self._lock``.  Returns ``(index or None,
+        mismatch_skips, uid_skips, served_skips)``.  A served slot that
+        fits is preferred over a virgin (#1507); ``served_skips`` counts
+        the served slots of ANOTHER posture passed over, which is what
+        makes a miss a posture miss.
+        """
+        virgin_idx: Optional[int] = None
+        mismatch_skips = uid_skips = served_skips = 0
+        for i, candidate in enumerate(self._idle_slots):
+            if candidate.cascade_id is not None:
+                continue
+            if not key.accepts_unaffined(candidate):
+                uid_skips += not key.uid_fits(candidate)
+                served_skips += candidate.has_served
+                mismatch_skips += 1
+                continue
+            if not candidate.has_served:
+                if virgin_idx is None:
+                    virgin_idx = i
+                continue
+            return i, mismatch_skips, uid_skips, served_skips
+        return virgin_idx, mismatch_skips, uid_skips, served_skips
 
     def fork_slot_into(
         self, key: SlotKey, entry: Dict[str, Any],
