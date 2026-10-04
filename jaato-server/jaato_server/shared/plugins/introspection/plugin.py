@@ -10,7 +10,7 @@ The plugin supports deferred tool loading for token economy:
 """
 
 import threading
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
@@ -386,8 +386,63 @@ class IntrospectionPlugin(RunnerForwardingMixin):
             Filtered list of ToolSchema objects visible to the current session.
         """
         return filter_visible_tool_schemas(
-            self._registry, self._get_session_plugin_schemas()
+            self._registry, self._get_session_plugin_schemas(),
+            session=self._scope_session(),
         )
+
+    def _missing_tools_report(
+        self, missing: List[Tuple[str, str]]
+    ) -> Dict[str, Any]:
+        """The ``not_available`` / ``not_found`` keys for the requested
+        ``(tool_id, tool_name)`` pairs ``get_tool_schemas`` returned no
+        schema for.
+
+        A tool the calling session's profile scoped out (#1513) is
+        ``not_available`` with the scope named, so the model does not hunt
+        for it elsewhere; anything else (unknown, or hidden by an
+        ``is_tool_visible`` predicate) stays ``not_found``.
+        """
+        report: Dict[str, Any] = {}
+        not_found: List[str] = []
+        not_available: List[Dict[str, str]] = []
+        for tool_id, tool_name in missing:
+            refusal = self._scope_refusal(tool_name)
+            if refusal:
+                not_available.append({"id": tool_id, "reason": refusal})
+            else:
+                not_found.append(tool_id)
+        if not_available:
+            report["not_available"] = not_available
+        if not_found:
+            report["not_found"] = not_found
+            report["hint"] = "Use list_tools() to see available tool IDs."
+        return report
+
+    def _scope_refusal(self, tool_name: str) -> str:
+        """Why ``tool_name`` is out of the calling session's surface, or
+        ``""`` when it is not scoped out (unknown, or simply hidden)."""
+        session = self._scope_session()
+        refusal = getattr(session, 'tool_scope_refusal', None)
+        if refusal is None:
+            return ""
+        try:
+            return refusal(tool_name) or ""
+        except Exception:
+            return ""
+
+    def _scope_session(self):
+        """The session whose ``plugin(tools:[...])`` scopes the catalog
+        honours (#1513): the one the session ContextVar names (set by
+        ``_execute_single_tool`` for the CALLING session), else this
+        thread's wired session.  Never a registry-wide view — the registry
+        is shared with sibling subagents, the scopes are per session.
+        """
+        try:
+            from jaato_server.shared.session_context import get_current_session
+            current = get_current_session()
+        except LookupError:
+            current = None
+        return current if current is not None else self._session
 
     def _visible_exposed_schemas(self) -> List[ToolSchema]:
         """Every exposed schema, minus those an ``is_tool_visible`` hides.
@@ -395,10 +450,13 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         The GLOBAL set ``list_tools`` counts and lists (tools from plugins
         outside the session's profile appear with ``available=False``).
         Filtered like the session set, so a hidden tool is neither counted
-        in a category nor listed with an ``activate_with`` hint (#1345).
+        in a category nor listed with an ``activate_with`` hint (#1345),
+        and a tool the calling session's profile scoped out is not listed
+        at all (#1513).
         """
         return filter_visible_tool_schemas(
-            self._registry, self._registry.get_exposed_tool_schemas()
+            self._registry, self._registry.get_exposed_tool_schemas(),
+            session=self._scope_session(),
         )
 
     def _get_session_plugin_schemas(self) -> List[ToolSchema]:
@@ -891,7 +949,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
 
         # Build results
         schemas = []
-        not_found = []
+        missing: List[Tuple[str, str]] = []
 
         # Collect tools that need activation (discoverable tools not yet in provider)
         tools_to_activate = []
@@ -930,17 +988,14 @@ class IntrospectionPlugin(RunnerForwardingMixin):
 
                 schemas.append(schema_entry)
             else:
-                not_found.append(tool_id)
+                missing.append((tool_id, tool_name))
 
         # Build response
         result = {
             "schemas": schemas,
             "count": len(schemas),
         }
-
-        if not_found:
-            result["not_found"] = not_found
-            result["hint"] = "Use list_tools() to see available tool IDs."
+        result.update(self._missing_tools_report(missing))
 
         # Activate discovered tools so the model can actually call them
         # This adds the tool schemas to the provider's declared tools

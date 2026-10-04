@@ -3264,6 +3264,12 @@ class JaatoSession:
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
+        # The profile's ``plugin(tools:[...])`` scopes bind execution too
+        # (#1513): an out-of-scope call is refused before the permission
+        # gate, so no whitelist or housekeeping rule can re-admit it.
+        self._executor.set_tool_surface(
+            self.tool_in_surface, self.tool_scope_refusal
+        )
 
         # Get tool schemas and executors from runtime
         self._tools = self._runtime.get_tool_schemas(plugins, preloaded_plugins=self._preloaded_plugins)
@@ -4159,7 +4165,9 @@ class JaatoSession:
                 f"plugin={plugin_name!r}; treating as visible"
             )
 
-        return filter_visible_tool_schemas(registry, scoped, on_error=_on_error)
+        return filter_visible_tool_schemas(
+            registry, scoped, on_error=_on_error, session=self
+        )
 
     def _apply_tool_scopes(
         self, schemas: List['ToolSchema']
@@ -4189,21 +4197,71 @@ class JaatoSession:
             return schemas
         kept: List['ToolSchema'] = []
         for schema in schemas:
-            plugin = registry.get_plugin_for_tool(schema.name)
-            plugin_name = plugin.name if plugin is not None else None
-            allow = (
-                self._tool_scopes.get(plugin_name)
-                if plugin_name is not None
-                else None
-            )
-            if allow is not None and schema.name not in allow:
+            if not self.tool_in_surface(schema.name):
                 self._trace(
                     f"tool_scope: dropping {schema.name!r} "
-                    f"(plugin {plugin_name!r} allow-list={allow})"
+                    f"({self.tool_scope_refusal(schema.name)})"
                 )
                 continue
             kept.append(schema)
         return kept
+
+    def _tool_scope_of(self, tool_name: str) -> Optional[Tuple[str, List[str]]]:
+        """``(plugin_name, allow_list)`` when ``tool_name``'s plugin is
+        scoped by this session's profile, else ``None``.
+
+        A tool with no owning plugin (``signal_completion``,
+        ``askPermission``, core infra) or whose plugin the profile did not
+        scope has no scope.  Never consults another session's scopes.
+        """
+        if not self._tool_scopes:
+            return None
+        registry = getattr(self._runtime, 'registry', None)
+        if registry is None:
+            return None
+        try:
+            plugin = registry.get_plugin_for_tool(tool_name)
+        except Exception:
+            return None
+        if plugin is None:
+            return None
+        allow = self._tool_scopes.get(plugin.name)
+        if allow is None:
+            return None
+        return plugin.name, list(allow)
+
+    def tool_in_surface(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` exists for THIS session under its
+        profile's ``plugin(tools:[...])`` scopes (#1513).
+
+        The ONE predicate behind the four places a scope must hold: the
+        initial wire schema (:meth:`_apply_tool_scopes`), discovery
+        (``filter_visible_tool_schemas``, read by ``list_tools`` /
+        ``get_tool_schemas``), execution (``ToolExecutor`` refuses an
+        out-of-scope call before the permission gate) and plugin hints
+        (``references``' enrichment, #1491).  Per session: the registry
+        and its plugin instances are shared with sibling subagents, the
+        scopes are not.  A tool whose plugin the profile did not scope —
+        including every core / always-initialized tool not named in a
+        scope — is in the surface.
+        """
+        scope = self._tool_scope_of(tool_name)
+        return scope is None or tool_name in scope[1]
+
+    def tool_scope_refusal(self, tool_name: str) -> str:
+        """The sentence naming the scope that excludes ``tool_name``.
+
+        Used by the executor's refusal and the traces, so they say the
+        same thing.  Empty when the tool is in the surface.
+        """
+        scope = self._tool_scope_of(tool_name)
+        if scope is None or tool_name in scope[1]:
+            return ""
+        plugin_name, allow = scope
+        return (
+            f"`{tool_name}` is not available in this session: the profile "
+            f"scopes plugin `{plugin_name}` to [{', '.join(allow)}]"
+        )
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -4916,17 +4974,12 @@ class JaatoSession:
             # a scoped-out tool must not be activatable even if the model
             # discovers it via introspection.  One granularity finer than
             # the plugin filter above.
-            if self._tool_scopes:
-                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
-                if plugin is not None:
-                    allow = self._tool_scopes.get(plugin.name)
-                    if allow is not None and tool_name not in allow:
-                        self._trace(
-                            f"activate_discovered_tools: skipping "
-                            f"'{tool_name}' (outside plugin "
-                            f"'{plugin.name}' allow-list={allow})"
-                        )
-                        continue
+            if not self.tool_in_surface(tool_name):
+                self._trace(
+                    f"activate_discovered_tools: skipping '{tool_name}' "
+                    f"({self.tool_scope_refusal(tool_name)})"
+                )
+                continue
 
             schema = schema_map[tool_name]
             if self._tools is None:
@@ -6011,6 +6064,10 @@ NOTES
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
+            # Enrichers on the shared registry answer for "the current
+            # session" (references' hints ask whether selectReferences is in
+            # its surface, #1491), so name this one before asking them.
+            set_current_session(self)
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
             resolved = resolved_mentions(result.metadata)

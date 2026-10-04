@@ -2068,6 +2068,44 @@ five reversions. It drives a real `PluginRegistry` with the real `lsp` and
 `introspection` plugins, and the lsp background thread switched off so no
 server is spawned.
 
+### A Tool the Profile Scoped Out Does Not Exist (#1513, #1491)
+
+`references(preload, tools:[proposeReference])` took the other references
+tools off the INITIAL wire schema and nothing else: `list_tools` listed
+them, `get_tool_schemas` returned their schemas, and the executor ran them.
+`listReferences` is in `HOUSEKEEPING_TOOLS`, so `auto_allow_housekeeping`
+approved it, and a 228k-token result overflowed a session whose author had
+removed the tool to prevent exactly that. The references plugin's hints
+(#1491) meanwhile told such sessions to call `selectReferences`, checking
+only the instance-wide `exclude_tools`.
+
+**One per-session predicate, four points.** `JaatoSession.tool_in_surface(name)`
+is the session's answer to "does this tool exist for me"; `tool_scope_refusal`
+is the sentence naming the scope that excludes one.
+
+| Point | Where |
+|---|---|
+| the wire | `_apply_tool_scopes` (and `activate_discovered_tools`) ask the predicate |
+| discovery | `tool_visibility.filter_visible_tool_schemas` drops out-of-scope tools first, for the session passed or the ContextVar's; `introspection` passes the CALLING session (`_scope_session`). `get_tool_schemas` names such a tool under `not_available` with the scope, not `not_found` |
+| execution | `ToolExecutor.set_tool_surface` (bound in `configure()`); `check_permission_only` refuses an out-of-scope call FIRST, so no whitelist, evaluator or housekeeping rule can re-admit it. `(False, {error, _permission: {method: "tool_scope"}})`, traced `[TOOL_RUNNER] scope: ... verdict=OUT_OF_SCOPE`. Covers the `<tool>-stream` route too (#797) |
+| hints | `tool_visibility.tool_in_session_surface` for plugins; `ReferencesPlugin._tool_available` gates enrichment passes 1, 2 and 2b and the system-instruction mentions of `selectReferences` / `listReferences` |
+
+Per session, never per instance: the registry and plugin instances are
+shared with sibling subagents (#944, #957), the scopes are not. A tool whose
+plugin the profile did not scope, including every core tool
+(`list_tools`, `signal_completion`, `askPermission`), is in the surface.
+Prompt enrichment now sets the session ContextVar before asking the
+enrichers, so a shared enricher answers for the session it is serving.
+
+`exclude_tools` keeps working (instance-wide, documented in
+`docs/jaato_knowledge_management.md`) and stays undeclared in the config
+schema: #910's guard uses it as its example of a read-but-undeclared knob.
+Not taken on here: #1468 (instructions for dropped tools in general).
+
+Guard: `jaato_server/shared/tests/test_a_scoped_out_tool_does_not_exist_1513.py`,
+seven reversions, on a real registry with the real `references`,
+`introspection` and `permission` plugins and two sessions sharing it.
+
 ### A Repository's Own Guidance, Pointed At (#1347)
 
 A TUI user working in their own checkout has an `AGENTS.md` or

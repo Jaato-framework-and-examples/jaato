@@ -62,7 +62,8 @@ REVERSIONS = [
         target=_INTRO,
         find=(
             "        return filter_visible_tool_schemas(\n"
-            "            self._registry, self._get_session_plugin_schemas()\n"
+            "            self._registry, self._get_session_plugin_schemas(),\n"
+            "            session=self._scope_session(),\n"
             "        )\n"
         ),
         replace="        return self._get_session_plugin_schemas()\n",
@@ -73,7 +74,8 @@ REVERSIONS = [
         target=_INTRO,
         find=(
             "        return filter_visible_tool_schemas(\n"
-            "            self._registry, self._registry.get_exposed_tool_schemas()\n"
+            "            self._registry, self._registry.get_exposed_tool_schemas(),\n"
+            "            session=self._scope_session(),\n"
             "        )\n"
         ),
         replace="        return self._registry.get_exposed_tool_schemas()\n",
@@ -82,7 +84,11 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SESSION,
-        find="        return filter_visible_tool_schemas(registry, scoped, on_error=_on_error)\n",
+        find=(
+            "        return filter_visible_tool_schemas(\n"
+            "            registry, scoped, on_error=_on_error, session=self\n"
+            "        )\n"
+        ),
         replace="        return scoped\n",
         test="test_the_provider_tool_array_hides_them_too",
         because="the wire and the catalog stop agreeing",
