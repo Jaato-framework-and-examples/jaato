@@ -361,10 +361,10 @@ REVERSIONS = [
     ),
     Reversion(
         target=_POOL,
-        find="""        unreserved = [s for s in self._idle_slots if s.cascade_id is None]
-        for slot in reversed(unreserved[self.target_size:]):""",
-        replace="""        unreserved = list(self._idle_slots)
-        for slot in reversed(unreserved[self.target_size:]):""",
+        find="""        unreserved = [s for s in self._idle_slots
+                      if s.cascade_id is None
+                      and (not s.has_served or self.target_size == 0)]""",
+        replace="""        unreserved = list(self._idle_slots)""",
         test="test_a_shrink_drops_unreserved_idle_slots_and_keeps_reservations",
         because=("a shrink counting a cascade's reservation as spare "
                  "capacity and dropping it"),
