@@ -114,8 +114,8 @@ class WebMCPPlugin:
             self._page = WebMCPPage(
                 page_url=cfg.get("page_url") or get_session_env(
                     "JAATO_WEBMCP_PAGE_URL", DEFAULT_PAGE_URL),
-                cdp_url=cfg.get("cdp_url") or get_session_env("JAATO_WEBMCP_CDP_URL"),
-                binary=cfg.get("binary") or get_session_env("JAATO_WEBMCP_BINARY"),
+                cdp_url=cfg.get("cdp_url") or get_session_env("JAATO_WEBMCP_CDP_URL"),  # env: attach webmcp to a running browser instead of launching one
+                binary=cfg.get("binary") or get_session_env("JAATO_WEBMCP_BINARY"),  # env: browser binary webmcp launches
                 user_data_dir=cfg.get("user_data_dir"),
                 headless=bool(cfg.get("headless", True)),
                 extra_args=cfg.get("extra_args"),
@@ -206,7 +206,7 @@ class WebMCPPlugin:
         browser the session will never open is context spent for nothing.
         """
         if not (self._config.get("page_url")
-                or get_session_env("JAATO_WEBMCP_PAGE_URL")):
+                or get_session_env("JAATO_WEBMCP_PAGE_URL")):  # env: page the webmcp plugin drives (an already-open tab with this URL is preferred)
             return None
         return (
             "The open web page may declare its own tools via WebMCP. Call "

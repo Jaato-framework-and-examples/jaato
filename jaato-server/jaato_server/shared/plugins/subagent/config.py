@@ -5345,7 +5345,7 @@ def discover_profiles(
     # ``force_profile_set`` (explicit kwarg) wins over the env-var read
     # so callers resolving a qualified ``set/name`` path can pin the
     # set without mutating the per-session env contextvar.
-    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')  # == PROFILE_SET_ENV_VAR; literal for the env-scope scan
+    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')  # env: profile-set directory under <config_root>/profiles/ this workspace resolves profiles from (literal, == PROFILE_SET_ENV_VAR, so the env-scope scan sees it)
     if profile_set and effective_config_root:
         set_path = (
             Path(effective_config_root).expanduser().resolve()

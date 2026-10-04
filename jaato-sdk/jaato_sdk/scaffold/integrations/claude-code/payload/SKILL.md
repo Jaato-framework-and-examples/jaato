@@ -80,17 +80,24 @@ jaato-scaffold explain oversight [<profile>] # the HUMAN-OVERSIGHT measures (EU 
 jaato-scaffold explain audit [<profile>]     # the AUDIT RECORD contract (Arts. 12, 19): what is logged, where, kept how long
 jaato-scaffold explain env [<filter>]        # every env var the daemon + plugins READ, with its typed profile key
 jaato-scaffold explain events [<filter>]     # the client/server event protocol
+jaato-scaffold explain event <NAME>          # one event's fields + docstring
+jaato-scaffold explain commands             # the user commands plugins register
 jaato-scaffold explain agents --workspace DIR   # the PERSONA layer (.jaato/agents/)
 jaato-scaffold explain services --workspace DIR # named HTTP APIs (.jaato/services/)
 jaato-scaffold explain sets --workspace DIR  # profile sets present + what each pins
 jaato-scaffold explain clients               # IPCClient vs IPCRecoveryClient
 jaato-scaffold explain transports            # IPC vs WS, daemon flags, auth contract
 jaato-scaffold explain runtime               # session/runner entities, workspace flow, logs
+jaato-scaffold explain pool                  # the pre-warm runner pool: knobs, live resize, sizing counters
+jaato-scaffold explain runner-user           # which OS account a root daemon's runners run as
 jaato-scaffold explain paths                 # ~/.jaato vs <workspace>/.jaato; config_root
 jaato-scaffold explain tiers                 # model tiers + roles
 jaato-scaffold explain gc                    # strategies + GCConfig fields
 jaato-scaffold explain archetypes            # what `new` WRITES, per archetype
 jaato-scaffold explain archetype <name>      # its tree, file by file, and its self-check
+jaato-scaffold explain integrations         # tools jaato can wire into (this skill is one)
+jaato-scaffold explain releases             # newer builds on PyPI / TestPyPI
+jaato-scaffold explain gh                   # driving `gh` / `git` with a per-user token
 ```
 
 **`dependencies` is a word you append to any of them**, not a topic of its own —

@@ -26,6 +26,22 @@ _SKILL = "jaato-sdk/jaato_sdk/scaffold/integrations/claude-code/payload/SKILL.md
 
 REVERSIONS = [
     Reversion(
+        target=_SKILL,
+        find="jaato-scaffold explain pool ",
+        replace="jaato-scaffold xplain pool ",
+        because="a topic the CLI has drops out of the skill, the state "
+                "explain pool and explain runner-user shipped in",
+        test="test_every_topic_the_cli_has_is_one_the_skill_lists",
+    ),
+    Reversion(
+        target="jaato-server/jaato_server/shared/tests/test_scaffold_surfaces_know_the_compliance_keys.py",
+        find='r"^jaato-scaffold explain ([a-z-]+)"',
+        replace='r"^jaato-scaffold explain ([a-z]+)"',
+        because="a hyphenated topic is read as its prefix, so the skill "
+                "lists 'runner' and the CLI has 'runner-user'",
+        test="test_every_topic_the_skill_lists_is_one_the_cli_has",
+    ),
+    Reversion(
         target=_BUILD,
         find='        + "\\n".join(_compliance_example()) + "\\n"\n',
         replace="",
@@ -156,10 +172,27 @@ def test_every_topic_the_skill_lists_is_one_the_cli_has():
     """The skill's own rule: if it contradicts `explain`, `explain` is right.
     A topic listed here that the CLI does not have is that contradiction."""
     from jaato_server.shared.scaffold.__main__ import _SCOPES
-    listed = set(re.findall(r"^jaato-scaffold explain ([a-z]+)", _skill_text(), re.M))
-    listed.discard("dependencies")   # a FACET, accepted after any topic, not a scope
-    unknown = sorted(listed - set(_SCOPES))
+    unknown = sorted(_skill_topics() - set(_SCOPES))
     assert not unknown, f"the skill lists explain topics the CLI has not got: {unknown}"
+
+
+def _skill_topics() -> set:
+    """The topics the skill's listing names.  Hyphens included: matching
+    ``[a-z]+`` read ``runner-user`` as ``runner`` (scaffold coverage audit)."""
+    listed = set(re.findall(r"^jaato-scaffold explain ([a-z-]+)", _skill_text(), re.M))
+    listed.discard("dependencies")   # a FACET, accepted after any topic, not a scope
+    return listed
+
+
+def test_every_topic_the_cli_has_is_one_the_skill_lists():
+    """The reverse direction.  ``explain pool`` (protocol 1.35) and ``explain
+    runner-user`` (#1168) shipped without reaching the skill, so an author
+    working from Claude Code was never told either existed."""
+    from jaato_server.shared.scaffold.__main__ import _SCOPES
+    missing = sorted(set(_SCOPES) - _skill_topics())
+    assert not missing, (
+        f"`explain` topics the integration skill does not list: {missing} -- "
+        f"add each to the listing in {_SKILL}")
 
 
 def test_every_archetype_the_skill_lists_is_one_new_accepts():

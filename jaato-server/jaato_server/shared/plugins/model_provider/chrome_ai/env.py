@@ -54,7 +54,7 @@ BROWSER_ABSOLUTE_PATHS: List[str] = [
 
 def resolve_binary() -> Optional[str]:
     """``JAATO_CHROME_AI_BINARY`` — explicit browser binary path."""
-    return get_session_env("JAATO_CHROME_AI_BINARY") or None
+    return get_session_env("JAATO_CHROME_AI_BINARY") or None  # env: Chrome/Edge binary to launch (default: search PATH and well-known locations)
 
 
 def resolve_cdp_url() -> Optional[str]:
@@ -65,7 +65,7 @@ def resolve_cdp_url() -> Optional[str]:
     ``ws://`` DevTools URL.  When set, the provider never launches its
     own browser process.
     """
-    return get_session_env("JAATO_CHROME_AI_CDP_URL") or None
+    return get_session_env("JAATO_CHROME_AI_CDP_URL") or None  # env: attach to a running browser's DevTools endpoint instead of launching one
 
 
 def resolve_user_data_dir() -> Optional[str]:
@@ -75,7 +75,7 @@ def resolve_user_data_dir() -> Optional[str]:
     must persist across sessions (a fresh ephemeral profile reports the
     model as ``downloadable`` every time).
     """
-    return get_session_env("JAATO_CHROME_AI_USER_DATA_DIR") or None
+    return get_session_env("JAATO_CHROME_AI_USER_DATA_DIR") or None  # env: browser profile dir the on-device model download is bound to (default ~/.jaato/chrome_ai/profile)
 
 
 def default_user_data_dir() -> str:
@@ -85,7 +85,7 @@ def default_user_data_dir() -> str:
 
 def resolve_headless() -> Optional[bool]:
     """``JAATO_CHROME_AI_HEADLESS`` — parse a boolean-ish env value."""
-    raw = get_session_env("JAATO_CHROME_AI_HEADLESS")
+    raw = get_session_env("JAATO_CHROME_AI_HEADLESS")  # env: launch the browser headless (default true; the model must already be downloaded)
     if raw is None or raw == "":
         return None
     return raw.strip().lower() not in ("0", "false", "no", "off")
@@ -93,7 +93,7 @@ def resolve_headless() -> Optional[bool]:
 
 def resolve_context_length() -> Optional[int]:
     """``JAATO_CHROME_AI_CONTEXT_LENGTH`` — manual context-window override."""
-    raw = get_session_env("JAATO_CHROME_AI_CONTEXT_LENGTH")
+    raw = get_session_env("JAATO_CHROME_AI_CONTEXT_LENGTH")  # env: manual context-window override (normally detected from the session quota)
     if not raw:
         return None
     try:
@@ -104,12 +104,12 @@ def resolve_context_length() -> Optional[int]:
 
 def resolve_model() -> Optional[str]:
     """``JAATO_CHROME_AI_MODEL`` — nominal default model name."""
-    return get_session_env("JAATO_CHROME_AI_MODEL") or None
+    return get_session_env("JAATO_CHROME_AI_MODEL") or None  # env: nominal model name (default gemini-nano; the Prompt API has no model selection)
 
 
 def resolve_page_url() -> Optional[str]:
     """``JAATO_CHROME_AI_PAGE_URL`` — page to host the Prompt API calls."""
-    return get_session_env("JAATO_CHROME_AI_PAGE_URL") or None
+    return get_session_env("JAATO_CHROME_AI_PAGE_URL") or None  # env: page hosting the Prompt API calls (default about:blank)
 
 
 def find_browser_binary(explicit: Optional[str] = None) -> Optional[str]:

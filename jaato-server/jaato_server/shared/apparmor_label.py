@@ -401,7 +401,7 @@ def complain_mode_requested(environ: Optional[dict] = None) -> bool:
         # confinement debugging aid.  Whole-daemon, so host-scoped: a
         # per-session value would be a lie about a kernel posture the
         # daemon applies to every profile it renders.
-        raw = os.environ.get(COMPLAIN_ENV_VAR, "")
+        raw = os.environ.get(COMPLAIN_ENV_VAR, "")  # env: load AppArmor profiles in complain mode (logs denials, enforces nothing) -- a host-wide diagnostic
     else:
         raw = environ.get(COMPLAIN_ENV_VAR, "")
     return raw.strip().lower() in _TRUTHY

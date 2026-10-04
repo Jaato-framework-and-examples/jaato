@@ -2929,6 +2929,34 @@ def _authored_workspace_paths(*names: str) -> List[Tuple[str, str]]:
     return [(f".jaato/{n}", by_path[n].why) for n in names if n in by_path]
 
 
+def _user_tier_snapshot_lines() -> List[str]:
+    """What a runner reads of ``~/.jaato`` WITHOUT reading it (#1465).
+
+    A confined runner is granted only the ``~/.jaato`` subtrees plugins
+    declare, so the daemon reads the rest and ships it on the session
+    envelope.  The names are read from ``shared/user_tier.py`` -- the one
+    list both the daemon's collector and the runner's installer use -- so
+    this cannot name a file the snapshot does not carry.
+    """
+    from jaato_server.shared import user_tier
+
+    import textwrap
+
+    names = (", ".join(user_tier.SHIPPED_FILES) + "; and "
+             + ", ".join(f"{d}/" for d in user_tier.SHIPPED_DIRS) + " whole.")
+    return [
+        "    -> Runners read these user-tier files from a SNAPSHOT the daemon",
+        "       takes at spawn and ships on the envelope, not from ~/.jaato:",
+        *textwrap.wrap(names, width=72, initial_indent="       ",
+                       subsequent_indent="       "),
+        "       An edit reaches the NEXT session.  Credentials (*_auth.json,",
+        "       *_oauth.json, *_accounts.json) are never shipped.",
+        "       permissions.json is layer 2 of the permission policy (framework <",
+        "       ~/.jaato < <config_root>|<workspace>/.jaato < profile, #1474);",
+        "       `explain plugin permission` prints the merge rules.",
+    ]
+
+
 def paths() -> Rendered:
     """The path & isolation model — daemon-global ``~/.jaato`` vs per-session
     workspace + ``config_root``.
@@ -3000,6 +3028,7 @@ def paths() -> Rendered:
         "    -> SHARED across every session on the daemon.  Do NOT override $HOME",
         "       to 'isolate' a run: creds + the auto-installed reactors live here",
         "       BY DESIGN, and a $HOME override hides them from the daemon.",
+        *_user_tier_snapshot_lines(),
         "",
         "  <workspace>/   — PER-SESSION (this is the isolation boundary):",
         "    .jaato/profiles/<set>/<agent>.yaml   profiles (resolved under config_root)",

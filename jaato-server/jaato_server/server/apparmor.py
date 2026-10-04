@@ -135,7 +135,7 @@ def profile_grace_seconds() -> float:
     Unset, unparseable or negative reads as the default: a typo must not
     turn the grace off or make it unbounded.  ``0`` disables it.
     """
-    raw = os.environ.get("JAATO_APPARMOR_PROFILE_GRACE_SECONDS", "").strip()
+    raw = os.environ.get("JAATO_APPARMOR_PROFILE_GRACE_SECONDS", "").strip()  # env: seconds an unheld boundary profile stays loaded for reuse (default 60; 0 unloads at once)
     if not raw:
         return DEFAULT_PROFILE_GRACE_SECONDS
     try:
