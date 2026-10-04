@@ -7755,6 +7755,25 @@ runner body carries `deny ptrace` and `deny capability sys_ptrace`
 `TestDumpableAfterInProcessDrop` in `test_runner_privilege_drop_1168.py`,
 three reversions.
 
+**A dropped runner's profile is a stack (#1509).** With
+`kernel.apparmor_restrict_unprivileged_unconfined = 1` (the Ubuntu
+default) the kernel converts an unprivileged, unconfined task's
+`change_profile` into a stack, so the runner reads
+`<P>//&unconfined (enforce)`, and the verify refused it. A stack is the
+intersection of its members and `unconfined` restricts nothing, so
+`shared/apparmor_label.py` (the one parser) reports such a label as `<P>`,
+in either order and for `<P>//child//&unconfined`; the kernel leaves
+`unconfined` out of the printed mode, so the mode is `<P>`'s own. Every
+reader (the bootstrap verify, the idempotent path, #1023's thread scan,
+`sandbox_mode`, `require_confinement`, the notebook's
+`cell_boundary_profile`) goes through it. Any other stack (`<P>//&<Q>`) is
+reported as its whole name, is never `enforced`, is divergence in the
+thread scan, and is refused; the refusal names stacking. The drop-first
+order is kept: transitioning first would need `capability setuid, setgid`.
+The #1348 denial hint reads no label (it keys on the installed `//child`
+transition), so it needs no change. Guard:
+`test_a_stack_with_unconfined_is_the_profile_1509.py`, five reversions.
+
 Chowning after write stays rejected: it cannot be made complete (it misses
 the intermediate directories, every file a subprocess writes, and anything
 an out-of-tree plugin writes), which is #735's shape.

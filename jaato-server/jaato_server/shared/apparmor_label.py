@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 #: The kernel's own spelling for "no profile attached".
@@ -65,6 +65,12 @@ UNCONFINED = "unconfined"
 #: only one that blocks a syscall; ``complain`` logs and allows.
 MODE_ENFORCE = "enforce"
 MODE_COMPLAIN = "complain"
+
+#: The separator the kernel prints between the components of a STACKED
+#: label (``aa_label_snxprint``).  Distinct from ``//``, which separates a
+#: profile from its hat or child: ``P//child//&unconfined`` is the stack
+#: of ``P//child`` and ``unconfined`` (#1509).
+STACK_SEPARATOR = "//&"
 
 #: Process-level label — really the MAIN THREAD's, because ``/proc/self``
 #: resolves to ``/proc/<pid>/``.  See :func:`read_thread_label` for the
@@ -88,6 +94,21 @@ class AppArmorLabel:
         mode: ``"enforce"``, ``"complain"``, some other annotation the
             kernel produced, or ``None`` when the label carried no
             ``(mode)`` parenthetical at all.
+        stack: The ``//&``-separated components of the label, in the
+            kernel's order.  One element for an ordinary label.
+
+    Stacks (#1509).  With ``kernel.apparmor_restrict_unprivileged_unconfined
+    = 1`` (the Ubuntu default) the kernel converts an unprivileged,
+    unconfined task's ``change_profile`` into a STACK, so a runner that
+    dropped its uid before confining reads ``P//&unconfined (enforce)``.
+    A stack is the intersection of its members, and ``unconfined``
+    restricts nothing, so such a task is confined by exactly ``P``:
+    :attr:`profile` is ``P``.  The kernel leaves ``unconfined`` out of the
+    printed mode (``label_modename`` skips it, so the stack is not reported
+    as ``mixed``), so :attr:`mode` is ``P``'s own.  Any OTHER stack (two
+    real profiles) is not reported as one of them: :attr:`profile` is the
+    whole stacked name, so a comparison against a requested profile fails,
+    and :attr:`foreign_stack` says why.
 
     ``mode is None`` is treated as NOT enforcing, deliberately and
     conservatively: a bare name is not evidence the kernel is blocking
@@ -98,6 +119,22 @@ class AppArmorLabel:
     raw: str
     profile: str
     mode: Optional[str]
+    stack: Tuple[str, ...] = ()
+
+    @property
+    def stacked(self) -> bool:
+        """Did the kernel report more than one stack component?"""
+        return len(self.stack) > 1
+
+    @property
+    def foreign_stack(self) -> bool:
+        """A stack with more than one real (non-``unconfined``) profile.
+
+        Such a task is bounded by the intersection of several profiles,
+        which is not the profile jaato asked for; :attr:`profile` is the
+        whole stacked name, so it never equals a requested one.
+        """
+        return len([c for c in self.stack if c != UNCONFINED]) > 1
 
     @property
     def confined(self) -> bool:
@@ -109,9 +146,15 @@ class AppArmorLabel:
         """Is a profile attached AND is the kernel blocking on it?
 
         The only predicate in this module that may back a claim that a
-        kernel boundary exists.
+        kernel boundary exists.  A :attr:`foreign_stack` is never
+        reported as enforced: its printed mode covers several profiles,
+        none of which is the one :attr:`profile` names (#1509).
         """
-        return self.confined and self.mode == MODE_ENFORCE
+        return (
+            self.confined
+            and self.mode == MODE_ENFORCE
+            and not self.foreign_stack
+        )
 
     @property
     def complaining(self) -> bool:
@@ -171,12 +214,38 @@ def parse_label(raw: Optional[str]) -> AppArmorLabel:
     name = name.strip()
     if not name:
         return AppArmorLabel(raw=cleaned, profile="", mode=None)
+    stack = tuple(c.strip() for c in name.split(STACK_SEPARATOR))
+    profile = _effective_profile(name, stack)
+    if not profile:
+        return AppArmorLabel(raw=cleaned, profile="", mode=None, stack=stack)
     if not paren:
         # A bare name with no ``(mode)``.  Not evidence of enforcement.
-        return AppArmorLabel(raw=cleaned, profile=name, mode=None)
+        return AppArmorLabel(raw=cleaned, profile=profile, mode=None, stack=stack)
 
     mode = rest.rstrip(")").strip() or None
-    return AppArmorLabel(raw=cleaned, profile=name, mode=mode)
+    return AppArmorLabel(raw=cleaned, profile=profile, mode=mode, stack=stack)
+
+
+def _effective_profile(name: str, stack: Tuple[str, ...]) -> str:
+    """The profile that bounds a task wearing *name* (#1509).
+
+    One component: itself.  A stack whose only other members are
+    ``unconfined``: the one real member, in whichever order the kernel
+    printed them.  A stack of nothing but ``unconfined``: ``""``.  Any
+    other stack: the whole stacked name, never one of its members, so a
+    comparison against a requested profile cannot pass.  An empty
+    component (a malformed label) also keeps the whole name.
+    """
+    if len(stack) == 1:
+        return stack[0]
+    if any(not c for c in stack):
+        return name
+    real = [c for c in stack if c != UNCONFINED]
+    if not real:
+        return ""
+    if len(real) == 1:
+        return real[0]
+    return name
 
 
 def profile_name_ignoring_mode(raw: str) -> str:
@@ -189,11 +258,17 @@ def profile_name_ignoring_mode(raw: str) -> str:
     divergence.  ``"unconfined"`` is returned verbatim, because for that
     question "unconfined" IS the answer rather than a missing one.
 
+    A stack with ``unconfined`` (``P//&unconfined``, #1509) answers ``P``,
+    the profile it is confined by; any other stack answers its whole
+    stacked name.  Both come from :func:`parse_label`.
+
     Never use this to decide whether a boundary exists; use
     :func:`label_is_enforced`.
     """
-    cleaned = _clean(raw)
-    return cleaned.split(" ", 1)[0].strip()
+    label = parse_label(raw)
+    if label.profile:
+        return label.profile
+    return _clean(raw).split(" ", 1)[0].strip()
 
 
 def label_is_enforced(raw: Optional[str]) -> bool:
