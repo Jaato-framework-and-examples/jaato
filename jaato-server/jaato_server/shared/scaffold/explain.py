@@ -3319,6 +3319,9 @@ _POOL_SIZING_SIGNALS = (
      "the ceiling stopped a refill: raise the max"),
     ("pool_stale_reservation_evicted_total",
      "a cascade's warm runner was spent at the ceiling: raise the max"),
+    ("pool_posture_miss_total",
+     "a session found only warm runners of another confinement posture "
+     "and no fresh one: raise the size"),
 )
 
 
@@ -3368,10 +3371,11 @@ def pool() -> Rendered:
                    "socket's SO_PEERCRED; never from the request",
         "refusals": dict(pa.REFUSAL_CATEGORIES),
         "grow": "wakes the replenish loop; forking starts at once",
-        "shrink": "drops idle runners only: unreserved above the floor "
-                  "first (newest first), then the stalest reservations "
-                  "while over the ceiling; a runner serving a session "
-                  "finishes it",
+        "shrink": "drops idle runners only: never-served ones above the "
+                  "floor first (newest first), then the stalest "
+                  "reservations and served runners of the least recently "
+                  "used posture while over the ceiling; a runner serving "
+                  "a session finishes it",
         "ceiling": "a chosen max is kept (clamped up to the floor); a "
                    "derived one (2 x floor) follows the floor",
         "restart": "--restart keeps the resized values; they outrank "
@@ -3385,9 +3389,11 @@ def pool() -> Rendered:
         "the pre-warm runner pool, and resizing it without a restart:",
         "",
         "  Sessions take a warm runner from the pool instead of cold-",
-        "  spawning one.  The FLOOR is how many unreserved idle runners",
-        "  are kept; the CEILING bounds all idle runners, cascade",
-        "  reservations included (each is 129-187 MB).",
+        "  spawning one.  The FLOOR is how many never-served idle runners",
+        "  are kept (a runner that served fits only that session's",
+        "  confinement posture, so it sits on top of the floor); the",
+        "  CEILING bounds all idle runners, cascade reservations and",
+        "  served runners included (each is 129-187 MB).",
         "",
         "  AT STARTUP",
     ] + [
@@ -3420,9 +3426,10 @@ def pool() -> Rendered:
     ] + [f"    {c:<{cwidth}}  {why}" for c, why in pa.REFUSAL_CATEGORIES] + [
         "",
         "  GROWING  wakes the replenish loop; forking starts at once.",
-        "  SHRINKING  drops IDLE runners only: unreserved above the floor",
-        "    first (newest first), then the stalest reservations while over",
-        "    the ceiling.  A runner serving a session finishes it.",
+        "  SHRINKING  drops IDLE runners only: never-served ones above the",
+        "    floor first (newest first), then, while over the ceiling, the",
+        "    stalest reservations and served runners of the least recently",
+        "    used posture.  A runner serving a session finishes it.",
         "  CEILING  a chosen max is kept (clamped up to the floor); a",
         "    derived one (2 x floor) follows the floor.",
         "  RESTART  --restart keeps the resized values; they outrank the",

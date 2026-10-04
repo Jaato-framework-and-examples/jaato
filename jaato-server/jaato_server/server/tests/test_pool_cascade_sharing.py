@@ -56,7 +56,7 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/server/runner_pool.py",
-        find="                if self.unreserved_idle_count() >= self.target_size:",
+        find="                if self.virgin_idle_count() >= self.target_size:",
         replace="                if self.idle_count() >= self.target_size:",
         test=("TestMultiTenantCapacity::"
               "test_replenish_forks_when_every_idle_slot_is_another_tenants"),

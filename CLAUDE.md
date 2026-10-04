@@ -2206,8 +2206,9 @@ The floor and the ceiling now count different things:
 
 | Knob | Counts | Means |
 |------|--------|-------|
-| `JAATO_RUNNER_POOL_SIZE` (`target_size`, default 2) | **unreserved** idle slots — those with no cascade affinity | how many warm slots ANY arriving session may take.  What replenishment tops up. |
-| `JAATO_RUNNER_POOL_MAX_SIZE` (`max_size`, default `2 x target_size`) | **all** idle slots, reservations included | the memory ceiling.  A slot is 129–187 MB, so one reservation per live cascade cannot accumulate unbounded. |
+| `JAATO_RUNNER_POOL_SIZE` (`target_size`, default 2) | **virgin** idle slots — no cascade affinity AND never served (#1507) | how many warm slots ANY arriving session may take.  What replenishment tops up. |
+| (on top of the floor) | **served** unaffined idle slots, per posture (profile, uid, SELinux boundary) | warm capacity for the one posture each can still serve (#1100); spent before a virgin when a session of that posture arrives |
+| `JAATO_RUNNER_POOL_MAX_SIZE` (`max_size`, default `2 x target_size`) | **all** idle slots, reservations and served slots included | the memory ceiling.  A slot is 129–187 MB, so one reservation per live cascade cannot accumulate unbounded. |
 
 Reservations sit ON TOP of the floor rather than consuming it, which is what
 lets a second tenant's arrival grow the pool instead of starving behind the
@@ -2219,6 +2220,25 @@ displace a pure-idle resident, as before. A cascade that loses its reservation
 still RUNS — it falls through to an unreserved slot and pays a cold plugin
 bootstrap. Warm state for one tenant is negotiable; capacity for every tenant is
 not.
+
+**A served slot is a reservation keyed on the boundary (#1507).** Since
+#1100 a slot that has served fits only its own posture, so counting it
+toward the floor let a daemon mixing unconfined IPC sessions and confined
+WS sessions read "full" on slots the second posture could not take: every
+such arrival cold-spawned (21/21 in the bench). The floor now counts
+virgin slots only (`virgin_idle_count`). An unaffined acquire takes a
+served slot of its own posture before a virgin, and records when each
+posture was last asked for. At the ceiling, with the floor short, the
+replenish loop spends the served slot of the least recently demanded
+posture (then the one idle longest) to fork a virgin; reservations are
+never spent there. A returning served slot displaces only a served
+resident whose posture was asked for less recently than its own, never a
+virgin or a reservation. Telemetry: `pool_posture_miss_total` (a miss
+that skipped served slots of another posture; should stay near zero once
+warm), `pool_served_slot_evicted_total`, and the gauges
+`pool_idle_virgin`, `pool_idle_reserved` and
+`pool_idle_served:<profile|unconfined>/uid=<uid|daemon>`. Guard:
+`server/tests/test_pool_posture_capacity_1507.py`, seven reversions.
 
 Nothing here depends on a tenant declaring "cascade finished" — there is no such
 call, and the crash case is when a pinned slot hurts most. The 300 s
@@ -2249,7 +2269,7 @@ All three reach `server/pool_admin.py::PoolAdmin.answer`, so they share one rule
 |---|---|
 | **only the daemon's own uid or root**, read from the transport's `SO_PEERCRED` peer, never from the request | the pool is host-scoped (memory, every session); those accounts could already restart the daemon with another env. No peer (WS, Windows) is `not_authorized`, never permission |
 | **growing wakes the loop** (`_replenish_wake`; every pause goes through `PoolManager._pause`) | otherwise a full pool sleeps a whole interval before the first fork |
-| **shrinking drops idle slots only**: unreserved above the floor first (newest first), then the stalest reservations while over the ceiling | an acquired slot is not in `_idle_slots` and finishes its session; a reservation is one cascade's warm state |
+| **shrinking drops idle slots only**: virgin slots above the floor first (newest first; at 0 every unaffined slot), then, while over the ceiling, the stalest reservations, then served slots of the least recently demanded posture | an acquired slot is not in `_idle_slots` and finishes its session; a reservation is one cascade's warm state |
 | **dropped slots are queued on `_pending_teardown`**, and the replenish thread is started for them even at target 0 (`_start_replenish_thread`, which skips the startup gate) | `_teardown_slot` blocks on the daemon loop; a shrink to 0 on a daemon booted with a disabled pool would otherwise never be reaped |
 | **a derived ceiling follows the floor, a chosen one is kept** (clamped up) | the same reading as startup |
 | **`--restart` keeps it**: `pool_size` / `pool_max_size` in the restart config (`None` max = derived), passed back to `JaatoDaemon` and outranking the env vars; `PoolStatusEvent.persisted` says when that write failed | a resize the next restart dropped would be a silent revert |
