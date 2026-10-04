@@ -9,11 +9,12 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand, CommandParameter, CommandCompletion, PromptEnrichmentResult
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from jaato_server.shared.session_id import validate_session_id
+from jaato_server.shared.workspace_ownership import fchown_to, make_dirs_owned
 from . import listing_cache
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .listing_cache import SessionListingCache
@@ -192,6 +193,7 @@ class FileSessionPlugin:
         self,
         state: SessionState,
         storage_dir: Optional[Path] = None,
+        owner: Optional[Tuple[int, int]] = None,
     ) -> None:
         """Save session state to a JSON file atomically.
 
@@ -204,13 +206,23 @@ class FileSessionPlugin:
             state: The complete session state to persist.
             storage_dir: Override storage directory. When None, uses the
                 directory set during initialize().
+            owner: ``(uid, gid)`` the record is created as (#1528).  The
+                temp file is ``fchown``-ed before anything is written to it,
+                so the ``os.replace`` installs a file that was never the
+                daemon's; directories this call creates get the same owner.
+                Without it every save replaced the workspace owner's record
+                with a root-owned one.  ``None`` writes as the calling
+                process, byte-identical to before.  Mode is unchanged
+                (``0666 & ~umask``, 0644 by default): what a record holds
+                is the conversation the workspace's own runner already
+                reads, and its owner is now that account.
         """
         # Update with current description if we have one
         if self._session_description and not state.description:
             state.description = self._session_description
 
         target_dir = storage_dir or self._storage_path
-        target_dir.mkdir(parents=True, exist_ok=True)
+        make_dirs_owned(str(target_dir), owner)
         # Fail-closed: never build a path from an unsafe session id (a traversal
         # id would write outside the sessions directory).
         validate_session_id(state.session_id)
@@ -222,7 +234,16 @@ class FileSessionPlugin:
         # rename is atomic on POSIX (same filesystem).
         tmp_path = target_dir / f"{state.session_id}.json.tmp"
         try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
+            # O_TRUNC keeps an existing tmp file's inode (a crashed save's
+            # leftover), so the fchown below also re-owns that one.
+            fd = os.open(
+                str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+            try:
+                fchown_to(fd, owner)
+            except BaseException:
+                os.close(fd)
+                raise
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
                 f.flush()
                 try:

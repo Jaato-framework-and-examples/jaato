@@ -25,6 +25,17 @@ directory itself), never inferred from the path.
 * Links are never followed: ``os.lchown`` changes the link itself, and the
   tree walk does not descend through one.
 
+The functions above hand a path over AFTER the daemon created it.  A file
+the daemon rewrites with a temp file plus ``os.replace`` (the session
+record) or appends to through a handler (a per-client session log) cannot
+be fixed up afterwards without a root-owned window, and the next rewrite
+re-roots it.  For those writers (#1528) the owner is decided FIRST and
+the file is created owned by it: :func:`make_dirs_owned` for the
+directories, :func:`fchown_to` on the open descriptor before a byte is
+written.  Whether the owner applies is the caller's decision
+(:func:`jaato_server.server.runner_user.workspace_file_owner`); these
+helpers take an ``owner`` and do nothing when it is ``None``.
+
 Stdlib only, no daemon state.
 """
 
@@ -49,6 +60,9 @@ def tree_owner(directory: str) -> Optional[Tuple[int, int]]:
     if st.st_uid == os.geteuid():
         return None
     return st.st_uid, st.st_gid
+
+
+Owner = Tuple[int, int]
 
 
 def _hand(path: str, owner: Tuple[int, int]) -> None:
@@ -87,8 +101,9 @@ def inherit_owner_files(directory: str, tree: str) -> None:
     For writers the daemon calls but does not own the file layout of: a
     ``<provider>-auth`` command run daemon-side stores its credential under
     ``<workspace>/.jaato/`` with a name and a mode (often ``0600``) the
-    plugin chooses.  Not recursive and files only: a daemon-owned
-    directory there (``sessions/``) is the daemon's own record store.
+    plugin chooses.  Not recursive and files only: the record store
+    (``sessions/``) and the logs are created owned by their writers
+    (#1528), not handed over here.
     """
     owner = tree_owner(tree)
     if owner is None or not os.path.isdir(directory):
@@ -96,3 +111,49 @@ def inherit_owner_files(directory: str, tree: str) -> None:
     for entry in os.scandir(directory):
         if entry.is_file(follow_symlinks=False):
             _hand(entry.path, owner)
+
+
+def hand_to(path: str, owner: Optional[Owner]) -> None:
+    """``lchown`` *path* to *owner* when the daemon owns it; ``None`` is a no-op.
+
+    The pre-decided twin of :func:`inherit_owner`, for a file that already
+    exists when its writer opens it (a client log a previous daemon left
+    root-owned).
+    """
+    if owner is not None:
+        _hand(path, owner)
+
+
+def make_dirs_owned(path: str, owner: Optional[Owner]) -> None:
+    """``mkdir -p`` *path*, handing each directory it CREATES to *owner*.
+
+    Existing components are left as they are: they are somebody's tree and
+    not this function's to re-own.  With ``owner`` ``None`` it is a plain
+    ``makedirs(exist_ok=True)``.
+    """
+    if owner is None:
+        os.makedirs(path, exist_ok=True)
+        return
+    missing = []
+    cursor = os.path.abspath(path)
+    while not os.path.lexists(cursor):
+        missing.append(cursor)
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            continue
+        os.lchown(directory, owner[0], owner[1])
+
+
+def fchown_to(fd: int, owner: Optional[Owner]) -> None:
+    """Give the open file *fd* to *owner* before anything is written to it.
+
+    ``None`` is a no-op, so a writer calls it unconditionally.
+    """
+    if owner is not None:
+        os.fchown(fd, owner[0], owner[1])

@@ -41,9 +41,14 @@ that user a root runner, and dropping would produce a runner that dies on
 its first lazy import with an ``ImportError`` several layers from the
 cause — so :class:`RunnerUserRefused` names the path instead.
 
-WHAT THE DAEMON STILL OWNS.  Session records, the workspace index and the
-daemon's own log are written by the daemon process and stay the daemon's.
-What the daemon creates FOR the runner is handed to the target uid before
+WHAT THE DAEMON STILL OWNS.  Files OUTSIDE any workspace: the workspace
+index (``~/.jaato/session_workspace_index.json``), the daemon's own log
+and ``~/.jaato/apparmor-cache``.  What the daemon writes INSIDE a
+workspace for its own bookkeeping -- the session record and its state
+files under ``.jaato/sessions/``, the per-client session logs under
+``.jaato/logs/`` -- belongs to the workspace owner whenever a policy that
+drops is in effect (:func:`workspace_file_owner`, #1528), and is created
+owned by them so no save re-roots it.  What the daemon creates FOR the runner is handed to the target uid before
 the spawn (:func:`prepare_runner_owned_paths`) — the session tmpdir, the
 private ``/tmp`` directory, the workspace HOME, ``.jaato/logs`` and the
 session's own ``.jaato/sessions/<id>`` — but only when the daemon uid owns
@@ -465,6 +470,38 @@ def prepare_runner_owned_paths(
             logger.warning(
                 "runner uid drop: could not prepare %s for %s (%s: %s)",
                 path, user.describe(), type(exc).__name__, exc)
+
+
+def workspace_file_owner(workspace_path: Optional[str]) -> Optional[Tuple[int, int]]:
+    """``(uid, gid)`` the daemon creates its in-workspace files as, or ``None`` (#1528).
+
+    The session record (``.jaato/sessions/<id>.json`` and the state files
+    beside it) and the per-client session logs (``.jaato/logs/``) are
+    written by the daemon, not the runner.  Under a policy that drops, the
+    runner is an ordinary account, and a root-owned file in its own
+    workspace is one it cannot rewrite or remove -- and the record is
+    replaced with ``os.replace`` on every save, so a ``chown -R`` was undone
+    by the next one.
+
+    ``None`` -- write as the daemon, byte-identical to before -- under the
+    default ``daemon`` policy, and whenever
+    :func:`jaato_server.shared.workspace_ownership.tree_owner` hands nothing
+    over (a non-root daemon, a root-owned workspace) or the workspace
+    cannot be stat'd.  Otherwise the workspace's owner: under
+    ``workspace-owner`` that is the runner's uid; under ``peer`` it is the
+    account the workspace belongs to, the rule every other daemon writer
+    into a workspace follows (#1496).
+
+    The policy is read from :func:`current_policy`, the value the spawn
+    resolves against, so the two cannot disagree.
+    """
+    if not workspace_path or current_policy() == POLICY_DAEMON:
+        return None
+    from jaato_server.shared.workspace_ownership import tree_owner
+    try:
+        return tree_owner(workspace_path)
+    except OSError:
+        return None
 
 
 def runner_uid_of(user: Optional[RunnerUser]) -> Optional[int]:

@@ -51,7 +51,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 
 PathLike = Union[str, Path]
@@ -63,6 +63,7 @@ def atomic_write_text(
     *,
     encoding: str = "utf-8",
     fsync: bool = True,
+    owner: Optional[Tuple[int, int]] = None,
 ) -> None:
     """Atomically write *content* to *path*.
 
@@ -81,10 +82,17 @@ def atomic_write_text(
             corruption is not (the rename atomicity holds either
             way; fsync controls whether the WRITE is durable, not
             whether it's atomic).
+        owner: ``(uid, gid)`` the file -- and each parent directory this
+            call creates -- is created as (#1528).  The temp file is
+            ``fchown``-ed before it is written, so ``os.replace`` installs
+            a file that was never anybody else's.  ``None`` (the default)
+            writes as the calling process, as before.
     """
+    from jaato_server.shared.workspace_ownership import fchown_to, make_dirs_owned
+
     target = Path(path)
     parent = target.parent
-    parent.mkdir(parents=True, exist_ok=True)
+    make_dirs_owned(str(parent), owner)
 
     # tempfile.mkstemp gives us a fresh fd + path in the same dir,
     # so the os.replace below is an intra-filesystem rename (atomic).
@@ -94,6 +102,7 @@ def atomic_write_text(
         dir=str(parent),
     )
     try:
+        fchown_to(fd, owner)
         with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(content)
             if fsync:
@@ -122,6 +131,7 @@ def atomic_write_json(
     indent: Optional[int] = 2,
     ensure_ascii: bool = False,
     fsync: bool = True,
+    owner: Optional[Tuple[int, int]] = None,
 ) -> None:
     """Atomically write *data* to *path* as JSON.
 
@@ -135,6 +145,7 @@ def atomic_write_json(
         ensure_ascii: ``json.dump`` ensure_ascii (default: False so
             unicode survives round-trips).
         fsync: Forwarded to :func:`atomic_write_text`.
+        owner: Forwarded to :func:`atomic_write_text`.
     """
     serialized = json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
-    atomic_write_text(path, serialized, fsync=fsync)
+    atomic_write_text(path, serialized, fsync=fsync, owner=owner)
