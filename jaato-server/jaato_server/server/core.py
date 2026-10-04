@@ -1824,6 +1824,10 @@ class JaatoServer:
             if jdtls_state_root:
                 try:
                     os.makedirs(jdtls_state_root, exist_ok=True)
+                    # A sibling of the workspace, used by its runner's
+                    # jdtls: it belongs to the workspace's owner.
+                    from jaato_server.shared.workspace_ownership import inherit_owner
+                    inherit_owner(jdtls_state_root, self._workspace_path)
                     # Sanity probe: confirm the dir is writable.
                     # Catches apparmor-grant misconfigurations at
                     # bootstrap rather than at first diagnostic poll

@@ -497,8 +497,14 @@ class _FakeEventSinkAdapterForHook:
 
 def _make_ws_server_for_hook(workspace_root: str):
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._apparmor = _FakeAppArmorForHook()
     ws._cgroups = None
     ws._workspace_root = workspace_root

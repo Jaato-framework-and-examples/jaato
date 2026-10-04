@@ -21,7 +21,10 @@ file staging (``websocket._write_staged_payload``, #1386):
   exists, so the refusal is not an oracle for the host's filesystem;
 * the destination itself is refused when it is a symlink, and written
   through a temp file plus :func:`os.replace` (:func:`atomic_write_bytes`),
-  which replaces a link rather than following it.
+  which replaces a link rather than following it;
+* every directory created and the file written take the owner of the root
+  (:mod:`jaato_server.shared.workspace_ownership`), so a root daemon writing into an account's
+  workspace leaves files that account can use.
 
 Stdlib only, no daemon state.
 """
@@ -31,6 +34,8 @@ from __future__ import annotations
 import os
 import secrets
 from typing import Callable, Optional
+
+from jaato_server.shared.workspace_ownership import inherit_owner
 
 
 class PathLeavesRoot(ValueError):
@@ -58,7 +63,8 @@ def contained_dir(
     ``root`` must already be resolved (:func:`os.path.realpath`).  Walks one
     component at a time and checks each existing one resolves inside
     ``root`` before descending.  ``dir_mode(part)`` gives the mode of a
-    directory this call creates.  Returns ``None`` when the directory is
+    directory this call creates; each one created is handed to the owner
+    of ``root``.  Returns ``None`` when the directory is
     absent and ``create`` is false; raises :class:`PathLeavesRoot` for a
     component that leaves the root or is not a directory.
     """
@@ -76,6 +82,7 @@ def contained_dir(
         if not create:
             return None
         os.mkdir(nxt, dir_mode(part))
+        inherit_owner(nxt, root)
         current = nxt
     return current
 
@@ -111,7 +118,7 @@ def write_contained(root: str, rel_path: str, data: bytes, mode: Optional[int] =
     absolute forms (the caller's own name check).  Raises
     :class:`PathLeavesRoot` when a parent leaves the root or the destination
     is a symlink, and ``OSError`` on an I/O failure.  Returns the real path
-    written.
+    written, which belongs to the owner of ``root``.
     """
     root = os.path.realpath(root)
     rel_dir, _, name = rel_path.rpartition("/")
@@ -122,4 +129,5 @@ def write_contained(root: str, rel_path: str, data: bytes, mode: Optional[int] =
     if os.path.islink(dest):
         raise PathLeavesRoot(f"{rel_path} is a symlink; a staged write never goes through a link")
     atomic_write_bytes(dest, data, mode)
+    inherit_owner(dest, root)
     return dest

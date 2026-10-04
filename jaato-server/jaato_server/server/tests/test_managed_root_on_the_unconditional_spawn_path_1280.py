@@ -33,6 +33,7 @@ stubbing only what would fork a process.  A test that called
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -89,7 +90,7 @@ REVERSIONS = [
     Reversion(
         target=_SM,
         find=(
-            "            managed_workspace_root=self._managed_workspace_root_for_spawn(),\n"
+            "            managed_workspace_root=self._managed_workspace_root_for_spawn(workspace_path),\n"
             "        )"
         ),
         replace="        )",
@@ -101,7 +102,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_WS,
-        find='        _hand_managed_root_to(sm, getattr(self, "_workspace_root", None))',
+        find="        _hand_managed_root_to(sm, self.managed_root_for)",
         replace="        pass  # #1280 reversion",
         test="test_ws_server_hands_its_root_to_the_session_manager",
         because=(
@@ -157,11 +158,28 @@ class _FakeServer:
         self.bootstrap_outcomes.append(reason)
 
 
+def _ws_resolver(managed_root: Optional[str]) -> Any:
+    """The real ``JaatoWSServer.managed_root_for`` over one daemon root.
+
+    ``None`` stands for an IPC-only daemon: no WS server, so no resolver.
+    """
+    if managed_root is None:
+        return None
+    from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
+
+    ws = JaatoWSServer.__new__(JaatoWSServer)
+    ws._workspace_root = managed_root
+    ws._app_credentials = AppCredentialStore({})
+    return ws.managed_root_for
+
+
 def _bare_sm(managed_root: Optional[str]) -> SessionManager:
     """A SessionManager with only what the unconditional spawn path reads.
 
-    ``set_managed_workspace_root`` and ``_managed_workspace_root_for_spawn``
-    are the real methods; everything else the path touches is a no-op.
+    ``set_managed_root_resolver`` and ``_managed_workspace_root_for_spawn``
+    are the real methods, fed the WS server's real resolver; everything
+    else the path touches is a no-op.
     """
     sm = SessionManager.__new__(SessionManager)
     sm._daemon_loop = object()  # type: ignore[attr-defined]
@@ -174,7 +192,7 @@ def _bare_sm(managed_root: Optional[str]) -> SessionManager:
     )
     sm._resolve_cgroups_manager = lambda: None  # type: ignore[assignment]
     sm._notify_apparmor = lambda *a, **k: None  # type: ignore[assignment]
-    sm.set_managed_workspace_root(managed_root)
+    sm.set_managed_root_resolver(_ws_resolver(managed_root))
     return sm
 
 
@@ -333,7 +351,7 @@ def test_provision_path_resolves_plugin_rules_with_the_managed_root(
     sm._spawn_session_runner_unconditional = (  # type: ignore[assignment]
         lambda **kwargs: True
     )
-    sm.set_managed_workspace_root(str(paths["root"]))
+    sm.set_managed_root_resolver(_ws_resolver(str(paths["root"])))
 
     sm._provision_ipc_apparmor_and_spawn_runner(
         _FakeServer(), "sess-1280", str(paths["managed"]), "client-1",
@@ -350,7 +368,7 @@ def test_provision_path_resolves_plugin_rules_with_the_managed_root(
 
 def test_ws_server_hands_its_root_to_the_session_manager(tmp_path: Path) -> None:
     """``set_command_router`` gives the router's session manager the WS
-    server's ``workspace_root``: it is the only source the session manager
+    server's root resolver: it is the only source the session manager
     has, since ``set_apparmor_dependencies`` runs before the WS server
     exists."""
     from jaato_server.server.websocket import JaatoWSServer
@@ -363,17 +381,20 @@ def test_ws_server_hands_its_root_to_the_session_manager(tmp_path: Path) -> None
     class _Router:
         _session_manager = sm
 
-    class _WS:
-        _workspace_root = root
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
-    JaatoWSServer.set_command_router(_WS(), _Router())  # type: ignore[arg-type]
+    ws = JaatoWSServer.__new__(JaatoWSServer)
+    ws._workspace_root = root
+    ws._app_credentials = AppCredentialStore({})
 
-    assert sm._managed_workspace_root_for_spawn() == root
+    JaatoWSServer.set_command_router(ws, _Router())  # type: ignore[arg-type]
+
+    assert sm._managed_workspace_root_for_spawn(os.path.join(root, "w")) == root
 
 
 def test_a_session_manager_without_the_setter_is_tolerated() -> None:
     """A test double or out-of-tree session manager without
-    ``set_managed_workspace_root`` is left alone, not crashed."""
+    ``set_managed_root_resolver`` is left alone, not crashed."""
     from jaato_server.server.websocket import _hand_managed_root_to
 
     _hand_managed_root_to(object(), "/somewhere")

@@ -40,8 +40,14 @@ Optionally create a realm role (e.g. `jaato-user`) and set
 
 ## 2. The shared app credential
 
+The application's workspaces live under a directory owned by an OS account
+of their own; create both first:
+
 ```bash
-sudo jaato-web-coder-server init --dir /etc/jaato-web-coder
+sudo useradd --system --create-home webcoder
+sudo -u webcoder mkdir -m 0700 /home/webcoder/workspaces
+sudo jaato-web-coder-server init --dir /etc/jaato-web-coder \
+    --account webcoder --workspace-root /home/webcoder/workspaces
 ```
 
 writes `app.credential`, `session.secret`, `credentials.key` (the key the
@@ -50,8 +56,16 @@ per-user API-key store is encrypted with) and a `jaato_server.server.yaml` templ
 `/etc/jaato/ws-apps.json` (mode 0600, owned by the daemon's user):
 
 ```json
-{"jaato-web-coder": "<the printed credential>"}
+{"jaato-web-coder": {"credential": "<the printed credential>",
+                     "account": "webcoder",
+                     "workspace_root": "/home/webcoder/workspaces"}}
 ```
+
+The daemon refuses to start when the root does not exist, is not owned by
+the account, or overlaps the daemon's own workspace root or another
+application's. A root daemon hands every file it writes in these
+workspaces to `webcoder`; start it with `--runner-uid-policy
+workspace-owner` so the sessions' runners run as `webcoder` too.
 
 Edit `jaato_server.server.yaml`: `public_url`, `daemon.url`, `auth.oidc.issuer`, and
 `backchannel_url: http://127.0.0.1:8180` if Keycloak is reached over

@@ -252,8 +252,14 @@ def _ws_server(bus: Any, router_calls: List[Any]) -> Any:
     would silently reroute WS traffic onto the IPC arm.
     """
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._lock = asyncio.Lock()
     ws._clients = {}
     ws._message_handlers = {}

@@ -24,6 +24,7 @@ from jaato_sdk.events import (
 )
 from jaato_server.server import workspace_clone
 from jaato_server.server.websocket import JaatoWSServer
+from jaato_server.server.ws_tickets import AppCredentialStore
 from jaato_server.server.workspace_clone import (
     clone_repos,
     git_auth_env,
@@ -277,6 +278,11 @@ class _Sessions:
 def _server(root: Path, rows=(), user=None):
     manager = WorkspaceManager(str(root), registry_path=root.parent / "reg.json")
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._workspace_manager = manager
     ws._event_sink_adapter = None
     ws._app_secret_resolver = None

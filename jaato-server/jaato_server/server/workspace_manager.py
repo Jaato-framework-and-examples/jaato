@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import dotenv_values
 
+from jaato_server.shared.workspace_ownership import inherit_owner, inherit_owner_tree
 from .workspace_sources import workspace_sources
 
 logger = logging.getLogger(__name__)
@@ -602,6 +603,11 @@ class WorkspaceManager:
         # ...and a GC strategy, because without one there is none at all.
         self._write_default_gc_config(path)
 
+        # The workspace and what was just written into it belong to the
+        # owner of the root it was created in (an application's account,
+        # when its root is one), not to the daemon.
+        inherit_owner_tree(str(path), str(self.workspace_root))
+
         ws_info = WorkspaceInfo(
             name=name,
             path=str(path),
@@ -1097,6 +1103,10 @@ class WorkspaceManager:
     def _write_env_file(self, path: Path, env_vars: Dict[str, Optional[str]]) -> None:
         """Write environment variables to a .env file.
 
+        A ``.env`` this creates is handed to the owner of the workspace it
+        is in (:mod:`jaato_server.shared.workspace_ownership`); rewriting an existing one keeps
+        its owner, since ``write_text`` writes in place.
+
         Args:
             path: Path to .env file.
             env_vars: Dictionary of environment variables.
@@ -1110,3 +1120,4 @@ class WorkspaceManager:
                 lines.append(f"{key}={value}")
 
         path.write_text("\n".join(lines) + "\n")
+        inherit_owner(str(path), str(path.parent))

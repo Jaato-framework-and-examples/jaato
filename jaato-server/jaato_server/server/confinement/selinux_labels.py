@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterator, Optional, Tuple
 
 from jaato_sdk.scaffold.gitignore import AUTHORED
+from jaato_server.shared.workspace_ownership import inherit_owner
 
 WORKSPACE_TYPE = "jaato_workspace_t"
 MANAGED_TYPE = "jaato_managed_ws_t"
@@ -136,6 +137,13 @@ def precreate_authored_dirs(workspace: str) -> None:
     # Pre-created for the reason the authored ones are: a runner creating it
     # later would give it the workspace type, readable by an isolated one.
     os.makedirs(os.path.join(dot, PROMPTS_DIR), exist_ok=True)
+    # The workspace's runner writes into these: they are its owner's.  Each
+    # one by name, never the whole of .jaato/, where the daemon's own
+    # session records live.
+    inherit_owner(dot, workspace)
+    created = [name for name, is_dir in authored_entries() if is_dir]
+    for name in [*created, CLAIMS_DIR, PROMPTS_DIR]:
+        inherit_owner(os.path.join(dot, name), workspace)
 
 
 def walk(root: str) -> Iterator[str]:

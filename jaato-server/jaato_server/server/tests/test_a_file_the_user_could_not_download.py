@@ -155,8 +155,14 @@ def test_a_file_over_the_cap_is_refused(ws: Path) -> None:
 @pytest.fixture
 def server(ws: Path):
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     srv = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    srv._clients = {}
+    srv._app_managers = {}
+    srv._app_provisioners = {}
+    srv._app_credentials = AppCredentialStore({})
     srv._clients = {}
     srv._lock = asyncio.Lock()
     srv._client_provisioned = {}

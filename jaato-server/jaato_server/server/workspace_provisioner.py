@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from jaato_server.shared.workspace_ownership import inherit_owner, inherit_owner_tree
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +97,10 @@ class WorkspaceProvisioner:
         # Ensure directories exist
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         self._templates_dir.mkdir(parents=True, exist_ok=True)
+        # Both belong to the owner of the root (an application's account,
+        # when its root is one); the manifest inside stays the daemon's.
+        inherit_owner(str(self._sessions_dir), str(self._root))
+        inherit_owner(str(self._templates_dir), str(self._root))
 
         # Load existing manifest
         self._load_manifest()
@@ -159,6 +165,10 @@ class WorkspaceProvisioner:
             env_file = ws_path / ".env"
             if not env_file.exists():
                 env_file.touch()
+
+            # The provisioned workspace, template copy included, is the
+            # root owner's: its runner runs as that account.
+            inherit_owner_tree(str(ws_path), str(self._root))
 
             now = datetime.now(timezone.utc).isoformat()
             workspace = ProvisionedWorkspace(

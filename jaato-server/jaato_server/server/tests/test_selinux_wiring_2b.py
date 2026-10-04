@@ -183,7 +183,7 @@ def _manager(backend):
     sm = SessionManager.__new__(SessionManager)
     sm.set_selinux_backend(backend)
     sm._notify_apparmor = MagicMock()
-    sm._managed_workspace_root_for_spawn = lambda: "/srv/ws"
+    sm._managed_workspace_root_for_spawn = lambda _p: "/srv/ws"
     return sm
 
 

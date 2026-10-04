@@ -326,9 +326,15 @@ def test_standalone_ws_mode_answers_a_page_request():
     import asyncio
     from jaato_sdk.events import HistoryPageRequest
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     sent = []
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._jaato_server = _server(_history())
 
     async def fake_send(cid, ev):

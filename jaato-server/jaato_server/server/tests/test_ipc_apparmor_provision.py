@@ -122,12 +122,19 @@ class _FakeAppArmorManager:
         return getattr(self, "complain_mode", False)
 
 
-class _FakeWSServer:
-    """Stand-in for the WS server with a ``_workspace_root`` attribute
-    used by the workspace-overlap precedence check."""
+def _FakeWSServer(workspace_root: str):
+    """A real WS server (no ``__init__``) whose only root is *workspace_root*.
 
-    def __init__(self, workspace_root: str) -> None:
-        self._workspace_root = workspace_root
+    Its ``managed_root_for`` is the resolver the session manager asks for
+    the workspace-overlap precedence check.
+    """
+    from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
+
+    ws = JaatoWSServer.__new__(JaatoWSServer)
+    ws._workspace_root = workspace_root
+    ws._app_credentials = AppCredentialStore({})
+    return ws
 
 
 @pytest.fixture

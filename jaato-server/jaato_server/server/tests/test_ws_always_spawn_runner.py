@@ -215,7 +215,13 @@ def _make_ws_server(
     hook reads.  Bypasses the heavy __init__ since we're testing
     the hook in isolation."""
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._apparmor = apparmor
     ws._cgroups = None
     ws._workspace_root = workspace_root

@@ -205,6 +205,15 @@ def transports() -> Rendered:
         "  simply not send.  An application credential binds and revokes; it\n"
         "  cannot open a session.  With the flag absent, none of this exists and\n"
         "  WS auth is the single shared token above.\n\n"
+        "per-application workspaces (the same file):\n"
+        '  {"<app_id>": {"credential": "...", "account": "<os account>",\n'
+        '               "workspace_root": "<dir owned by that account>"}}\n'
+        "  The application's users list, create and open workspaces under its\n"
+        "  root only; each workspace and everything the daemon writes into it\n"
+        "  (clone, staged files, .env, .gitconfig) belongs to the account, so\n"
+        "  --runner-uid-policy workspace-owner runs those sessions as it.  The\n"
+        "  daemon refuses to start if an account is missing, a root is not\n"
+        "  owned or reachable by its account, or two roots overlap.\n\n"
         "preflight the WS daemon side (port + token file + auth mode):\n"
         "  jaato-doctor --web-socket [host:]port\n\n"
         "scaffold any transport:\n"

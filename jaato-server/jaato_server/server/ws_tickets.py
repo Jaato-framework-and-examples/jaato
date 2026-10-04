@@ -232,6 +232,30 @@ class BoundIdentity:
         return f"{self.app_id}:{self.user}"
 
 
+@dataclass(frozen=True)
+class AppWorkspace:
+    """Where one application's workspaces live, and which OS account owns them.
+
+    Declared per application in the ``--ws-app-credentials`` file and
+    checked once at load (:func:`load_app_credentials`).  A connection that
+    authenticated with that application's ticket lists, creates and opens
+    workspaces under :attr:`workspace_root` only, and every workspace the
+    daemon creates there belongs to :attr:`account`, so under
+    ``--runner-uid-policy workspace-owner`` its runners run as that account.
+
+    Attributes:
+        account: The OS account name.
+        uid: Its uid, resolved at load.
+        gid: Its primary gid, resolved at load.
+        workspace_root: The resolved (``realpath``) root directory.
+    """
+
+    account: str
+    uid: int
+    gid: int
+    workspace_root: str
+
+
 class AppCredentialStore:
     """Digest → ``app_id`` for the configured application credentials.
 
@@ -249,8 +273,17 @@ class AppCredentialStore:
     so an empty store is only ever the unconfigured default.)
     """
 
-    def __init__(self, credentials: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        credentials: Mapping[str, str],
+        workspaces: Optional[Mapping[str, AppWorkspace]] = None,
+    ) -> None:
         """Hash ``credentials`` (``app_id`` → plaintext) into the store.
+
+        ``workspaces`` maps an ``app_id`` to its :class:`AppWorkspace`.  The
+        file loader always supplies one per application; the in-memory form
+        may omit it, and an application without one is served from the
+        daemon's own workspace root.
 
         Validation lives in :func:`load_app_credentials` rather than
         here, so that a file's problems are reported with the file's
@@ -275,6 +308,7 @@ class AppCredentialStore:
                 )
             by_digest[digest] = app_id
         self._by_digest = by_digest
+        self._workspaces: Dict[str, AppWorkspace] = dict(workspaces or {})
 
     def lookup(self, digest: bytes) -> Optional[str]:
         """Return the ``app_id`` for ``digest``, or ``None``.
@@ -286,6 +320,16 @@ class AppCredentialStore:
         single shared token.
         """
         return self._by_digest.get(digest)
+
+    def workspace(self, app_id: Optional[str]) -> Optional[AppWorkspace]:
+        """The :class:`AppWorkspace` declared for ``app_id``, or ``None``."""
+        if not app_id:
+            return None
+        return self._workspaces.get(app_id)
+
+    def workspaces(self) -> Dict[str, AppWorkspace]:
+        """Every declared ``app_id`` → :class:`AppWorkspace`."""
+        return dict(self._workspaces)
 
     def app_ids(self) -> Tuple[str, ...]:
         """Every configured ``app_id``, sorted.  For startup logging."""
@@ -604,19 +648,30 @@ def _validate_user(user: str) -> None:
 def load_app_credentials(path: "str | os.PathLike[str]") -> AppCredentialStore:
     """Read the app-credentials file at ``path``.
 
-    Format — a JSON object mapping ``app_id`` to that application's
-    credential::
+    Format — a JSON object mapping ``app_id`` to that application's entry::
 
         {
-          "acme-portal": "nQ3...43-chars...",
-          "internal-ops": "Zk8...43-chars..."
+          "acme-portal": {
+            "credential": "nQ3...43-chars...",
+            "account": "acme",
+            "workspace_root": "/home/acme/workspaces"
+          }
         }
 
-    One shape, deliberately: a richer per-application form (a
-    ``workspace_root``, a ``config_root``) is an additive change to
-    this loader and to nothing else, and picking its spelling now would
-    be guessing at a requirement that has not arrived.  This function
-    is the whole format surface.
+    ``credential`` authorises the application's bind channel.
+    ``account`` is the OS account that owns the application's workspaces,
+    and ``workspace_root`` the directory they live in; see
+    :class:`AppWorkspace`.  Each is checked here, so a daemon that starts
+    has a usable root for every application:
+
+    * the account exists;
+    * the root is an absolute path to an existing directory, owned by the
+      account, which the account can reach (every ancestor searchable);
+    * a daemon that is not root can create files on no account but its
+      own, so there the account must be the daemon's;
+    * no two applications share a root or nest one inside another.
+
+    No other keys are accepted.  This function is the whole format surface.
 
     Mode is enforced exactly as ``--ws-token-file`` enforces it: a file
     any other principal can read is refused rather than read, because
@@ -650,34 +705,53 @@ def load_app_credentials(path: "str | os.PathLike[str]") -> AppCredentialStore:
             f"app credentials file {file_path} must be a JSON object "
             'mapping app_id to credential, e.g. {"acme": "<token>"}'
         )
-    credentials = _validated_entries(parsed, file_path)
+    credentials, workspaces = _validated_entries(parsed, file_path)
     if not credentials:
         raise AppCredentialsError(
             f"app credentials file {file_path} declares no applications; "
             "remove the flag or add an entry"
         )
     try:
-        return AppCredentialStore(credentials)
+        return AppCredentialStore(credentials, workspaces)
     except ValueError as exc:
         raise AppCredentialsError(f"{file_path}: {exc}") from exc
 
 
+_ENTRY_KEYS = frozenset({"credential", "account", "workspace_root"})
+
+
 def _validated_entries(
     parsed: Mapping[str, object], file_path: Path
-) -> Dict[str, str]:
-    """Return ``{app_id: credential}`` or raise ``AppCredentialsError``.
+) -> Tuple[Dict[str, str], Dict[str, AppWorkspace]]:
+    """Return ``({app_id: credential}, {app_id: AppWorkspace})`` or raise.
 
     Split out of :func:`load_app_credentials` so the per-entry rules
     read as one list rather than as nesting inside the file handling.
     """
     credentials: Dict[str, str] = {}
-    for app_id, credential in parsed.items():
+    workspaces: Dict[str, AppWorkspace] = {}
+    for app_id, entry in parsed.items():
         if not isinstance(app_id, str) or not _APP_ID_RE.match(app_id):
             raise AppCredentialsError(
                 f"{file_path}: invalid app id {app_id!r} — must match "
                 f"{_APP_ID_RE.pattern} (a ':' would make the qualified "
                 "identity ambiguous)"
             )
+        if not isinstance(entry, dict):
+            raise AppCredentialsError(
+                f"{file_path}: the entry for {app_id!r} must be an object "
+                '{"credential": ..., "account": ..., "workspace_root": ...}'
+            )
+        unknown = sorted(set(entry) - _ENTRY_KEYS)
+        missing = sorted(_ENTRY_KEYS - set(entry))
+        if unknown or missing:
+            raise AppCredentialsError(
+                f"{file_path}: the entry for {app_id!r} "
+                + (f"has unknown keys {unknown}" if unknown else "")
+                + (" and " if unknown and missing else "")
+                + (f"lacks {missing}" if missing else "")
+            )
+        credential = entry["credential"]
         if not isinstance(credential, str):
             raise AppCredentialsError(
                 f"{file_path}: credential for {app_id!r} must be a string"
@@ -688,7 +762,72 @@ def _validated_entries(
                 f"{MIN_APP_CREDENTIAL_CHARS} characters"
             )
         credentials[app_id] = credential
-    return credentials
+        workspaces[app_id] = _app_workspace(
+            app_id, entry["account"], entry["workspace_root"], file_path)
+    _refuse_shared_roots(workspaces, file_path)
+    return credentials, workspaces
+
+
+def _app_workspace(
+    app_id: str, account: object, root: object, file_path: Path,
+) -> AppWorkspace:
+    """Check one application's ``account`` / ``workspace_root`` pair."""
+    where = f"{file_path}: application {app_id!r}"
+    if not isinstance(account, str) or not account:
+        raise AppCredentialsError(f"{where}: account must be a non-empty string")
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise AppCredentialsError(f"{where}: workspace_root must be an absolute path")
+    import pwd  # POSIX only: per-application accounts need POSIX ownership
+
+    try:
+        pw = pwd.getpwnam(account)
+    except KeyError as exc:
+        raise AppCredentialsError(f"{where}: no OS account named {account!r}") from exc
+    daemon_uid = os.geteuid()
+    if daemon_uid != 0 and pw.pw_uid != daemon_uid:
+        raise AppCredentialsError(
+            f"{where}: the daemon is not root, so it cannot create files "
+            f"owned by {account!r}; use the daemon's own account or run it as root"
+        )
+    real = os.path.realpath(root)
+    try:
+        st = os.stat(real)
+    except OSError as exc:
+        raise AppCredentialsError(f"{where}: workspace_root {root} does not exist ({exc})") from exc
+    if not stat.S_ISDIR(st.st_mode):
+        raise AppCredentialsError(f"{where}: workspace_root {root} is not a directory")
+    if st.st_uid != pw.pw_uid:
+        raise AppCredentialsError(
+            f"{where}: workspace_root {root} is owned by uid {st.st_uid}, not "
+            f"by {account!r} (uid {pw.pw_uid}); chown it to the account"
+        )
+    from jaato_server.shared.peer_identity import PeerCredentials, path_reachable_by
+
+    peer = PeerCredentials(uid=pw.pw_uid, gid=pw.pw_gid, username=account)
+    if path_reachable_by(real, peer) is not True:
+        raise AppCredentialsError(
+            f"{where}: {account!r} cannot reach workspace_root {real} "
+            "(an ancestor directory is not searchable by it)"
+        )
+    return AppWorkspace(account=account, uid=pw.pw_uid, gid=pw.pw_gid,
+                        workspace_root=real)
+
+
+def _refuse_shared_roots(workspaces: Mapping[str, AppWorkspace], file_path: Path) -> None:
+    """Refuse two applications whose roots are equal or nested.
+
+    A workspace under two roots would be listed, owned and opened by two
+    applications, which is the boundary this file exists to draw.
+    """
+    items = sorted(workspaces.items())
+    for i, (app_a, ws_a) in enumerate(items):
+        for app_b, ws_b in items[i + 1:]:
+            a, b = ws_a.workspace_root, ws_b.workspace_root
+            if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                raise AppCredentialsError(
+                    f"{file_path}: applications {app_a!r} and {app_b!r} have "
+                    f"overlapping workspace roots ({a}, {b})"
+                )
 
 
 def _refuse_loose_mode(file_path: Path) -> None:

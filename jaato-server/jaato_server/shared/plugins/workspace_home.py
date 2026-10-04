@@ -43,6 +43,7 @@ import os
 from typing import List, MutableMapping, Optional
 
 from .jaato_tools_path import append_path_entry
+from jaato_server.shared.workspace_ownership import inherit_owner
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +294,10 @@ def ensure_workspace_home(home_path: str) -> None:
         if not os.path.exists(gitignore):
             with open(gitignore, "w", encoding="utf-8") as handle:
                 handle.write("*\n")
+        # Both belong to the workspace's owner (the home's parent).
+        workspace = os.path.dirname(os.path.abspath(home_path))
+        inherit_owner(home_path, workspace)
+        inherit_owner(gitignore, workspace)
     except OSError as exc:
         logger.warning(
             "workspace_home: could not write %s (%s: %s); the home may be "

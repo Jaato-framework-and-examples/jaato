@@ -134,8 +134,14 @@ def _make_ws_server(workspace_root: str, *, adapter_loop: Optional[Any]):
     the call site to model "start() has not even constructed one".
     """
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._apparmor = _FakeAppArmorForHook()
     ws._cgroups = None
     ws._workspace_root = workspace_root
@@ -225,7 +231,13 @@ def test_app_secret_resolver_degrades_when_no_adapter_exists_yet() -> None:
     from jaato_server.server.app_secret import AppSecretAnswer
     from jaato_server.server.websocket import JaatoWSServer
 
+    from jaato_server.server.ws_tickets import AppCredentialStore
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._event_sink_adapter = None
     ws._app_connection_for = lambda app_id: "client-1"  # type: ignore[method-assign]
 
