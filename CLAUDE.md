@@ -1720,7 +1720,7 @@ message whose parts change is recounted.
 
 **Calibration.** Once per response (`_accumulate_turn_tokens`), the
 provider's prompt size, `prompt_tokens + cache_read + cache_creation`, is
-compared with the budget total (`InstructionBudget.calibrate`). A usage
+compared with the estimate of that same request (`InstructionBudget.calibrate`). A usage
 with `reported=False` (#688) or a zero prompt is not a measurement.
 
 | Ratio reported / estimate | Effect |
@@ -1729,6 +1729,18 @@ with `reported=False` (#688) or a zero prompt is not a measurement.
 | above 1.15 | `calibration_factor` = the ratio; `effective_total_tokens()` = estimate × factor decides the threshold (`utilization_percent`, `available_tokens`, `get_context_usage`) |
 | below 0.85 | the estimate (already the larger) decides |
 | either side of the margin | one WARNING per session naming both figures |
+
+**Both figures describe one request (#1514).** The estimate compared is
+the one `JaatoSession._note_send_estimate` takes from the list
+`_history_for_provider` hands to `provider.complete()` (the non-history
+sources plus each wire message), never the budget's total when the answer
+arrives. On the tool-results path the budget is refreshed before the
+results are appended, so the old comparison read a 228k-token result as a
+2.38x estimation error and GC fired at ~45%. A snapshot measures one
+response; with none pending, or for an unreported usage, the factor is
+kept. Each comparison logs `BUDGET_CALIBRATION` at INFO with both figures.
+Guard: `jaato_server/shared/tests/test_calibration_measures_one_request_1514.py`,
+four reversions.
 
 The estimate is SCALED rather than replaced by the reported figure, so a
 GC pass lowers it at once; the reported figure describes the request before
