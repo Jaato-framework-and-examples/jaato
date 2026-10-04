@@ -146,6 +146,31 @@ REVERSIONS = [
         because="a refused drop falling back to in-process tool execution, "
                 "i.e. running the model's tools in the ROOT daemon",
     ),
+    Reversion(
+        target="jaato-server/jaato_server/server/runner/session.py",
+        find="        ensure_dumpable(user)\n",
+        replace="",
+        test="TestDumpableAfterInProcessDrop::test_the_slot_restores_dumpable_after_the_drop",
+        because="a pool slot that dropped in process staying non-dumpable: "
+                "its /proc is root-owned and every owner /proc/*/... rule "
+                "denies the bootstrap read-back (#1499)",
+    ),
+    Reversion(
+        target="jaato-server/jaato_server/shared/privilege_drop.py",
+        find="    if now != 1:\n",
+        replace="    if False:\n",
+        test="TestDumpableAfterInProcessDrop::test_a_prctl_that_did_not_stick_refuses",
+        because="a slot left non-dumpable reported as fixed, refused by "
+                "AppArmor later and far from the cause",
+    ),
+    Reversion(
+        target="jaato-server/jaato_server/shared/privilege_drop.py",
+        find="    except OSError as exc:\n        raise PrivilegeDropError(\n            f\"dropped to {user.describe()} but could not make",
+        replace="    except ValueError as exc:\n        raise PrivilegeDropError(\n            f\"dropped to {user.describe()} but could not make",
+        test="TestDumpableAfterInProcessDrop::test_a_failed_prctl_refuses_the_bootstrap",
+        because="a prctl failure escaping as a bare OSError instead of the "
+                "privilege_drop bootstrap refusal",
+    ),
 ]
 
 
@@ -499,6 +524,111 @@ class TestTheDrop:
             assert target.stat().st_uid == 65534
         finally:
             self._cleanup()
+
+
+# ----------------------------------------------------------- dumpable (#1499)
+
+class TestDumpableAfterInProcessDrop:
+    """A pool slot drops without exec, so it must restore dumpable itself.
+
+    ``setresuid`` clears the dumpable flag and the kernel then owns the
+    process's ``/proc/<pid>/`` as root, so the profile's ``owner`` rules
+    never match.  ``execve`` restores the flag for a cold spawn; a slot
+    calls ``ensure_dumpable`` between the drop and ``aa_change_profile``.
+    """
+
+    @staticmethod
+    def _fake_prctl(monkeypatch, *, start=2, sticks=True, fails=False):
+        from jaato_server.shared import privilege_drop
+        state = {"dumpable": start, "calls": []}
+
+        def prctl(option, arg=0):
+            state["calls"].append((option, arg))
+            if fails:
+                raise OSError(1, "EPERM")
+            if option == privilege_drop.PR_SET_DUMPABLE and sticks:
+                state["dumpable"] = arg
+            return state["dumpable"] if option == privilege_drop.PR_GET_DUMPABLE else 0
+        monkeypatch.setattr(privilege_drop, "_prctl", prctl)
+        return state
+
+    def test_the_slot_restores_dumpable_after_the_drop(self, monkeypatch):
+        from jaato_server.server.runner import session as session_mod
+        order = []
+        monkeypatch.setattr(session_mod, "drop_to",
+                            lambda u: order.append("drop_to") or True)
+        state = self._fake_prctl(monkeypatch)
+        monkeypatch.setattr(session_mod, "apply_user_env", lambda *a: None)
+        session_mod._drop_to_runner_user(
+            SimpleNamespace(runner_user=NOBODY.to_dict()))
+        assert state["dumpable"] == 1
+        assert order == ["drop_to"]
+
+    def test_the_restore_is_after_setresuid_and_inside_the_drop_step(self):
+        """AST: inside ``_drop_to_runner_user``, drop_to precedes
+        ensure_dumpable; the step itself precedes ``_maybe_self_confine``
+        (checked by ``TestTheOrder``)."""
+        from jaato_server.server.runner import session as session_mod
+        tree = ast.parse(pathlib.Path(session_mod.__file__).read_text())
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "_drop_to_runner_user")
+        calls = TestTheOrder._calls_in(fn)
+        assert "ensure_dumpable" in calls
+        assert calls.index("drop_to") < calls.index("ensure_dumpable")
+
+    def test_the_cold_spawn_path_does_not_call_it(self):
+        from jaato_server.server import runner_spawner
+        src = pathlib.Path(runner_spawner.__file__).read_text()
+        assert "ensure_dumpable" not in src and "PR_SET_DUMPABLE" not in src
+
+    def test_already_dumpable_is_a_no_op(self, monkeypatch):
+        from jaato_server.shared import privilege_drop
+        state = self._fake_prctl(monkeypatch, start=1)
+        assert privilege_drop.ensure_dumpable(NOBODY) is False
+        assert [c[0] for c in state["calls"]] == [privilege_drop.PR_GET_DUMPABLE]
+
+    def test_a_prctl_that_did_not_stick_refuses(self, monkeypatch):
+        from jaato_server.shared import privilege_drop
+        self._fake_prctl(monkeypatch, sticks=False)
+        with pytest.raises(PrivilegeDropError, match="PR_GET_DUMPABLE"):
+            privilege_drop.ensure_dumpable(NOBODY)
+
+    def test_a_failed_prctl_refuses_the_bootstrap(self, monkeypatch):
+        from jaato_server.server.runner import session as session_mod
+        monkeypatch.setattr(session_mod, "drop_to", lambda u: True)
+        self._fake_prctl(monkeypatch, fails=True)
+        with pytest.raises(session_mod.BootstrapError) as info:
+            session_mod._drop_to_runner_user(
+                SimpleNamespace(runner_user=NOBODY.to_dict()))
+        assert info.value.stage == "privilege_drop"
+        assert "dumpable" in str(info.value)
+
+    @pytest.mark.skipif(os.geteuid() != 0, reason="needs root to drop")
+    def test_a_real_child_drops_without_exec_and_owns_its_proc(self):
+        from jaato_server.shared import privilege_drop
+        read_end, write_end = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - child
+            code = 1
+            try:
+                drop_to(NOBODY)
+                before = privilege_drop._prctl(privilege_drop.PR_GET_DUMPABLE)
+                privilege_drop.ensure_dumpable(NOBODY)
+                after = privilege_drop._prctl(privilege_drop.PR_GET_DUMPABLE)
+                owner = os.stat(f"/proc/{os.getpid()}/attr/current").st_uid
+                os.write(write_end, f"{before} {after} {owner}".encode())
+                code = 0
+            except BaseException as exc:  # noqa: BLE001 - report it
+                os.write(write_end, repr(exc).encode()[:200])
+            finally:
+                os._exit(code)
+        os.close(write_end)
+        _, status = os.waitpid(pid, 0)
+        report = os.read(read_end, 256).decode()
+        os.close(read_end)
+        assert os.waitstatus_to_exitcode(status) == 0, report
+        before, after, owner = report.split()
+        assert after == "1" and owner == "65534", report
 
 
 # ------------------------------------------------------------ owned paths

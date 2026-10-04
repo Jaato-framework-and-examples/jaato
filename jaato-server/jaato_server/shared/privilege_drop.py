@@ -40,6 +40,17 @@ CPython's ``os.setresuid`` goes through glibc, which applies a credential
 change to every thread of the process (the ``setxid`` broadcast), so a pool
 slot's existing worker threads follow the drop — unlike an AppArmor label,
 which is per task (#1023).
+
+DUMPABLE (#1499).  A credential change clears the process's dumpable flag
+(it becomes ``fs.suid_dumpable``, 2 on Ubuntu), and the kernel then makes
+``/proc/<pid>/`` owned by root.  Every AppArmor rule on the runner's own
+``/proc`` entries is ``owner``-qualified (``attr/current``, the per-task
+``attr/current``, ``limits``), so a non-dumpable dropped runner is denied
+reading its own label, and its children are denied the ``//child``
+transition.  A cold-spawned runner is unaffected: ``execve`` resets the
+flag to 1 for a process whose uid equals its euid.  A pool slot drops in
+process and never execs, so it calls :func:`ensure_dumpable` after the drop
+and before it confines.  Never called on the cold-spawn path.
 """
 
 from __future__ import annotations
@@ -161,6 +172,66 @@ def drop_to(user: RunnerUser) -> bool:
         raise PrivilegeDropError(
             f"could not become {user.describe()}: {exc}") from exc
     _prove_irreversible(user)
+    return True
+
+
+#: ``prctl`` options (``<linux/prctl.h>``).
+PR_GET_DUMPABLE = 3
+PR_SET_DUMPABLE = 4
+
+
+def _prctl(option: int, arg: int = 0) -> int:
+    """``prctl(option, arg)`` through libc; raises ``OSError`` on -1.
+
+    ``ctypes`` is imported here rather than at module scope so the
+    cold-spawn child, which imports this module between ``fork`` and
+    ``exec`` and never calls this, loads nothing more than before.
+    """
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+    rc = libc.prctl(ctypes.c_int(option), ctypes.c_ulong(arg),
+                    ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0))
+    if rc == -1:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return rc
+
+
+def ensure_dumpable(user: RunnerUser) -> bool:
+    """Make a runner that dropped IN PROCESS dumpable again (#1499).
+
+    Gives a pool slot the state ``execve`` gives a cold-spawned runner, so
+    ``/proc/<pid>/`` is owned by the dropped uid and the ``owner`` rules of
+    the AppArmor profile match.  Children forked afterwards inherit the
+    flag.  Returns whether anything changed (``False`` when the process is
+    already dumpable, e.g. a cold-spawned runner reaching bootstrap).
+
+    Cost, the same one a cold-spawned runner already has: a dumpable
+    process may be traced by another process of the same uid (subject to
+    the profile's ``deny ptrace`` and Yama) and may write a core dump.
+
+    Raises:
+        PrivilegeDropError: ``prctl`` failed, or ``PR_GET_DUMPABLE`` does
+            not read 1 afterwards.  A slot left non-dumpable would be
+            refused by AppArmor later, far from the cause.
+    """
+    try:
+        if _prctl(PR_GET_DUMPABLE) == 1:
+            return False
+        _prctl(PR_SET_DUMPABLE, 1)
+        now = _prctl(PR_GET_DUMPABLE)
+    except OSError as exc:
+        raise PrivilegeDropError(
+            f"dropped to {user.describe()} but could not make the runner "
+            f"dumpable again (prctl: {exc}); its /proc entries stay "
+            f"root-owned and AppArmor's owner rules would deny them (#1499)"
+        ) from exc
+    if now != 1:
+        raise PrivilegeDropError(
+            f"dropped to {user.describe()} but PR_GET_DUMPABLE reads {now} "
+            f"after PR_SET_DUMPABLE(1) (#1499)")
     return True
 
 

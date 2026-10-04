@@ -1006,6 +1006,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # full LSM file-mediation check.  The ``owner`` qualifier covers
   # both read and write against the resolved path while preserving
   # the process-is-owner constraint.
+  # The constraint requires a DUMPABLE runner (#1499): after a uid
+  # drop without exec the kernel owns /proc/<pid>/ as root.  Cold spawn
+  # is dumpable after execve; a pool slot calls PR_SET_DUMPABLE.
   #
   # The ``r`` permission is required by the runner subprocess's
   # ``confine_to_profile.read_current_profile`` verify-after-write
@@ -2133,7 +2136,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # confine_to_profile.read_current_profile verify-after-write step
   # (server/runner/bootstrap.py:188).  ``owner`` qualifier matches the
   # kernel's resolved /proc/<pid>/ path AND verifies the process is
-  # the file's owner (always true for the process's own attr/current).
+  # the file's owner.  That holds only while the runner is DUMPABLE:
+  # a non-dumpable process's /proc/<pid>/ is root-owned (#1499).  A
+  # cold-spawned runner is dumpable after execve; a pool slot that
+  # dropped its uid in process restores it with PR_SET_DUMPABLE.
   # No write permission: by design the sub-runner stays in this
   # profile for its lifetime (no further self-transitions per the
   # DROP block below), so the write capability the parent + tool_hat
