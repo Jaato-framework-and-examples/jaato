@@ -131,6 +131,7 @@ from jaato_sdk.plugins.base import (
 from jaato_server.shared.path_utils import normalize_for_comparison
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.session_context import get_current_session, session_plugin_setting
+from jaato_server.shared.tool_visibility import tool_in_session_surface
 from jaato_server.shared.trace import trace as _trace_write
 
 
@@ -5571,7 +5572,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 and s.id not in self._selected_source_ids
             ]
             # If selectReferences is excluded or no selectable sources, nothing to show
-            if not selectable or "selectReferences" in self._exclude_tools:
+            if not selectable or not self._tool_available("selectReferences"):
                 self._trace("get_system_instructions: no sources to inject")
                 return None
 
@@ -5580,7 +5581,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "",
                 "Additional reference sources are available for this session.",
             ]
-            if "listReferences" not in self._exclude_tools:
+            if self._tool_available("listReferences"):
                 parts.append("Use `listReferences` to see available sources, their tags, and resolved paths.")
             parts.extend([
                 "Use `selectReferences` with specific IDs or tags to select sources and",
@@ -5620,7 +5621,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         # Mention remaining selectable sources (not pre-selected) if any
         # Only show if selectReferences tool is available
-        if "selectReferences" not in self._exclude_tools:
+        if self._tool_available("selectReferences"):
             selectable = [
                 s for s in self._sources
                 if s.mode == InjectionMode.SELECTABLE
@@ -6385,6 +6386,41 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 return True
         return False
 
+    def _tool_available(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` (one of this plugin's tools) can be called
+        by the CALLING session — the predicate every hint and instruction
+        that names one of them asks before naming it (#1491).
+
+        False when the instance-wide ``exclude_tools`` withholds it, or when
+        the calling session's profile scopes this plugin to a list that
+        leaves it out (``references(tools:[...])``, asked through
+        ``JaatoSession.tool_in_surface``, #1513).  Per session: the plugin
+        instance is shared with sibling subagents whose scopes differ.
+        """
+        if tool_name in self._exclude_tools:
+            return False
+        return tool_in_session_surface(tool_name)
+
+    def _hintable_mentions(
+        self, matches: List[str], source_ids: Set[str], source_type: str
+    ) -> List[str]:
+        """The ``@id`` mentions pass 1 expands: known ids, and none at all
+        when ``selectReferences`` is not in the calling session's surface.
+
+        Passes 1, 2 and 2b point the session at references it is expected
+        to SELECT, so each runs only when the session can call
+        ``selectReferences``: its profile's ``references(tools:[...])``
+        scope, not only the instance-wide ``exclude_tools`` (#1491).
+        """
+        mentioned_ids = [m for m in matches if m in source_ids]
+        if mentioned_ids and not self._tool_available("selectReferences"):
+            self._trace(
+                f"enrich [{source_type}]: selectReferences not in this "
+                f"session's surface; skipping reference hints"
+            )
+            return []
+        return mentioned_ids
+
     def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
         """Common enrichment logic for prompts and tool results.
 
@@ -6419,7 +6455,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         source_ids = {s.id for s in self._sources}
         at_reference_pattern = re.compile(r'@([\w-]+)')
         matches = at_reference_pattern.findall(content)
-        mentioned_ids = [m for m in matches if m in source_ids]
+        mentioned_ids = self._hintable_mentions(matches, source_ids, source_type)
 
         if mentioned_ids:
             self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
@@ -6465,7 +6501,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # --- Pass 2: tag-based reference ID hints ---
         # Only consider unselected selectable sources (not AUTO, not already selected)
         # and only if selectReferences is available
-        if "selectReferences" not in self._exclude_tools:
+        if self._tool_available("selectReferences"):
             unselected = [
                 s for s in self._sources
                 if s.mode == InjectionMode.SELECTABLE
@@ -6586,7 +6622,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if (
             self._semantic_available()
             and self._lookup_strategy in ("hybrid", "semantic_only")
-            and "selectReferences" not in self._exclude_tools
+            and self._tool_available("selectReferences")
         ):
             # IDs already surfaced by earlier passes — no need to re-hint
             already_surfaced: set = set(mentioned_ids)
