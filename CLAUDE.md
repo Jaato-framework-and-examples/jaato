@@ -2520,6 +2520,53 @@ is still the right place for the fix, because it protects against ANY
 unconfined session sharing a daemon; whether the first runner should wait
 for provisioning is its own change.
 
+### A Profile Reloaded That the Kernel Already Had (#1501)
+
+`provision_profile` rendered, rewrote and `sudo apparmor_parser -r`-ed the
+boundary profile for every confined session, even when #1033 had given it
+a name the kernel already had loaded with byte-identical rules. Measured
+on the reporting host: +1.26 s per session cold, +1.70 s on a pool slot.
+
+**A reload is skipped only on positive evidence** (`_loaded_profile_matches`):
+
+| Condition | Why |
+|---|---|
+| the boundary's refs dir is empty | reference grants are spliced in by an `include if exists` the render cannot see |
+| no failed reload left the kernel ahead of the files (`_kernel_may_diverge`) | a reload that failed after a fragment was REMOVED keeps the old rule loaded |
+| the file on disk is byte-identical to the render | kept although the name embeds a digest |
+| the kernel lists the exact name, in the mode the render asks for | #1014: the mode recorded (`loaded_mode`) is the one the kernel reported. A complain render is another body and so another name anyway |
+
+`/sys/kernel/security/apparmor/profiles` is read first, the
+`policy/profiles/<name>.<n>/{name,mode}` tree second; neither readable
+LOADS (#1253 / #1299). The grant record (#1326) is refreshed from the same
+render on a skip.
+
+**An unheld boundary stays loaded for a grace** (`JAATO_APPARMOR_PROFILE_GRACE_SECONDS`,
+host-scoped, default 60, `0` = unload at once as before). Only boundary-derived
+ids get one; a per-session name can never be claimed again. A provision of the
+same boundary claims it; the #812 lifetime watchdog (`_sweep_idle_apparmor_profiles`,
+both the IPC and the WS manager), every provision and release, and daemon stop
+(`SessionManager.shutdown`, `JaatoWSServer.stop`) unload what is due. Two rules:
+
+- **A boundary carrying session-added reference grants unloads at once**, refs
+  dir and all, so the next session starts with exactly what its render gives.
+- **Held is not idle.** The sweep re-checks live sessions and
+  `AppArmorManager.slot_in_use` (wired to `PoolManager.profile_in_use`); a held
+  boundary's idle entry is dropped and its next release starts a new grace.
+
+Every provision logs `AppArmor provision timings session=… reload=ran|skipped
+id= render= check= write= parser= total=` (`id` is the probe render in
+`confinement_id_for_boundary`). Locally, with the parser stubbed, everything
+but the parser is about 1-3 ms.
+
+Found while reading: the only unload sites were slot death, the WS workspace
+reaper and the cascade transition, so on the cold path the per-session cost was
+the reload, not an unload. A skipped reload also does not pick up a changed
+system abstraction (`abstractions/base`) until the profile is next loaded.
+
+Guard: `jaato_server/server/tests/test_apparmor_profile_reuse_1501.py`, nine
+reversions. No kernel: the parser and securityfs are stubbed.
+
 ### A Tmpdir Two Modules Named Differently (#1171)
 
 `RunnerSpawner` decided where a runner's temp files go; `AppArmorManager`

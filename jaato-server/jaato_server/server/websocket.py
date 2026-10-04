@@ -1878,6 +1878,8 @@ class JaatoWSServer:
             workspace_root=self._workspace_root,
             loop=loop,
         )
+        # #1501: an idle-grace profile a pooled slot still wears is held.
+        self._apparmor.slot_in_use = self._apparmor_slot_in_use
         if self._apparmor_mode is False:
             if self._apparmor_required_env:
                 # Contradiction: env requires confinement, flag disables
@@ -2070,9 +2072,24 @@ class JaatoWSServer:
         # Give server time to start
         await asyncio.sleep(0.1)
 
+    def _apparmor_slot_in_use(self, profile_name: str) -> bool:
+        """``AppArmorManager.slot_in_use`` for this server's manager (#1501)."""
+        pool = getattr(self, "_pool_manager_ref", None)
+        return bool(pool is not None and pool.profile_in_use(profile_name))
+
     async def stop(self) -> None:
         """Stop the server gracefully."""
         self._shutdown_event.set()
+
+        # #1501: unload boundary profiles kept loaded for their idle grace.
+        # Off the loop: the unload is dispatched back onto it (#1355).
+        apparmor = getattr(self, "_apparmor", None)
+        if apparmor is not None and hasattr(apparmor, "unload_idle_profiles"):
+            try:
+                await asyncio.to_thread(apparmor.unload_idle_profiles)
+            except Exception:  # noqa: BLE001 — stopping carries on
+                logger.warning("unloading idle AppArmor profiles failed",
+                               exc_info=True)
 
         # Stop workspace reaper
         for provisioner in [self._provisioner, *self._app_provisioners.values()]:
