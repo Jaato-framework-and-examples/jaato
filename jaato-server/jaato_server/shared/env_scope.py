@@ -184,6 +184,9 @@ CATALOG: Dict[str, EnvClass] = {
     # ---- daemon / runner lifecycle -----------------------------------
     "JAATO_APPARMOR_COMPLAIN": EnvClass(HOST, None,
         "kernel policy load mode; a host-wide diagnostic posture"),
+    "JAATO_APPARMOR_PROFILE_GRACE_SECONDS": EnvClass(HOST, None,
+        "how long the daemon keeps an unheld boundary profile loaded; a "
+        "property of the kernel policy the whole host shares, not of a session"),
     "JAATO_AZURE_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.azure_openai.api_key",
         "credential; azure_openai exposes the knob, so a profile can carry "
         "a pass:// URI instead of the env var"),

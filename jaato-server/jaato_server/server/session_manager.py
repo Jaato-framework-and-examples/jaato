@@ -2774,6 +2774,10 @@ class SessionManager:
                 workspace_root=workspace_path,
                 loop=daemon_loop,
             )
+            # #1501: an idle-grace profile a live pool slot still wears is
+            # held, not idle.  Read the pool at call time: it is wired
+            # after this manager may be built.
+            self._apparmor_manager.slot_in_use = self._apparmor_slot_in_use
 
         apparmor = self._apparmor_manager
         if not apparmor.is_available():
@@ -2914,6 +2918,45 @@ class SessionManager:
                 "kernel profile loaded; cascade-idle sweep will reap",
                 prior_session_id, current_session_id, exc,
             )
+
+    def _apparmor_slot_in_use(self, profile_name: str) -> bool:
+        """Is an idle pool slot confined to *profile_name*? (#1501)
+
+        The ``AppArmorManager.slot_in_use`` predicate.  A checked-out slot
+        always has a session, which the manager sees on its own.
+        """
+        pool = getattr(self, "_pool_manager_ref", None)
+        return bool(pool is not None and pool.profile_in_use(profile_name))
+
+    def _apparmor_managers(self) -> List[Any]:
+        """Every AppArmor manager this daemon built: its own and the WS one.
+
+        Each is wired with :meth:`_apparmor_slot_in_use` on the way out, so
+        the WS manager's sweep consults the pool too.
+        """
+        found: List[Any] = []
+        for mgr in (getattr(self, "_apparmor_manager", None),
+                    getattr(getattr(self, "_ws_server_ref", None), "_apparmor", None)):
+            if mgr is None or mgr in found or not hasattr(mgr, "sweep_idle_profiles"):
+                continue
+            if getattr(mgr, "slot_in_use", None) is None:
+                mgr.slot_in_use = self._apparmor_slot_in_use
+            found.append(mgr)
+        return found
+
+    def _sweep_idle_apparmor_profiles(self) -> None:
+        """Unload boundary profiles whose idle grace has passed (#1501)."""
+        for mgr in self._apparmor_managers():
+            mgr.sweep_idle_profiles()
+
+    def _unload_idle_apparmor_profiles(self) -> None:
+        """Daemon stop: unload every idle boundary profile now (#1501)."""
+        for mgr in self._apparmor_managers():
+            try:
+                mgr.unload_idle_profiles()
+            except Exception:  # noqa: BLE001 — shutdown carries on
+                logger.warning("unloading idle AppArmor profiles failed",
+                               exc_info=True)
 
     def _reap_apparmor_profile_for_dead_slot(self, profile_name: str) -> None:
         """``PoolManager.profile_reaper`` — the last wearer has died.
@@ -6320,6 +6363,13 @@ class SessionManager:
                 logger.exception(
                     "session-inbox sweep raised — the next pass re-derives "
                     "its state",
+                )
+            try:
+                self._sweep_idle_apparmor_profiles()
+            except Exception:  # noqa: BLE001 — same rule, separate pass
+                logger.exception(
+                    "AppArmor idle-profile sweep raised — the next pass "
+                    "re-derives its state",
                 )
 
     def _sweep_app_secret_expiry(self, now: Optional[float] = None) -> None:
@@ -16914,6 +16964,10 @@ class SessionManager:
             _egress_wireup.shutdown_all()
         except Exception:  # pragma: no cover - defensive
             logger.warning("egress proxy shutdown_all failed", exc_info=True)
+
+        # #1501: a boundary kept loaded for its grace does not outlive the
+        # daemon.  Held profiles (a live slot) are left to the pool reaper.
+        self._unload_idle_apparmor_profiles()
 
         self._session_plugin.shutdown()
         logger.info("SessionManager shutdown complete")
