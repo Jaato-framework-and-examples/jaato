@@ -47,6 +47,7 @@ from jaato_server.shared.apparmor_label import (
 from jaato_server.shared.session_envelope import SessionInitEnvelope
 from jaato_server.shared.privilege_drop import (
     PrivilegeDropError, RunnerUser, apply_user_env, drop_to,
+    ensure_dumpable,
 )
 from jaato_server.shared.private_tmp import (
     PRIVATE_TMP_TARGETS, PrivateTmpError, enter_private_tmp,
@@ -948,6 +949,12 @@ def _drop_to_runner_user(envelope: SessionInitEnvelope) -> None:
         if user is None:
             return
         changed = drop_to(user)
+        # #1499: an in-process drop leaves the slot non-dumpable, so its
+        # /proc entries are root-owned and every ``owner /proc/*/...``
+        # rule of the profile 1c applies denies them.  Before 1c, so the
+        # label is applied and read back with /proc owned by the user.
+        # A no-op for a cold-spawned runner, which execve made dumpable.
+        ensure_dumpable(user)
     except PrivilegeDropError as exc:
         raise BootstrapError(
             "privilege_drop",

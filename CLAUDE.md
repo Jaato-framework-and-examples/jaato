@@ -7623,6 +7623,27 @@ Stated costs and limits:
   `nobody` was run here (unconfined): the runner served RPC as uid 65534
   and its log and `.jaato/logs` were owned by it.
 
+**A pool slot must be dumpable again (#1499).** A credential change
+clears the process's dumpable flag (it becomes `fs.suid_dumpable`, 2 on
+Ubuntu) and the kernel then owns `/proc/<pid>/` as root, so every
+`owner /proc/*/...` rule in the profile stopped matching: the bootstrap
+read-back of `attr/current`, `verify_thread_confinement`'s per-task scan,
+the `//child` transition write by `cli` / `interactive_shell` / notebook
+children, and `limits`. Every session on a dropped slot was refused with
+`RunnerBootstrapFailed`. A cold spawn was never affected: `execve` resets
+the flag for a process whose uid equals its euid. Step 1b3 now calls
+`privilege_drop.ensure_dumpable` after `drop_to` (after `setresuid` and
+the `setuid(0)` proof) and before 1c confines; it reads
+`PR_GET_DUMPABLE` back and refuses the bootstrap (`privilege_drop`) if it
+is not 1. Not called on the cold-spawn path. The `owner` qualifiers stay.
+Cost, the same a cold-spawned runner already has: a dumpable runner may be
+traced by another process of its uid and may write a core dump. Every
+runner body carries `deny ptrace` and `deny capability sys_ptrace`
+(AppArmor mediates both tracer and tracee, and Yama applies on top); no
+`RLIMIT_CORE` is set for runners, which is a possible follow-up. Guard:
+`TestDumpableAfterInProcessDrop` in `test_runner_privilege_drop_1168.py`,
+three reversions.
+
 Chowning after write stays rejected: it cannot be made complete (it misses
 the intermediate directories, every file a subprocess writes, and anything
 an out-of-tree plugin writes), which is #735's shape.
