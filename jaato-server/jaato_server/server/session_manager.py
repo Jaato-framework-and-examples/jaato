@@ -619,6 +619,24 @@ def _seccomp_for_record(session: Any) -> Optional[Dict[str, Any]]:
     return dict(restored) if isinstance(restored, dict) else None
 
 
+def _boundary_columns(session: Any) -> Dict[str, Any]:
+    """The confinement columns of one ``session.info`` listing row.
+
+    ``sandbox_mode`` (what the LSM boundary is) and, since #1503,
+    ``seccomp`` (the posture of the syscall filter), each present only
+    when known.
+    """
+    if session is None:
+        return {}
+    out: Dict[str, Any] = {}
+    if session.sandbox_mode:
+        out["sandbox_mode"] = session.sandbox_mode
+    seccomp = _seccomp_for_record(session)
+    if seccomp:
+        out["seccomp"] = seccomp.get("posture")
+    return out
+
+
 def session_picker_fields(info: Any) -> Dict[str, Any]:
     """The session-picker keys every client-facing session row carries.
 
@@ -15424,12 +15442,7 @@ class SessionManager:
                 "workspace_path": s.workspace_path or "",
                 **session_picker_fields(s),
             }
-            sess = session_lookup.get(s.session_id)
-            if sess and sess.sandbox_mode:
-                entry["sandbox_mode"] = sess.sandbox_mode
-            seccomp = _seccomp_for_record(sess) if sess else None
-            if seccomp:
-                entry["seccomp"] = seccomp.get("posture")
+            entry.update(_boundary_columns(session_lookup.get(s.session_id)))
             sessions_data.append(entry)
 
         # Get tools list from the session's server

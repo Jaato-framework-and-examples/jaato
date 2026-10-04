@@ -34,7 +34,7 @@
 import { MIN_DIAGNOSTICS_PROTOCOL, isProtocolCompatible } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
 import { getClient, isConnected } from "@/sdk/connection";
-import type { DiagnosticsGrants, DiagnosticsProbe } from "@/store/types";
+import type { DiagnosticsGrants, DiagnosticsProbe, DiagnosticsSeccomp } from "@/store/types";
 
 type Patch = Parameters<ReturnType<typeof useJaato.getState>["patchDiagnostics"]>[0];
 const patch = (p: Patch) => useJaato.getState().patchDiagnostics(p);
@@ -77,6 +77,26 @@ export function diagnosticsSummary(d: Pick<
  * ``unscoped`` means every in-PATH binary.  ``not recorded`` is its own
  * answer, never read as either.
  */
+/** One line for the seccomp posture (#1503): what a subprocess may reach.
+ *  ``absent`` and ``off`` say "no filter" in words, so "LSM yes, seccomp
+ *  no" reads as such rather than as a bare token. */
+export function seccompLine(s: DiagnosticsSeccomp | null): string {
+  if (!s) return "(not reported)";
+  const allowed = s.allowed_families?.length ? `, allowed back: ${s.allowed_families.join(", ")}` : "";
+  switch (s.posture) {
+    case "filter":
+      return `filter installed in every subprocess${allowed}`;
+    case "off":
+      return "off: no syscall filter (runtime_limits.seccomp: off)";
+    case "absent":
+      return `absent: no syscall filter${s.reason ? ` (${s.reason})` : ""}${s.spawns_refused ? " — every subprocess refused" : ""}`;
+    case "unconfined":
+      return "none: the session has no kernel boundary";
+    default:
+      return s.posture;
+  }
+}
+
 export function grantsSummary(g: DiagnosticsGrants): string {
   const declared = g.declared_by === ""
     ? " (declared by: unknown)"
@@ -136,6 +156,7 @@ export async function refreshDiagnostics(): Promise<void> {
       serverVersion: answer.server_version ?? "",
       probe: (answer.probe as unknown as DiagnosticsProbe | null) ?? null,
       apparmorGrants: (answer.apparmor_grants as unknown as DiagnosticsGrants | null) ?? null,
+      seccomp: (answer.seccomp as unknown as DiagnosticsSeccomp | null) ?? null,
       checkedAt: Date.now(),
     });
   } catch (err) {
