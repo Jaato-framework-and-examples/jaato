@@ -35,8 +35,9 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/shared/tests/test_scaffold_surfaces_know_the_compliance_keys.py",
-        find='r"^jaato-scaffold explain ([a-z-]+)"',
-        replace='r"^jaato-scaffold explain ([a-z]+)"',
+        # \x2d spells the hyphen so this literal is not itself the anchor.
+        find='listed = set(re.findall(r"^jaato-scaffold explain ([a-z\x2d]',
+        replace='listed = set(re.findall(r"^jaato-scaffold explain ([a-z]',
         because="a hyphenated topic is read as its prefix, so the skill "
                 "lists 'runner' and the CLI has 'runner-user'",
         test="test_every_topic_the_skill_lists_is_one_the_cli_has",
