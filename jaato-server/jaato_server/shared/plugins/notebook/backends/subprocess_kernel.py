@@ -45,9 +45,13 @@ from ...workspace_home import resolve_home_path, apply_home_to_env
 from ...jaato_tools_path import append_path_entry, jaato_tools_dir
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
+from jaato_server.shared.lsm_label import (
+    BACKEND_SELINUX, selinux_cell_boundary, selinux_session_boundary,
+)
 from ..kernel_sandbox import (
     BOUNDARY_APPARMOR,
     BOUNDARY_AUDIT,
+    BOUNDARY_SELINUX,
     BOUNDARY_NONE,
     BOUNDARY_OPT_OUT,
     UNCONTAINED_OPT_IN_ENV,
@@ -402,6 +406,31 @@ class SubprocessKernelBackend(NotebookBackend):
 
         return _preexec
 
+    def _selinux_kernel_args(self) -> List[str]:
+        """The kernel argv that claims the SELinux tier, or ``[]`` (#1519).
+
+        Non-empty only when the runner's bootstrap recorded an SELinux
+        boundary the daemon attested as enforcing AND the child transition
+        is wired, so the kernel is exec'd into that boundary's
+        ``jaato_child_t`` context.  Without the transition the kernel would
+        inherit ``jaato_runner_t``, which is not a cell boundary.  The kernel
+        re-checks its own context against the label it is given and refuses
+        the tier on any mismatch; this is only the pre-spawn expectation.
+
+        The facts travel in argv, set here from the envelope, never in the
+        environment: a model can write the workspace ``.env``.
+        """
+        boundary = selinux_session_boundary()
+        if (boundary is None or not boundary.enforcing_attested
+                or self._apparmor_child_transition is None
+                or not selinux_cell_boundary(
+                    raw=boundary.child_label, backend=BACKEND_SELINUX,
+                    enforcing_attested=True,
+                    host_enforcing=lambda: None)):
+            return []
+        return ["--selinux-child-label", boundary.child_label,
+                "--selinux-enforcing-attested"]
+
     def _sandbox_allow_block(self) -> Optional[Dict[str, List[str]]]:
         """The ``allow`` block to attach to an ``execute`` frame, or ``None``.
 
@@ -489,6 +518,8 @@ class SubprocessKernelBackend(NotebookBackend):
         if profile and (self._apparmor_child_transition is not None
                         or not profile_can_leave_itself(profile)):
             return BOUNDARY_APPARMOR
+        if self._selinux_kernel_args():
+            return BOUNDARY_SELINUX
         if self._allow_uncontained:
             return BOUNDARY_OPT_OUT
         if not (get_workspace_root() or self._workspace_root):
@@ -521,6 +552,11 @@ class SubprocessKernelBackend(NotebookBackend):
                     "is started in the //child sub-profile)")
             return True, (
                 f"AppArmor-enforced profile {profile} (inherited by the kernel)")
+        if kind == BOUNDARY_SELINUX:
+            child = self._selinux_kernel_args()[1]
+            return True, (
+                f"SELinux-enforced domain {child} (the kernel is exec'd into "
+                "jaato_child_t)")
         if kind == BOUNDARY_OPT_OUT:
             return True, "operator opt-out (uncontained)"
         if kind == BOUNDARY_NONE:
@@ -906,6 +942,7 @@ class SubprocessKernelBackend(NotebookBackend):
             containment_args += ["--allow-write", str(venv_path)]
         if self._allow_uncontained:
             containment_args.append("--uncontained")
+        containment_args += self._selinux_kernel_args()
         proc = _popen_or_close(
             [*_kernel_argv(kernel_python, import_dirs,
                            user_site_is_workspaces=bool(home_path)),

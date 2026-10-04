@@ -10552,6 +10552,28 @@ confined deployment that chose `backend: local` without the opt-in now has its
 cells refused. Guard:
 `jaato_server/shared/tests/test_notebook_kernel_runs_in_child_1323.py`.
 
+**The same rule under SELinux (#1519).** A kernel exec'd into `jaato_child_t`
+(the composed child `preexec_fn` already carried `setexeccon` to it) got the
+audit tier, because `establish_containment` asked only AppArmor, so `import
+numpy` failed in a cell on every SELinux session. `BOUNDARY_SELINUX` is the
+kernel tier for it, and needs positive evidence: the kernel's own context
+(`lsm_label.selinux_cell_boundary`) is `jaato_child_t` and the exact context
+the runner exec'd it into; `jaato_runner_t` does not count (a kernel found
+there missed the transition). Enforcement cannot be asked from inside the
+domain (neither jaato domain may read `/sys/fs/selinux` or compute an access
+vector), so the daemon attests it when it provisions the boundary (host
+enforcing, neither domain permissive, `ConfinementHandle.enforcing_attested`),
+and it travels on the envelope descriptor (`"enforcing"`, absent from an older
+daemon = not attested), the runner's recorded `SELinuxSessionBoundary` and the
+kernel's argv, never its environment. A host switch the kernel CAN read as `0`
+refuses the tier whatever was attested. `lsm_label` imports `ctypes` lazily,
+because the kernel imports it before its hook: a preloaded `ctypes` would hand
+an audit-tier cell `ctypes.pythonapi`. The tier shows in the notice, the
+diagnostics' `notebook_boundary_kind` and `get_environment(aspect="runtime")`
+(`notebook.boundary`). Guard:
+`jaato_server/shared/tests/test_notebook_kernel_selinux_tier_1519.py`, twelve
+reversions.
+
 #### The audit tier cannot import `ctypes`, and so cannot import numpy (#1011)
 
 The row above says `ctypes.dlopen` of anything **outside the interpreter
@@ -10584,9 +10606,9 @@ read/write with no library load at all — the `_POLICY`-rebinding limit the
 module docstring already names. Under the audit tier you genuinely cannot have
 both `import ctypes` and this boundary.
 
-**The AppArmor tier has no such restriction**, because `establish_containment`
-installs no hook at all when `/proc/self/attr/current` reports an enforced
-profile — there, `import ctypes` and numpy work normally. Neither does a
+**The AppArmor and SELinux tiers have no such restriction**, because
+`establish_containment` installs no hook at all when the kernel is in an
+enforced `//child` profile or `jaato_child_t` domain (#1323, #1519) — there, `import ctypes` and numpy work normally. Neither does a
 **subprocess**: a spawned child is bounded by the OS and nothing else, so the
 same import runs through `cli` or `!python`, which is also why `!pip install X`
 works. Those are the remedies, and they are all *other surfaces* — which is the

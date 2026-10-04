@@ -1212,6 +1212,10 @@ def _maybe_self_confine(
     # is refused here, before the unconfined no-op below could read an empty
     # ``profile_name`` as "the operator opted out" (selinux-backend.md §3.2).
     from . import lsm_confine
+    from jaato_server.shared.lsm_label import set_selinux_session_boundary
+    # Cleared on every bootstrap so a pool slot never reports a previous
+    # session's boundary to the notebook backend (#1519).
+    set_selinux_session_boundary(None)
     confinement = lsm_confine.resolve(envelope)
     backend = confinement.backend if confinement else ""
     if backend == lsm_confine.BACKEND_SELINUX:
@@ -1378,11 +1382,23 @@ def _confirm_selinux_domain(
     """
     from . import lsm_confine
 
+    from jaato_server.shared.lsm_label import (
+        SELinuxSessionBoundary, set_selinux_session_boundary,
+    )
+
     lsm_confine.self_confine(confinement.backend, confinement.label)
     logger.info("runner-session bootstrap: running in SELinux domain %s",
                 confinement.label)
     _retire_and_verify_threads(confinement.label, recycle_pools,
                                backend=confinement.backend)
+    # Recorded only once the domain is confirmed and every thread verified:
+    # the notebook backend reads it to start kernels at the SELinux tier
+    # (#1519), and a boundary that failed either check is not one.
+    set_selinux_session_boundary(SELinuxSessionBoundary(
+        label=confinement.label,
+        child_label=confinement.child_label,
+        enforcing_attested=bool(getattr(confinement, "enforcing_attested", False)),
+    ))
 
 
 def _retire_and_verify_threads(

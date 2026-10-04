@@ -353,14 +353,16 @@ class SELinuxBackend:
                          session_id, workspace, exc)
             return None
         label = f"{own.user}:{own.role}:{domain}:{level}"
+        child_label = f"{own.user}:{own.role}:{child_domain}:{level}"
         permissive = self._domain_permissive(label)
         handle = ConfinementHandle(
             backend=BACKEND_SELINUX,
             label=label,
             confinement_id=self.confinement_id_for_boundary(boundary, domain),
-            child_label=f"{own.user}:{own.role}:{child_domain}:{level}",
+            child_label=child_label,
             grants=_grants(plan, label, domain, child_domain),
             complain=(permissive is True or self.host_readiness().enforcing is False),
+            enforcing_attested=self._attest_enforcing(label, child_label, permissive),
         )
         # The session tmpdir, before the spawn: the runner has no add_name
         # in /tmp and no write on user_tmp_t, so a directory it did not get
@@ -374,6 +376,22 @@ class SELinuxBackend:
                          "labelled: %s", session_id, exc)
             return None
         return handle
+
+    def _attest_enforcing(
+        self, label: str, child_label: str, permissive: Optional[bool],
+    ) -> bool:
+        """Positive evidence the kernel enforces both domains (#1519).
+
+        The host switch read now (not the cached readiness), and neither the
+        runner's domain nor the child's permissive.  The child domain is
+        asked separately: ``semanage permissive -a jaato_child_t`` leaves the
+        runner enforcing.  Any half unread is ``False``.
+        """
+        if self._host_enforcing() is not True or permissive is not False:
+            return False
+        if child_label == label:
+            return True
+        return self._domain_permissive(child_label) is False
 
     def _ensure_labelled(self, kernel: "_Kernel", plan: "selinux_labels.Plan") -> None:
         """Walk and label unless the stamp and the root's label say done."""

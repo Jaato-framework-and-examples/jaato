@@ -14,7 +14,8 @@ blocks on a ``tool_call`` frame the runner answers.
 **Containment comes first, and refusal is a state this process can be in**
 (issue #710).  ``main`` calls ``kernel_sandbox.establish_containment`` BEFORE
 the READY handshake and before any cell can arrive, and records the boundary in
-``_BOUNDARY``: an enforced AppArmor profile (the kernel inherits the runner's),
+``_BOUNDARY``: an enforced AppArmor ``//child`` profile or SELinux
+``jaato_child_t`` domain the kernel was started in (#1323, #1519),
 this module's audit hook, or an explicit operator opt-out.  When none of those
 holds, every ``execute`` is answered with an ``error`` frame naming the reason
 instead of running the cell — the kernel stays up and serving so the refusal
@@ -28,6 +29,7 @@ Invocation:
   python -m shared.plugins.notebook.kernel_main \
       --workspace-root <abs> --read-fd <n> --write-fd <n> \
       [--allow-read PATH ...] [--allow-write PATH ...] [--uncontained]
+      [--selinux-child-label CTX [--selinux-enforcing-attested]]
 """
 
 import argparse
@@ -234,6 +236,12 @@ def main(argv=None) -> int:
                     help="extra path a cell may read and WRITE (repeatable)")
     ap.add_argument("--uncontained", action="store_true",
                     help="operator opted out of filesystem containment")
+    ap.add_argument("--selinux-child-label", default=None,
+                    help="the SELinux context the runner exec'd this kernel "
+                         "into (#1519)")
+    ap.add_argument("--selinux-enforcing-attested", action="store_true",
+                    help="the daemon attested the kernel enforces that "
+                         "context (#1519)")
     args = ap.parse_args(argv)
 
     # The whole point of 1c: the kernel's OWN cwd is the workspace, so relative
@@ -248,6 +256,8 @@ def main(argv=None) -> int:
         extra_read_paths=tuple(args.allow_read),
         extra_write_paths=tuple(args.allow_write),
         opt_out=bool(args.uncontained),
+        selinux_child_label=args.selinux_child_label,
+        selinux_enforcing_attested=bool(args.selinux_enforcing_attested),
     )
 
     rstream = os.fdopen(args.read_fd, "rb", buffering=0)
