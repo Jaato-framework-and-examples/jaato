@@ -70,7 +70,7 @@ The framework uses a server-first architecture where the server runs as a daemon
   - `--ipc-trust-peer-paths`: opt out of that check (also `JAATO_IPC_TRUST_PEER_PATHS=1`). Announced at WARNING the first time it takes effect.
   - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth. **Prefer `--ws-token-file`, or neither flag.** A token passed as `--ws-token TOKEN` sits in the daemon's `argv` and is therefore served by `/proc/<daemon_pid>/cmdline` to anything on the host that can read it. AppArmor template v30 denies that read from inside a confined session (#712), but the exposure to everything else on the box is a property of the flag, not of the profile.
   - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
-  - `--ws-app-credentials PATH`: opt into per-user **connect tickets** (#1074). A JSON object mapping an application id to that application's long-lived credential, mode 0600 enforced. Each entry authorises one WS connection to call `ticket.bind` / `ticket.revoke` and **nothing else** — it cannot open a session. Omit the flag and WS auth is byte-identical to what it has always been. See [Identity at Connect](#identity-at-connect-1074).
+  - `--ws-app-credentials PATH`: opt into per-user **connect tickets** (#1074). A JSON object mapping an application id to `{credential, account, workspace_root}`, mode 0600 enforced; the last two place that application's workspaces (#1496, see [An Application's Workspaces Belong to Its Account](#an-applications-workspaces-belong-to-its-account-1496)). Each entry authorises one WS connection to call `ticket.bind` / `ticket.revoke` and **nothing else** — it cannot open a session. Omit the flag and WS auth is byte-identical to what it has always been. See [Identity at Connect](#identity-at-connect-1074).
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
 
@@ -7654,6 +7654,52 @@ caveat and the log line to verify. It reads `runner_user.py`
 `runner_import_paths`) rather than restating it. Guard:
 `jaato_server/shared/tests/test_explain_runner_user_1168.py`, three
 reversions.
+
+### An Application's Workspaces Belong to Its Account (#1496)
+
+A WS connection has no OS principal, so `--runner-uid-policy peer` keeps
+the daemon's uid for it, and `workspace-owner` read `root` for every
+workspace a root daemon created. One daemon root also cannot serve two
+applications that each need their workspaces under their own account.
+
+Each entry of `--ws-app-credentials` now declares where its application's
+workspaces live:
+
+```json
+{"jaato-web-coder": {"credential": "<43 chars>",
+                     "account": "webcoder",
+                     "workspace_root": "/home/webcoder/workspaces"}}
+```
+
+| Piece | Where |
+|---|---|
+| the entry: exactly these three keys; the account must exist, the root must exist, be a directory owned by the account and searchable by it; a non-root daemon may name only its own account; two applications' roots may not be equal or nested | `ws_tickets._validated_entries`, `_app_workspace`, `_refuse_shared_roots` (`AppCredentialStore.workspace(app_id)`) |
+| one `WorkspaceManager` and `WorkspaceProvisioner` per application, its registry at `~/.jaato/workspaces-<app_id>.json` (daemon-side: the rows carry the `owner` that decides visibility); a root overlapping the daemon's own refuses startup | `JaatoWSServer._init_app_workspaces` |
+| a connection whose `app_id` has a root is served from it by every workspace verb, staging, inspect, clone, delete and provisioning; any other connection keeps the daemon's root | `_workspace_manager_for`, `_provisioner_for` |
+| "is this a daemon-managed workspace" (AppArmor/cgroup gates, workspace HOME #1225, venv #1274, private `/tmp` #1381) is asked per workspace | `JaatoWSServer.managed_root_for`, `SessionManager.set_managed_root_resolver` |
+
+**What the daemon writes in a workspace takes the owner of its tree**
+(`shared/workspace_ownership.py`): only a root daemon hands anything over,
+only into a tree not owned by root, only paths the daemon itself owns
+(never one another account owns), with `lchown` and without following a
+link. Writers that hand over: `workspace.create` and the provisioner, the
+`.env` writes, `contained_write` (staging, `workspace.app_write`'s files,
+promotion), `workspace.app_write`, `workspace.ignore`, the reference
+catalog after a promotion, the `.jdtls-state` sibling, workspace HOME and
+private `/tmp` directories, the SELinux authored-dir pre-creation, artifact
+copies, replay snapshots, credential files a daemon-side `<provider>-auth`
+command leaves in `.jaato/`. `git clone` runs AS the workspace owner
+(`workspace_clone._clone_identity`), so its checkout is never root's.
+Daemon-tier records stay root's: session records, logs, the inbox.
+
+No compatibility path: a bare-string entry is refused. Connections without
+an application (the shared token, IPC) keep the daemon's own root, and a
+root-owned workspace behaves exactly as before. Existing workspaces under
+the daemon's root are not moved; moving them is an operator step.
+
+Guard: `jaato_server/server/tests/test_an_applications_workspaces_belong_to_its_account_1496.py`,
+eleven reversions. Ownership is exercised through a view of `os` as a root
+daemon sees it (the suite does not run as root).
 
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 

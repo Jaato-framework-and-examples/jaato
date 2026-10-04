@@ -117,6 +117,7 @@ from jaato_server.shared.plugins.references.models import (
 )
 
 from .contained_write import PathLeavesRoot, contained_dir, write_contained
+from jaato_server.shared.workspace_ownership import inherit_owner_tree
 from .memory_verbs import may_curate
 
 logger = logging.getLogger(__name__)
@@ -556,6 +557,9 @@ def reconcile_destination(
         source.bundle_name = dest.name
     provider = RunnerEmbeddingProvider(embed, dest.embedding_model, dest.embedding_dimensions)
     result = reconcile_bundle(dest, sources, provider)
+    # The index files (sidecar, manifest, rewritten references) were written
+    # on the daemon's account; the workspace's owner reads and rebuilds them.
+    inherit_owner_tree(str(dest.directory), root)
     outcome = _RECONCILE_STATUS.get(result.status.value, "error")
     skipped = dict(result.skipped)
     if ref_id in skipped:

@@ -2181,9 +2181,15 @@ Examples:
         "--ws-app-credentials",
         metavar="PATH",
         default=None,
-        help="Path to a JSON file of APPLICATION credentials, mapping an "
-             "app id to that application's long-lived credential. Each "
-             "authorises one WS connection to call ticket.bind / "
+        help="Path to a JSON file of APPLICATIONS, mapping an app id to "
+             '{"credential", "account", "workspace_root"}: the '
+             "application's long-lived credential, the OS account that owns "
+             "its workspaces, and the directory they live in (owned by that "
+             "account). The application's users list, create and open "
+             "workspaces under its root only, and every workspace the daemon "
+             "creates there belongs to the account, so "
+             "--runner-uid-policy workspace-owner runs those sessions as it. "
+             "Each credential authorises one WS connection to call ticket.bind / "
              "ticket.revoke -- minting a short-lived, single-use ticket for "
              "one of that application's already-authenticated users -- and "
              "authorises nothing else: such a connection cannot open a "

@@ -155,35 +155,24 @@ REVERSIONS = [
     Reversion(
         target=_WS,
         find=(
-            "            ):\n"
-            "                # #1296: the ROUTINE exit — every non-WS "
-            "session\n"
-            "                # (IPC / user-CWD) takes this branch, since "
-            "the hook is\n"
-            "                # registered for every session bootstrap "
-            "regardless of\n"
-            "                # transport.  DEBUG only, so it stays "
-            "greppable on\n"
-            "                # demand without adding one line per "
-            "ordinary session\n"
-            "                # creation at the daemon's default log "
-            "level.\n"
+            "            if ws_workspace_root is None:\n"
+            "                # #1296: the ROUTINE exit — every non-WS session\n"
+            "                # (IPC / user-CWD) takes this branch, since the hook is\n"
+            "                # registered for every session bootstrap regardless of\n"
+            "                # transport.  DEBUG only, so it stays greppable on\n"
+            "                # demand without adding one line per ordinary session\n"
+            "                # creation at the daemon's default log level.\n"
             "                logger.debug(\n"
-            '                    "AppArmor pre-init: session %s workspace '
-            '%s is not "\n'
-            '                    "under the WS server\'s workspace_root %s '
-            '— IPC or "\n'
+            '                    "AppArmor pre-init: session %s workspace %s is under "\n'
+            '                    "none of the WS server\'s workspace roots %s — IPC or "\n'
             '                    "user-CWD session, not WS-provisioned",\n'
-            "                    session_id, sess_workspace, "
-            "ws_workspace_root,\n"
+            "                    session_id, sess_workspace, ws_server._managed_roots(),\n"
             "                )\n"
-            "                return  # IPC or user-CWD session — not "
-            "WS-provisioned"
+            "                return  # IPC or user-CWD session — not WS-provisioned"
         ),
         replace=(
-            "            ):\n"
-            "                return  # IPC or user-CWD session — not "
-            "WS-provisioned"
+            "            if ws_workspace_root is None:\n"
+            "                return  # IPC or user-CWD session — not WS-provisioned"
         ),
         test="test_not_under_ws_root_logs_both_paths_at_debug",
         because=(
@@ -240,8 +229,14 @@ class _FakeEventSinkAdapterForHook:
 
 def _make_ws_server_for_hook(workspace_root: str):
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._apparmor = _FakeAppArmorForHook()
     ws._cgroups = None
     ws._workspace_root = workspace_root

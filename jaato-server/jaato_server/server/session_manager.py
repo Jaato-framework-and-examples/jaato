@@ -151,6 +151,7 @@ from jaato_sdk.events import (
     describe_event_type_problems,
 )
 from .workspace_monitor import WorkspaceMonitor
+from jaato_server.shared.workspace_ownership import inherit_owner_tree
 
 
 logger = logging.getLogger(__name__)
@@ -1911,13 +1912,15 @@ class SessionManager:
         # run (server 0.6.49+).
         self._pre_initialize_hooks: List[Callable] = []
 
-        # #1280: the WS server's provisioning root (``workspace_root``),
-        # handed over by ``JaatoWSServer.set_command_router`` via
-        # :meth:`set_managed_workspace_root`.  ``None`` on an IPC-only
-        # daemon.  Read through :meth:`_managed_workspace_root`, which
-        # threads it into the spawn path so the #1225 workspace HOME and
-        # #1274 workspace venv defaults apply to daemon-managed workspaces.
-        self._managed_workspace_root: Optional[str] = None
+        # #1280: which WS provisioning root (the daemon's own, or an
+        # application's) a workspace lies under, handed over by
+        # ``JaatoWSServer.set_command_router`` via
+        # :meth:`set_managed_root_resolver`.  ``None`` on an IPC-only
+        # daemon.  Read through :meth:`_managed_workspace_root_for_spawn`,
+        # which threads the answer into the spawn path so the #1225
+        # workspace HOME and #1274 workspace venv defaults apply to
+        # daemon-managed workspaces.
+        self._managed_root_resolver: Optional[Callable[[str], Optional[str]]] = None
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
@@ -2360,7 +2363,7 @@ class SessionManager:
             # #1280: grant the #1225 / #1274 managed defaults (workspace venv
             # ``bin`` and home ``.local/bin`` exec) on the path a WUI
             # ``session.new`` takes, as the WS pre-init hook does.
-            managed_workspace_root=self._managed_workspace_root_for_spawn(),
+            managed_workspace_root=self._managed_workspace_root_for_spawn(workspace_path),
         )
 
         # Spawn requires a workspace (cwd target).  Sessions without
@@ -2419,7 +2422,7 @@ class SessionManager:
                 # user's own checkout unless the profile opts in.
                 private_tmp_dir=resolve_session_private_tmp(
                     server, workspace_path,
-                    self._managed_workspace_root_for_spawn()),
+                    self._managed_workspace_root_for_spawn(workspace_path)),
             )
             confinement_required = self._kernel_confinement_available()
 
@@ -2576,66 +2579,56 @@ class SessionManager:
             )
 
     def _workspace_under_ws_root(self, workspace_path: str) -> bool:
-        """Return True iff *workspace_path* is under a running WS
-        server's ``_workspace_root``.
+        """Return True iff *workspace_path* is under one of a running WS
+        server's managed roots (its own or an application's).
 
         Used by ``_provision_ipc_apparmor_and_spawn_runner`` to
         skip its work for sessions the WS hook owns — preventing
         double-provision + double-spawn.
         """
-        ws_server = getattr(self, "_ws_server_ref", None)
-        if ws_server is None:
-            return False
-        ws_root = getattr(ws_server, "_workspace_root", None)
-        if not ws_root:
-            return False
         try:
-            ws_root_real = os.path.realpath(ws_root)
-            sess_real = os.path.realpath(workspace_path)
-            return (
-                sess_real == ws_root_real
-                or sess_real.startswith(ws_root_real + os.sep)
-            )
+            return self._managed_workspace_root_for_spawn(workspace_path) is not None
         except OSError:
             return False
 
-    def set_managed_workspace_root(self, root: Optional[str]) -> None:
-        """#1280: record the WS server's provisioning root.
+    def set_managed_root_resolver(
+        self, resolver: Optional[Callable[[str], Optional[str]]],
+    ) -> None:
+        """#1280: record how to find a workspace's WS provisioning root.
 
         Called by ``JaatoWSServer.set_command_router`` (the seam that also
         registers the WS pre-init hook, so any deployment that has that hook
-        has this value).  It is what makes a workspace "daemon-managed" for
-        the #1225 workspace HOME and #1274 workspace venv defaults.
+        has this resolver).  *resolver* maps a workspace path to the managed
+        root it lies under -- the daemon's own, or an application's -- or
+        ``None``.  That is what makes a workspace "daemon-managed" for the
+        #1225 workspace HOME and #1274 workspace venv defaults.
 
         Not threaded through :meth:`set_apparmor_dependencies` because the
         daemon calls that BEFORE it constructs the WS server, so the
         ``ws_server`` it hands over is ``None`` on every WS daemon.
 
         Args:
-            root: The WS server's ``workspace_root``.  ``None`` (standalone
-                or IPC-only) leaves both defaults off, as before.
+            resolver: ``JaatoWSServer.managed_root_for``.  ``None``
+                (standalone or IPC-only) leaves both defaults off.
         """
-        self._managed_workspace_root = root or None
+        self._managed_root_resolver = resolver
 
-    def _managed_workspace_root_for_spawn(self) -> Optional[str]:
-        """#1280: the provisioning root to thread into a runner spawn.
+    def _managed_workspace_root_for_spawn(self, workspace_path: Optional[str]) -> Optional[str]:
+        """#1280: the managed root *workspace_path* lies under, for a runner spawn.
 
-        The value set by :meth:`set_managed_workspace_root`, else the
-        ``_workspace_root`` of the WS server reference from
-        :meth:`set_apparmor_dependencies` (same root, second route), else
-        ``None``.
-
-        Returned unconditionally when known: whether a given session's
-        workspace is under it is decided downstream by
-        ``workspace_home._is_daemon_managed``, so an IPC or user-CWD
-        workspace outside the root still resolves to "not managed" and its
-        envelope is unchanged.
+        Asked of the resolver set by :meth:`set_managed_root_resolver`, else
+        of the WS server reference from :meth:`set_apparmor_dependencies`
+        (same answer, second route), else ``None``.  ``None`` for a
+        workspace under no managed root (an IPC or user-CWD workspace), so
+        its envelope is unchanged.
         """
-        explicit = getattr(self, "_managed_workspace_root", None)
-        if explicit:
-            return explicit
-        ws_server = getattr(self, "_ws_server_ref", None)
-        return getattr(ws_server, "_workspace_root", None) or None
+        if not workspace_path:
+            return None
+        resolver = getattr(self, "_managed_root_resolver", None)
+        if resolver is None:
+            ws_server = getattr(self, "_ws_server_ref", None)
+            resolver = getattr(ws_server, "managed_root_for", None)
+        return resolver(workspace_path) if resolver is not None else None
 
     def set_selinux_backend(self, backend: Any) -> None:
         """The daemon selected SELinux (``select_backend``); provision with it.
@@ -2682,7 +2675,7 @@ class SessionManager:
             workspace_path=workspace_path, config_root=config_root,
             env_file=env_file, private_tmp_dir=private_tmp_dir,
             managed=_is_daemon_managed(
-                workspace_path, self._managed_workspace_root_for_spawn()),
+                workspace_path, self._managed_workspace_root_for_spawn(workspace_path)),
         ))
         if handle is None:
             self._notify_apparmor(
@@ -3093,7 +3086,7 @@ class SessionManager:
             # and #1274 workspace venv defaults into the envelope.  Both
             # decide per workspace (``_is_daemon_managed``), so an IPC or
             # user-CWD workspace outside the root is unchanged.
-            managed_workspace_root = self._managed_workspace_root_for_spawn()
+            managed_workspace_root = self._managed_workspace_root_for_spawn(workspace_path)
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -3716,7 +3709,7 @@ class SessionManager:
             Boundary(
                 workspace_path=workspace_path,
                 managed=_is_daemon_managed(
-                    workspace_path, self._managed_workspace_root_for_spawn()),
+                    workspace_path, self._managed_workspace_root_for_spawn(workspace_path)),
             ),
             read_only=bool(tightenings.get("isolated_read_only_workspace")),
         )
@@ -15557,6 +15550,12 @@ class SessionManager:
                 shutil.rmtree(dest_dir, ignore_errors=True)
             raise
 
+        # The replay area sits in the requester's workspace and its runner
+        # reads (and cleans) it, so it belongs to that workspace's owner.
+        inherit_owner_tree(
+            os.path.join(requester_workspace, ".jaato", "replay"),
+            requester_workspace,
+        )
         logger.info(
             "Snapshot workspace '%s' → '%s' (commit=%s)",
             workspace, dest_dir, source_commit,

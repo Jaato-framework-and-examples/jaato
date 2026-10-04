@@ -21,6 +21,7 @@ from jaato_server.server import pool_admin
 from jaato_server.server.event_sink import EventSink, client_peer
 from jaato_server.server.session_manager import SessionManager, session_picker_fields
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
+from jaato_server.shared.workspace_ownership import inherit_owner, inherit_owner_files
 from jaato_server.shared.path_utils import describe_relative_path
 from jaato_server.shared.session_id import is_safe_session_id
 from jaato_server.shared.peer_identity import (
@@ -99,6 +100,18 @@ def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     raw = payload.get("attachments")
     return [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+
+
+def _hand_command_files_to_workspace(workspace: Optional[str]) -> None:
+    """Hand the files a daemon-side user command left in ``.jaato/`` to the workspace's owner.
+
+    An auth command (``<provider>-auth key``) stores its credential in
+    ``<workspace>/.jaato/`` on the daemon's account, and the workspace's
+    runner, which may run as the workspace owner, must read it.  No
+    workspace, nothing to hand.
+    """
+    if workspace:
+        inherit_owner_files(os.path.join(workspace, ".jaato"), workspace)
 
 
 @dataclass
@@ -933,6 +946,7 @@ class CommandRouter:
             new_content, ignored = toggle_gitignore_pattern(existing, pattern)
             with open(gitignore_path, "w", encoding="utf-8") as fh:
                 fh.write(new_content)
+            inherit_owner(gitignore_path, workspace)
         except OSError as exc:
             logger.warning("workspace.ignore: client=%s could not write %s: %s",
                            client_id, gitignore_path, exc)
@@ -3109,6 +3123,7 @@ class CommandRouter:
 
             parsed_args = parse_command_args(cmd_def, ' '.join(args)) if cmd_def else {}
             result = plugin.execute_user_command(command, parsed_args)
+            _hand_command_files_to_workspace(workspace)
 
             # Send accumulated _emit() output as a single system message
             if output_parts:
@@ -3738,6 +3753,7 @@ class CommandRouter:
 
         with open(env_path, 'w') as f:
             f.writelines(lines)
+        inherit_owner(env_path, workspace_path)
 
 
 # Module-level helpers (moved from JaatoDaemon static methods)

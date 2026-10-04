@@ -35,6 +35,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from jaato_server.server.contained_write import PathLeavesRoot, atomic_write_bytes, contained_dir
+from jaato_server.shared.workspace_ownership import inherit_owner
 from jaato_server.shared.plugins.subagent.config import parse_app_secret_reference
 
 #: An env name this verb may set: an ordinary upper-case variable name.
@@ -149,9 +150,16 @@ def _read_nofollow(path: str) -> Optional[str]:
         return fh.read()
 
 
-def _atomic_write(path: str, body: str, mode: int) -> None:
-    """Temp file in the same directory, then ``os.replace`` (shared helper)."""
+def _atomic_write(path: str, body: str, mode: int, workspace: str) -> None:
+    """Temp file in the same directory, then ``os.replace`` (shared helper).
+
+    The replacement is a new file owned by the daemon, so it is handed to
+    the workspace's owner (:mod:`jaato_server.shared.workspace_ownership`): a ``.env`` or a
+    ``0600`` ``.gitconfig`` the workspace's runner could not read would
+    break the very binding this verb exists to write.
+    """
     atomic_write_bytes(path, body.encode("utf-8"), mode)
+    inherit_owner(path, workspace)
 
 
 def _dir_mode(part: str) -> int:
@@ -205,7 +213,7 @@ def apply_env(root: str, env: Dict[str, Optional[str]]) -> Dict[str, str]:
             mode = os.stat(path).st_mode & 0o777
         except FileNotFoundError:
             pass
-        _atomic_write(path, new_body, mode)
+        _atomic_write(path, new_body, mode, root)
     return actions
 
 
@@ -233,7 +241,7 @@ def apply_file(root: str, entry: Dict[str, Any]) -> Dict[str, Any]:
         if current == content:
             return {"path": rel, "action": "unchanged"}
         mode = 0o600 if rel == GITCONFIG_PATH else 0o644
-        _atomic_write(dest, content, mode)
+        _atomic_write(dest, content, mode, root)
         return {"path": rel, "action": "written"}
     except AppWriteRefused as exc:
         return {"path": rel, "action": "error", "detail": str(exc)}
