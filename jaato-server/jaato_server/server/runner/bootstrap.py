@@ -75,6 +75,7 @@ from typing import (
 from jaato_server.shared.apparmor_label import (
     AppArmorLabel,
     COMPLAIN_ENV_VAR,
+    STACK_SEPARATOR,
     parse_label,
     profile_name_ignoring_mode,
 )
@@ -113,9 +114,17 @@ class ConfinementMismatchError(RuntimeError):
     """
 
     def __init__(self, expected: str, actual: str) -> None:
+        detail = ""
+        if parse_label(actual).foreign_stack:
+            # #1509: a stack with ``unconfined`` is accepted as the
+            # requested profile; a stack with anything else is not.
+            detail = (
+                " — a stack of more than the requested profile "
+                "(only a stack with 'unconfined' is accepted)"
+            )
         super().__init__(
             f"AppArmor confinement mismatch: requested {expected!r} but "
-            f"/proc/self/attr/current reports {actual!r}"
+            f"/proc/self/attr/current reports {actual!r}{detail}"
         )
         self.expected = expected
         self.actual = actual
@@ -575,7 +584,13 @@ def _label_is_inside(label: str, expected: str) -> bool:
     that question (#1014).
     """
     name = profile_name_ignoring_mode(label)
-    return name == expected or name.startswith(expected + "//")
+    if name == expected:
+        return True
+    # A sub-profile of *expected*, but never a stack: ``P//&Q`` also
+    # starts with ``P//`` and is bounded by Q as well (#1509).  A stack
+    # with ``unconfined`` has already been resolved to its real member by
+    # the parser, so it reaches the equality above.
+    return name.startswith(expected + "//") and STACK_SEPARATOR not in name
 
 
 def _thread_names() -> Dict[int, str]:

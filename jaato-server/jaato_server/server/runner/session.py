@@ -42,6 +42,7 @@ from jaato_server.server.confinement_id import (
 from jaato_server.shared.apparmor_label import (
     AppArmorLabel,
     COMPLAIN_ENV_VAR,
+    parse_label,
     profile_name_ignoring_mode,
 )
 from jaato_server.shared.session_envelope import SessionInitEnvelope
@@ -1064,6 +1065,49 @@ def _set_tempdir(path: str, envelope: SessionInitEnvelope) -> None:
     )
 
 
+def _confinement_mismatch_cause(actual: str, exc: Any) -> str:
+    """The "likely cause" sentence of a confinement-mismatch refusal.
+
+    *actual* is the label read before the transition; *exc* is the
+    :class:`ConfinementMismatchError` carrying ``expected`` and the label
+    read after it.  A stacked post-transition label is named as a stack
+    first (#1509): the transition happened, and the kernel stacked it.
+    """
+    current = profile_name_ignoring_mode(actual)
+    likely_cause: str
+    if parse_label(exc.actual).stacked:
+        # #1509: the transition happened, as a stack.  A stack with
+        # ``unconfined`` would have verified, so this one carries
+        # another real profile.
+        likely_cause = (
+            f"the kernel stacked the profile "
+            f"(``kernel.apparmor_restrict_unprivileged_unconfined=1`` "
+            f"turns an unprivileged, unconfined task's change_profile "
+            f"into a stack) and the stack holds more than "
+            f"{exc.expected!r} and 'unconfined'.  A stack with anything "
+            f"other than 'unconfined' is refused: the task is bounded "
+            f"by a profile jaato did not ask for."
+        )
+    elif current.startswith("jaato-ws-"):
+        likely_cause = (
+            f"current profile {current!r} doesn't permit "
+            f"``change_profile -> {exc.expected}``.  Almost "
+            f"always means the kernel has a pre-v28 template "
+            f"loaded (no cascade-sharing glob rule).  Restart "
+            f"the daemon to reload all per-session profiles "
+            f"against the current template."
+        )
+    else:
+        likely_cause = (
+            f"pool slot's current profile ({current!r}) "
+            f"doesn't permit ``change_profile -> {exc.expected}``.  "
+            f"Verify daemon-side ``AppArmorManager.provision_profile`` "
+            f"loaded {exc.expected} before the bootstrap RPC was "
+            f"dispatched."
+        )
+    return likely_cause
+
+
 def _maybe_self_confine(
     envelope: SessionInitEnvelope,
     recycle_pools: Optional[Callable[[str], Any]] = None,
@@ -1274,25 +1318,7 @@ def _maybe_self_confine(
         # has an old template loaded (pre-v28, no
         # ``change_profile -> jaato-ws-*,`` rule).  Restart the
         # daemon to pick up the new template.
-        current = profile_name_ignoring_mode(actual)
-        likely_cause: str
-        if current.startswith("jaato-ws-"):
-            likely_cause = (
-                f"current profile {current!r} doesn't permit "
-                f"``change_profile -> {exc.expected}``.  Almost "
-                f"always means the kernel has a pre-v28 template "
-                f"loaded (no cascade-sharing glob rule).  Restart "
-                f"the daemon to reload all per-session profiles "
-                f"against the current template."
-            )
-        else:
-            likely_cause = (
-                f"pool slot's current profile ({current!r}) "
-                f"doesn't permit ``change_profile -> {exc.expected}``.  "
-                f"Verify daemon-side ``AppArmorManager.provision_profile`` "
-                f"loaded {exc.expected} before the bootstrap RPC was "
-                f"dispatched."
-            )
+        likely_cause = _confinement_mismatch_cause(actual, exc)
         raise BootstrapError(
             "confine",
             f"AppArmor confinement mismatch — kernel reports "
