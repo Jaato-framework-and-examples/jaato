@@ -283,6 +283,15 @@ user checkout, stay ungranted, and the runner (CPython) has no `execmem`.
 The `io_uring` anon-inode `create` the same run logged is refused on
 purpose: libuv falls back, and the #1503 filter denies `io_uring` anyway.
 
+**`setpcap` and `setcap` for `jaato_runner_t` (#1543, module 1.10.0).**
+A root runner's children kept the full capability bounding set, so the
+payload started every `exec` with every capability and only the policy
+refused their use. The forked child now drops them before `execve`, while
+it is still `jaato_runner_t` (`setexeccon` changes nothing until the exec):
+`PR_CAPBSET_DROP` needs `capability setpcap`, and `capset` lowering its own
+sets is checked as `process setcap`. Both only lower sets. `jaato_child_t`
+keeps no capability, and is denied `setcap` so the payload cannot undo it.
+
 **A workspace whose ancestor the domains cannot search is refused at
 provisioning (#1522).** The daemon labels the workspace tree, never its
 ancestors. A workspace under a `mktemp -d` directory in `/tmp`
@@ -655,6 +664,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
 | 4.1 | **shipped, not yet verified on a kernel**: module 1.8.0, `map` beside every read of a jaato file type (#1520), so `git` runs in a confined workspace; marker unchanged (`jaato_policy_v4_t`): an older module still confines, it only refuses `mmap`. `probe_policy.py` runs `git init` / `commit` / `log` in a child and checks a `PROT_EXEC` mapping of the checkout stays refused | git in confined sessions |
 | 4.2 | **shipped, not yet verified on a kernel**: module 1.9.0, `execmem` for `jaato_child_t` behind `jaato_child_execmem` (default on, #1521); provisioning refuses a workspace whose ancestor the domains cannot search (#1522); the notebook kernel takes the SELinux tier when `/sys/kernel/security/lsm` and `/sys/fs/selinux` are unreadable from `jaato_child_t`, which they always are; `jaato-doctor` gives `semanage fcontext` rules when `restorecon` has no rule for `~/.jaato`. Marker unchanged (`jaato_policy_v4_t`) | node and numpy in confined sessions |
+| 4.3 | **shipped, not yet verified on a kernel**: module 1.10.0, `jaato_runner_t self:capability setpcap` and `self:process setcap`, so a model-driven subprocess drops its capability bounding set and clears its permitted / effective / inheritable / ambient sets in the forked child, before the exec into `jaato_child_t` (#1543). `jaato_child_t` still holds no capability and may not `setcap`. Marker unchanged: on an older module the runner records the `partial` or `absent` posture and spawns are not refused | an empty `CapBnd` in confined payloads |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
 ### What the phase 2a kernel run found

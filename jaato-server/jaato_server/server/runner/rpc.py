@@ -1811,11 +1811,14 @@ class RunnerRPC:
         # ``sandbox_mode`` (``filter`` / ``off`` / ``absent`` /
         # ``unconfined``).  An older daemon ignores the key.
         from jaato_server.shared.seccomp_filter import current_posture
+        from jaato_server.shared import capability_drop
         return True, {
             "ok": True,
             "ready": host.is_ready,
             "session_id": host.session_id,
             "seccomp": current_posture(),
+            # #1543: the capability drop, beside it.
+            "capabilities": capability_drop.current_posture(),
         }
 
     def _handle_session_health_check(self) -> "tuple[bool, Any]":
@@ -2094,6 +2097,8 @@ class RunnerRPC:
         if isinstance(probe, dict):
             from jaato_server.shared.seccomp_filter import current_posture
             probe["seccomp"] = current_posture()
+            from jaato_server.shared import capability_drop
+            probe["capabilities"] = capability_drop.current_posture()
         return True, {
             "probe": probe,
             "notebook_boundary_kind": notebook_boundary_kind,

@@ -804,7 +804,15 @@ class AppArmorManager:
     #       grant: the runner itself writes per-session state there
     #       (``sessions/<id>/plans``, a ``save`` tool call), and a record
     #       written by the runner is unsealed and narrowed on revive.
-    _TEMPLATE_VERSION = 46
+    #   v47 (#1543): ``capability setpcap,`` in base and ``tool_hat``,
+    #       never in ``//child``.  A model-driven subprocess drops its
+    #       capability BOUNDING set in its forked child, before the
+    #       ``//child`` transition, and ``PR_CAPBSET_DROP`` needs
+    #       ``CAP_SETPCAP``.  The capability only lowers sets here: every
+    #       other capability stays denied by the LSM, so raising an
+    #       inheritable bit from the bounding set gains nothing a
+    #       confined runner could use.  See ``shared.capability_drop``.
+    _TEMPLATE_VERSION = 47
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -1079,6 +1087,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   deny capability sys_admin,
   deny capability net_admin,
   deny capability sys_ptrace,
+
+  # v47 (#1543): the one capability granted.  A model-driven
+  # subprocess drops its capability bounding set before it enters
+  # //child, and PR_CAPBSET_DROP needs CAP_SETPCAP.
+  capability setpcap,
 
   # ---- profile transitions ----
   # Required for the framework's apparmor_confine.__exit__ to restore
@@ -3937,6 +3950,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     deny capability sys_admin,
     deny capability net_admin,
     deny capability sys_ptrace,
+    capability setpcap,
 
     # ---- profile transitions (mirrors base, needed to exit hat) ----
     # ``owner /proc/*/...`` form matches the kernel's resolved path

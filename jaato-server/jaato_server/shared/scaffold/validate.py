@@ -756,6 +756,7 @@ def validate_profile(
     # --- secret env scrub (#863) -----------------------------------------
     _check_secret_scrub(profile, add)
     _check_seccomp(profile, add)
+    _check_capabilities(profile, add)
 
     # --- gc strategy -----------------------------------------------------
     gc = getattr(profile, "gc", None)
@@ -858,6 +859,7 @@ HIGH_RISK_ESCALATED_CODES = frozenset({
     "budget_limits_without_abort",
     "secret_scrub_disabled",
     "seccomp_disabled",
+    "capabilities_inherited",
     "missing_description",
     "permission_rule_without_plugin",
     "unknown_tool",
@@ -2019,6 +2021,39 @@ def _check_seccomp(profile: Any, add: Callable[..., None]) -> None:
             "behind the LSM boundary alone.  Allow back only the family a "
             "stage needs with seccomp_allow instead.",
             where="runtime_limits.seccomp")
+
+
+def _check_capabilities(profile: Any, add: Callable[..., None]) -> None:
+    """``runtime_limits.capabilities`` (#1543).
+
+    An unknown name is an ERROR for the reason an unknown seccomp family is:
+    the runner does not keep it, so the capability the author meant to keep
+    is dropped and the stage fails at its first use with an ``EPERM``
+    nothing explains.  ``inherit`` is a WARNING: the payload keeps the
+    runner's capability sets behind the LSM alone.
+    """
+    from jaato_server.shared.capability_drop import (
+        CAPABILITIES, MODE_INHERIT, unknown_capabilities)
+    limits = getattr(profile, "runtime_limits", None)
+    value = getattr(limits, "capabilities", None) if limits is not None else None
+    if value is None:
+        return
+    if value == MODE_INHERIT:
+        add("warn", "capabilities_inherited",
+            "runtime_limits.capabilities is 'inherit': model-driven "
+            "subprocesses keep the runner's capability sets (the full set "
+            "under a root daemon), behind the LSM boundary alone.  Keep "
+            "only what a stage needs with a list instead.",
+            where="runtime_limits.capabilities")
+        return
+    if isinstance(value, str):
+        return
+    for name in unknown_capabilities(value):
+        add("error", "capability_unknown",
+            f"runtime_limits.capabilities names {name!r}, which is not a "
+            f"Linux capability (e.g. {', '.join(list(CAPABILITIES)[:4])}, "
+            "...) — it is not kept",
+            where="runtime_limits.capabilities")
 
 
 # A declared type token → the predicate a value must satisfy.  Two

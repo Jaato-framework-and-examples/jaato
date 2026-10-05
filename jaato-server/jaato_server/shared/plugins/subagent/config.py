@@ -3900,7 +3900,7 @@ _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
 #: ``min()``: the mode by "``default`` beats ``off``", the allow-back list by
 #: INTERSECTION.  Normalised out of the ceilings agreement test like the
 #: min-wins fields, so two parents differing only here are resolved.
-_RESTRICTIVE_WINS_SECCOMP_FIELDS = ("seccomp", "seccomp_allow")
+_RESTRICTIVE_WINS_SECCOMP_FIELDS = ("seccomp", "seccomp_allow", "capabilities")
 
 
 def _merged_seccomp_fields(
@@ -3931,7 +3931,28 @@ def _merged_seccomp_fields(
     if allows:
         kept = set(allows[0]).intersection(*allows[1:])
         allow = tuple(a for a in allows[0] if a in kept)
-    return {"seccomp": mode, "seccomp_allow": allow}
+    return {"seccomp": mode, "seccomp_allow": allow,
+            "capabilities": _merged_capabilities(layers)}
+
+
+def _merged_capabilities(layers: List[RuntimeLimits]) -> Any:
+    """Resolve ``capabilities`` (#1543) across the declaring layers.
+
+    Most-restrictive-wins: ``none`` beats a list beats ``inherit``, and two
+    lists keep only what both keep, so a child can never keep a capability
+    a parent dropped.  ``None`` when no layer declares one.
+    """
+    values = [lim.capabilities for lim in layers
+              if lim.capabilities is not None]
+    if not values:
+        return None
+    if "none" in values:
+        return "none"
+    lists = [tuple(v) for v in values if not isinstance(v, str)]
+    if not lists:
+        return "inherit"
+    kept = set(lists[0]).intersection(*lists[1:])
+    return tuple(c for c in lists[0] if c in kept)
 
 
 def _merged_min_wins_limit(
@@ -4046,7 +4067,10 @@ def _merge_runtime_limits(
       :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`;
     * ``seccomp`` / ``seccomp_allow`` (#1503) — **most-restrictive-wins**
       (:func:`_merged_seccomp_fields`): ``default`` beats ``off``, and the
-      allow-back list is the intersection of the declared ones.
+      allow-back list is the intersection of the declared ones;
+    * ``capabilities`` (#1543) — **most-restrictive-wins**
+      (:func:`_merged_capabilities`): ``none`` beats a list beats
+      ``inherit``, and lists intersect.
 
     Args:
         parents: The resolved parent profiles, in declaration order.

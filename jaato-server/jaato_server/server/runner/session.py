@@ -1522,9 +1522,11 @@ def _child_preexec(
 ) -> Callable[[], None]:
     """The ``preexec_fn`` step every model-driven subprocess gets (#1503).
 
-    The LSM ``//child`` transition (AppArmor ``changeprofile`` / SELinux
-    ``setexeccon``), then ``PR_SET_NO_NEW_PRIVS`` and the seccomp filter,
-    composed by :func:`shared.seccomp_filter.compose_child_preexec`.  This
+    The capability bounding-set drop, the LSM ``//child`` transition
+    (AppArmor ``changeprofile`` / SELinux ``setexeccon``), the process
+    capability sets cleared (#1543, :mod:`shared.capability_drop`), then
+    ``PR_SET_NO_NEW_PRIVS`` and the seccomp filter, composed by
+    :func:`shared.seccomp_filter.compose_child_preexec`.  This
     is the one place the filter enters the chain: ``cli``,
     ``interactive_shell`` and the notebook kernel all receive this callable
     through ``set_apparmor_child_transition_callback``, and append their
@@ -1550,6 +1552,13 @@ def _child_preexec(
         confinement.backend, confinement.label, confinement.child_label,
     )
     limits = _runtime_limits_from_envelope(envelope)
+    # #1543: the capability drop wraps the LSM transition (bounding set
+    # before it, the process sets and NO_NEW_PRIVS after it); the seccomp
+    # filter is composed after that.
+    from jaato_server.shared import capability_drop
+    caps = capability_drop.plan_for_session(
+        getattr(limits, "capabilities", None), boundary_active=True)
+    lsm_cb = capability_drop.compose_child_preexec(lsm_cb, caps)
     plan = seccomp_filter.plan_for_session(
         getattr(limits, "seccomp", None),
         getattr(limits, "seccomp_allow", None),
@@ -1573,10 +1582,16 @@ def _record_seccomp_without_filter(
     so it is recorded ``absent`` with that reason (a stated limit of #1503,
     never a silent one).
     """
-    from jaato_server.shared import seccomp_filter
+    from jaato_server.shared import capability_drop, seccomp_filter
     if not sub_runner:
         seccomp_filter.plan_for_session(None, None, boundary_active=False)
+        capability_drop.plan_for_session(None, boundary_active=False)
         return
+    capability_drop.record_plan(capability_drop.CapabilityPlan(
+        capability_drop.POSTURE_ABSENT,
+        reason="isolated sub-runner: no //child transition to drop "
+               "capabilities around",
+    ))
     seccomp_filter.record_plan(seccomp_filter.SeccompPlan(
         seccomp_filter.POSTURE_ABSENT,
         reason="isolated sub-runner: no //child transition to install a "

@@ -255,6 +255,36 @@ def _seccomp_fields(limits: "RuntimeLimits") -> None:
     object.__setattr__(limits, "seccomp_allow", tuple(allow))
 
 
+#: ``runtime_limits.capabilities`` scalar values (mirrors
+#: ``shared.capability_drop.MODES``; a test pins the two equal).  A list of
+#: capability names is the third form.
+CAPABILITY_MODES = ("none", "inherit")
+
+
+def _capabilities_field(limits: "RuntimeLimits") -> None:
+    """Validate ``capabilities`` and normalise a list to a tuple (#1543).
+
+    The scalar is a closed vocabulary.  Capability NAMES are not judged
+    here, for the reason ``seccomp_allow`` names are not: an unknown one is
+    simply not kept (the safe side) and ``validate`` reports it.
+    """
+    value = limits.capabilities
+    if value is None:
+        return
+    if isinstance(value, str):
+        if value not in CAPABILITY_MODES:
+            raise ValueError(
+                f"capabilities={value!r} must be one of "
+                f"{', '.join(CAPABILITY_MODES)}, or a list of capability names")
+        return
+    if not isinstance(value, (list, tuple)) or not all(
+            isinstance(c, str) and c for c in value):
+        raise ValueError(
+            f"capabilities={value!r} must be 'none', 'inherit' or a list of "
+            f"capability names")
+    object.__setattr__(limits, "capabilities", tuple(value))
+
+
 @dataclass(frozen=True)
 class RuntimeLimits:
     """Per-session resource consumption caps.
@@ -361,6 +391,15 @@ class RuntimeLimits:
     #: declare one, so a child can narrow what a parent allowed back and
     #: never reopen a family a parent kept closed.
     seccomp_allow: Optional[Tuple[str, ...]] = None
+    #: The capabilities a model-driven subprocess keeps (#1543): ``"none"``
+    #: (what ``None`` means while a kernel boundary is active), a list of
+    #: capability names to keep, or ``"inherit"`` (the runner's sets, no
+    #: drop; announced at WARNING).  Applied in the forked child of every
+    #: ``cli`` / ``interactive_shell`` / notebook subprocess, beside the
+    #: seccomp filter.  Resolved MOST-RESTRICTIVE-WINS across
+    #: ``inherits:``: ``none`` beats a list beats ``inherit``, and two lists
+    #: intersect.
+    capabilities: Optional[Any] = None
 
     # Future-proof: forward-compat passthrough for fields the runtime
     # doesn't recognise yet.  Profile schema validation should reject
@@ -391,6 +430,7 @@ class RuntimeLimits:
         _non_negative_number("max_orphan_seconds", self.max_orphan_seconds)
         _non_negative_number("unload_grace_seconds", self.unload_grace_seconds)
         _seccomp_fields(self)
+        _capabilities_field(self)
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "RuntimeLimits":
@@ -406,7 +446,7 @@ class RuntimeLimits:
                         "tool_timeout_seconds", "max_output_bytes",
                         "max_parallel_tools", "max_session_seconds",
                         "max_orphan_seconds", "unload_grace_seconds",
-                        "seccomp", "seccomp_allow"}
+                        "seccomp", "seccomp_allow", "capabilities"}
         kwargs: Dict[str, Any] = {k: data[k] for k in known_fields if k in data}
         extra = {k: v for k, v in data.items() if k not in known_fields}
         return cls(extra=extra, **kwargs)

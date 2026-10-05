@@ -1762,6 +1762,7 @@ def dispatch_bootstrap_envelope(
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)
         _note_seccomp_posture(server, result, session_id)
+        _note_capability_posture(server, result, session_id)
         session_new_timing.mark("bootstrap_acked", session_id=session_id)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
@@ -1903,6 +1904,37 @@ def _log_seccomp_posture(session_id: str, posture: Dict[str, Any]) -> None:
     else:
         logger.info("seccomp: session %s: runner posture %s",
                     session_id, posture)
+
+
+def _note_capability_posture(
+    server: Any, result: Any, session_id: str = "",
+) -> None:
+    """Record the runner's capability-drop posture on *server* (#1543).
+
+    The sibling of :func:`_note_seccomp_posture`, and says it in the DAEMON
+    log for the same reason: ``dropped`` / ``unconfined`` at INFO,
+    ``partial`` / ``inherit`` / ``absent`` at WARNING with the reason, so
+    "LSM yes, capabilities kept" is never silent.  Best-effort.
+    """
+    note = getattr(server, "note_capability_posture", None)
+    if not callable(note):
+        return
+    try:
+        posture = result.get("capabilities") if isinstance(result, dict) else None
+        note(posture)
+        if not isinstance(posture, dict):
+            return
+        kind = posture.get("posture")
+        if kind in ("dropped", "unconfined"):
+            logger.info("capabilities: session %s: runner posture %s",
+                        session_id, posture)
+        else:
+            logger.warning(
+                "capabilities: session %s: posture %s (%s) -- model-driven "
+                "subprocesses are not fully stripped of capabilities",
+                session_id, kind, posture.get("reason") or "no reason given")
+    except Exception:  # noqa: BLE001 — a recorder must not fail the path
+        logger.debug("note_capability_posture raised", exc_info=True)
 
 
 def _note_bootstrap_outcome(server: Any, error: Optional[str]) -> None:
