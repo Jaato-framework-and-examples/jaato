@@ -14,21 +14,27 @@ Covered here, against a fresh interpreter doing what the template does:
 * the warm-up leaves one thread alive, so the template can fork;
 * the heap is frozen (``gc.freeze``), so a slot's collector does not
   dirty the pages it inherited;
-* the template actually calls the preload (an AST check of
-  ``_run_template_mode``: the behavioural cases call ``preload()``
-  directly, so they cannot see the call being dropped);
+* the template actually plans and preloads (an AST check of
+  ``_run_template_mode``: the behavioural cases call ``plan()`` and
+  ``preload()`` directly, so they cannot see the call being dropped);
+* ``PLUGIN_PRELOAD`` declarations: an out-of-tree one is honoured only
+  for a distribution listed in ``JAATO_PLUGIN_ALLOW_PRELOAD``, a
+  malformed one is ignored, and a declaration is read from source
+  without importing its package;
 * a missing entry is skipped quietly, a broken one with a warning, and
   neither raises.
 """
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 import logging
 import os
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -38,6 +44,7 @@ from jaato_server.shared.tests.reversion import Reversion
 
 _PRELOAD = "jaato-server/jaato_server/server/runner/template_preload.py"
 _MAIN = "jaato-server/jaato_server/server/runner/__main__.py"
+_MCP = "jaato-server/jaato_server/shared/plugins/mcp/__init__.py"
 _MAIN_PATH = Path(__file__).resolve().parents[1] / "runner" / "__main__.py"
 
 REVERSIONS = [
@@ -64,25 +71,55 @@ REVERSIONS = [
     ),
     Reversion(
         target=_MAIN,
-        find="    template_preload.log_report(template_preload.preload())\n",
+        find=(
+            "    template_preload.log_report(\n"
+            "        template_preload.preload(preload_plan.modules), "
+            "preload_plan)\n"
+        ),
         replace="",
         because="the template stops preloading, whatever the list says",
         test="test_the_template_calls_the_preload",
+    ),
+    Reversion(
+        target=_MCP,
+        find=(
+            "PLUGIN_PRELOAD = (\n"
+            '    "mcp",\n'
+            '    "mcp.client.stdio",\n'
+            '    "jaato_server.shared.mcp_context_manager",\n'
+            ")\n"
+        ),
+        replace="",
+        because="the mcp plugin no longer declares what it imports lazily, "
+                "so every slot imports mcp after the fork",
+        test="test_a_bootstrap_after_the_warm_up_imports_nothing_new",
+    ),
+    Reversion(
+        target=_PRELOAD,
+        find=(
+            '        if not builtin and normalize_distribution(dist or "") '
+            "not in allowed:\n"
+        ),
+        replace="        if False:\n",
+        because="an out-of-tree declaration runs its import-time code in "
+                "the template with nobody having opted in",
+        test="test_an_out_of_tree_declaration_needs_its_distribution_listed",
     ),
 ]
 
 
 # The subprocess does, in order, what the template does at startup
-# (runner-tier discovery, then the preload), then what a pool slot does
-# on its first session.  A fresh interpreter, because the test process
-# has already imported most of the tree.
+# (runner-tier discovery, the plan, the preload), then what a pool slot
+# does on its first session.  A fresh interpreter, because the test
+# process has already imported most of the tree.
 _PROBE = textwrap.dedent(
     """
     import gc, json, os, sys, tempfile, threading
     from jaato_server.shared.plugins.registry import PluginRegistry
-    PluginRegistry().discover(tier_filter="runner")
+    registry = PluginRegistry()
+    registry.discover(tier_filter="runner")
     from jaato_server.server.runner import template_preload
-    report = template_preload.preload()
+    report = template_preload.preload(template_preload.plan(registry).modules)
     out = {"threads": report.threads, "frozen": gc.get_freeze_count(),
            "unfrozen": len(gc.get_objects()), "failed": report.failed}
     before = set(sys.modules)
@@ -131,10 +168,11 @@ def test_a_bootstrap_after_the_warm_up_imports_nothing_new(probe):
     assert probe["ready"], "the probe's bootstrap did not produce a session"
     assert probe["new"] == [], (
         "session.bootstrap imported modules the pool template did not, so "
-        "every slot imports them privately after the fork.  Add them to "
-        "BOOTSTRAP_MODULES in server/runner/template_preload.py (after "
-        "checking they read no environment at import): "
-        + ", ".join(probe["new"])
+        "every slot imports them privately after the fork.  Declare each in "
+        "the PLUGIN_PRELOAD of the plugin or provider package that imports "
+        "it, or in CORE_MODULES in server/runner/template_preload.py when "
+        "the framework does (after checking it reads no environment at "
+        "import): " + ", ".join(probe["new"])
     )
 
 
@@ -161,9 +199,8 @@ def test_the_template_calls_the_preload():
     calls = {
         ast.unparse(n.func) for n in ast.walk(func) if isinstance(n, ast.Call)
     }
-    assert "template_preload.preload" in calls, (
-        "_run_template_mode no longer calls template_preload.preload()"
-    )
+    for name in ("template_preload.plan", "template_preload.preload"):
+        assert name in calls, f"_run_template_mode no longer calls {name}()"
 
 
 @pytest.fixture(autouse=True)
@@ -203,3 +240,101 @@ def test_a_missing_dependency_of_an_installed_entry_is_a_failure(monkeypatch):
     report = template_preload.preload(["installed_entry"])
     assert report.missing == []
     assert "installed_entry" in report.failed
+
+
+# ---------------------------------------------------------------- declarations
+
+
+class _Origin:
+    def __init__(self, module, distribution=None):
+        self.module = module
+        self.distribution = distribution
+
+
+class _Registry:
+    def __init__(self, *origins):
+        self._origins = {o.module: o for o in origins}
+
+    def get_plugin_sources(self):
+        return dict(self._origins)
+
+
+@pytest.fixture
+def fake_package(monkeypatch):
+    """An imported out-of-tree package ``acme_preload_pkg`` declaring preloads."""
+
+    def _make(declaration):
+        mod = types.ModuleType("acme_preload_pkg")
+        mod.PLUGIN_PRELOAD = declaration
+        monkeypatch.setitem(sys.modules, "acme_preload_pkg", mod)
+        monkeypatch.setattr(template_preload, "_owners_from_providers",
+                            lambda: [])
+        return _Registry(_Origin("acme_preload_pkg.plugin", "acme-tools"))
+
+    monkeypatch.delenv("JAATO_PLUGIN_ALLOW_PRELOAD", raising=False)
+    return _make
+
+
+def test_an_out_of_tree_declaration_needs_its_distribution_listed(
+    fake_package, monkeypatch,
+):
+    registry = fake_package(("acme_preload_dep",))
+    refused = template_preload.plan(registry)
+    assert "acme_preload_dep" not in refused.modules
+    assert "JAATO_PLUGIN_ALLOW_PRELOAD" in refused.ignored["acme_preload_pkg"]
+
+    monkeypatch.setenv("JAATO_PLUGIN_ALLOW_PRELOAD", "Acme_Tools")
+    honoured = template_preload.plan(registry)
+    assert "acme_preload_dep" in honoured.modules
+    assert honoured.declared == {"acme_preload_pkg": ("acme_preload_dep",)}
+    core = template_preload.CORE_MODULES
+    assert honoured.modules[:len(core)] == core
+
+
+def test_a_malformed_declaration_is_ignored(fake_package, monkeypatch):
+    monkeypatch.setenv("JAATO_PLUGIN_ALLOW_PRELOAD", "acme-tools")
+    result = template_preload.plan(fake_package("not-a-tuple"))
+    assert result.ignored["acme_preload_pkg"].startswith("malformed")
+    assert result.modules == template_preload.CORE_MODULES
+
+
+def test_a_declaration_is_read_without_importing_its_package(
+    tmp_path, monkeypatch,
+):
+    pkg = tmp_path / "acme_unimported_pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        'PLUGIN_PRELOAD = ("json", "acme_unimported_pkg.sub")\n'
+        'raise RuntimeError("importing this package runs its code")\n'
+    )
+    (tmp_path / "acme_computed_pkg").mkdir()
+    (tmp_path / "acme_computed_pkg" / "__init__.py").write_text(
+        'PLUGIN_PRELOAD = tuple(["json"])\n'
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert template_preload.read_declaration("acme_unimported_pkg") == (
+        "json", "acme_unimported_pkg.sub")
+    assert "acme_unimported_pkg" not in sys.modules
+    with pytest.raises(ValueError):
+        template_preload.read_declaration("acme_computed_pkg")
+
+
+def test_every_in_tree_declaration_is_a_literal_matching_the_package():
+    """The template reads an unimported package's declaration from source,
+    so a computed one would read differently there than in a live import."""
+    owners = [p for p, _, builtin in template_preload._owners_from_providers()
+              if builtin]
+    plugins = Path(template_preload.__file__).resolve().parents[2] \
+        / "shared" / "plugins"
+    owners += [f"jaato_server.shared.plugins.{d.name}"
+               for d in sorted(plugins.iterdir())
+               if (d / "__init__.py").is_file()]
+    checked = 0
+    for package in owners:
+        literal = template_preload._literal_declaration(package)
+        if literal is None:
+            continue
+        live = getattr(importlib.import_module(package), "PLUGIN_PRELOAD")
+        assert tuple(literal) == tuple(live), package
+        checked += 1
+    assert checked >= 7

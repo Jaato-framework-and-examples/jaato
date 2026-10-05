@@ -2265,10 +2265,19 @@ lazily imported helpers. All of it was imported after the fork, so each
 slot paid for it in time and held its own private copy, because a module
 imported after `fork()` is not shared copy-on-write with the template.
 
-`server/runner/template_preload.py` imports `BOOTSTRAP_MODULES` and,
-best effort, `PROVIDER_MODULES` (`openai`, `google.genai` and their
-provider packages) in the template after discovery, then calls
-`gc.freeze()` so a slot's first collection does not copy every
+`server/runner/template_preload.py` builds the list from two sources
+and imports it in the template after discovery:
+
+| Source | Holds |
+|---|---|
+| `CORE_MODULES` | what the framework imports for every session (the session stack, the runner's bootstrap helpers); no plugin owns these |
+| `PLUGIN_PRELOAD` in a plugin's or model provider's package `__init__.py` | what that package imports lazily, beside the import it describes. A literal tuple of module names, read from source for a package not yet imported, so no provider is imported to find out. Declared today by `mcp`, `notebook`, `references`, `subagent`, and the `openai`, `openrouter` and `google_genai` providers |
+
+A declaration from outside the built-in package is honoured only when its
+distribution is listed in `JAATO_PLUGIN_ALLOW_PRELOAD` (checked before
+the declaration is read); otherwise it is logged as ignored. A malformed
+or non-literal declaration is ignored with a log line. Then
+`gc.freeze()` runs so a slot's first collection does not copy every
 inherited page. Measured (echo provider, unconfined, 4 CPUs):
 
 | | before | after |
@@ -2289,11 +2298,13 @@ import-time knobs; the daemon's environment decides them. The template
 grows by the shared imports once.
 
 Guard: `jaato_server/server/tests/test_template_preload_covers_bootstrap.py`,
-three reversions. It runs, in a fresh interpreter, discovery and the
-preload, then a real `bootstrap_session`, and fails naming any jaato
-module or new third-party package the bootstrap still imports, so a
-module that becomes a bootstrap import is added to the list rather than
-moving back into every slot.
+five reversions. It runs, in a fresh interpreter, discovery, the plan
+and the preload, then a real `bootstrap_session`, and fails naming any
+jaato module or new third-party package the bootstrap still imports, so
+a module that becomes a bootstrap import is declared by its owner (or in
+`CORE_MODULES`) rather than moving back into every slot. It also checks
+the out-of-tree gate, malformed declarations, and that every in-tree
+declaration is a literal.
 
 ### Resizing the Pool Without a Restart (protocol 1.35)
 
@@ -5726,6 +5737,7 @@ by `PluginRegistry._gate_entry_point`:
 | **A security-critical subset is never shadowable** | `permission`, `cli`, `file_edit`, `mcp`, `sandbox_manager`, `interactive_shell` — refused even with the opt-in below. |
 | **Operator opt-in** | `JAATO_PLUGIN_ALLOW_SHADOW=<name>[,<name>]` lets a distribution replace a non-critical built-in. The substitution is announced at WARNING, never silent. |
 | **Optional distribution allowlist** | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST=<dist>[,<dist>]` narrows which distributions may contribute plugins at all, so a transitive dependency nobody chose stops participating. Names compare under PEP 503 normalisation. |
+| **Preload declarations need an opt-in** | `JAATO_PLUGIN_ALLOW_PRELOAD=<dist>[,<dist>]` lets an out-of-tree distribution's `PLUGIN_PRELOAD` be imported by the pool template. Unset, such a declaration is ignored and logged: preloading runs its import-time code in the template, whose environment is the daemon's. See [What the Template Imports Before It Forks](#what-the-template-imports-before-it-forks). |
 | **Collisions are named, not skipped** | First writer still wins, but the loser is logged at WARNING with both providers named — including the directory scan skipping a built-in because something else holds its name. Re-discovery by the same module stays quiet. |
 
 **Provenance.**  The registry records a `PluginOrigin` for every plugin it
@@ -13483,6 +13495,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` | Comma-separated distribution names allowed to contribute plugins through the `jaato.*` entry-point groups. Unset (the default) means every installed distribution participates. When set, an entry point from any other distribution is refused **before** `ep.load()` — so its module is never imported — with a WARNING naming it. The built-in package is always honoured and never needs listing. See [Entry-point plugin trust](#entry-point-plugin-trust). |
 | `JAATO_REVIVE_PROFILE` | Where a REVIVED session's profile comes from: `persisted` (default — the resolved recipe the session froze at creation) or `disk` (re-resolve `profile_name` against the profile files as they stand now). Set `disk` to interrogate a finished session under a different contract, where a `JAATO_PROFILE_SET` switch must actually take effect. |
 | `JAATO_REVIVE_PERSONA` | Where a REVIVED session's system instruction comes from: `persisted` (default — the exact prompt rendered at session-prep, prefetch output included) or `disk` (re-render from the agent markdown, **re-running** the persona's `{{!py:...}}` prefetch scripts against the session's original `agent_params`). The default is what makes a prefetch run once as documented; `disk` may execute side effects. |
+| `JAATO_PLUGIN_ALLOW_PRELOAD` | Comma-separated distribution names whose plugins' and providers' `PLUGIN_PRELOAD` declarations the pool template imports before it forks. Unset (the default) means none: built-in declarations are always honoured, an out-of-tree one is ignored with an INFO line. Opt in only for a distribution whose listed modules read no session-scoped state (environment, home, tempdir, cwd) at import time. See [What the Template Imports Before It Forks](#what-the-template-imports-before-it-forks). |
 | `JAATO_PLUGIN_ALLOW_SHADOW` | Comma-separated built-in plugin names an out-of-tree distribution IS allowed to replace. Built-in names are reserved by default; a foreign entry point claiming one is refused. Names in the never-shadowable set (`permission`, `cli`, `file_edit`, `mcp`, `sandbox_manager`, `interactive_shell`) are refused even when listed here. An honoured shadow still logs a WARNING naming the distribution that won. |
 
 ### Rate Limiting

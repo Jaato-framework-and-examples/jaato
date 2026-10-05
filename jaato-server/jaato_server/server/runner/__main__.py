@@ -198,11 +198,15 @@ def _run_template_mode() -> None:
 
     # discover() walks the plugin packages' __init__.py files; what
     # session.bootstrap spends its time importing (the session stack,
-    # anthropic, mcp, provider SDKs) is reached from elsewhere.  Import it
-    # here so slots inherit it shared rather than importing it privately
-    # per session.  Best effort: never fatal.  See template_preload.py.
+    # anthropic, what plugins and providers import lazily) is reached from
+    # elsewhere.  Import it here so slots inherit it shared rather than
+    # importing it privately per session: the framework's own list plus
+    # each package's PLUGIN_PRELOAD.  Best effort: never fatal.  See
+    # template_preload.py.
     from jaato_server.server.runner import template_preload
-    template_preload.log_report(template_preload.preload())
+    preload_plan = template_preload.plan(registry)
+    template_preload.log_report(
+        template_preload.preload(preload_plan.modules), preload_plan)
 
     # Sit idle on fd 3 waiting for the daemon's shutdown signal.
     # PR 3 will extend this loop to dispatch FORK_SLOT requests.

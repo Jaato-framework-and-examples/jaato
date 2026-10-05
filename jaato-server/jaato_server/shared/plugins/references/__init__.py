@@ -40,6 +40,16 @@ Example usage:
 PLUGIN_KIND = "tool"
 
 PLUGIN_TIER = "runner"
+
+#: Modules this package imports lazily (imported when the entry handler is registered).
+#: The pool template imports them before it forks, so a session's
+#: slot inherits them shared instead of importing them privately.
+#: A literal tuple of strings, read without importing the package;
+#: nothing listed may read session-scoped state at import time.
+#: See jaato_server/server/runner/template_preload.py.
+PLUGIN_PRELOAD = (
+    "jaato_server.shared.plugins.references.entry_handler",
+)
 from .models import (
     SourceType,
     InjectionMode,
