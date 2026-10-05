@@ -672,7 +672,11 @@ class Session:
     last_activity: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
-    is_dirty: bool = False  # True if has unsaved changes
+    #: True when the session has changes no save has captured.  Every write
+    #: of ``True`` also bumps :attr:`dirty_generation` (see ``__setattr__``),
+    #: which is what lets ``_save_session`` clear the flag only when nothing
+    #: marked the session dirty AFTER the history it wrote was read (#1542).
+    is_dirty: bool = False
     #: Correlation id of the ``session.new`` that created this session, so an
     #: event answering that create can be matched to it by the CLIENT.
     #:
@@ -837,6 +841,49 @@ class Session:
     # save (record 2.10), and restored from disk as a STALE record naming the
     # process of a previous daemon.  ``None`` for a session with no runner.
     runner_identity: Optional['RunnerIdentity'] = None
+    #: How many times ``is_dirty`` has been set to ``True`` (#1542).  Written
+    #: only by ``__setattr__``; ``_save_session`` reads it before fetching
+    #: history and again before clearing the flag.
+    dirty_generation: int = field(default=0, repr=False, compare=False)
+    #: Makes a dirty mark and :meth:`clear_dirty_if_unchanged` atomic with
+    #: respect to each other.
+    _dirty_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
+
+    def clear_dirty_if_unchanged(self, generation: int) -> bool:
+        """Clear ``is_dirty`` only if no mark arrived since *generation*.
+
+        Called by ``_save_session`` with the generation it read before
+        fetching the history it wrote.  Returns whether it cleared.
+        """
+        with self._dirty_lock:
+            if self.dirty_generation != generation:
+                return False
+            object.__setattr__(self, "is_dirty", False)
+            return True
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Count every dirty mark, so a save cannot clear one it did not see.
+
+        The flag is set from about fifteen places, several of them on the
+        event path while an async save is already reading history (a tool
+        call start spawns one).  A save that read history BEFORE a later mark
+        and then wrote ``is_dirty = False`` erased that mark: the unload saw a
+        clean session, skipped its final save and released the runner, and
+        the turn was never persisted (#1542).  Counting here rather than at
+        each call site means a new call site cannot opt out.
+        """
+        lock = self.__dict__.get("_dirty_lock") if name == "is_dirty" else None
+        if lock is None:
+            # Construction (the lock does not exist yet) or another field.
+            object.__setattr__(self, name, value)
+            return
+        with lock:
+            if value:
+                object.__setattr__(
+                    self, "dirty_generation", self.dirty_generation + 1)
+            object.__setattr__(self, name, value)
 
 
 @dataclass
@@ -13686,6 +13733,10 @@ class SessionManager:
         -- would otherwise fetch nothing and write ``[]`` over the record
         the pre-release save wrote correctly.  A server that never had a
         runner still saves ``[]``, as before.
+
+        The WARNING is reserved for a post-release save of a session that is
+        still DIRTY: that is a change no save captured, i.e. lost.  A clean
+        session's late save is superseded and skipped at DEBUG (#1542).
         """
         server = session.server
         if not server:
@@ -13693,6 +13744,14 @@ class SessionManager:
         if getattr(server, "_runner_rpc", None) is not None:
             return server._runner_rpc.session_get_history_threadsafe()
         if getattr(server, "_runner_released", False):
+            if not session.is_dirty:
+                # Superseded: the save before the release (the unload's
+                # final one) captured everything, and this one -- an async
+                # save queued behind it -- has nothing left to write.
+                logger.debug(
+                    "Skipping save of session %s: runner released and "
+                    "nothing changed since the last save", session.session_id)
+                return None
             logger.warning(
                 "Not saving session %s: its runner was already released, so "
                 "its history cannot be read; keeping the record on disk.",
@@ -13888,6 +13947,9 @@ class SessionManager:
                 # ``session.get_history`` RPC instead of the daemon-side
                 # JaatoClient indirection.  Captures in-progress turns
                 # (the agent state cache only updates at turn end).
+                # Read BEFORE the history: a mark made after this point is
+                # one the history below may not contain (#1542).
+                generation = session.dirty_generation
                 history = self._history_for_save(session)
                 if history is None:
                     return False
@@ -14137,7 +14199,11 @@ class SessionManager:
                 self._write_record(
                     state, storage_dir, record_owner,
                     seal=session.record_trusted)
-                session.is_dirty = False
+                # Clear only what this save captured.  A mark made while it
+                # ran (a turn ending under an async save started at a tool
+                # call) stays set, so the next save -- the unload's final
+                # one in particular -- is not skipped (#1542).
+                session.clear_dirty_if_unchanged(generation)
 
                 logger.debug(f"Saved session: {session.session_id}")
                 return True
@@ -14931,7 +14997,11 @@ class SessionManager:
 
         # Save before unloading.  Now running on a real thread so
         # session_get_history_threadsafe + budget snapshot RPCs work
-        # without deadlocking.
+        # without deadlocking.  THE ORDER IS THE POINT (#1542): save, then
+        # ``server.shutdown()`` releases the runner, then the AppArmor
+        # boundary is released.  A save after the release cannot read the
+        # history.  ``is_dirty`` is trustworthy here because a save clears
+        # only the marks it captured (``Session.clear_dirty_if_unchanged``).
         if session.is_dirty:
             self._save_session(session)
 
