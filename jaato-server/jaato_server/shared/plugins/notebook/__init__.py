@@ -13,6 +13,17 @@ variables across multiple executions within a session.
 PLUGIN_KIND = "tool"
 
 PLUGIN_TIER = "runner"
+
+#: Modules this package imports lazily (imported when the subprocess kernel backend is built).
+#: The pool template imports them before it forks, so a session's
+#: slot inherits them shared instead of importing them privately.
+#: A literal tuple of strings, read without importing the package;
+#: nothing listed may read session-scoped state at import time.
+#: See jaato_server/server/runner/template_preload.py.
+PLUGIN_PRELOAD = (
+    "jaato_server.shared.plugins.notebook.backends.subprocess_kernel",
+    "jaato_server.shared.plugins.notebook.kernel_protocol",
+)
 from .plugin import NotebookPlugin, create_plugin
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 

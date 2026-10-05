@@ -39,6 +39,16 @@ Example usage:
 PLUGIN_KIND = "tool"
 
 PLUGIN_TIER = "runner"
+
+#: Modules this package imports lazily (imported when the profiles entry handler is registered).
+#: The pool template imports them before it forks, so a session's
+#: slot inherits them shared instead of importing them privately.
+#: A literal tuple of strings, read without importing the package;
+#: nothing listed may read session-scoped state at import time.
+#: See jaato_server/server/runner/template_preload.py.
+PLUGIN_PRELOAD = (
+    "jaato_server.shared.plugins.subagent.entry_handler",
+)
 # Lazy (#1267).  Importing ``subagent.config`` (the ``SubagentProfile``
 # schema, read by every profile resolver and by ``jaato-scaffold``) runs this
 # ``__init__`` first.  An eager ``from .plugin import ...`` here made that
