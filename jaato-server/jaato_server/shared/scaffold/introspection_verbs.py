@@ -223,19 +223,19 @@ def _scope_usage(scope: str, spec: ExplainScope) -> str:
     return f"explain {scope} {spec.arg}".rstrip()
 
 
-def _call_simple(spec, scope, name, ws):
+def _call_simple(spec, scope, name, ws, profile_set=None):
     return spec.render()
 
 
-def _call_filter(spec, scope, name, ws):
+def _call_filter(spec, scope, name, ws, profile_set=None):
     return spec.render(name)
 
 
-def _call_workspace(spec, scope, name, ws):
+def _call_workspace(spec, scope, name, ws, profile_set=None):
     return spec.render(ws)
 
 
-def _call_named(spec, scope, name, ws):
+def _call_named(spec, scope, name, ws, profile_set=None):
     if not name:
         raise _ScopeUsageError(f"usage: {_scope_usage(scope, spec)}")
     data, text = spec.render(name)
@@ -244,8 +244,15 @@ def _call_named(spec, scope, name, ws):
     return data, text
 
 
-def _call_optional_named(spec, scope, name, ws):
-    return spec.render_named(name, ws) if name else spec.render()
+def _call_optional_named(spec, scope, name, ws, profile_set=None):
+    # ``profile_set`` (``--set``) reaches only the NAMED renderer: every one
+    # of them resolves a profile through ``discover_profiles``, and a set is
+    # meaningless to the bare schema / contract a scope renders without one.
+    if not name:
+        return spec.render()
+    if profile_set:
+        return spec.render_named(name, ws, profile_set=profile_set)
+    return spec.render_named(name, ws)
 
 
 #: How each :attr:`ExplainScope.kind` is invoked.  Dispatch is a lookup here,
@@ -425,6 +432,7 @@ def _scope_renderer(scope: str):
 
 def render_topic(
     scope: Optional[str], name: Optional[str] = None, workspace: str = ".",
+    profile_set: Optional[str] = None,
 ) -> "tuple[bool, Dict[str, Any], str, str]":
     """Render one topic — the ONE dispatch, with no printing and no exit code.
 
@@ -439,6 +447,9 @@ def render_topic(
         scope: The topic, or ``None`` for the overview.
         name: The topic's argument, when it takes one.
         workspace: What a workspace-reading topic reads.
+        profile_set: The profile set a named-profile topic resolves under
+            (``--set``); ``None`` follows the workspace ``.env``.  Passed only
+            to built-in ``optional_named`` scopes.
 
     Returns:
         ``(ok, data, text, error)``.  ``ok`` is ``False`` for an unknown
@@ -456,7 +467,10 @@ def render_topic(
         return False, {}, "", (
             f"unknown explain scope {scope!r} — one of: {_all_scopes_help()}")
     try:
-        data, text = render(scope, name, workspace)
+        if profile_set and _SCOPES.get(scope) is not None:
+            data, text = render(scope, name, workspace, profile_set=profile_set)
+        else:
+            data, text = render(scope, name, workspace)
         # Contributed SECTIONS append to whatever rendered — a built-in or a
         # contributed topic alike — so two packages can answer about one
         # subject without either having to know the other exists.
@@ -488,12 +502,20 @@ def _cmd_explain(args) -> int:
         return 0
 
     asked = getattr(args, "connect", None)
+    pset = getattr(args, "set", None)
+    if asked and pset:
+        # The daemon's ``scaffold.explain`` carries no set: it reads the
+        # caller's workspace ``.env``.  Asking it while claiming a set would
+        # answer about a set nobody chose.
+        print("explain: --set cannot be combined with --connect (the daemon "
+              "reads JAATO_PROFILE_SET from the workspace .env)", file=sys.stderr)
+        return 2
     if asked:
         rc, _note = _remote.render_from_daemon(asked, scope, name, args,
                                                 required=True)
         return rc
 
-    ok, data, text, error = render_topic(scope, name, ws)
+    ok, data, text, error = render_topic(scope, name, ws, profile_set=pset)
     if not ok:
         # Only a topic this venv does not HAVE is worth a socket: a usage
         # error is about the caller's own command line, and asking a daemon
@@ -764,6 +786,9 @@ class ExplainVerb:
                              "of any scope: what it needs, what is installed, and "
                              "whether this environment agrees with itself")
         pe.add_argument("--workspace", help=_workspace_arg_help())
+        pe.add_argument("--set", help="JAATO_PROFILE_SET name a named-profile "
+                                      "topic (profile/oversight/audit <name>) "
+                                      "resolves under; default: the workspace .env")
         pe.add_argument("--connect", nargs="?", const=True, metavar="SOCKET",
                         help="ask a running daemon to render the topic instead of "
                              "this virtualenv — for a CLI installed beside an "

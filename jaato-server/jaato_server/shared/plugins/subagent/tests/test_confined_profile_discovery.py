@@ -18,7 +18,7 @@ def test_scan_profiles_dir_skips_tier_when_is_dir_denied():
     denied = MagicMock()
     denied.is_dir.side_effect = PermissionError(13, "Permission denied")
     profiles, errors = {}, {}
-    _scan_profiles_dir(denied, profiles, errors)  # must NOT raise
+    _scan_profiles_dir(denied, profiles, errors, {})  # must NOT raise
     assert profiles == {}
     assert errors == {}
 
@@ -28,5 +28,5 @@ def test_scan_profiles_dir_skips_tier_when_iterdir_denied():
     denied.is_dir.return_value = True
     denied.iterdir.side_effect = PermissionError(13, "Permission denied")
     profiles, errors = {}, {}
-    _scan_profiles_dir(denied, profiles, errors)  # must NOT raise
+    _scan_profiles_dir(denied, profiles, errors, {})  # must NOT raise
     assert profiles == {}

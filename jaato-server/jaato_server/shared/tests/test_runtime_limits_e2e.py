@@ -108,7 +108,7 @@ class TestFakeFsE2E:
 
         # Load via _scan_profiles_dir (isolated, no tier scanning)
         profiles, errors = {}, {}
-        _scan_profiles_dir(tmp_path, profiles, errors)
+        _scan_profiles_dir(tmp_path, profiles, errors, {})
         assert "heavy" in profiles
         assert not errors
 
@@ -145,7 +145,7 @@ class TestFakeFsE2E:
         })
 
         profiles, errors = {}, {}
-        _scan_profiles_dir(tmp_path, profiles, errors)
+        _scan_profiles_dir(tmp_path, profiles, errors, {})
         limits = profiles["app_only"].runtime_limits
 
         assert limits.tool_timeout_seconds == 30
@@ -168,7 +168,7 @@ class TestFakeFsE2E:
         })
 
         profiles, errors = {}, {}
-        _scan_profiles_dir(tmp_path, profiles, errors)
+        _scan_profiles_dir(tmp_path, profiles, errors, {})
         assert profiles["plain"].runtime_limits is None
 
     # -- 4. Invalid runtime_limits rejected at load --
@@ -184,7 +184,7 @@ class TestFakeFsE2E:
         })
 
         profiles, errors = {}, {}
-        _scan_profiles_dir(tmp_path, profiles, errors)
+        _scan_profiles_dir(tmp_path, profiles, errors, {})
         # Profile with invalid runtime_limits is rejected — not added to profiles
         assert "bad_limits" not in profiles
         # Error is recorded
@@ -210,7 +210,7 @@ class TestFakeFsE2E:
         })
 
         profiles, errors = {}, {}
-        _scan_profiles_dir(tmp_path, profiles, errors)
+        _scan_profiles_dir(tmp_path, profiles, errors, {})
         # _scan_profiles_dir mutates in-place
         assert "parent_lim" in profiles
         assert "child_inherit" in profiles
@@ -242,7 +242,7 @@ class TestFakeFsE2E:
             },
         })
 
-        _scan_profiles_dir(tmp_path, profiles := {}, errors := {})
+        _scan_profiles_dir(tmp_path, profiles := {}, errors := {}, {})
         resolved, errors = resolve_profiles(profiles)
         assert not errors
         assert resolved["child_ov"].runtime_limits.memory_max_mb == 4096
@@ -269,7 +269,7 @@ class TestFakeFsE2E:
             "plugins": [],  # required key; empty keeps the inherited surface
         })
 
-        _scan_profiles_dir(tmp_path, profiles := {}, errors := {})
+        _scan_profiles_dir(tmp_path, profiles := {}, errors := {}, {})
         resolved, errors = resolve_profiles(profiles)
         assert "child_conflict" in errors
         assert "runtime_limits" in errors["child_conflict"]
