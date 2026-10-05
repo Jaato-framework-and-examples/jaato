@@ -945,15 +945,19 @@ markup and drew as raw tags. Guard: `ToolBlockView.test.tsx`.
 
 A session woken from disk — `session.wake`, a reattach, anything reaching
 `SessionManager._load_session` — comes back with **what it persisted**, not
-with what the files on disk say today (issue #787):
+with what the files on disk say today (issue #787), **when the record
+carries the daemon's seal** (#1529). A record the daemon cannot
+authenticate is narrowed instead; the last column says how (see
+[A Record the Session Could Rewrite](#a-record-the-session-could-rewrite-1529)):
 
-| What | Persisted as | Restored via |
-|------|--------------|--------------|
-| the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` |
-| the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
-| the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
-| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` |
-| the runner that ran it (#812, record 2.10+) | `SessionState.runner_identity` | restored onto `Session.runner_identity` as **`stale=True`** — the pid named is from a previous process lifetime, so it is evidence, never a handle |
+| What | Persisted as | Restored via (sealed record) | Unsealed record |
+|------|--------------|------------------------------|-----------------|
+| the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` | re-resolved from disk by `profile_name`; refused if it no longer resolves |
+| the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` | restored (lower impact; re-rendering would re-run prefetch scripts) |
+| the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` | dropped |
+| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` | from the daemon's index (`membership`), else none |
+| the runner that ran it (#812, record 2.10+) | `SessionState.runner_identity` | restored onto `Session.runner_identity` as **`stale=True`** — the pid named is from a previous process lifetime, so it is evidence, never a handle | same |
+| the confinement mode | `SessionState.sandbox_mode` | evidence only: a kernel claim ARMS the revive's opt-in, anything else leaves the fresh opt-in to decide | confinement is armed |
 
 Record version 2.8+. Restoring the render means a revive does **not** re-run
 the persona's `{{!py:...}}` prefetch scripts — which is what made a session
@@ -7963,8 +7967,9 @@ Files OUTSIDE any workspace stay the daemon's:
 `~/.jaato/session_workspace_index.json`, the daemon log,
 `~/.jaato/apparmor-cache`. Still root-owned and tracked separately: the
 session inbox (`.jaato/sessions/<id>.inbox/`, `session_inbox.py`, #1530). A
-session can rewrite its own record, and a revive trusts its confinement,
-seccomp and permission fields: #1529. Guard:
+session can rewrite its own record; since #1529 a revive no longer trusts
+one the daemon did not seal (see
+[A Record the Session Could Rewrite](#a-record-the-session-could-rewrite-1529)). Guard:
 `jaato_server/server/tests/test_daemon_workspace_files_owned_1528.py`, six
 reversions, real `chown` to `nobody` as root and an inode ledger otherwise.
 
@@ -9672,11 +9677,123 @@ Still open: the other `TRAIT_SESSION_PERSISTENT` plugins (`reliability`,
 `service_connector`) are saved and restored through the daemon registry
 the same way, and the `a` / `t` / `i` re-emit gap above.
 
+Since #1529 the snapshot is restored as written only from a record the
+daemon sealed. From any other record only the narrowing half is restored
+(`session_blacklist` and a `deny` default); an `always` cannot be checked
+against anything on disk, so it is dropped.
+
 Guard: `jaato_server/server/tests/test_permission_decisions_survive_a_revive_1412.py`,
 five reversions. It drives a real `RunnerRPCClient` over a socketpair to a
 real `RunnerRPC`, with the enforcer built by the bootstrap's own function:
 decide through the command path on runner A, save, revive on runner B, and
 B enforces both decisions and announces `allow`.
+
+### A Record the Session Could Rewrite (#1529)
+
+A session record is `<ws>/.jaato/sessions/<id>.json`, inside the workspace
+and so inside what a session's own code can write: the workspace-wide
+`rwkl` grant (template v13) covered it in `//child` (`python -c`, a
+script, a notebook cell), and under a dropping `--runner-uid-policy` it is
+the runner account's own file (#1528). A revive rebuilt the session from
+it, and took from it the fields that decide the revived boundary. Read
+from the tree, and checked against it:
+
+| Record field | What a revive did with it |
+|---|---|
+| `sandbox_mode` | `apparmor=sandbox_mode_is_kernel(...)` on the restore envelope: `null` revived an IPC session with no kernel boundary |
+| `profile_snapshot.apparmor_fragments` / `_source` | exec scoping of `//child` |
+| `profile_snapshot.runtime_limits` | the seccomp filter (`seccomp: off`, `seccomp_allow`), pids, memory, cpu, the lifetime bounds |
+| `profile_snapshot.plugin_configs.permission` | the enforcer's profile layer (#1474): `defaultPolicy: allow` |
+| `profile_snapshot.plugins` / other `plugin_configs` | which tools exist; `notebook.allow_uncontained_exec`, `cli.extra_paths`, `interactive_shell.require_confinement` |
+| `profile_snapshot.env` | resolved daemon-side at spawn, `pass://` / `vault://` included, and shipped to the runner |
+| `profile_snapshot.scrub_secret_env` | `none` |
+| `metadata.plugin_states.permission` | `always` rules for any tool (#1412) |
+| `workspace_path`, `config_root` | where the runner runs and is confined; where profiles are searched |
+| `created_by`, `cascade_driver_id`, `sibling_name` | attribution and the courier group a session joins |
+| `rendered_instructions` | the prompt (lower impact: the agent already controls its context) |
+
+**Threat model.** On an unconfined host whose runner shares the daemon's
+uid, the agent can already edit the profile files and `~/.jaato`; nothing
+here adds a boundary there. What this closes is a **confined runner**
+(AppArmor, SELinux, or a dropped uid) widening the next lifetime of its own
+session.
+
+**Layer 1: the daemon seals what it writes, and narrows what it did not.**
+
+| Piece | Where |
+|---|---|
+| the seal: HMAC-SHA256 over the canonical JSON of the whole record minus `record_seal`, under `~/.jaato/session-record.key` (32 bytes, `0600`, created with `O_EXCL`, in the DAEMON's home) | `server/record_seal.py` |
+| every daemon save is sealed (`FileSessionPlugin.save(seal=)`), every load is checked (`load(verify=)` → `SessionState.record_verified`, not persisted) | `SessionManager._write_record`, `_read_record` |
+| an unverified record is rewritten in place to its fail-safe form before the revive reads it; one WARNING names every field changed, by key only | `server/record_distrust.py`, `SessionManager._apply_record_trust` |
+| the confinement opt-in a revive passes: `True` for an unsealed record or a sealed kernel claim, else `None` (the fresh opt-in decides) | `revive_arms_confinement` |
+| the `sandbox_mode` the revived `Session` records: what provisioning produced now, else the record's value as evidence | `revived_sandbox_mode` |
+
+What an unsealed record still gives a revive, and what it does not:
+
+| Re-derived | Narrowed | Dropped | Still taken from the record |
+|---|---|---|---|
+| the profile (from disk by `profile_name`, so plugins, plugin configs, fragments, `runtime_limits`, `scrub_secret_env`, `env` URIs are the files'); the workspace (where the record was read, else the index); `config_root` (client, else `<ws>/.jaato`); membership (the index) | permission state (deny rules and a `deny` default only); `model_override_env` (`MODEL_NAME` / `JAATO_PROVIDER` only); confinement (armed) | `agent_params`; other plugins' states; `metadata.subagents` | history and its bookkeeping, `rendered_instructions`, `budget_control` (when the disk profile declares none) and `budget_usage` |
+
+Why each: the conversation and the prompt are the agent's own context; the
+budget has no daemon-owned copy, and an edited ceiling can only be raised
+to "none", which is what dropping it would give.
+
+Rules the implementation holds to:
+
+- **A MAC over the whole record, not a list of fields.** The
+  security-relevant surface of a profile is not a closed list (plugins,
+  every plugin's knobs, MCP servers), and a per-field merge is the list
+  that drifts when a knob is added. This departs from the issue's
+  suggested most-restrictive-wins merge for that reason.
+- **Fail safe, or refuse.** An inline `profile_spec` has nothing on disk to
+  re-derive from, and a named profile that no longer resolves would fall
+  back to an env-only session with the default plugin set: both REFUSE the
+  revive (`ErrorEvent(error_type="SessionRecordUntrusted")`).
+- **No laundering.** A session revived from an unsealed record is resealed
+  only once the daemon decided its boundary itself (provisioning ran, the
+  workspace is under the WS root, or there is no workspace). A clientless
+  revive provisions nothing, so its saves stay unsealed
+  (`Session.record_trusted`) and the next revive narrows again.
+- **`sandbox_mode` never disarms.** A sealed `null` means the daemon chose
+  unconfined, so the fresh opt-in decides; a sealed kernel claim arms; an
+  unsealed record arms whatever it says.
+
+**Layer 2: the kernel.** Template **v46** write-denies
+`<ws>/.jaato/sessions/` and everything under it in `//child`, and
+`<ws>/.jaato/sessions/*.json` in the isolated sub-runner. Base and
+`tool_hat` keep the grant: the runner writes per-session state there
+(`sessions/<id>/plans`, a `save` tool call), and a record the runner
+writes is unsealed and narrowed. `gitignore.CONFINED_STATE` names
+`sessions/`. No SELinux change: `.jaato/sessions/` keeps the workspace
+type, and layer 1 is the fix there (#1540).
+
+Stated costs:
+
+- **Every record written before this change is unsealed, once.** Its
+  first revive takes the profile from disk (not the #787 snapshot), drops
+  `always` rules, `agent_params`, other plugins' states and restored
+  subagents, and arms confinement: an IPC session that ran unconfined on
+  an AppArmor or SELinux host comes back confined. A pre-change inline
+  session cannot be revived. No record version bump: an older daemon
+  ignores `record_seal`.
+- **The key is per daemon home.** A lost key, or a workspace moved to
+  another daemon, makes every record unsealed. A key not owned by the
+  daemon or unreadable is logged at ERROR and every save is unsealed; a
+  group/other-readable key is tightened to `0600`.
+- **A no-profile `session.new --model` override is kept**; one applied to
+  a profile lives in the snapshot and is lost with it on an unsealed revive.
+
+Not covered, tracked separately: per-session state files beside the record
+(`sessions/<id>/subagents/*.json`, read by a SEALED revive and carrying
+subagent profiles; `sessions/<id>/plans/_state.json`) and the inbox
+(`<id>.inbox/`, #1530) are not sealed (#1539); layer 2 covers them for `//child`
+only. Nothing here was run against an enforcing kernel.
+
+Guard: `jaato_server/server/tests/test_a_revive_does_not_trust_the_record_1529.py`,
+six reversions. It writes records to disk and drives the real
+`_load_session_impl` with the real `FileSessionPlugin`, stubbing only
+server construction; the kernel half checks the rendered profiles with the
+#1348 rule matcher.
 
 ### A Policy File Read and Thrown Away (#1474)
 

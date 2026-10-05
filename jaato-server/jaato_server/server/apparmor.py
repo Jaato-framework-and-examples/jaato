@@ -791,7 +791,20 @@ class AppArmorManager:
     #       no confined session.  ``bin/* ix`` beside it, mirroring the
     #       venv grant, because ``<venv>/bin/python`` resolves there.  A
     #       root inside a workspace is never granted (model-writable).
-    _TEMPLATE_VERSION = 45
+    #   v46 (#1529): write-deny ``<ws>/.jaato/sessions/`` (the directory
+    #       and everything under it) in ``//child``, and the top-level
+    #       records ``<ws>/.jaato/sessions/*.json`` in the isolated
+    #       sub-runner.  A revive rebuilt the session from its record, and
+    #       the record's profile snapshot, permission rules and
+    #       ``sandbox_mode`` decided the revived boundary, so a subprocess
+    #       that rewrote it widened the next lifetime of its own session.
+    #       Defence in depth only: the fix is that a revive no longer
+    #       trusts a record it cannot authenticate (``server.record_seal``,
+    #       ``server.record_distrust``).  Base and ``tool_hat`` keep the
+    #       grant: the runner itself writes per-session state there
+    #       (``sessions/<id>/plans``, a ``save`` tool call), and a record
+    #       written by the runner is unsealed and narrowed on revive.
+    _TEMPLATE_VERSION = 46
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -2378,6 +2391,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # session that rewrote it would widen the policy of every later
   # session in this workspace.  Read stays allowed: the runner reads it.
   audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
+  # Session records (v46, #1529): a revive reads them back.  The
+  # sub-runner hosts one subagent and writes no top-level record.
+  audit deny "{workspace_path}/.jaato/sessions/*.json"       wlk,
   audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
   audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
   audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -4091,6 +4107,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # the references plugin's contributed grant, which lands here too.
     audit deny "{workspace_path}/.jaato/references-claims/" wlk,
     audit deny "{workspace_path}/.jaato/references-claims/**" wlk,
+    # Session records and per-session state (v46, #1529) -- //child
+    # ONLY among the runner bodies.  A revive reads them back; no
+    # model-driven subprocess has a reason to write them, and the
+    # runner's in-process writes (base / tool_hat) are unaffected.
+    audit deny "{workspace_path}/.jaato/sessions/" wlk,
+    audit deny "{workspace_path}/.jaato/sessions/**" wlk,
 
     # ---- tool_hat-style read-denies (mirrors tool_hat) ----
     # Same information-isolation as the in-process tool_hat: a

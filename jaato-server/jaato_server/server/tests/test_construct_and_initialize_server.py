@@ -381,7 +381,10 @@ def test_load_session_impl_uses_sub_helper_with_no_client_id(
     env = captured_envelopes[0]
     assert env.session_id == "restored-1"
     assert env.client_id is None  # disk-restore has no client opt-in
-    assert env.sandbox_mode == "apparmor"  # carried from saved state
+    # #1529: the saved mode is no longer handed on as "already decided"
+    # (the Session records what provisioning produces); it ARMS the revive.
+    assert env.sandbox_mode is None
+    assert env.apparmor is True
     # restore_state field carries the saved state for §3.12 follow-on
     # consumers (defer-and-flush etc.).
     assert env.restore_state is not None

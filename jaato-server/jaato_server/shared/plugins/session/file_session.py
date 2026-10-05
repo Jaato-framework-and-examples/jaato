@@ -194,6 +194,7 @@ class FileSessionPlugin:
         state: SessionState,
         storage_dir: Optional[Path] = None,
         owner: Optional[Tuple[int, int]] = None,
+        seal: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> None:
         """Save session state to a JSON file atomically.
 
@@ -216,6 +217,13 @@ class FileSessionPlugin:
                 (``0666 & ~umask``, 0644 by default): what a record holds
                 is the conversation the workspace's own runner already
                 reads, and its owner is now that account.
+            seal: Called on the serialized record just before it is
+                written; returns the dict to write (#1529).  The daemon
+                passes :func:`server.record_seal.seal` bound to its key, so
+                a revive can tell its own record from one a session edited.
+                ``None`` (a runner-side ``save`` tool call, any caller that
+                holds no key) writes the record unsealed, which a revive
+                reads as untrusted -- the narrower reading.
         """
         # Update with current description if we have one
         if self._session_description and not state.description:
@@ -228,6 +236,8 @@ class FileSessionPlugin:
         validate_session_id(state.session_id)
         file_path = target_dir / f"{state.session_id}.json"
         data = serialize_session_state(state)
+        if seal is not None:
+            data = seal(data)
 
         # Atomic write: tmp file → fsync → rename → fsync directory.
         # The tmp file lives in the same directory as the target so the
@@ -278,6 +288,7 @@ class FileSessionPlugin:
         self,
         session_id: str,
         storage_dir: Optional[Path] = None,
+        verify: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> SessionState:
         """Load session state from a JSON file.
 
@@ -285,6 +296,10 @@ class FileSessionPlugin:
             session_id: The session ID to load.
             storage_dir: Override storage directory. When None, uses the
                 directory set during initialize().
+            verify: Asked with the PARSED record before it is
+                deserialized; its answer is stored on
+                ``SessionState.record_verified`` (#1529).  ``None`` leaves
+                that field ``None`` ("nobody asked").
 
         Returns:
             The loaded SessionState.
@@ -306,6 +321,8 @@ class FileSessionPlugin:
             data = json.load(f)
 
         state = deserialize_session_state(data)
+        if verify is not None:
+            state.record_verified = bool(verify(data))
 
         # Update internal state
         self._current_session_id = state.session_id
