@@ -262,7 +262,7 @@ def _positive_float(raw: Optional[str], name: str, default: float) -> float:
 def lock_timeout_seconds() -> float:
     """Effective lock wait bound (``JAATO_CREDENTIAL_LOCK_TIMEOUT``)."""
     return _positive_float(
-        os.environ.get(LOCK_TIMEOUT_ENV),
+        os.environ.get(LOCK_TIMEOUT_ENV),  # env: seconds to wait for another process refreshing a rotating OAuth credential (default 60)
         LOCK_TIMEOUT_ENV,
         DEFAULT_LOCK_TIMEOUT_SECONDS,
     )
@@ -271,7 +271,7 @@ def lock_timeout_seconds() -> float:
 def refresh_margin_seconds() -> float:
     """Effective early-refresh margin (``JAATO_OAUTH_REFRESH_MARGIN``)."""
     return _positive_float(
-        os.environ.get(REFRESH_MARGIN_ENV),
+        os.environ.get(REFRESH_MARGIN_ENV),  # env: seconds before expiry at which an OAuth access token is refreshed (default 300)
         REFRESH_MARGIN_ENV,
         DEFAULT_REFRESH_MARGIN_SECONDS,
     )

@@ -128,7 +128,7 @@ class TokenLedger:
         # Session-scoped reads go through the per-session context first,
         # so two sessions on one daemon do not read each other's paths.
         from .session_context import get_session_env
-        raw = self._path if self._path is not None else get_session_env(LEDGER_PATH_ENV)
+        raw = self._path if self._path is not None else get_session_env(LEDGER_PATH_ENV)  # env: token-ledger JSONL path; relative = per session (typed: trace.ledger)
         if not raw:
             return None
         if os.path.isabs(raw):
@@ -149,7 +149,7 @@ class TokenLedger:
         """
         from .session_context import get_session_env
         raw = (self._integrity if self._integrity is not None
-               else get_session_env(LEDGER_INTEGRITY_ENV))
+               else get_session_env(LEDGER_INTEGRITY_ENV))  # env: token-ledger tamper evidence: sha256-chain | none (typed: record_keeping.integrity)
         return (raw or "none").strip().lower() == "sha256-chain"
 
     def _line(self, index: int) -> str:

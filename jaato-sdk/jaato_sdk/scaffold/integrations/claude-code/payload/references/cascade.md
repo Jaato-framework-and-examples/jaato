@@ -36,8 +36,10 @@ per run.
 
 **Two tenants, one daemon:** slots are affine to a cascade and cross-cascade
 reuse is forbidden by design, so a second concurrent cascade competes for pool
-capacity. `JAATO_RUNNER_POOL_SIZE` is a floor on unreserved idle slots and
-`JAATO_RUNNER_POOL_MAX_SIZE` a ceiling on the total; `explain env` carries both.
+capacity. `JAATO_RUNNER_POOL_SIZE` is a floor on virgin idle slots (no cascade
+affinity, never served) and `JAATO_RUNNER_POOL_MAX_SIZE` a ceiling on the total.
+Both can be changed on a running daemon (`jaato-server --pool-size N`);
+`explain pool` says how, and which counters say the size is wrong.
 A run that must not contend belongs on its own `--ipc-socket`.
 
 ## Observing a run

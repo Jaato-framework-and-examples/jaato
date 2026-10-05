@@ -75,7 +75,7 @@ def hold_warn_seconds() -> float:
     """
     # A literal, not HOLD_WARN_ENV: the env-scope catalog is derived by an
     # AST scan for literal reads (shared/env_scope.py).
-    raw = os.environ.get("JAATO_LOCK_HOLD_WARN_MS", "").strip()
+    raw = os.environ.get("JAATO_LOCK_HOLD_WARN_MS", "").strip()  # env: ms SessionManager._lock may be held before LOCK_HELD_LONG is logged with the holder's stack (default 500; 0 off)
     if not raw:
         return DEFAULT_HOLD_WARN_MS / 1000.0
     try:
