@@ -145,6 +145,13 @@ class SessionState:
     ``== "apparmor"`` reads it as "not confined", which is TRUE and is the
     safe direction.
 
+    Since #1529 a revive never DISARMS confinement from this value: a
+    kernel claim in a daemon-sealed record arms the revive's opt-in, any
+    other sealed value leaves the fresh opt-in to decide, and an unsealed
+    record arms confinement whatever it says (``session_manager.
+    revive_arms_confinement``).  The revived Session records what
+    provisioning produced then; this value is evidence.
+
     Persisted so disk-restore / orphan-revive re-applies the SAME
     confinement on runner re-spawn.  Without it a revived session's
     ``_load_session`` read of ``state.sandbox_mode`` was always None
@@ -379,6 +386,15 @@ class SessionState:
     end_reason: Optional[str] = None
     """The ``SessionTerminatedEvent.reason`` that finished it, beside
     ``ended_at`` (record 2.11).  ``None`` exactly when ``ended_at`` is."""
+
+    record_verified: Optional[bool] = field(default=None, compare=False)
+    """Whether the record this state was read from carries a valid daemon
+    seal (#1529).  NOT persisted: it is a fact about the bytes just read,
+    set by ``FileSessionPlugin.load(..., verify=...)``.  ``None`` = nobody
+    asked (a load without a verifier, or a state built in memory);
+    ``False`` = asked and the seal is absent or wrong, so a revive must not
+    trust the record's security-relevant fields
+    (:mod:`server.record_distrust`)."""
 
 
 @dataclass

@@ -184,6 +184,10 @@ CONFINED_STATE: Tuple[Tuple[str, str], ...] = (
      "reference claims written by proposeReference (in-process, in the "
      "runner's base profile): denied to //child so a subprocess the model "
      "drives cannot write a claim, or its recorded witness, by hand"),
+    ("sessions/",
+     "session records and per-session state (#1529): a revive reads them "
+     "back, so //child may not write them; the runner itself still does, "
+     "and a record the daemon did not seal is narrowed on revive"),
 )
 
 #: Workspace-root scratch the framework writes OUTSIDE ``.jaato/``, which

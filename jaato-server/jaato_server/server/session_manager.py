@@ -775,6 +775,14 @@ class Session:
     #: rule #1355 applies to history.  ``None`` = nothing decided (or never
     #: learned).
     permission_state: Optional[Dict[str, Any]] = None
+    #: Whether this session's saves are SEALED (#1529, ``server.record_seal``).
+    #: ``True`` for every session the daemon created, and for one revived
+    #: from a sealed record.  ``False`` for one revived from an unsealed
+    #: record whose boundary the revive did not re-decide (a clientless
+    #: wake): sealing it would turn an edited ``sandbox_mode`` into a value
+    #: the next revive trusts, so it stays unsealed and the next revive
+    #: narrows it again.  Never persisted.
+    record_trusted: bool = True
     # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
     # ID stamped at session creation.  Consumed by
     # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
@@ -1497,6 +1505,64 @@ def _apply_model_override(
     if provider:
         extra["JAATO_PROVIDER"] = provider
     return profile, inline_spec, {**(env_overrides or {}), **extra}, extra
+
+
+@dataclass(frozen=True)
+class RecordTrust:
+    """What a revive may take from the record it read (#1529).
+
+    ``trusted`` is ``True`` only for a record sealed under this daemon's key
+    (:mod:`server.record_seal`).  ``require_disk_profile`` is set for an
+    unsealed record that names a profile: it is revived under that profile
+    as the files say now, or not at all.
+    """
+
+    trusted: bool
+    require_disk_profile: bool = False
+
+
+def revive_arms_confinement(state: Any, trusted: bool) -> Optional[bool]:
+    """The ``apparmor`` opt-in a revive passes to provisioning (#1529).
+
+    ``True`` when the record is unsealed (an edited ``sandbox_mode: null``
+    must not disarm a boundary) or when a sealed record says the daemon
+    armed kernel confinement before.  ``None`` otherwise: no override, so
+    the revive resolves the opt-in a fresh session does (the attaching
+    client's, then the profile's).  Never ``False``, which would override a
+    client that opts in.
+    """
+    if not trusted:
+        return True
+    return True if sandbox_mode_is_kernel(getattr(state, "sandbox_mode", None)) else None
+
+
+def revived_sandbox_mode(
+    state: Any, trusted: bool, provisioned: Optional[str],
+) -> Optional[str]:
+    """The ``sandbox_mode`` a revived ``Session`` records (#1529).
+
+    What provisioning produced now, when it ran.  Otherwise (a clientless
+    revive provisions nothing) the record's value as evidence: as written
+    for a sealed record, and for an unsealed one only a kernel claim, the
+    value that arms the next revive rather than disarming it.
+    """
+    if provisioned is not None:
+        return provisioned
+    recorded = getattr(state, "sandbox_mode", None)
+    if trusted or sandbox_mode_is_kernel(recorded):
+        return recorded
+    return None
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """Whether callable *fn* takes keyword *name* (or ``**kwargs``)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _model_override_metadata(session: Any) -> Dict[str, Any]:
@@ -4900,8 +4966,8 @@ class SessionManager:
            client).
         5. Build the :class:`Session` record with ``sandbox_mode``
            resolved per the priority chain:
-           a. ``envelope.sandbox_mode`` — disk-restore's pre-known
-              value (the saved Session record's mode).
+           a. ``envelope.sandbox_mode`` — a caller's pre-resolved
+              value (disk-restore passes ``None`` since #1529).
            b. Return value of
               :meth:`_provision_ipc_apparmor_and_spawn_runner`
               (§3.13's inline call) — apparmor opt-in result for
@@ -5040,8 +5106,9 @@ class SessionManager:
         5. ``server.initialize()`` — return ``(None, None)`` on
            failure.
         6. Resolve sandbox_mode: ``envelope.sandbox_mode`` wins
-           (disk-restore's pre-known value); else IPC method
-           result; else None.
+           when a caller pre-resolved one; else IPC method result;
+           else None.  Disk-restore passes ``None`` since #1529, so
+           the revived Session records what provisioning produced.
 
         Returns:
             ``(JaatoServer, sandbox_mode)`` on success;
@@ -5216,8 +5283,9 @@ class SessionManager:
             )
 
         # Resolve sandbox_mode.  Priority:
-        # 1. ``envelope.sandbox_mode`` — authoritative pre-resolved
-        #    value (disk-restore's saved mode).
+        # 1. ``envelope.sandbox_mode`` — a caller's pre-resolved value
+        #    (disk-restore passes None since #1529: the record's mode is
+        #    evidence, never a decision).
         # 2. Result of inline IPC apparmor provisioning.
         # 3. None — no opt-in / non-confined.
         planned_sandbox = envelope.sandbox_mode
@@ -12843,7 +12911,7 @@ class SessionManager:
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
 
         try:
-            state = self._session_plugin.load(session_id, storage_dir=storage_dir)
+            state = self._read_record(session_id, storage_dir)
             logger.debug(f"_load_session: loaded state for {session_id}")
         except FileNotFoundError:
             logger.debug(f"_load_session: session {session_id} not found on disk")
@@ -12872,23 +12940,15 @@ class SessionManager:
         else:
             init_callback = lambda e: self._emit_to_session(session_id, e)
 
-        # Determine which env_file to use for this session:
-        # 1. If client_id is provided, use client's env_file from their config
-        # 2. If session has workspace_path, try workspace/.env
-        # Sessions are workspace-bound: the workspace determines the .env file,
-        # which in turn determines the provider.
-        session_env_file = None
-        if client_id:
-            client_config = self._client_config.get(client_id, {})
-            if client_config.get('env_file'):
-                session_env_file = client_config['env_file']
-                logger.debug(f"_load_session: using client's env_file: {session_env_file}")
-        if not session_env_file and state.workspace_path:
-            import os
-            workspace_env = os.path.join(state.workspace_path, '.env')
-            if os.path.exists(workspace_env):
-                session_env_file = workspace_env
-                logger.debug(f"_load_session: using workspace env_file: {session_env_file}")
+        # #1529: a record the daemon did not seal is narrowed to what the
+        # daemon can vouch for BEFORE anything below reads it.  ``None`` is
+        # a refusal, already logged and announced.
+        trust = self._apply_record_trust(
+            state, session_id, workspace_path, init_callback)
+        if trust is None:
+            return None
+
+        session_env_file = self._revive_env_file(client_id, state.workspace_path)
 
         # Resolve the SubagentProfile from ``state.profile_name``
         # (persisted post-2.3) so disk-restore re-binds the full
@@ -12927,6 +12987,9 @@ class SessionManager:
             config_root=restore_config_root,
             env_file=session_env_file,
         )
+        if not self._revive_profile_acceptable(
+                trust, restored_profile, state, init_callback):
+            return None
 
         self._attach_budget_ceiling(
             getattr(state, "budget_control", None), restored_profile,
@@ -12972,23 +13035,18 @@ class SessionManager:
             # #859: the creator recorded on the session record (2.9+), so
             # a revived runner session is attributed to the same user.
             created_by=getattr(state, "created_by", None),
-            sandbox_mode=getattr(state, "sandbox_mode", None),
-            # Drive confinement from the SAVED sandbox_mode (precedence-1
-            # apparmor_override in _provision) rather than re-running the
-            # client-driven opt-in — preserves the "use saved sandbox_mode,
-            # don't re-run the opt-in" intent now that a real client_id is
-            # threaded above.  env_file stays a saved-driven override; config_root
-            # is resolved saved→client→<workspace>/.jaato (restore_config_root
-            # above) so a pre-persistence None can't hang the runner.
-            # #1014: ANY kernel mode re-arms confinement on revive, from
-            # either LSM (``apparmor`` is the opt-in flag's historical
-            # name; it means "this session wants a kernel boundary", and
-            # the daemon's selected backend provides it).  The mode is
+            # #1529: the record's ``sandbox_mode`` never decides the revived
+            # boundary and is not handed on as "already decided": the
+            # Session below records what provisioning produced NOW.
+            sandbox_mode=None,
+            # #1529: arm kernel confinement when the SEALED record says the
+            # daemon armed it before, or when the record is not sealed at
+            # all (an edited ``null`` must not disarm it).  Otherwise
+            # ``None``: the same opt-in a fresh session resolves (the
+            # attaching client's, then the profile's).  #1014: the mode is
             # re-decided at provisioning time, so a session that ran
             # complain or permissive does not inherit that posture.
-            apparmor=sandbox_mode_is_kernel(
-                getattr(state, "sandbox_mode", None)
-            ),
+            apparmor=revive_arms_confinement(state, trust.trusted),
             profile=restored_profile,
             # Re-apply the profile's ``suppress_base_instructions`` on restore.
             # Unlike plugins / plugin_configs / system_instructions / gc (which
@@ -13250,7 +13308,14 @@ class SessionManager:
             # exactly what a post-mortem of a finished session wants.
             runner_identity=RunnerIdentity.from_dict(
                 getattr(state, "runner_identity", None), stale=True),
-            sandbox_mode=getattr(state, "sandbox_mode", None),
+            # #1529: what was provisioned now; the record's value only as
+            # evidence where nothing was (see ``revived_sandbox_mode``).
+            sandbox_mode=revived_sandbox_mode(
+                state, trust.trusted, _restore_sandbox),
+            # #1529: an unsealed record is resealed only once its boundary
+            # has been re-decided; until then its saves stay unsealed.
+            record_trusted=self._revive_reseals(
+                trust.trusted, state.workspace_path, _restore_sandbox),
             # #1503: kept until the new runner reports its own posture.
             seccomp=getattr(state, "seccomp", None),
             # Carry the inline spec forward so a re-save of the restored
@@ -14069,7 +14134,9 @@ class SessionManager:
                     end_reason=session.end_reason,
                 )
 
-                self._write_record(state, storage_dir, record_owner)
+                self._write_record(
+                    state, storage_dir, record_owner,
+                    seal=session.record_trusted)
                 session.is_dirty = False
 
                 logger.debug(f"Saved session: {session.session_id}")
@@ -14108,6 +14175,11 @@ class SessionManager:
            ``JAATO_REVIVE_PROFILE=disk`` opt-in, which interrogation needs
            because a ``JAATO_PROFILE_SET`` switch is resolved inside
            ``discover_profiles`` and a frozen profile would make it inert.
+
+        Since #1529 this only sees a snapshot from a record the daemon
+        SEALED: ``_apply_record_trust`` drops it from any other, so an
+        unsealed record resolves through (3), and the caller refuses the
+        revive when (3) finds nothing.
 
         A snapshot that fails to rebuild falls through to (3) rather than
         failing the load: the worst case is the pre-#787 behaviour, and a
@@ -14404,18 +14476,171 @@ class SessionManager:
         state: Any,
         storage_dir: pathlib.Path,
         owner: Optional[Tuple[int, int]],
+        seal: bool = True,
     ) -> None:
         """Hand *state* to the session plugin, as *owner* when one is set (#1528).
 
         ``owner`` is passed only when set, so a session plugin that predates
         the keyword (any implementation other than ``FileSessionPlugin``) is
         called exactly as before under the default policy.
+
+        ``seal`` (#1529): when true and the daemon holds a record key, the
+        record is sealed (:mod:`server.record_seal`) so a revive can tell it
+        from one a session edited.  ``False`` for a session restored from an
+        unsealed record whose boundary has not been re-decided yet
+        (``Session.record_trusted``).  Passed only to a plugin whose
+        ``save`` takes the keyword.
         """
-        if owner is None:
-            self._session_plugin.save(state, storage_dir=storage_dir)
-        else:
-            self._session_plugin.save(
-                state, storage_dir=storage_dir, owner=owner)
+        kwargs: Dict[str, Any] = {"storage_dir": storage_dir}
+        if owner is not None:
+            kwargs["owner"] = owner
+        sealer = self._record_sealer() if seal else None
+        if sealer is not None and _accepts_kwarg(self._session_plugin.save, "seal"):
+            kwargs["seal"] = sealer
+        self._session_plugin.save(state, **kwargs)
+
+    def _record_sealer(self) -> Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]:
+        """``record_seal.seal`` bound to the daemon's key, or ``None`` (#1529)."""
+        from jaato_server.server import record_seal
+        key = record_seal.load_key()
+        if key is None:
+            return None
+        return lambda data: record_seal.seal(data, key)
+
+    def _read_record(self, session_id: str, storage_dir: Optional[pathlib.Path]) -> Any:
+        """Load a record, asking whether it carries the daemon's seal (#1529).
+
+        ``state.record_verified`` is ``True`` only for a record sealed under
+        this daemon's key.  A session plugin whose ``load`` takes no
+        ``verify`` keyword leaves it ``None``, which the revive reads as
+        unverified: an implementation that cannot say is not trusted.
+        """
+        if not _accepts_kwarg(self._session_plugin.load, "verify"):
+            return self._session_plugin.load(session_id, storage_dir=storage_dir)
+        from jaato_server.server import record_seal
+        key = record_seal.load_key()
+        return self._session_plugin.load(
+            session_id, storage_dir=storage_dir,
+            verify=lambda data: record_seal.verify(data, key))
+
+    def _apply_record_trust(
+        self,
+        state: Any,
+        session_id: str,
+        workspace_path: Optional[str],
+        announce: Callable[[Any], None],
+    ) -> Optional["RecordTrust"]:
+        """Decide what a revive may take from *state*; ``None`` refuses it.
+
+        A sealed record (``record_verified is True``) is used as written.
+        Any other is rewritten by :func:`server.record_distrust.distrust_record`
+        to what the daemon can vouch for: the workspace it was read from (or
+        the daemon's index), the index's membership facts, no snapshot (the
+        profile comes from disk), narrowed permission rules.  One WARNING
+        names every field changed, by key only.  An inline-profile record
+        cannot be re-derived and is refused, announced on *announce* as an
+        ``ErrorEvent`` so an attaching client sees why.
+        """
+        if getattr(state, "record_verified", None) is True:
+            return RecordTrust(trusted=True)
+        from jaato_server.server.record_distrust import distrust_record
+        index = self._session_workspace_index
+        outcome = distrust_record(
+            state,
+            loaded_from=workspace_path,
+            indexed_workspace=None if workspace_path else index.resolve(session_id),
+            membership=index.membership(session_id),
+        )
+        logger.warning(
+            "session %s: its record carries no valid daemon seal (written "
+            "before #1529, edited, or written by another process); reviving "
+            "from what the daemon can vouch for.  Changed: %s",
+            session_id, "; ".join(outcome.changes) or "nothing")
+        if outcome.refusal:
+            self._refuse_untrusted_revive(session_id, outcome.refusal, announce)
+            return None
+        return RecordTrust(
+            trusted=False, require_disk_profile=outcome.require_disk_profile)
+
+    @staticmethod
+    def _refuse_untrusted_revive(
+        session_id: str, reason: str, announce: Callable[[Any], None],
+    ) -> None:
+        """Log and announce a refused revive of an unsealed record (#1529)."""
+        message = (f"session {session_id} cannot be revived: its record is not "
+                   f"sealed by this daemon and {reason}")
+        logger.error("_load_session: %s", message)
+        try:
+            announce(ErrorEvent(
+                error=message, error_type="SessionRecordUntrusted",
+                recoverable=False))
+        except Exception:  # noqa: BLE001 -- the refusal stands either way
+            logger.debug("could not announce the refusal", exc_info=True)
+
+    def _revive_profile_acceptable(
+        self,
+        trust: "RecordTrust",
+        profile: Optional[Any],
+        state: Any,
+        announce: Callable[[Any], None],
+    ) -> bool:
+        """Refuse an unsealed record whose named profile no longer resolves.
+
+        Falling back to an env-only session would give it the default
+        plugin set, which may be wider than the profile it ran under
+        (#1529).  A sealed record keeps the pre-existing behaviour.
+        """
+        if not trust.require_disk_profile or profile is not None:
+            return True
+        self._refuse_untrusted_revive(
+            state.session_id,
+            f"its profile {state.profile_name!r} does not resolve from disk",
+            announce)
+        return False
+
+    def _revive_env_file(
+        self, client_id: Optional[str], workspace_path: Optional[str],
+    ) -> Optional[str]:
+        """The ``.env`` a revived session reads.
+
+        1. the attaching client's ``env_file`` (its ``ClientConfigRequest``);
+        2. else ``<workspace>/.env`` when it exists.
+
+        Sessions are workspace-bound: the workspace determines the ``.env``,
+        which in turn determines the provider.  Lifted out of
+        ``_load_session_impl`` unchanged.
+        """
+        if client_id:
+            env_file = self._client_config.get(client_id, {}).get('env_file')
+            if env_file:
+                logger.debug(f"_load_session: using client's env_file: {env_file}")
+                return env_file
+        if workspace_path:
+            workspace_env = os.path.join(workspace_path, '.env')
+            if os.path.exists(workspace_env):
+                logger.debug(f"_load_session: using workspace env_file: {workspace_env}")
+                return workspace_env
+        return None
+
+    def _revive_reseals(
+        self,
+        trusted: bool,
+        workspace_path: Optional[str],
+        provisioned: Optional[str],
+    ) -> bool:
+        """Whether a revived session's saves are sealed again (#1529).
+
+        A sealed record stays sealed.  An unsealed one is resealed once the
+        daemon has decided its boundary itself: a provisioning result, a
+        workspace under the WS root (the WS hook confines from the root, not
+        the record), or no workspace at all (no runner to confine).  A
+        clientless revive provisions nothing, and sealing it would launder an
+        edited ``sandbox_mode: null`` into a record the next revive trusts;
+        so its saves stay unsealed and the next revive narrows again.
+        """
+        if trusted or provisioned is not None or not workspace_path:
+            return True
+        return self._workspace_under_ws_root(workspace_path)
 
     def _save_todo_state(
         self,
