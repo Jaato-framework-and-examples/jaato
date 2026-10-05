@@ -336,13 +336,15 @@ def _warn_unbounding_selinux_domain(
 ) -> None:
     """Say why a kernel in a jaato SELinux domain is not trusted as the boundary.
 
-    Silent off SELinux and outside jaato's domains: there is nothing to
-    explain there.  Otherwise the kernel is in ``jaato_runner_t`` (the
+    Silent on AppArmor and outside jaato's domains: there is nothing to
+    explain there.  The backend is not required to read as SELinux: inside
+    a jaato domain it usually cannot be read at all (#1519 follow-up), and
+    the own context being a jaato domain is the evidence.  Otherwise the kernel is in ``jaato_runner_t`` (the
     ``setexeccon`` step did not happen), in a context other than the one it
     was exec'd into, or without positive evidence the kernel enforces it
     (#1014), and it falls back to the audit hook.
     """
-    if lsm_label.active_lsm_backend() != lsm_label.BACKEND_SELINUX:
+    if lsm_label.active_lsm_backend() == lsm_label.BACKEND_APPARMOR:
         return
     raw = lsm_label.read_own_context()
     context = lsm_label.parse_selinux_context(raw)

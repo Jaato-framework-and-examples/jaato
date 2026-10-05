@@ -78,6 +78,22 @@ REVERSIONS = [
     ),
     Reversion(
         target=_LSM,
+        find="    if detected != BACKEND_SELINUX and not expected_label:\n        return None\n",
+        replace="    if detected != BACKEND_SELINUX:\n        return None\n",
+        test="test_an_unreadable_lsm_list_still_gets_the_selinux_tier",
+        because="inside jaato_child_t securityfs and selinuxfs are security_t and "
+                "unreadable, so the backend reads 'none' on every SELinux host and "
+                "every kernel fell to the audit tier",
+    ),
+    Reversion(
+        target=_LSM,
+        find="    if detected == BACKEND_APPARMOR:\n        return None\n",
+        replace="",
+        test="test_off_selinux_the_context_is_not_consulted",
+        because="on an AppArmor host a label shaped like a context would be read as one",
+    ),
+    Reversion(
+        target=_LSM,
         find="import os\nimport threading\n",
         replace="import ctypes\nimport os\nimport threading\n",
         test="test_the_kernel_imports_no_ctypes_before_its_hook",
@@ -227,6 +243,36 @@ def test_a_context_other_than_the_one_exec_d_into_uses_the_audit_hook(tmp_path):
 def test_off_selinux_the_context_is_not_consulted(tmp_path):
     out = _kernel(tmp_path, CHILD, backend="apparmor")
     assert out["kind"] == kernel_sandbox.BOUNDARY_AUDIT
+
+
+def test_an_unreadable_lsm_list_still_gets_the_selinux_tier(tmp_path):
+    # Inside jaato_child_t, /sys/kernel/security/lsm and /sys/fs/selinux are
+    # security_t: active_lsm_backend() reads "none" on every SELinux host.
+    # The spawner's label matching the kernel's own context is the evidence.
+    out = _kernel(tmp_path, CHILD, backend="none", host=None)
+    assert out["kind"] == kernel_sandbox.BOUNDARY_SELINUX
+    assert out["ctypes"]
+
+
+def test_an_unreadable_lsm_list_without_a_named_label_uses_the_audit_hook(tmp_path):
+    out = _kernel(tmp_path, CHILD, backend="none", expected=None)
+    assert out["kind"] == kernel_sandbox.BOUNDARY_AUDIT
+
+
+def test_detection_with_securityfs_and_selinuxfs_unreadable(tmp_path, monkeypatch):
+    # The real detection, its three sources all unreadable, as in the domain.
+    missing = dict(lsm_list_path=str(tmp_path / "no-lsm"),
+                   apparmor_path=str(tmp_path / "no-apparmor"),
+                   selinux_path=str(tmp_path / "no-selinuxfs"))
+    real = lsm_label.active_lsm_backend
+    assert real(**missing) == lsm_label.BACKEND_NONE
+    monkeypatch.setattr(lsm_label, "active_lsm_backend",
+                        lambda **_k: real(**missing))
+    got = lsm_label.selinux_cell_boundary(
+        raw=CHILD, expected_label=CHILD, enforcing_attested=True,
+        host_enforcing=lambda: lsm_label.selinux_host_enforcing(
+            str(tmp_path / "no-selinuxfs" / "enforce")))
+    assert got == CHILD
 
 
 def test_the_kernel_imports_no_ctypes_before_its_hook(tmp_path):

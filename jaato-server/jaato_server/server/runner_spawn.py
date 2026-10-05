@@ -1848,6 +1848,10 @@ def _note_seccomp_posture(
                                                        subprocess spawn in
                                                        this session will be
                                                        refused, and why
+    any, with ``ignored_families``          WARNING    the unknown
+                                                       ``seccomp_allow``
+                                                       names, which allowed
+                                                       nothing back
     ======================================  =========  ====================
 
     Each names the session.  Best-effort, like
@@ -1872,6 +1876,14 @@ def _log_seccomp_posture(session_id: str, posture: Dict[str, Any]) -> None:
 
     kind = posture.get("posture")
     reason = posture.get("reason") or "no reason given"
+    ignored = posture.get("ignored_families")
+    if ignored:
+        logger.warning(
+            "seccomp: session %s: runtime_limits.seccomp_allow names unknown "
+            "famil%s %s (known: %s); ignored, the filter is unchanged and "
+            "nothing was allowed back for them",
+            session_id, "y" if len(ignored) == 1 else "ies", list(ignored),
+            ", ".join(sf.FAMILIES))
     if kind == sf.POSTURE_ABSENT and posture.get("spawns_refused"):
         logger.error(
             "seccomp: session %s: the filter is REQUIRED and unavailable "
