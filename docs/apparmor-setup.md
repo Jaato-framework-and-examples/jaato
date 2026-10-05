@@ -155,6 +155,9 @@ When a WS client creates a session, the server:
 |----------|--------|
 | Session workspace (`~/.jaato/workspaces/sessions/{id}/`) | Read-write |
 | Python venv (server's `sys.prefix`) | Read-only |
+| The interpreter installation the venv resolves to (`sys.base_prefix`), when it is not under `/usr` (uv, pyenv, conda) | Read, map shared objects, exec `bin/*` (template v45) |
+| `/dev/ptmx`, `/dev/pts/*` (base and `tool_hat`: `interactive_shell` opens the pty in-process) | Read-write (template v45 for `/dev/ptmx`) |
+| `/usr/share/python-wheels/`, `/usr/share/git-core/templates/` (`//child`) | Read-only (template v45) |
 | Session temp files (`/tmp/jaato-{id}-*`) | Read-write |
 | System binaries (`/usr/bin/`, `/bin/`) | Execute (inherit) |
 | Network (TCP/UDP outbound) | Allowed |
@@ -224,6 +227,35 @@ runner, and `.jaato/template_extracts/`, which is where the template plugin
 writes the templates it extracts from tool output — the sibling directory
 that keeps that path working while the provisioned catalog in
 `.jaato/templates/` stays read-only to the agent.
+
+### A session cannot run what it wrote into its workspace
+
+The workspace is granted read, write, lock and link, and **no exec**: in
+`//child` an exec of a file under the workspace is refused, as is an
+`mmap(PROT_EXEC)` of a shared object built there.  This is deliberate.
+The workspace is the one tree the model can write, so an exec grant on
+it would let a payload write a binary and run it outside every rule the
+profile states about which programs a session may start.
+
+What follows for operators: **probes and tools a session needs must be
+installed on the host `PATH`** (`/usr/bin`, `/usr/local/bin`), not into
+the workspace.  A `curl … | sh` into the workspace, a `go build -o ./x
+&& ./x`, a `pip install --target ./lib` of a package with C extensions
+all fail by design.
+
+The sanctioned exceptions are narrow and come from plugins, not the
+template, on a **daemon-managed** workspace only:
+
+| Exception | Grant |
+|---|---|
+| the managed tool venv (#1274) | `<ws>/.jaato/tool-venv/bin/*` exec |
+| tools installed by `uv tool` / `pipx` / `pip --user` into the workspace HOME (#1225) | `<ws>/.home/.local/bin/*` and `.home/.local/share/**/bin/*` exec |
+| the web coder's toolchains plugin (#1344, out of tree) | `<ws>/**` map+exec, contributed only on a managed workspace, so a project's own build output runs |
+
+A user's own checkout (IPC, user-CWD session) gets none of them.  The
+SELinux backend makes the same choice by type: `jaato_workspace_t` is not
+executable and only `jaato_managed_ws_t` is (see
+[the SELinux backend design](design/selinux-backend.md) §8).
 
 ### Lifecycle
 

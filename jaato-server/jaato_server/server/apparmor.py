@@ -155,6 +155,61 @@ def _ms(start: float, end: float) -> float:
     return round((end - start) * 1000.0, 1)
 
 
+# Interpreter installations the included abstractions already cover:
+# ``abstractions/python`` grants the stdlib under ``/usr/lib/python3*`` and
+# ``/usr/local/lib/python3*``, and every body maps ``/usr/lib/**`` and
+# execs ``/usr/bin/**``.  A root among these needs no rule of its own.
+_SYSTEM_INTERPRETER_PREFIXES = (Path("/"), Path("/usr"), Path("/usr/local"))
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Whether *path* is *root* or lies under it (both already resolved)."""
+    return path == root or root in path.parents
+
+
+def interpreter_install_roots(
+    venv_path: Path,
+    workspace_root: Optional[Path] = None,
+    prefixes: Optional[List[str]] = None,
+) -> List[Path]:
+    """The interpreter installation dirs a confined body must read (#1511).
+
+    Derived from the RUNNING interpreter (``sys.base_prefix`` and
+    ``sys.base_exec_prefix``, resolved), which is the one the runner is
+    started with, the same way ``{venv_path}`` comes from ``sys.prefix``.
+    A uv-managed Python lives under ``~/.local/share/uv/python/<build>``,
+    pyenv under ``~/.pyenv/versions/<v>``, conda under its own root: none
+    is covered by ``abstractions/python``, so before template v45 a daemon
+    on one could start no confined session (the stdlib was unreadable).
+
+    Dropped: a system prefix (``/``, ``/usr``, ``/usr/local``), a root
+    equal to or inside *venv_path* (already granted), and a root inside
+    *workspace_root* (model-writable; an exec grant there would let a
+    session run what it wrote).  Order is kept, duplicates removed.
+    """
+    if prefixes is None:
+        import sys
+        prefixes = [sys.base_prefix, sys.base_exec_prefix]
+    roots: List[Path] = []
+    for raw in prefixes:
+        if not raw:
+            continue
+        root = Path(raw).resolve()
+        if root in roots or root in _SYSTEM_INTERPRETER_PREFIXES:
+            continue
+        if _is_within(root, venv_path):
+            continue
+        if workspace_root is not None and _is_within(root, workspace_root):
+            logger.warning(
+                "AppArmor: interpreter installation %s is inside the "
+                "workspace root %s; not granting it (model-writable)",
+                root, workspace_root,
+            )
+            continue
+        roots.append(root)
+    return roots
+
+
 class AppArmorManager:
     """Manages AppArmor profiles for per-session workspace confinement.
 
@@ -711,7 +766,24 @@ class AppArmorManager:
     #       that could write ``defaultPolicy: allow`` there would auto-
     #       approve every tool of every later session in the workspace.
     #       Reads stay allowed -- the runner reads the file in-process.
-    _TEMPLATE_VERSION = 44
+    #   v45 (#1511): four gaps found on an enforcing Ubuntu kernel.
+    #       ``/dev/ptmx rw`` in base and ``tool_hat``: pexpect opens the
+    #       pty in-process (in the runner) before its child execs, so
+    #       ``shell_spawn`` got no pty in any confined session.  The
+    #       ``/dev/pts/*`` grant was already there; ``//child`` and the
+    #       isolated sub-runner gain nothing.  ``//child`` (scoped or
+    #       not) reads ``/usr/share/python-wheels/`` (Debian's
+    #       ``ensurepip`` source, so ``python3 -m venv`` works) and
+    #       ``/usr/share/git-core/templates/`` (``git init`` / ``clone``).
+    #       Every body reads and maps the RESOLVED interpreter
+    #       installation (``sys.base_prefix`` / ``sys.base_exec_prefix``)
+    #       when it lies outside the system prefixes the abstractions
+    #       already cover: a uv-, pyenv- or conda-managed Python keeps
+    #       its stdlib under its own root, so a daemon on one could start
+    #       no confined session.  ``bin/* ix`` beside it, mirroring the
+    #       venv grant, because ``<venv>/bin/python`` resolves there.  A
+    #       root inside a workspace is never granted (model-writable).
+    _TEMPLATE_VERSION = 45
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -827,6 +899,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   {venv_path}/**/*.so    mr,
   {venv_path}/**/*.so.*  mr,
   {venv_path}/bin/*      ix,
+{interpreter_rules}
 
   # ---- jaato source tree (read-only, for editable installs) ----
   # Required so plugin discovery and module imports work when jaato
@@ -928,6 +1001,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /dev/null            rw,
   /dev/urandom         r,
   /dev/pts/*           rw,
+  # v45 (#1511): interactive_shell's pexpect opens the pty master
+  # in-process, in this profile, before its child execs.
+  /dev/ptmx            rw,
 
   # ---- procfs credential + memory hardening (template v30, #712) ----
   # The runner's own os.environ is a live credential store: provider API
@@ -1224,6 +1300,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         self._workspace_root = Path(workspace_root).expanduser().resolve()
         self._sessions_root = self._workspace_root / "sessions"
         self._venv_path = Path(venv_path or sys.prefix).resolve()
+        # v45 (#1511): where the interpreter's own stdlib lives, when the
+        # abstractions do not already cover it (uv / pyenv / conda).
+        self._interpreter_roots = interpreter_install_roots(
+            self._venv_path, self._workspace_root)
         self._profile_dir = Path(profile_dir)
 
         # session_id -> was this session's profile GENERATED in complain
@@ -2328,6 +2408,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   {self._venv_path}/**/*.so    mr,
   {self._venv_path}/**/*.so.*  mr,
   {self._venv_path}/bin/*      ix,
+{self._interpreter_rules(workspace_path, "  ")}
   {self._source_root}/         r,
   {self._source_root}/**       r,
   {premium_rules}
@@ -3391,6 +3472,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
+            interpreter_rules=self._interpreter_rules(workspace_path, "  "),
             source_root=str(self._source_root),
             premium_rules=premium_rules,
             config_root_rules=config_root_rules,
@@ -3433,6 +3515,36 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             "/dev/shm/**    rwkl,",
         )
         return "\n".join(f"{indent}{line}" for line in lines)
+
+    def _interpreter_rules(self, workspace_path: str, indent: str) -> str:
+        """Read+map (and ``bin/* ix``) on the interpreter installation (#1511).
+
+        One block per root in ``self._interpreter_roots``
+        (:func:`interpreter_install_roots`), mirroring the venv grant:
+        ``r`` on the tree, ``mr`` on shared objects, ``ix`` on ``bin/*``
+        because ``<venv>/bin/python`` resolves into it and AppArmor judges
+        the resolved path.  A root inside *workspace_path* is skipped,
+        because the session can write there and an exec grant on it would
+        let the payload run what it wrote.  A comment line when nothing
+        applies, so the body says the feature was considered.
+        """
+        ws = Path(workspace_path).expanduser().resolve()
+        # getattr: a manager built without __init__ (tests do) has none.
+        roots = [r for r in getattr(self, "_interpreter_roots", ())
+                 if not _is_within(r, ws)]
+        if not roots:
+            return (f"{indent}# (interpreter installation covered by the "
+                    f"system abstractions or the venv)")
+        lines = [f"{indent}# v45 (#1511): the resolved interpreter installation"]
+        for root in roots:
+            lines += [
+                f'{indent}"{root}/"           r,',
+                f'{indent}"{root}/**"         r,',
+                f'{indent}"{root}/**/*.so"    mr,',
+                f'{indent}"{root}/**/*.so.*"  mr,',
+                f'{indent}"{root}/bin/*"      ix,',
+            ]
+        return "\n".join(lines)
 
     def _build_tool_hat_subprofile(
         self,
@@ -3530,6 +3642,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {self._venv_path}/**/*.so    mr,
     {self._venv_path}/**/*.so.*  mr,
     {self._venv_path}/bin/*      ix,
+{self._interpreter_rules(workspace_path, "    ")}
     {self._source_root}/         r,
     {self._source_root}/**       r,
     {premium_rules}
@@ -3570,6 +3683,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
+    # v45 (#1511), mirrors base: the pty master pexpect opens.
+    /dev/ptmx            rw,
 
     # ---- procfs credential + memory hardening (mirrors base, #712) ----
     # Sub-profiles do NOT inherit base rules, so the deny block has to
@@ -3791,6 +3906,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {self._venv_path}/**/*.so    mr,
     {self._venv_path}/**/*.so.*  mr,
     {self._venv_path}/bin/*      ix,
+{self._interpreter_rules(workspace_path, "    ")}
     {self._source_root}/         r,
     {self._source_root}/**       r,
     {premium_rules}
@@ -3843,6 +3959,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # v42: the stdlib's mimetypes.init() opens it; without it every
     # mimetypes.guess_type() in a confined process raises EACCES.
     /etc/mime.types      r,
+    # v45 (#1511): read-only data a model-driven subprocess needs.
+    # Debian's ensurepip installs pip from these wheels, so without
+    # them ``python3 -m venv`` fails; ``git init`` / ``clone`` copy
+    # the templates into the new repository.  No exec.
+    /usr/share/python-wheels/         r,
+    /usr/share/python-wheels/**       r,
+    /usr/share/git-core/templates/    r,
+    /usr/share/git-core/templates/**  r,
     /proc/self/**        r,
     # v41: two reads the broad /proc/self/** line never grants (AppArmor
     # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.

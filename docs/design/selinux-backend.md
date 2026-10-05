@@ -548,6 +548,17 @@ notebook kernel (#1323) take it through the existing
 | `/proc/*/environ` of the runner itself, read in-process | **not denied.** `self:file read` covers `/proc/self`; AppArmor denies it by path. The application check `is_sensitive_proc_path` still covers file tools. Stated, not hidden |
 | template version gate | policy module version gate |
 
+**A session cannot execute what it wrote into its workspace**, under
+either LSM, and that is a property rather than a gap (#1511).
+`jaato_workspace_t` carries no `execute` / `execute_no_trans` for
+`jaato_child_t` (and, since #1520, `map` with every read but never a
+`PROT_EXEC` mapping); AppArmor's `//child` grants the workspace `rwkl` and
+no `x`.  Probes and tools must be installed on the host `PATH`, never into
+the workspace.  The sanctioned exception is the managed workspace
+(`jaato_managed_ws_t` here; the tool venv and `.home/.local/bin` exec
+grants under AppArmor), which a user's own checkout never gets.  See
+[AppArmor setup](../apparmor-setup.md#a-session-cannot-run-what-it-wrote-into-its-workspace).
+
 The unsupported rows are why this backend must state its coverage in
 `get_environment(aspect="runtime")` and in `explain oversight`, rather than
 reusing the AppArmor wording.

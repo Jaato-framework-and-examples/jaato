@@ -10920,6 +10920,46 @@ Guard: `jaato_server/shared/tests/test_coreutils_run_confined_1342.py`, two
 reversions. Where `apparmor_parser` is installed it also compiles the
 rendered profile. Not verified on an enforcing kernel.
 
+### Four Rules the 2026-10-04 Kernel Run Was Missing (#1511)
+
+An enforcing Ubuntu kernel (7.0.0-31) refused four things the template
+had no rule for. Template **v45**:
+
+| Refused | Grant | Bodies |
+|---|---|---|
+| `shell_spawn` got no pty: `/dev/ptmx` `wr` denied to `runner-rpc-work` | `/dev/ptmx rw` (`/dev/pts/*` was already there) | base, `tool_hat`; pexpect opens the master in-process before its child execs, so `//child` and the isolated sub-runner get nothing |
+| `python3 -m venv` (Debian's `ensurepip` reads `/usr/share/python-wheels/`) | read | `//child`, scoped or not |
+| `git init` / `clone` warned on `/usr/share/git-core/templates/` | read | `//child`, scoped or not |
+| a daemon on a uv-managed Python started no confined session (stdlib unreadable) | read, `mr` on `*.so`, `bin/* ix` on the RESOLVED interpreter installation | every body, isolated sub-runner included |
+
+The interpreter root is derived at render time from the running
+interpreter (`sys.base_prefix`, `sys.base_exec_prefix`, resolved), as
+`{venv_path}` comes from `sys.prefix`: `interpreter_install_roots` in
+`server/apparmor.py`. Nothing is hardcoded for uv, so pyenv and conda get
+the same answer. `bin/* ix` mirrors the venv grant because
+`<venv>/bin/python` resolves there and AppArmor judges the resolved path.
+Dropped: `/`, `/usr`, `/usr/local` (the abstractions already cover them),
+a root inside the venv, and a root inside the daemon's workspace root or
+the session's workspace, since an exec grant there would be on a
+model-writable directory.
+
+The fifth AppArmor bullet (`ldconfig` / `collect2` exec denials from
+`ctypes.util.find_library`) was the runner compiling its seccomp filter,
+moved to the daemon by #1508. The one runner-side `find_library` left on
+a path that can run confined, `privilege_drop._prctl`, now uses
+`CDLL(None)`. The SELinux bullets are #1520 and #1522.
+
+Not a gap, and now documented in `docs/apparmor-setup.md` and the SELinux
+design (§8): neither LSM lets a session execute a binary it wrote into
+its workspace. Probes and tools go on the host `PATH`; the managed tool
+venv, `.home/.local/bin` and the web coder's toolchains grant are the
+sanctioned exceptions, on a managed workspace only.
+
+Not verified on an enforcing kernel: the rules are checked as rendered
+text through the #1348 matcher, and compiled where `apparmor_parser` is
+installed. Guard: `jaato_server/shared/tests/test_kernel_run_gaps_1511.py`,
+six reversions.
+
 ### A Save That Waited on Its Own Loop (#1355)
 
 Every `*_threadsafe` wrapper on `RunnerRPCClient` schedules a coroutine on
