@@ -149,20 +149,16 @@ Tabulate one row per call: off answer, on answer, the designed answer (`filtered
 **Foreign architecture is killed** (x86_64 hosts):
 
 ```sh
-gcc -O0 -o /opt/jaato-bench/tools/int80 $T/int80.c
-python $T/confined_exec.py --root /opt/jaato-bench/run-1503 --stage $T/int80 --command './int80; echo exit=$?'
-python $T/confined_exec.py --root /opt/jaato-bench/run-1503 --stage $T/int80 --command './int80; echo exit=$?' --seccomp off
-```
-
-**[SELinux]** A staged file lands in the session workspace (`jaato_workspace_t`), which `jaato_child_t` may read but not execute (`./int80: Permission denied`, exit 126); only a managed workspace (`jaato_managed_ws_t`) holds executables, and an IPC-only daemon like this tool's has no managed root. Run the binary **in place** instead: `/opt` files are `usr_t`, which the child may execute.
+A session cannot execute a file in its workspace, under either LSM ([AppArmor setup](../apparmor-setup.md#a-session-cannot-run-what-it-wrote-into-its-workspace), #1511): `--stage` of a binary gives `Permission denied`, exit 126. Install the binary on the host `PATH` instead, and run it from there:
 
 ```sh
-restorecon -v /opt/jaato-bench/tools/int80      # expect usr_t
-python $T/confined_exec.py --root /opt/jaato-bench/run-1503 --command '/opt/jaato-bench/tools/int80; echo exit=$?'
-python $T/confined_exec.py --root /opt/jaato-bench/run-1503 --command '/opt/jaato-bench/tools/int80; echo exit=$?' --seccomp off
+gcc -O0 -o /opt/jaato-bench/tools/int80 $T/int80.c
+install -m 755 /opt/jaato-bench/tools/int80 /usr/local/bin/jaato-bench-int80     # [SELinux] lands as bin_t
+python $T/confined_exec.py --root /opt/jaato-bench/run-1503 --command 'jaato-bench-int80; echo exit=$?'
+python $T/confined_exec.py --root /opt/jaato-bench/run-1503 --command 'jaato-bench-int80; echo exit=$?' --seccomp off
 ```
 
-Staging a Python script (`probe_syscalls.py`) is fine on both LSMs: `python3` executes, the script is only read.
+Staging a Python script (`probe_syscalls.py`) is fine: `python3` executes, the script is only read.
 Expect `exit=159` (SIGSYS) with the filter, `exit=0` and a pid without.
 
 **A family allowed back is allowed back, and only that one.** `--seccomp-allow ptrace` re-run of the probe: `ptrace`/`process_vm_readv` lose the `EPERM` (they may still fail for other reasons — Yama, `ESRCH`), every other family stays denied. `--seccomp-allow nonsense`: a WARNING in `daemon.log`, everything stays denied.
@@ -235,16 +231,16 @@ Baseline to compare against (Hetzner VPS, kernel 7.0.0-31, AppArmor, jaato-serve
 Download the release binary of `genuinetools/amicontained` (latest release, Linux amd64/arm64), verify its sha256 against the release page, and record version and hash. Then:
 
 ```sh
-python $T/confined_exec.py --root /opt/jaato-bench/run-c1 --stage ./amicontained \
-  --command './amicontained' > c1-jaato-default.txt
-python $T/confined_exec.py --root /opt/jaato-bench/run-c1 --stage ./amicontained \
-  --command './amicontained' --seccomp off > c1-jaato-no-seccomp.txt
-python $T/confined_exec.py --root /opt/jaato-bench/run-c1 --stage ./amicontained \
-  --command './amicontained' --fragments '' > c1-jaato-scoped.txt
+python $T/confined_exec.py --root /opt/jaato-bench/run-c1 \
+  --command 'amicontained' > c1-jaato-default.txt
+python $T/confined_exec.py --root /opt/jaato-bench/run-c1 \
+  --command 'amicontained' --seccomp off > c1-jaato-no-seccomp.txt
+python $T/confined_exec.py --root /opt/jaato-bench/run-c1 \
+  --command 'amicontained' --fragments '' > c1-jaato-scoped.txt
 docker run --rm -v "$PWD/amicontained:/a:ro" alpine /a > c1-docker.txt      # disposable host with Docker only
 ```
 
-**[SELinux]** As with A3's `int80`, a staged binary can't execute; keep it under `/opt/jaato-bench/c1/` (`usr_t`) and run it by absolute path, e.g. `--command '/opt/jaato-bench/c1/amicontained'` with no `--stage`. Note that amicontained prints the SELinux context on its `AppArmor Profile:` line.
+As with A3's `int80`, the binary can't run from the workspace: install it on the host `PATH` (`install -m 755 ./amicontained /usr/local/bin/amicontained`) and run it with no `--stage`, as above. **[SELinux]** amicontained prints the SELinux context on its `AppArmor Profile:` line.
 
 `--fragments ''` declares an empty fragment list — a scoped stage with **no** exec authority in `//child` beyond what plugins grant — so it may refuse to run the binary at all; that refusal is itself a result. If it does, rerun with `--fragments` naming the fragment that grants the binary's path, if one exists, and record which. Put the four outputs side by side in `RESULTS.md`: LSM, seccomp mode, blocked syscalls count and list, capabilities, namespaces.
 
