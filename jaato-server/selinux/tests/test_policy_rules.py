@@ -719,6 +719,81 @@ RULES: Tuple[Rule, ...] = (
                   {"write", "append", "create", "unlink", "rename"}),
          "a shell command could forge witnessed_by (template v43)",
          append="allow jaato_child_t jaato_claims_t:file create;\n"),
+    # --- map (#1520) ----------------------------------------------------
+    # Asserted unconditionally: Fedora grants map to every domain under
+    # the domain_can_mmap_files boolean, off by default, so a grant that
+    # rested on it would leave git failing on a stock host.
+    Rule("a child may map the workspace",
+         _allows("jaato_child_t", "jaato_workspace_t", "file", {"map"}),
+         "git mmaps .git/config: without map even `git init` fails (#1520)",
+         find='allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file { lock map };\n',
+         replace="allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file lock;\n"
+                 "allow jaato_runner_t jaato_workspace_t:file map;\n"),
+    Rule("the runner may map the workspace",
+         _allows("jaato_runner_t", "jaato_workspace_t", "file", {"map"}),
+         "an in-process tool mmaps what it may read (sqlite, numpy.load)",
+         find='allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file { lock map };\n',
+         replace="allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file lock;\n"
+                 "allow jaato_child_t jaato_workspace_t:file map;\n"),
+    Rule("both may map a managed workspace",
+         lambda p: all(granted(p, d, "jaato_managed_ws_t", "file",
+                               frozenset({"map"}), conditional=False) == {"map"}
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "git in a workspace the daemon provisioned",
+         find="allow { jaato_runner_t jaato_child_t } jaato_managed_ws_t:file "
+              "{ lock map execute execute_no_trans };\n",
+         replace="allow { jaato_runner_t jaato_child_t } jaato_managed_ws_t:file "
+                 "{ lock execute execute_no_trans };\n"),
+    Rule("both may map authored and agent config",
+         lambda p: all(granted(p, d, t, "file", frozenset({"map"}), conditional=False) == {"map"}
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for t in ("jaato_authored_t", "jaato_agent_config_t")),
+         "map with every read: a reference bundle's index is mmapped",
+         find="allow { jaato_runner_t jaato_child_t } { jaato_authored_t "
+              "jaato_agent_config_t }:file map;\n"),
+    Rule("both may map the prompt library",
+         lambda p: all(granted(p, d, "jaato_prompts_t", "file", frozenset({"map"}),
+                               conditional=False) == {"map"}
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "map with every read (#1520)",
+         find="allow { jaato_runner_t jaato_child_t } jaato_prompts_t:file map;\n"),
+    Rule("both may map reference claims",
+         lambda p: all(granted(p, d, "jaato_claims_t", "file", frozenset({"map"}),
+                               conditional=False) == {"map"}
+                       for d in ("jaato_runner_t", "jaato_child_t")),
+         "map with every read (#1520)",
+         find="allow { jaato_runner_t jaato_child_t } jaato_claims_t:file map;\n"),
+    Rule("both may map the user tier",
+         lambda p: all(granted(p, d, t, "file", frozenset({"map"}), conditional=False) == {"map"}
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for t in ("jaato_user_config_t", "jaato_user_data_t")),
+         "the memory store's index is mmapped",
+         find="allow { jaato_runner_t jaato_child_t } { jaato_user_config_t "
+              "jaato_user_data_t }:file map;\n"),
+    Rule("the isolated domains may map the workspace",
+         lambda p: all(granted(p, d, t, "file", frozenset({"map"}), conditional=False) == {"map"}
+                       for d in ISOLATED
+                       for t in ("jaato_workspace_t", "jaato_managed_ws_t")),
+         "a sub-runner reads the parent's workspace the same way",
+         find="allow jaato_isolated_ro_t { jaato_workspace_t jaato_managed_ws_t }:file map;\n"),
+    Rule("the read-write isolated domain may map the workspace",
+         _allows("jaato_isolated_t", "jaato_workspace_t", "file", {"map"}),
+         "a sub-runner reads the parent's workspace the same way",
+         find="allow jaato_isolated_t { jaato_workspace_t jaato_managed_ws_t }:file { lock map };\n",
+         replace="allow jaato_isolated_t { jaato_workspace_t jaato_managed_ws_t }:file lock;\n"),
+    Rule("the isolated domains may map authored config and claims",
+         lambda p: all(granted(p, d, t, "file", frozenset({"map"}), conditional=False) == {"map"}
+                       for d in ISOLATED for t in ("jaato_authored_t", "jaato_claims_t")),
+         "map with every read (#1520)",
+         find="allow { jaato_isolated_t jaato_isolated_ro_t } { jaato_authored_t "
+              "jaato_claims_t }:file map;\n"),
+    Rule("map on a user's own checkout does not make it executable",
+         lambda p: all(not granted(p, d, "jaato_workspace_t", "file",
+                                   frozenset({"execute", "execute_no_trans", "execmod"}))
+                       for d in JAATO_DOMAINS),
+         "map permits PROT_READ/PROT_WRITE only; a binary written into the "
+         "checkout must still be refused (#1511, by design)",
+         append="allow jaato_child_t jaato_workspace_t:file execmod;\n"),
     Rule("nothing executes from a user's own checkout",
          lambda p: all(not granted(p, d, "jaato_workspace_t", "file",
                                    frozenset({"execute", "execute_no_trans",

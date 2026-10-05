@@ -1,4 +1,4 @@
-policy_module(jaato, 1.7.0)
+policy_module(jaato, 1.8.0)
 
 ########################################
 #
@@ -386,6 +386,7 @@ read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_config_t, ja
 manage_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)
 manage_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)
 manage_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_user_data_t, jaato_user_data_t)
+allow { jaato_runner_t jaato_child_t } { jaato_user_config_t jaato_user_data_t }:file map;
 # What a runner writes here is born at s0, not at its workspace's level.
 # The tier is global by design (AppArmor gives every session the same
 # ~/.jaato/memories/): a file at s0:c101,c102 could not be read by a
@@ -415,7 +416,15 @@ manage_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
 manage_lnk_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
 manage_fifo_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
 manage_sock_files_pattern(jaato_child_t, jaato_workspace_t, jaato_workspace_t)
-allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file lock;
+allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file { lock map };
+# map (#1520): git mmaps .git/config, the packs and the index, and
+# read/write without map refuses every mmap(2) of a file the domain may
+# already read(2). Fedora grants map to every domain only under the
+# domain_can_mmap_files boolean, off by default. map alone permits
+# PROT_READ / PROT_WRITE mappings: PROT_EXEC on a file also needs execute,
+# and execmod / execmem are separate permissions this module grants
+# nowhere, so a mapping cannot be used to run what the session wrote.
+#
 # Deliberately absent: execute on jaato_workspace_t. A user's own
 # checkout is not a place the session runs binaries from.
 
@@ -450,6 +459,8 @@ read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_authored_t, jaato
 list_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_agent_config_t, jaato_agent_config_t)
 read_files_pattern({ jaato_runner_t jaato_child_t }, jaato_agent_config_t, jaato_agent_config_t)
 read_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_agent_config_t, jaato_agent_config_t)
+# map with every read, for the reason on the workspace types (#1520).
+allow { jaato_runner_t jaato_child_t } { jaato_authored_t jaato_agent_config_t }:file map;
 
 # The two authored FILES directly under .jaato (the rest are directories,
 # created at provisioning). AppArmor denies a write to the path whether or
@@ -474,6 +485,7 @@ type_transition { jaato_runner_t jaato_child_t jaato_isolated_t } { jaato_worksp
 manage_dirs_pattern({ jaato_runner_t jaato_child_t }, jaato_prompts_t, jaato_prompts_t)
 manage_files_pattern({ jaato_runner_t jaato_child_t }, jaato_prompts_t, jaato_prompts_t)
 manage_lnk_files_pattern({ jaato_runner_t jaato_child_t }, jaato_prompts_t, jaato_prompts_t)
+allow { jaato_runner_t jaato_child_t } jaato_prompts_t:file map;
 
 ########################################
 #
@@ -485,6 +497,7 @@ manage_dirs_pattern(jaato_runner_t, jaato_claims_t, jaato_claims_t)
 manage_files_pattern(jaato_runner_t, jaato_claims_t, jaato_claims_t)
 list_dirs_pattern(jaato_child_t, jaato_claims_t, jaato_claims_t)
 read_files_pattern(jaato_child_t, jaato_claims_t, jaato_claims_t)
+allow { jaato_runner_t jaato_child_t } jaato_claims_t:file map;
 
 ########################################
 #
@@ -605,10 +618,12 @@ corenet_udp_bind_all_unreserved_ports(jaato_isolated_ro_t)
 manage_dirs_pattern(jaato_isolated_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
 manage_files_pattern(jaato_isolated_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
 manage_lnk_files_pattern(jaato_isolated_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
-allow jaato_isolated_t { jaato_workspace_t jaato_managed_ws_t }:file lock;
+allow jaato_isolated_t { jaato_workspace_t jaato_managed_ws_t }:file { lock map };
 list_dirs_pattern(jaato_isolated_ro_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
 read_files_pattern(jaato_isolated_ro_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
 read_lnk_files_pattern(jaato_isolated_ro_t, { jaato_workspace_t jaato_managed_ws_t }, { jaato_workspace_t jaato_managed_ws_t })
+# map, not write: a read-only mapping (#1520).
+allow jaato_isolated_ro_t { jaato_workspace_t jaato_managed_ws_t }:file map;
 
 # Authored config it may read (references, templates, services, plans, the
 # routing table, the fragment tiers), and claims (inside the workspace, so
@@ -620,6 +635,7 @@ manage_dirs_pattern(jaato_isolated_t, jaato_claims_t, jaato_claims_t)
 manage_files_pattern(jaato_isolated_t, jaato_claims_t, jaato_claims_t)
 list_dirs_pattern(jaato_isolated_ro_t, jaato_claims_t, jaato_claims_t)
 read_files_pattern(jaato_isolated_ro_t, jaato_claims_t, jaato_claims_t)
+allow { jaato_isolated_t jaato_isolated_ro_t } { jaato_authored_t jaato_claims_t }:file map;
 #
 # Deliberately absent: any access to jaato_agent_config_t and
 # jaato_prompts_t (the sub-profile's read-denies: information isolation

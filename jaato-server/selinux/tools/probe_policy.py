@@ -367,6 +367,29 @@ print(p.stdout + p.stderr)
     expect_ok("child: writes the workspace",
               py_in(R, L1, spawn.replace("CMD", f"['/bin/sh','-c','echo x > {p['wsA']}/child.txt && echo OK']")))
 
+    # map (#1520): read/write without map refused every mmap(2), and git
+    # mmaps .git/config, so even `git init` failed in a confined workspace.
+    expect_ok("child: mmaps a file in a user's own checkout (read-only)",
+              py_in(R, L1, child_py(
+                  "import mmap\n"
+                  f"f = open('{p['wsU']}/file.txt', 'rb')\n"
+                  "attempt(lambda: mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ), False)")))
+    expect_denied("child: a PROT_EXEC mapping of the checkout is refused",
+                  py_in(R, L1, child_py(
+                      "import mmap\n"
+                      f"f = open('{p['wsU']}/file.txt', 'rb')\n"
+                      "attempt(lambda: mmap.mmap(f.fileno(), 0, "
+                      "prot=mmap.PROT_READ | mmap.PROT_EXEC), True)")))
+    if shutil.which("git"):
+        git = (f"cd {p['wsU']} && rm -rf g && git init -q g && cd g && "
+               "git -c user.email=probe@jaato -c user.name=probe commit -q "
+               "--allow-empty -m probe && git log --oneline | grep -q probe && echo OK")
+        expect_ok("child: git init, commit and log in a user's own checkout",
+                  py_in(R, L1, spawn.replace("CMD", repr(["/bin/sh", "-c", git]))))
+    else:
+        record("child: git init, commit and log in a user's own checkout", None,
+               "git is not installed on this host")
+
     if venv:
         expect_ok("runner: imports jaato_server.server.runner from the venv",
                   # From the workspace, as a runner starts: from the
