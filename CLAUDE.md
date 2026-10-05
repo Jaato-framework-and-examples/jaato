@@ -2254,6 +2254,47 @@ and `max_size` refused) — nonzero on a multi-tenant daemon means raise
 
 **Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible — but **not** because the slot re-confines itself per session; see the next section for what actually makes that true.
 
+### What the Template Imports Before It Forks
+
+The template warmed only plugin discovery, which walks the plugin
+packages' `__init__.py` files. What `session.bootstrap` actually spends
+its time importing is reached from elsewhere: the session stack
+(`JaatoRuntime` → `JaatoSession` → `retry_utils` → `anthropic` and its
+pydantic models), `mcp` from the MCP plugin's thread, and about twenty
+lazily imported helpers. All of it was imported after the fork, so each
+slot paid for it in time and held its own private copy, because a module
+imported after `fork()` is not shared copy-on-write with the template.
+
+`server/runner/template_preload.py` imports `BOOTSTRAP_MODULES` and,
+best effort, `PROVIDER_MODULES` (`openai`, `google.genai` and their
+provider packages) in the template after discovery, then calls
+`gc.freeze()` so a slot's first collection does not copy every
+inherited page. Measured (echo provider, unconfined, 4 CPUs):
+
+| | before | after |
+|---|---|---|
+| private memory of a slot serving a session | 114 MB | 25.5 MB |
+| `session.new`, one session, warm slot | ~2.0 s | ~0.45 s |
+| `session.new`, three at once | ~3.9 s | ~1.4 s |
+| in-process `bootstrap_session` | 1.96 s | 0.07 s |
+
+| Rule | Why |
+|---|---|
+| **an entry reads nothing session-scoped at import** | the template has the daemon's environment; a value captured at import would reach every slot (#1171's shape). The jaato entries were audited by recording `os.environ` / `getenv` / home / tempdir / cwd reads during the import: none. Third-party ones read only their own diagnostic knobs (`ANTHROPIC_LOG`, `OPENAI_LOG`, `OTEL_*`, `WEBSOCKETS_*`, locale), and `openai` reads three Azure variables into defaults for its global client, which no provider uses |
+| **best effort, never fatal** | an entry that is not installed is skipped at DEBUG; one that raises is skipped at WARNING; a missing dependency of an installed entry counts as a failure, not as "not installed". A failure costs only the import the session then does itself |
+| **one thread** | the template forks; the report's thread count is logged at ERROR when it is not one |
+
+Stated cost: a session's `.env` can no longer change those third-party
+import-time knobs; the daemon's environment decides them. The template
+grows by the shared imports once.
+
+Guard: `jaato_server/server/tests/test_template_preload_covers_bootstrap.py`,
+three reversions. It runs, in a fresh interpreter, discovery and the
+preload, then a real `bootstrap_session`, and fails naming any jaato
+module or new third-party package the bootstrap still imports, so a
+module that becomes a bootstrap import is added to the list rather than
+moving back into every slot.
+
 ### Resizing the Pool Without a Restart (protocol 1.35)
 
 `JAATO_RUNNER_POOL_SIZE` / `_MAX_SIZE` were read once at startup, so adding

@@ -191,15 +191,18 @@ def _run_template_mode() -> None:
         )
     discover_ms = (__import__("time").perf_counter() - t0) * 1000
     log.info(
-        "runner template ready: %d plugins discovered in %.1fms — "
-        "pool slots will fork from this process and inherit warm "
-        "imports.  Note: discover() walks __init__.py files; some "
-        "plugins defer heavy imports to initialize() which only fires "
-        "post-bootstrap.  PR 2 measures actual savings will be confirmed "
-        "when PR 4 routes sessions through the pool.",
+        "runner template ready: %d plugins discovered in %.1fms",
         len(discovered),
         discover_ms,
     )
+
+    # discover() walks the plugin packages' __init__.py files; what
+    # session.bootstrap spends its time importing (the session stack,
+    # anthropic, mcp, provider SDKs) is reached from elsewhere.  Import it
+    # here so slots inherit it shared rather than importing it privately
+    # per session.  Best effort: never fatal.  See template_preload.py.
+    from jaato_server.server.runner import template_preload
+    template_preload.log_report(template_preload.preload())
 
     # Sit idle on fd 3 waiting for the daemon's shutdown signal.
     # PR 3 will extend this loop to dispatch FORK_SLOT requests.
