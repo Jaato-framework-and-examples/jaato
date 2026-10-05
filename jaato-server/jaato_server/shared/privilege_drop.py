@@ -186,11 +186,15 @@ def _prctl(option: int, arg: int = 0) -> int:
     ``ctypes`` is imported here rather than at module scope so the
     cold-spawn child, which imports this module between ``fork`` and
     ``exec`` and never calls this, loads nothing more than before.
+
+    ``CDLL(None)`` resolves ``prctl`` from the symbols already loaded
+    into this process (CPython links libc), never by
+    ``ctypes.util.find_library``: that execs ``ldconfig`` (and ``gcc``,
+    hence ``collect2``), which a confined runner is refused (#1511).
     """
     import ctypes
-    import ctypes.util
 
-    libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+    libc = ctypes.CDLL(None, use_errno=True)
     rc = libc.prctl(ctypes.c_int(option), ctypes.c_ulong(arg),
                     ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0))
     if rc == -1:
