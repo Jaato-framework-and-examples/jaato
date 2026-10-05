@@ -809,12 +809,32 @@ RULES: Tuple[Rule, ...] = (
                        for d in ("jaato_runner_t", "jaato_child_t")),
          "only a managed workspace is executable",
          append="allow jaato_child_t jaato_workspace_t:file execute;\n"),
-    Rule("neither domain holds any capability",
-         lambda p: all(not granted(p, d, d, c, class_perms(p, c))
-                       for d in ("jaato_runner_t", "jaato_child_t")
-                       for c in ("capability", "cap_userns", "capability2")),
-         "no sys_admin, net_admin, sys_ptrace, dac_override, ...",
+    Rule("the child holds no capability, the runner only setpcap",
+         lambda p: all(not granted(p, "jaato_child_t", "jaato_child_t", c,
+                                   class_perms(p, c))
+                       for c in ("capability", "cap_userns", "capability2"))
+                   and granted(p, "jaato_runner_t", "jaato_runner_t",
+                               "capability",
+                               class_perms(p, "capability")) <= {"setpcap"}
+                   and all(not granted(p, "jaato_runner_t", "jaato_runner_t",
+                                       c, class_perms(p, c))
+                           for c in ("cap_userns", "capability2")),
+         "no sys_admin, net_admin, sys_ptrace, dac_override, ...; setpcap "
+         "only lowers the bounding set (#1543)",
          append="allow jaato_runner_t self:capability sys_admin;\n"),
+    Rule("the runner may drop its children's bounding set",
+         _allows("jaato_runner_t", "jaato_runner_t", "capability", {"setpcap"}),
+         "PR_CAPBSET_DROP in the forked child needs CAP_SETPCAP (#1543)",
+         find="allow jaato_runner_t self:capability setpcap;\n"),
+    Rule("the runner may clear its children's capability sets",
+         _allows("jaato_runner_t", "jaato_runner_t", "process", {"setcap"}),
+         "capset() in the forked child is checked as process setcap (#1543)",
+         find="allow jaato_runner_t self:process setcap;\n"),
+    Rule("the child may not change its capabilities",
+         lambda p: not granted(p, "jaato_child_t", "jaato_child_t", "process",
+                               frozenset({"setcap"})),
+         "the payload must not undo what the runner dropped",
+         append="allow jaato_child_t self:process setcap;\n"),
     Rule("neither domain may mount",
          lambda p: all(not granted(p, d, None, "filesystem",
                                    frozenset({"mount", "remount", "unmount"}))

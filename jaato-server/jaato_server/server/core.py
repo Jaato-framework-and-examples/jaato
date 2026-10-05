@@ -943,6 +943,9 @@ class JaatoServer:
         # ``session.bootstrap`` answer, ``None`` until one did (or with no
         # runner at all).  See :meth:`note_seccomp_posture`.
         self.seccomp_posture: Optional[Dict[str, Any]] = None
+        # #1543: the capability-drop posture, beside it.  See
+        # :meth:`note_capability_posture`.
+        self.capability_posture: Optional[Dict[str, Any]] = None
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -8117,6 +8120,19 @@ class JaatoServer:
         not a dict (an older runner sends nothing) records ``None``.
         """
         self.seccomp_posture = dict(posture) if isinstance(posture, dict) else None
+
+    def note_capability_posture(self, posture: Any) -> None:
+        """Record the capability-drop posture the runner reported (#1543).
+
+        The ``capabilities`` key of the runner's bootstrap answer:
+        ``{posture, kept?, reason?}`` where ``posture`` is ``dropped`` /
+        ``partial`` / ``inherit`` / ``absent`` / ``unconfined``.  The
+        diagnostics probe reads the same posture live from the runner
+        (``probe["capabilities"]``).  Anything that is
+        not a dict (an older runner sends nothing) records ``None``.
+        """
+        self.capability_posture = (
+            dict(posture) if isinstance(posture, dict) else None)
 
     @property
     def runner_bootstrap_error(self) -> Optional[str]:

@@ -14,6 +14,7 @@ them; it derives none of them a second time:
 | subprocess ``PATH``, ``HOME``, ``XDG_*``, tool-venv | ``CLIToolPlugin._build_subprocess_env()`` on the session's own ``cli`` instance |
 | bound toolchains | ``<workspace>/.jaato/environment.json`` (#1344), when present |
 | ``seccomp`` | the posture the runner recorded at bootstrap, via :mod:`jaato_server.shared.seccomp_filter` (#1503) |
+| ``capabilities`` | the capability-drop posture the runner recorded at bootstrap, via :mod:`jaato_server.shared.capability_drop` (#1543) |
 | ``notebook.boundary`` | the active notebook backend's ``boundary_kind()`` (#1012, #1519): ``apparmor``, ``selinux``, ``audit``, ``opt-out`` or ``none`` |
 | ``notebook.imports_daemon_jaato`` | :mod:`jaato_server.shared.jaato_self_shadowing` (#1413), only when the workspace holds jaato's own source |
 
@@ -236,6 +237,30 @@ def seccomp_report() -> Dict[str, Any]:
     return report
 
 
+def capabilities_report() -> Dict[str, Any]:
+    """The capability sets of this session's subprocesses (#1543).
+
+    Read from what the bootstrap recorded in this process.  ``dropped``
+    says a ``cli`` command starts with only the kept capabilities (none by
+    default), so a command needing one fails with ``EPERM`` whatever the
+    LSM would allow.
+    """
+    from jaato_server.shared import capability_drop
+    posture = capability_drop.current_posture()
+    if posture is None:
+        return {"posture": "unknown",
+                "note": "no session bootstrap has recorded a posture here"}
+    report = dict(posture)
+    if report.get("posture") == capability_drop.POSTURE_DROPPED:
+        report["note"] = (
+            "cli / interactive_shell / notebook subprocesses hold no "
+            "capabilities beyond those listed under 'kept' (bounding, "
+            "permitted, effective, inheritable and ambient sets); an "
+            "operation needing one fails with EPERM, so retrying will not "
+            "help")
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Bound toolchains
 # ---------------------------------------------------------------------------
@@ -364,6 +389,7 @@ def runtime_report(
         workspace = workspace or getattr(cli, "_workspace_root", None)
     report["private_tmp"] = private_tmp_report()
     report["seccomp"] = seccomp_report()
+    report["capabilities"] = capabilities_report()
     report["toolchains"] = toolchains_report(workspace)
     venv = (report["subprocess"].get("tool_venv") or {}).get("path")
     shadow = notebook_shadowing_report(workspace, [venv])
@@ -416,6 +442,9 @@ def runtime_summary(report: Dict[str, Any]) -> Dict[str, str]:
     seccomp = report.get("seccomp") or {}
     lines["seccomp"] = seccomp.get("posture", "unknown") + (
         f" ({seccomp['reason']})" if seccomp.get("reason") else "")
+    caps = report.get("capabilities") or {}
+    lines["capabilities"] = caps.get("posture", "unknown") + (
+        f" (kept: {', '.join(caps['kept'])})" if caps.get("kept") else "")
     chains = report["toolchains"]
     lines["toolchains"] = chains["status"]
     notebook = report.get("notebook") or {}

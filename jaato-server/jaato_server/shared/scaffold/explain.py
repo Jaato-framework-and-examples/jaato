@@ -673,6 +673,9 @@ _RUNTIME_LIMIT_FIELDS = (
      "default | off (off is announced at WARNING)"),
     ("seccomp_allow", "kernel (seccomp)",
      "deny-list families allowed back for this stage, e.g. [ptrace]"),
+    ("capabilities", "kernel (capabilities)",
+     "capabilities a cli / shell / notebook subprocess keeps: none | "
+     "[names] | inherit (inherit is announced at WARNING)"),
 )
 
 
@@ -705,6 +708,9 @@ def _runtime_limits_report() -> Dict[str, Any]:
         "seccomp": "default while a kernel boundary is active; no filter "
                    "when unconfined",
         "seccomp_allow": "none (every family denied)",
+        "capabilities": "none while a kernel boundary is active (bounding, "
+                        "permitted, effective, inheritable and ambient "
+                        "empty); untouched when unconfined",
     }
     iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
     return {
@@ -734,6 +740,8 @@ def _runtime_limits_report() -> Dict[str, Any]:
                        "declares it",
             "seccomp_allow": "INTERSECTION across every layer that declares "
                              "one",
+            "capabilities": "'none' beats a list beats 'inherit'; lists "
+                            "INTERSECT",
         },
         "seccomp_families": _seccomp_families(),
     }
@@ -781,6 +789,12 @@ def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
     )
     lines.append(
         "  seccomp_allow is the intersection of every declared list (#1503)."
+    )
+    lines.append(
+        "  capabilities likewise: 'none' beats a list beats 'inherit', and"
+    )
+    lines.append(
+        "  two lists keep only what both keep (#1543)."
     )
     lines.append("  seccomp families (each answers EPERM unless allowed back):")
     for fam in report.get("seccomp_families", ()):

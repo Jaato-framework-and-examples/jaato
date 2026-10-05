@@ -1,4 +1,4 @@
-policy_module(jaato, 1.9.0)
+policy_module(jaato, 1.10.0)
 
 ########################################
 #
@@ -223,6 +223,13 @@ fs_getattr_all_fs(jaato_runner_t)
 # so nothing running in the runner can change its own domain. The one
 # process attribute it may set is the exec context of its children:
 allow jaato_runner_t self:process setexec;
+# #1543: a model-driven subprocess drops its capabilities in the forked
+# child, still in jaato_runner_t (setexeccon changes nothing before
+# execve): PR_CAPBSET_DROP needs setpcap, and capset (lowering its own
+# permitted/effective/inheritable sets) is checked as process setcap.
+# Both only lower sets; jaato_child_t holds no capability at all.
+allow jaato_runner_t self:capability setpcap;
+allow jaato_runner_t self:process setcap;
 allow jaato_runner_t jaato_child_t:process transition;
 # #1503: a model-driven subprocess sets PR_SET_NO_NEW_PRIVS and installs a
 # seccomp filter between setexeccon and execve. Under no_new_privs the

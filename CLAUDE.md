@@ -3230,6 +3230,53 @@ foreign-arch or malformed program is `absent` or refused) and
 `test_seccomp_refusals_are_loud_1510.py` (seven: the daemon-log levels, and
 refused spawns and `out of pty devices` as failures).
 
+### A Payload That Kept Every Capability (#1543)
+
+Under a root daemon a confined payload (`//child`, `jaato_child_t`) kept
+the full capability bounding set, and a root `exec` recomputes permitted as
+that set, so a `cli` command started with every capability permitted and
+effective. The LSM denied their use (dmesg showed `syslog`, `sys_time`,
+`setuid` refused from `//child`), so the policy was the only layer. Every
+model-driven subprocess now drops them in its forked child
+(`shared/capability_drop.py`), composed around the LSM transition and before
+the #1503 filter:
+
+| Step | When | Needs |
+|---|---|---|
+| `PR_CAPBSET_DROP` for every capability not kept | before the transition | `CAP_SETPCAP`: AppArmor template **v47** grants `capability setpcap,` in base and `tool_hat` (never `//child`); SELinux module **1.10.0** grants `jaato_runner_t self:capability setpcap` |
+| `PR_CAP_AMBIENT_CLEAR_ALL`, `capset(P = E = kept, I = 0)` | after it | nothing on AppArmor; SELinux `jaato_runner_t self:process setcap` |
+| `PR_SET_NO_NEW_PRIVS` | after it | nothing; set here too, so `seccomp: off` cannot let a root `exec` regain the bounding set |
+
+```yaml
+runtime_limits:
+  capabilities: none            # default; or [net_bind_service]; or inherit
+```
+
+`inherit` opts out (WARNING; `validate`: `capabilities_inherited`, an error
+under `risk_class: high`); an unknown name is not kept (`capability_unknown`,
+error). Inheritance is most-restrictive-wins: `none` beats a list beats
+`inherit`, and lists intersect.
+
+The runner learns what the calls achieve by running them once at plan time
+in a forked probe child, and records the posture: `dropped`, `partial`
+(bounding set kept because `CAP_SETPCAP` was refused: a non-root runner, or
+a host whose loaded policy predates this change; the process sets are still
+empty and NNP set, so an `exec` gains nothing), `inherit`, `absent` (nothing
+took effect), `unconfined`. It rides the `session.bootstrap` answer
+(`JaatoServer.capability_posture`, logged in the daemon log at INFO, or
+WARNING for anything but `dropped`), `get_environment(aspect="runtime")`
+(`capabilities`) and the diagnostics probe (`probe["capabilities"]`).
+Nothing refuses a spawn: the LSM is still the boundary. Not persisted in the
+session record. An isolated sub-runner's subprocesses drop nothing (no
+`//child` transition; recorded `absent`). The non-root runner (the issue's
+second half) is tracked separately.
+
+Guard: `jaato_server/shared/tests/test_capabilities_dropped_in_child_1543.py`,
+six reversions; its kernel case asserts all five sets are zero as root and
+the `partial` posture otherwise. The SELinux rules are in
+`selinux/tests/test_policy_rules.py` (the `selinux-policy` CI job). Not
+verified on an enforcing AppArmor or SELinux kernel.
+
 ### Three Things a Fresh Workspace Told the Model Wrongly (#1357, #1358, #1359)
 
 Found by an assessment run in a new web-coder workspace (MiniMax-M3). Each
@@ -13866,6 +13913,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Per-User GitHub Credentials](docs/design/per-user-github-credentials.md) - Proposed (#1225–#1228): how a multi-user web deployment on a root daemon gives each session its WUI user's GitHub token. The BFF holds the grant (GitHub App, refresh token encrypted per OIDC `sub`) and binds an account per workspace; the workspace `.env` carries only a reference (`GH_TOKEN=app://github`), which the daemon resolves at every spawn by asking the owning application over its bind channel, so cascade, wake and revived sessions get it too and nothing resolved is persisted. Includes the per-workspace `.home/` for model-driven subprocesses.
 - [GitHub Workspace Guidance](docs/design/github-workspace-guidance.md) - Proposed (#1240, docs-only, application-scoped): how the web coder ships the "use `gh` safely in a shared workspace" rule-set into every workspace it binds a GitHub account to, as application-managed files (no daemon change). The BFF writes `.jaato/instructions/40-github.md` at bind time beside the `.env`/`.gitconfig` it already seeds, so cascade/wake/revive sessions get the rules as they get the token; the UI refreshes on session start. Recommends BFF-as-primary-writer, one gitconfig source of commit identity, a force-push permission blacklist (enforced) plus prose (judgement), helper+prose worktree cleanup, and a generic managed-file mechanism GitLab can later reuse.
 - [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Built except phase 0 (verification on a confined host) and phase 5 (a shared cache); application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The web coder's `web_coder_toolchains` plugin installs it with mise into `<ws>/.home` from inside the session's runner (the BFF holds only the policy, which the page stages as `.jaato/toolchain-offer.json`), where binaries already run under confinement (#1273/#1274, template v38). Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
-- [SELinux Backend](docs/design/selinux-backend.md) - A confinement backend for hosts whose LSM is SELinux (RHEL, Fedora, Rocky), behind the `ConfinementBackend` seam (`server/confinement/`). The policy module is `jaato-server/selinux/` (installed once; checked rule by rule, each with its reversion, by the `selinux-policy` CI job in a Fedora container). `JAATO_CONFINEMENT=selinux` (or `auto` on an SELinux host) makes the daemon label each workspace at its own MCS level, start the runner in `jaato_runner_t` (a cold spawn by exec transition, or, since phase 4, a pool slot the template forks for the session, which calls `setcon` while it has one thread and is then reused per boundary and uid), confine an isolated sub-runner in `jaato_isolated_t` / `jaato_isolated_ro_t` (phase 3), and move model-driven subprocesses into `jaato_child_t`; the handle travels explicitly as `confinement=` through spawn and envelope, while AppArmor still rides `profile_name`. Phases 2b, 3 and 4 are verified on a kernel. The handoffs (`selinux-phase*-handoff.md`) and `jaato-server/selinux/tools/` are the kernel runs. The feature map states what does not translate (path fragments, exec scoping, in-process `/proc/self/environ` denial). Every read of a jaato file type carries `map` too (module 1.8.0, #1520: `git` mmaps `.git/config`, and Fedora's `domain_can_mmap_files` is off by default), while a user's own checkout still grants no `execute`, so a `PROT_EXEC` mapping or a binary the session wrote there stays refused. Module 1.9.0 grants `jaato_child_t` `execmem` behind the `jaato_child_execmem` boolean (default on) so JIT runtimes (`node`) run (#1521), and provisioning refuses a workspace whose ancestor the jaato domains cannot `search` (a `mktemp -d` parent in `/tmp`), naming it, instead of a bootstrap `EACCES` on a file inside it (#1522).
+- [SELinux Backend](docs/design/selinux-backend.md) - A confinement backend for hosts whose LSM is SELinux (RHEL, Fedora, Rocky), behind the `ConfinementBackend` seam (`server/confinement/`). The policy module is `jaato-server/selinux/` (installed once; checked rule by rule, each with its reversion, by the `selinux-policy` CI job in a Fedora container). `JAATO_CONFINEMENT=selinux` (or `auto` on an SELinux host) makes the daemon label each workspace at its own MCS level, start the runner in `jaato_runner_t` (a cold spawn by exec transition, or, since phase 4, a pool slot the template forks for the session, which calls `setcon` while it has one thread and is then reused per boundary and uid), confine an isolated sub-runner in `jaato_isolated_t` / `jaato_isolated_ro_t` (phase 3), and move model-driven subprocesses into `jaato_child_t`; the handle travels explicitly as `confinement=` through spawn and envelope, while AppArmor still rides `profile_name`. Phases 2b, 3 and 4 are verified on a kernel. The handoffs (`selinux-phase*-handoff.md`) and `jaato-server/selinux/tools/` are the kernel runs. The feature map states what does not translate (path fragments, exec scoping, in-process `/proc/self/environ` denial). Every read of a jaato file type carries `map` too (module 1.8.0, #1520: `git` mmaps `.git/config`, and Fedora's `domain_can_mmap_files` is off by default), while a user's own checkout still grants no `execute`, so a `PROT_EXEC` mapping or a binary the session wrote there stays refused. Module 1.9.0 grants `jaato_child_t` `execmem` behind the `jaato_child_execmem` boolean (default on) so JIT runtimes (`node`) run (#1521), and provisioning refuses a workspace whose ancestor the jaato domains cannot `search` (a `mktemp -d` parent in `/tmp`), naming it, instead of a bootstrap `EACCES` on a file inside it (#1522). Module 1.10.0 grants `jaato_runner_t` `capability setpcap` and `process setcap`, so a model-driven subprocess drops its capabilities in its forked child before the exec into `jaato_child_t`, which still holds none (#1543).
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
