@@ -111,6 +111,21 @@ class ExplainScope:
             ``arg`` does: the banner used to be hand-typed prose and had
             drifted to advertise 21 of 23 topics (#1006), so every string the
             banner prints is now a field of the entry it describes.
+        live_only: why this topic is NOT in the explain snapshot jaato-sdk
+            ships (:mod:`explain_snapshot`), or empty when it is.  Set on a
+            topic whose answer describes the machine or the moment rather
+            than the installed code (the network, ``$HOME``, this venv's
+            paths): a snapshot of it would be a snapshot of whoever generated
+            it.  A ``workspace`` topic, a filtered render and the named form
+            of an ``optional_named`` one are never snapshotted and need no
+            reason here: their argument is the caller's.
+        names: for a ``named`` topic, every name it renders, as
+            ``{canonical: [accepted spellings]}``.  The snapshot renders each
+            canonical name once and maps every spelling to it, so an SDK-only
+            ``explain provider zhipuai-openai`` finds what ``zhipuai_openai``
+            would.
+            A ``named`` topic without one cannot be snapshotted, and the
+            generator refuses rather than silently shipping without it.
     """
 
     render: Callable[..., Any]
@@ -118,6 +133,40 @@ class ExplainScope:
     arg: str = ""
     render_named: Callable[..., Any] | None = None
     blurb: str = ""
+    live_only: str = ""
+    names: Callable[[], Dict[str, Any]] | None = None
+
+
+def _plugin_names() -> Dict[str, Any]:
+    """Every name ``explain plugin`` renders: the registry's, plus ``lifecycle``."""
+    from . import introspect
+    names = {n: [n] for n in introspect.plugins()}
+    names[_explain.LIFECYCLE_TOPIC] = [_explain.LIFECYCLE_TOPIC]
+    return names
+
+
+def _provider_names() -> Dict[str, Any]:
+    """Every provider, with the spellings ``resolve_provider`` accepts."""
+    from . import introspect
+    return {n: sorted(i.normalized_names() | {n})
+            for n, i in introspect.providers().items()}
+
+
+def _event_names() -> Dict[str, Any]:
+    """Every event; ``explain event`` matches member or wire, any case."""
+    from . import introspect
+    out = {}
+    for key, e in introspect.events().items():
+        spellings = {key, e.name, e.wire}
+        out[key] = sorted(spellings | {s.lower() for s in spellings}
+                          | {s.upper() for s in spellings})
+    return out
+
+
+def _archetype_names() -> Dict[str, Any]:
+    """Every archetype with its aliases, as ``archetypes.resolve`` follows them."""
+    from . import archetypes
+    return {n: [n, *d.aliases] for n, d in archetypes.ARCHETYPES.items()}
 
 
 #: Every `explain` topic, in the order the help line lists them.
@@ -137,10 +186,12 @@ class ExplainScope:
 #:                       workspace.
 _SCOPES = {
     "plugins": ExplainScope(_explain.plugins),
-    "plugin": ExplainScope(_explain.plugin, "named", "<name>"),
+    "plugin": ExplainScope(_explain.plugin, "named", "<name>",
+                          names=_plugin_names),
     "commands": ExplainScope(_explain.commands),
     "providers": ExplainScope(_explain.providers),
-    "provider": ExplainScope(_explain.provider, "named", "<name>"),
+    "provider": ExplainScope(_explain.provider, "named", "<name>",
+                            names=_provider_names),
     "gc": ExplainScope(_explain.gc),
     "env": ExplainScope(_explain.env, "filter", "[<filter>]",
                         blurb="vars the daemon + plugins READ"),
@@ -150,18 +201,23 @@ _SCOPES = {
     # "|", so a hint carrying one is unreadable there and unparseable by
     # anything reading the line back.
     "event": ExplainScope(_explain.event, "named", "<NAME or wire.value>",
-                          blurb="one event's fields + docstring"),
+                          blurb="one event's fields + docstring",
+                          names=_event_names),
     "transports": ExplainScope(_explain.transports),
     "clients": ExplainScope(_explain.clients),
     "runtime": ExplainScope(_explain.runtime),
     "tiers": ExplainScope(_explain.tiers),
     "integrations": ExplainScope(_explain.integrations,
-                                 blurb="tools jaato can wire into"),
+                                 blurb="tools jaato can wire into",
+                                 live_only="reports whether each integration is "
+                                           "applied under THIS machine's $HOME"),
     # The only topic that reaches the network: our own indexes, asked what
     # they carry.  Its own topic rather than a section of `dependencies`,
     # which is an OFFLINE read of the installed tree and must stay one.
     "releases": ExplainScope(_explain.releases,
-                             blurb="newer builds on PyPI / TestPyPI"),
+                             blurb="newer builds on PyPI / TestPyPI",
+                             live_only="asks PyPI / TestPyPI at the time of "
+                                       "asking"),
     "sets": ExplainScope(_explain.sets, "workspace"),
     "agents": ExplainScope(_explain.agents, "workspace",
                            blurb="the PERSONA layer (.jaato/agents/)"),
@@ -193,7 +249,9 @@ _SCOPES = {
     "gh": ExplainScope(_explain.gh,
                        blurb="driving `gh` / `git` with a per-user token"),
     "runner-user": ExplainScope(_explain.runner_user,
-                                blurb="which OS account a root daemon's runners run as"),
+                                blurb="which OS account a root daemon's runners run as",
+                                live_only="names the import paths of the "
+                                          "install it runs in"),
     "pool": ExplainScope(_explain.pool,
                          blurb="the pre-warm runner pool, resized live"),
     "prefetch": ExplainScope(_explain.prefetch),
@@ -201,7 +259,8 @@ _SCOPES = {
                                blurb="the OUTPUT-side hook"),
     "archetypes": ExplainScope(_explain.archetypes,
                                blurb="what `new` WRITES"),
-    "archetype": ExplainScope(_explain.archetype, "named", "<name>"),
+    "archetype": ExplainScope(_explain.archetype, "named", "<name>",
+                              names=_archetype_names),
 }
 
 

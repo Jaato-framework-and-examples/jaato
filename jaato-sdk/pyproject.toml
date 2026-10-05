@@ -61,11 +61,13 @@ include = ["jaato_sdk*", "jaato*"]
 # stamp it leaves against this distribution's version.
 # `authoring_snapshot.json` is what `jaato-scaffold new` reads about providers
 # and env vars when jaato-server's source tree is not installed beside it
-# (#1267).
+# (#1267).  `explain_snapshot.json` is every `jaato-scaffold explain` topic
+# jaato-server renders without a workspace or the network, answered when
+# jaato-server is not installed.
 [tool.setuptools.package-data]
 "jaato_sdk.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
                         "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md",
-                        "authoring_snapshot.json"]
+                        "authoring_snapshot.json", "explain_snapshot.json"]
 
 [tool.pytest.ini_options]
 markers = [
