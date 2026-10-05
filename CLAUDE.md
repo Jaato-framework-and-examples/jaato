@@ -7871,9 +7871,34 @@ Chowning after write stays rejected: it cannot be made complete (it misses
 the intermediate directories, every file a subprocess writes, and anything
 an out-of-tree plugin writes), which is #735's shape.
 
-Daemon-tier artifacts stay root-owned under every policy, deliberately:
-session records, `~/.jaato/session_workspace_index.json` and the daemon log
-are written by the daemon process and are not the agent's output.
+**A file the daemon writes INSIDE a workspace is the workspace owner's
+(#1528).** This section used to say session records stay root-owned under
+every policy. That was wrong for the files that live in the user's
+workspace: the record is rewritten with a temp file plus `os.replace`, so
+every save installed a new root-owned record, undid any `chown -R`, and left
+files the owner (and their runner) could not rewrite or remove. Now, when
+the policy is not `daemon`, those writers create their file owned by the
+workspace owner from the start, with no root-owned window:
+
+| Writer | How |
+|---|---|
+| `.jaato/sessions/<id>.json` (`FileSessionPlugin.save`) | the temp file is `fchown`-ed before it is written, so `os.replace` installs a file that was never root's; directories the save creates get the same owner |
+| subagent and TODO state under `.jaato/sessions/<id>/` | `atomic_write_text(..., owner=)`, same rule |
+| `.jaato/logs/session_<id>_client_<c>.log` (`session_logging._create_owned`) | created empty and `fchown`-ed before `FileHandler` opens it for append; a log a previous daemon left is handed over |
+
+`runner_user.workspace_file_owner(ws)` is the one decision: `None` under the
+`daemon` policy (byte-identical to before), and otherwise
+`workspace_ownership.tree_owner(ws)` (nothing for a non-root daemon or a
+root-owned workspace). Under `peer` it is the workspace's owner, the
+#1496 rule, not the peer. Modes are unchanged (record and logs `0644`).
+Files OUTSIDE any workspace stay the daemon's:
+`~/.jaato/session_workspace_index.json`, the daemon log,
+`~/.jaato/apparmor-cache`. Still root-owned and tracked separately: the
+session inbox (`.jaato/sessions/<id>.inbox/`, `session_inbox.py`, #1530). A
+session can rewrite its own record, and a revive trusts its confinement,
+seccomp and permission fields: #1529. Guard:
+`jaato_server/server/tests/test_daemon_workspace_files_owned_1528.py`, six
+reversions, real `chown` to `nobody` as root and an inode ledger otherwise.
 
 Guard: `jaato_server/server/tests/test_a_root_daemon_says_so_1168.py`, six reversions. The
 uid is substituted in **both** directions — patched to 0 for the warning
@@ -7934,7 +7959,10 @@ private `/tmp` directories, the SELinux authored-dir pre-creation, artifact
 copies, replay snapshots, credential files a daemon-side `<provider>-auth`
 command leaves in `.jaato/`. `git clone` runs AS the workspace owner
 (`workspace_clone._clone_identity`), so its checkout is never root's.
-Daemon-tier records stay root's: session records, logs, the inbox.
+Under a runner-uid policy that drops, the session record, its state files
+and the per-client session logs are created owned by the workspace owner
+too (#1528, see [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-and-nothing-said-so-1168));
+the inbox is still root's.
 
 No compatibility path: a bare-string entry is refused. Connections without
 an application (the shared token, IPC) keep the daemon's own root, and a

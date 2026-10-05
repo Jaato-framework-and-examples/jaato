@@ -72,6 +72,8 @@ from .memory_verbs import MEMORY_REQUEST_TYPES
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_identity import RunnerIdentity, identity_from_server
+from .runner_user import workspace_file_owner
+from jaato_server.shared.workspace_ownership import make_dirs_owned
 from .session_lifetime import (
     DEFAULT_SWEEP_INTERVAL_SECONDS,
     LifetimeVerdict,
@@ -13781,6 +13783,11 @@ class SessionManager:
                     )
                 else:
                     storage_dir = pathlib.Path(self._session_config.storage_path)
+                # #1528: under a runner-uid policy that drops, the record and
+                # the state files beside it are the workspace owner's, created
+                # owned by them.  ``None`` (the default policy, or no
+                # workspace) writes as the daemon, exactly as before.
+                record_owner = workspace_file_owner(session.workspace_path)
 
                 # Get subagent state if subagent plugin is available
                 subagent_metadata = {}
@@ -13797,12 +13804,14 @@ class SessionManager:
                                 subagent_plugin,
                                 subagent_registry.get('agents', []),
                                 storage_dir=storage_dir,
+                                owner=record_owner,
                             )
 
                 # Save TODO plugin state
                 session_dir = storage_dir / session.session_id
                 if session.server:
-                    self._save_todo_state(session.server, session_dir)
+                    self._save_todo_state(
+                        session.server, session_dir, owner=record_owner)
 
                 # Generic plugin state persistence: iterate all exposed plugins
                 # and collect state from any that implement get_persistence_state().
@@ -13990,7 +13999,7 @@ class SessionManager:
                     end_reason=session.end_reason,
                 )
 
-                self._session_plugin.save(state, storage_dir=storage_dir)
+                self._write_record(state, storage_dir, record_owner)
                 session.is_dirty = False
 
                 logger.debug(f"Saved session: {session.session_id}")
@@ -14320,12 +14329,38 @@ class SessionManager:
         })
         logger.debug(f"Configured TODO storage at: {plans_dir}")
 
-    def _save_todo_state(self, server: JaatoServer, session_dir: pathlib.Path) -> None:
+    def _write_record(
+        self,
+        state: Any,
+        storage_dir: pathlib.Path,
+        owner: Optional[Tuple[int, int]],
+    ) -> None:
+        """Hand *state* to the session plugin, as *owner* when one is set (#1528).
+
+        ``owner`` is passed only when set, so a session plugin that predates
+        the keyword (any implementation other than ``FileSessionPlugin``) is
+        called exactly as before under the default policy.
+        """
+        if owner is None:
+            self._session_plugin.save(state, storage_dir=storage_dir)
+        else:
+            self._session_plugin.save(
+                state, storage_dir=storage_dir, owner=owner)
+
+    def _save_todo_state(
+        self,
+        server: JaatoServer,
+        session_dir: pathlib.Path,
+        owner: Optional[Tuple[int, int]] = None,
+    ) -> None:
         """Save TODO plugin state (agent-plan mapping, blocked steps).
 
         Args:
             server: The JaatoServer instance.
             session_dir: The session's storage directory.
+            owner: ``(uid, gid)`` the state file (and any directory this
+                creates) is written as, from
+                :func:`server.runner_user.workspace_file_owner` (#1528).
         """
         todo_plugin = self._get_todo_plugin(server)
         if not todo_plugin or not hasattr(todo_plugin, 'get_persistence_state'):
@@ -14340,7 +14375,7 @@ class SessionManager:
         state_path = (session_dir / "plans" / "_state.json").resolve()
         try:
             from jaato_server.shared.atomic_write import atomic_write_json
-            atomic_write_json(state_path, state)
+            atomic_write_json(state_path, state, owner=owner)
             logger.debug(f"Saved TODO state: {state_path}")
         except Exception as e:
             logger.error(f"Failed to save TODO state: {e}")
@@ -14375,8 +14410,12 @@ class SessionManager:
         subagent_plugin: Any,
         agents: List[Dict[str, Any]],
         storage_dir: Optional[pathlib.Path] = None,
+        owner: Optional[Tuple[int, int]] = None,
     ) -> None:
         """Save per-agent state files for subagents.
+
+        ``owner`` is the record's (#1528): the ``subagents/`` directory and
+        each state file are created as that account when it is set.
 
         Args:
             session_id: The parent session ID.
@@ -14387,7 +14426,7 @@ class SessionManager:
         # Create subagents directory
         base = storage_dir or pathlib.Path(self._session_config.storage_path)
         subagents_dir = base / session_id / "subagents"
-        subagents_dir.mkdir(parents=True, exist_ok=True)
+        make_dirs_owned(str(subagents_dir), owner)
 
         for agent_info in agents:
             agent_id = agent_info.get('agent_id')
@@ -14405,7 +14444,7 @@ class SessionManager:
             agent_file = subagents_dir / f"{agent_id}.json"
             try:
                 from jaato_server.shared.atomic_write import atomic_write_json
-                atomic_write_json(agent_file, full_state)
+                atomic_write_json(agent_file, full_state, owner=owner)
                 logger.debug(f"Saved subagent state: {agent_file}")
             except Exception as e:
                 logger.error(f"Failed to save subagent {agent_id}: {e}")
