@@ -5414,7 +5414,9 @@ shell's rules:
 
 **The refusal.** In an SDK-only environment each of the four answers exit 2
 with *"install jaato-server in this environment (pip install
-jaato-server), or ..."*, never an `ImportError`. `explain` first asks a
+jaato-server), or ..."*, never an `ImportError`. `explain` first answers
+from the snapshot shipped with the SDK (see [`explain` From a
+Snapshot](#explain-from-a-snapshot-1267)), then asks a
 running daemon (the protocol 1.18 path, unchanged: `--connect`, or a daemon
 listening on the default socket); `releases` points at `jaato-doctor`, whose
 release check needs only the SDK; `validate` asks a daemon too since tier 3
@@ -5588,6 +5590,48 @@ the `jaato-sdk` integration skill.
 
 Guard: `jaato_server/server/tests/test_scaffold_validate_verb_1267.py`, five
 reversions.
+
+### `explain` From a Snapshot (#1267)
+
+Tier 1 shipped `authoring_snapshot.json` so an SDK-only `new` could
+author; `explain` was left answering only through a daemon, although nearly
+every topic is a deterministic render of the installed code. jaato-server
+now renders them ahead of time into
+`jaato-sdk/jaato_sdk/scaffold/explain_snapshot.json`, and the SDK shell
+answers from it before any daemon is asked (`--connect` skips it).
+
+| Piece | Where |
+|---|---|
+| the generator: `render_topic` (the one dispatch) for the overview, every `simple` topic, every `filter` topic unfiltered, the bare `optional_named` forms, and every name of every `named` topic | `shared/scaffold/explain_snapshot.py` (`--write` / `--check`) |
+| what is rendered, read from the topic table: `ExplainScope.live_only` (why a topic cannot be snapshotted) and `ExplainScope.names` (a named topic's `{canonical: [spellings]}`) | `introspection_verbs._SCOPES` |
+| the reader: stdlib only, an alias map so `provider zhipuai-openai` finds `zhipuai_openai` as the live lookup does, and a byline naming the snapshot's jaato-server version | `jaato_sdk/scaffold/explain_snapshot.py`, `cli._explain_from_snapshot` |
+
+Not in it, so still jaato-server or a daemon: `live_only` topics
+(`releases` asks PyPI, `integrations` reads `$HOME`, `runner-user` names this
+install's paths), workspace-reading topics and the named forms of `profile` /
+`oversight` / `audit`, a filtered `env` / `events`, contributed topics and
+sections (premium), and the `dependencies` facet. The refusal now says which
+of these applied.
+
+**It mirrors jaato-server alone.** Generation runs in a subprocess with an
+empty `$HOME` and working directory and no `JAATO_*` variables
+(`prompt_library` lists `~/.claude/skills` while describing itself), and
+refuses, naming the cause, when a plugin or `explain` topic comes from
+another distribution, when an in-tree plugin did not load (an extra such as
+`[interactive]` missing), or when a rendering contains a path of the
+generating machine (such a topic belongs under `live_only`). Verified
+identical across `[dev,interactive]` and every extra.
+
+`.githooks/pre-commit` regenerates it when non-test source under
+`jaato-server/jaato_server/` or `jaato-sdk/jaato_sdk/` (the event catalog and
+archetypes are SDK code), or `jaato-server/pyproject.toml`, is staged; about
+10 s. It is ~1.2 MB because `--json` needs each topic's data beside its
+text. Guard:
+`jaato_server/shared/tests/test_explain_snapshot_mirrors_the_server.py`, six
+reversions; its drift case fails naming the regenerate command.
+
+Not done here: `validate` has no snapshot route. Its checks are code over a
+caller's workspace, which a rendered answer cannot replace.
 
 ### An Integration Declares Its Own Paths, and Its Own Harness
 

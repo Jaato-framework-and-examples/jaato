@@ -8,6 +8,10 @@
 #    records) -> jaato-sdk/jaato_sdk/scaffold/authoring_snapshot.json
 #    (python -m jaato_server.shared.scaffold.authoring_contracts --write), so
 #    test_authoring_does_not_load_introspection_1267 stays green (#1267).
+# 3. jaato-server or jaato-sdk source -> jaato-sdk/jaato_sdk/scaffold/
+#    explain_snapshot.json (python -m
+#    jaato_server.shared.scaffold.explain_snapshot --write), so
+#    test_explain_snapshot_mirrors_the_server stays green.
 #
 # Each regenerates only when a commit touches its sources, and stages the
 # result so it lands in the same commit.
@@ -72,6 +76,34 @@ if [ -n "$sources" ]; then
     git add "$repo_root/$snapshot"
     if ! git diff --cached --quiet -- "$repo_root/$snapshot"; then
         echo "pre-commit: $(basename "$snapshot") regenerated + staged."
+    fi
+fi
+
+# --- 3. explain_snapshot.json -----------------------------------------------
+# Every `explain` topic rendered ahead of time, for an install with no
+# jaato-server.  The renderers read jaato-server (plugins, providers, env vars)
+# AND jaato-sdk (the event catalog, the archetypes), so a non-test change to
+# either regenerates it, as does jaato-server's version, which it records.
+# Generation refuses an environment that lacks an in-tree plugin's extra or
+# holds a foreign plugin; its message names what to install or remove.
+explain_snapshot="jaato-sdk/jaato_sdk/scaffold/explain_snapshot.json"
+explain_sources="$(grep -E '^jaato-(server/(jaato_server/.*\.py|pyproject\.toml)|sdk/jaato_sdk/.*\.py)$' <<<"$staged" \
+                   | grep -vE '/tests/' || true)"
+if [ -n "$explain_sources" ]; then
+    echo "pre-commit: framework source changed — regenerating $(basename "$explain_snapshot") ..."
+    if ! PYTHONPATH="$repo_root/jaato-server:$repo_root/jaato-sdk${PYTHONPATH:+:$PYTHONPATH}" \
+            "$py" -m jaato_server.shared.scaffold.explain_snapshot --write >/dev/null; then
+        {
+            echo "pre-commit: FAILED to regenerate $explain_snapshot (reason above)."
+            echo "  Run it with both packages and the [interactive] extra installed:"
+            echo "      python -m jaato_server.shared.scaffold.explain_snapshot --write"
+            echo "  To bypass this hook: git commit --no-verify"
+        } >&2
+        exit 1
+    fi
+    git add "$repo_root/$explain_snapshot"
+    if ! git diff --cached --quiet -- "$repo_root/$explain_snapshot"; then
+        echo "pre-commit: $(basename "$explain_snapshot") regenerated + staged."
     fi
 fi
 
