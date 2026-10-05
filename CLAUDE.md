@@ -5376,6 +5376,16 @@ five reversions. Import footprints are measured in a fresh interpreter. The
 snapshot must equal the live projection, and `new` must write the same
 `.env` and set-profile text for every provider from either source.
 
+**The `jaato_server.server` package is lazy too (#1549).** Its `__init__`
+imported `JaatoServer` and `SessionManager` eagerly, so reading a constant
+from any submodule (`runner_user`, `pool_admin`, which `explain runner-user`
+and `explain pool` read) loaded ~120 `jaato_server` modules, the daemon core
+included. The re-exports (those two, `RuntimeSessionInfo` and the events)
+now resolve through a module `__getattr__` on first access; `import
+jaato_server.server.pool_admin` loads 3 modules. Guard:
+`jaato_server/shared/tests/test_server_package_is_lazy_1549.py`, one
+reversion.
+
 ### `jaato-scaffold` Ships With the SDK (#1267, tier 1)
 
 The move step 1 prepared. `jaato-scaffold` is now jaato-sdk's console
