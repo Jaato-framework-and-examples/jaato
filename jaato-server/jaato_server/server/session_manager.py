@@ -10882,9 +10882,13 @@ class SessionManager:
         # call get_session() to modify session attributes (e.g. sandbox_mode).
         self._run_session_hooks(server, session_id)
 
-        # Start workspace file monitor
+        # Start workspace file monitor.  Its baseline walk is on this
+        # path, before the confirmation, so it gets a phase of its own:
+        # it was where four concurrent creates spent ~45 s (#1553).
         if workspace_path:
             self._start_workspace_monitor(session_id, workspace_path)
+            session_new_timing.mark(
+                "workspace_monitor_started", session_id=session_id)
 
         # Save initial state to disk
         self._save_session(session)

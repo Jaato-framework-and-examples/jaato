@@ -12010,6 +12010,37 @@ core.hooksPath=/dev/null`); `check-ignore` reads the repository's own
 Guard: `jaato_server/server/test_files_panel_agrees_with_git.py`, one
 reversion, plus a case that a repo-configured program is not run.
 
+### A Baseline Walk Four Creates Waited On (#1553)
+
+Four concurrent `session.new` against warm slots: every runner ready in
+3-5 s, three confirmations past the caller's 60 s. Each session's runner
+went quiet after `get_auth_info` (the end of `initialize()`) and resumed
+with `get_history` (the first save) ~45 s later, all four together.
+Between the two, `_create_session_impl` starts the workspace monitor,
+whose `start()` walks the whole tree for its baseline before the session
+is confirmed. Since the oracle above, that walk paid per FILE: a pathlib
+`relative_to` per checkout, a rescan of the workspace root for every path
+outside a checkout, the parser's own `relative_to` + `stat` + ancestors,
+and one git round trip read one byte per Python call. Pure Python on one
+GIL, and every blocking git read waited out the switch interval to get it
+back, so four walks took ~6x one each and finished together. Measured on
+a 12k-file workspace: 3.0 s alone, 18.2 s with four at once; now 0.2 s
+and 1.5 s.
+
+| Piece | Where |
+|---|---|
+| one walk for `_seed_baseline` and `reconcile`: the parser asked with the relative path the walk already has (`GitignoreParser.is_ignored_relative`, ancestors already judged; `is_ignored` fallback for an older SDK), git asked about a directory's listing in one exchange | `WorkspaceMonitor._walk_unignored` |
+| `is_ignored_many`: 128 paths per write, their records read before the next chunk, so git's stdout pipe never fills while stdin is being written | `GitIgnoreOracle`, `_CheckIgnore` |
+| records read in chunks, not a byte per call; checkout lookup by string prefix | same |
+| a path outside every checkout stats only its own top-level child's `.git`, never rescans the root | `GitIgnoreOracle._new_checkout_for` |
+| `SESSION_NEW_PHASE ... phase=workspace_monitor_started`, and the monitor's start line names the walk's ms | `session_new_timing`, `WorkspaceMonitor.start` |
+
+Verdicts are unchanged (a guard compares the walk against `_is_ignored`
+per path). Not changed: the walk is still on the create path, and N
+sessions in one workspace still walk it N times. Guard:
+`server/tests/test_a_concurrent_create_does_not_walk_for_a_minute_1553.py`,
+four reversions.
+
 ### Any File, Hidden or Not (protocol 1.32)
 
 The Files panel lists what CHANGED, so a file nobody touched this session,

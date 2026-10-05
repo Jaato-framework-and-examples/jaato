@@ -210,6 +210,19 @@ class GitignoreParser:
                 return True
         return self._verdict("/".join(parts), is_dir=path.is_dir())
 
+    def is_ignored_relative(self, rel: str, is_dir: bool) -> bool:
+        """The verdict for one POSIX path relative to the workspace, ancestors aside.
+
+        For a caller that walks the tree top-down and prunes excluded
+        directories as it goes: every ancestor of *rel* has then already
+        been judged not ignored, so only the path's own rules decide, and
+        *is_dir* is what the walk already knows.  :meth:`is_ignored` answers
+        the same question from a ``Path`` and pays for a ``relative_to``, a
+        ``stat`` and every ancestor again; a baseline walk asks it once per
+        file in the workspace.
+        """
+        return self._verdict(rel, is_dir=is_dir)
+
     def filter_paths(self, paths: Set[str]) -> Set[str]:
         """Return only paths that are NOT ignored.
 
