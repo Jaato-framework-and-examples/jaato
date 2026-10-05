@@ -2997,26 +2997,95 @@ class SessionManager:
                 logger.warning("unloading idle AppArmor profiles failed",
                                exc_info=True)
 
+    def _release_apparmor_boundary(self, session_id: str) -> None:
+        """Release *session_id*'s claim on its AppArmor boundary (#1506).
+
+        The ONE session-end release, called by every path that ends a
+        confined session AFTER ``server.shutdown()`` (so a pooled slot is
+        already back in the pool, wearing the profile, and a cold runner
+        is already gone): unload (:meth:`_do_session_unload` — which the
+        #812 orphan stop, ``session.stop`` and the #1106 grace expiry all
+        reach), :meth:`delete_session`, the cascade refusal, and daemon
+        stop (:meth:`shutdown`).  Before #1506 none of the IPC paths
+        released, so #1501's grace never started and profiles accumulated.
+
+        Goes through ``AppArmorManager.teardown_profile``, whose refcount
+        and grace decide what leaves the kernel: another live session on
+        the boundary keeps it loaded, and so does an idle pool slot
+        wearing it — slot ownership stays with the pool, whose reaper
+        (:meth:`_reap_apparmor_profile_for_dead_slot`) releases it when
+        the last such slot dies.  Asked of every manager this daemon
+        built, and acted on only by the one that provisioned the session.
+        Best effort: a failure is logged, never raised into a teardown.
+        """
+        for mgr in self._apparmor_managers():
+            holds = getattr(mgr, "holds_session", None)
+            try:
+                if holds is None or not holds(session_id):
+                    continue
+                mgr.teardown_profile(session_id)
+            except Exception:  # noqa: BLE001 — a release never blocks a teardown
+                logger.warning(
+                    "AppArmor: releasing the boundary of session %s failed",
+                    session_id, exc_info=True)
+
+    def _stop_apparmor_grace(self) -> None:
+        """Daemon stop: releases from here on unload at once (#1506)."""
+        for mgr in self._apparmor_managers():
+            stop = getattr(mgr, "stop_grace", None)
+            if stop is not None:
+                stop()
+
+    def reconcile_apparmor_profiles(self) -> List[str]:
+        """Daemon start: reclaim orphaned ``jaato-ws-*`` profiles (#1506).
+
+        Uses a manager of its own rather than building the IPC one, which
+        is created lazily from the first session's workspace.  What it may
+        touch is decided by ``AppArmorManager.reclaim_orphaned_profiles``
+        (an owner ledger, the file's uid, every task's label, and this
+        daemon's own slots).  Returns the reclaimed profile names; no-op
+        (``[]``) where AppArmor is unavailable.
+        """
+        from jaato_server.server.apparmor import AppArmorManager
+        try:
+            mgr = AppArmorManager(
+                workspace_root=str(pathlib.Path.home()),
+                loop=getattr(self, "_daemon_loop", None),
+            )
+            mgr.slot_in_use = self._apparmor_slot_in_use
+            return mgr.reclaim_orphaned_profiles()
+        except Exception:  # noqa: BLE001 — the reconcile never blocks a start
+            logger.warning("AppArmor startup reconcile failed", exc_info=True)
+            return []
+
     def _reap_apparmor_profile_for_dead_slot(self, profile_name: str) -> None:
         """``PoolManager.profile_reaper`` — the last wearer has died.
 
         Unloads *profile_name* unless a live session still claims it;
         that second guard lives in ``AppArmorManager.teardown_profile``,
         which is also where the checked-out (non-idle) slots are covered,
-        since such a slot always has a session.
+        since such a slot always has a session.  With two managers (IPC
+        and WS, #1506) a session of EITHER keeps it, and the release is
+        made on the manager that provisioned the boundary, so its grace
+        applies.
 
         Silently does nothing when no AppArmor manager was ever built —
         the pool runs on hosts with no AppArmor at all, and a reaper that
         insisted on one would log noise on every slot teardown.
         """
-        apparmor = getattr(self, "_apparmor_manager", None)
-        if apparmor is None or not apparmor.is_available():
-            return
         prefix = "jaato-ws-"
         if not profile_name.startswith(prefix):
             return
-        apparmor.teardown_profile_by_confinement_id(
-            profile_name[len(prefix):])
+        cid = profile_name[len(prefix):]
+        managers = [m for m in self._apparmor_managers() if m.is_available()]
+        if not managers:
+            return
+        if any(cid in getattr(m, "_confinement_ids", {}).values()
+               for m in managers):
+            return
+        owner = next((m for m in managers
+                      if cid in getattr(m, "_boundary_ids", ())), managers[0])
+        owner.teardown_profile_by_confinement_id(cid)
 
     def _spawn_session_runner_unconditional(
         self,
@@ -10595,6 +10664,7 @@ class SessionManager:
                             "server.shutdown after cascade refusal raised",
                             exc_info=True,
                         )
+                    self._release_apparmor_boundary(session_id)
                     return ""
 
         # Caller-supplied USAGE, pre-charged onto the fresh session via the
@@ -14678,6 +14748,8 @@ class SessionManager:
                 "Unload: server.shutdown raised for session %s — "
                 "removing from sessions anyway", session_id,
             )
+        # After the shutdown: its slot is back in the pool by now (#1506).
+        self._release_apparmor_boundary(session_id)
         with self._lock:
             self._sessions.pop(session_id, None)
             # The grace clock belongs to a LOADED session; drop it with the
@@ -15041,6 +15113,7 @@ class SessionManager:
         # already popped above, so nothing else can reach it.
         if session is not None:
             session.server.shutdown()
+        self._release_apparmor_boundary(session_id)
 
         # Stop the session's egress proxy if one was started (Phase 5 §5.11).
         # Idempotent + guarded — a no-op for sessions without an allowlist.
@@ -17023,9 +17096,13 @@ class SessionManager:
             # the loop waits for the lock.
             closing = list(self._sessions.values())
 
+        # #1506: nothing released on the way out may enter a grace that no
+        # watchdog will ever expire; pool slots reaped after this unload too.
+        self._stop_apparmor_grace()
         for session in closing:
             self._save_session(session)
             session.server.shutdown()
+            self._release_apparmor_boundary(session.session_id)
 
         with self._lock:
             self._sessions.clear()

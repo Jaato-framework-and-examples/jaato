@@ -222,7 +222,15 @@ class AppArmorManager:
        ``apparmor_confine()`` context manager (see below), which the
        ``ToolExecutor`` wraps around every tool call.  Subprocesses
        inherit the parent thread's confinement via fork+exec.
-    3. ``teardown_profile(session_id)`` — unloads and removes the profile.
+    3. ``teardown_profile(session_id)`` — RELEASES the session's claim on
+       its boundary.  The profile leaves the kernel only when nobody else
+       holds it: another live session on the boundary keeps it, an idle
+       pool slot wearing it keeps it (the slot's death releases it again,
+       ``PoolManager._reap_slot_profile``), and a boundary-derived profile
+       then waits out the #1501 grace.  ``SessionManager`` calls it on
+       every session end (#1506); :meth:`stop_grace` makes daemon stop
+       unload at once; :meth:`reclaim_orphaned_profiles` cleans up after a
+       daemon that never got to release.
 
     All methods are safe to call even when AppArmor is unavailable; they
     degrade to no-ops.
@@ -1407,6 +1415,14 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         # by whoever owns the pool; ``None`` = no pool, nothing worn.
         self.slot_in_use: Optional[Callable[[str], bool]] = None
         self._securityfs_profiles = Path(SECURITYFS_PROFILES)
+        # #1506: which daemon wrote each profile file, so a later daemon's
+        # startup reconcile (:meth:`reclaim_orphaned_profiles`) can tell an
+        # orphan from a profile another LIVE daemon is using.  Beside the
+        # parser cache, under the daemon account's ``~/.jaato``.
+        from jaato_server.server.apparmor_reclaim import LEDGER_FILENAME
+        self._owner_ledger_path = self._cache_dir.parent / LEDGER_FILENAME
+        self._proc_root = Path("/proc")
+        self._owner: Optional[str] = None
         self._securityfs_policy_dir = Path(SECURITYFS_POLICY_DIR)
 
     # ------------------------------------------------------------------
@@ -1698,6 +1714,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 
         profile_name = self.profile_name_for_confinement_id(render_id)
         profile_path = self._profile_dir / profile_name
+        # #1506: stamped BEFORE the file can exist, so a concurrent startup
+        # reconcile never sees one of ours unledgered.
+        self._record_owner(profile_name)
         composition: Dict[str, Any] = {}
         t0 = _time.monotonic()
         profile_content = self._render_profile(
@@ -2522,10 +2541,15 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         return self.teardown_profile(confinement_id)
 
     def _teardown_profile_impl(self, session_id: str) -> bool:
-        """Inner body of :meth:`teardown_profile`.
+        """Inner body of :meth:`teardown_profile`: release one claim.
 
-        Runs ``apparmor_parser -R`` to unload the profile, then deletes
-        the profile file.
+        Drops *session_id*'s claim, then unloads (``apparmor_parser -R`` and
+        the file) only when nothing else holds the boundary: no other live
+        session of this manager, no idle pool slot wearing it
+        (``slot_in_use``, #1506 — slot ownership is the pool's, so a
+        session end never strips a slot), and no grace to wait out
+        (#1501).  The same path serves the pool's reaper, called with the
+        confinement id once the last slot wearing it has died.
 
         Server 0.6.47+: BEFORE running ``apparmor_parser -R``, sweeps
         every registered ``ApparmorSafeThreadPoolExecutor`` to dispatch
@@ -2563,6 +2587,18 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                 profile_name, session_id,
                 sum(1 for v in self._confinement_ids.values()
                     if v == confinement_id),
+            )
+            return True
+        # #1506: the other holder is a pool SLOT.  A session's slot goes
+        # back to the pool still wearing the profile, and the pool's own
+        # reaper (``PoolManager._reap_slot_profile``) releases it again when
+        # the last such slot dies.  Slot ownership is the pool's; a session
+        # ending never unloads a profile a slot wears, grace or no grace.
+        if self._slot_holds(confinement_id):
+            logger.info(
+                "AppArmor: leaving profile %s loaded — session %s released "
+                "it and a pooled runner slot still wears it",
+                profile_name, session_id,
             )
             return True
 
@@ -2656,6 +2692,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         self._remove_all_reference_fragments(confinement_id)
         with self._session_locks_guard:
             self._session_locks.pop(confinement_id, None)
+        self._forget_owner(profile_name)
 
         logger.info("Removed AppArmor profile %s", profile_name)
         return True
@@ -2668,6 +2705,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         """Does a live session or a live pool slot hold this boundary?"""
         if any(v == confinement_id for v in self._confinement_ids.values()):
             return True
+        return self._slot_holds(confinement_id)
+
+    def _slot_holds(self, confinement_id: str) -> bool:
+        """Is an idle pool slot confined to this boundary? (``slot_in_use``)
+
+        ``False`` when no pool is wired.  A predicate that raises reads as
+        held: never unload a worn profile.
+        """
         check = self.slot_in_use
         if check is None:
             return False
@@ -2728,6 +2773,167 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         """``{confinement id: monotonic release time}`` for idle boundaries."""
         with self._idle_lock:
             return dict(self._idle_since)
+
+    def stop_grace(self) -> None:
+        """Daemon stop: every later release unloads at once (#1506).
+
+        Called before the daemon releases its sessions and tears down its
+        pool slots, so a boundary released on the way out (by a session or
+        by the last slot wearing it) does not enter a grace nothing will
+        ever expire.  Profiles already idle are unloaded by
+        :meth:`unload_idle_profiles`.  Irreversible for this manager.
+        """
+        self._grace_seconds = 0.0
+
+    def holds_session(self, session_id: str) -> bool:
+        """Did this manager provision a profile for *session_id*? (#1506)
+
+        A session provisioned under a boundary id has a row in
+        ``_confinement_ids``; one provisioned the pre-#1033 way (no id) has
+        a profile file named after itself.  Lets a caller that serves both
+        the IPC and the WS manager release a session on the one that holds
+        it, and nowhere else.
+        """
+        if session_id in self._confinement_ids:
+            return True
+        try:
+            name = self.profile_name_for_confinement_id(session_id)
+        except ValueError:
+            return False
+        return (self._profile_dir / name).exists()
+
+    # ------------------------------------------------------------------
+    # Ownership ledger + startup reconcile (#1506)
+    # ------------------------------------------------------------------
+
+    def _owner_key(self) -> str:
+        if self._owner is None:
+            from jaato_server.server.apparmor_reclaim import owner_key
+            self._owner = owner_key(proc_root=self._proc_root)
+        return self._owner
+
+    def _ledger(self):
+        from jaato_server.server.apparmor_reclaim import OwnerLedger
+        return OwnerLedger(self._owner_ledger_path)
+
+    def _record_owner(self, profile_name: str) -> None:
+        """Stamp *profile_name* as this daemon's in the owner ledger.
+
+        Best effort: a ledger that cannot be written costs only the
+        precision of a later reconcile (an unledgered file is still judged
+        by its uid and by whether a task wears it).
+        """
+        try:
+            self._ledger().record(profile_name, self._owner_key())
+        except Exception:  # noqa: BLE001 — bookkeeping, never a gate
+            logger.debug("AppArmor: could not record owner of %s",
+                         profile_name, exc_info=True)
+
+    def _forget_owner(self, profile_name: str) -> None:
+        try:
+            self._ledger().forget(profile_name)
+        except Exception:  # noqa: BLE001 — bookkeeping, never a gate
+            logger.debug("AppArmor: could not forget owner of %s",
+                         profile_name, exc_info=True)
+
+    def reclaim_orphaned_profiles(self) -> List[str]:
+        """Unload and remove ``jaato-ws-*`` profiles nobody holds (#1506).
+
+        Run once at daemon start.  Which files are this daemon's to
+        reclaim is decided by :mod:`server.apparmor_reclaim` (the owner
+        ledger, the file's uid, and every task's label); a profile a
+        session or pool slot of THIS manager holds is kept too.  Logs one
+        INFO line naming what was reclaimed.  Returns the profile names.
+        """
+        if not self.is_available():
+            return []
+        return self._run_unconfined(self._reclaim_orphaned_impl)
+
+    def _reclaim_orphaned_impl(self) -> List[str]:
+        from jaato_server.server.apparmor_reclaim import (
+            RECLAIM, kernel_name_for_file, reclaim_verdict, worn_profiles,
+        )
+        from jaato_server.server.confinement_id import PROFILE_PREFIX
+
+        try:
+            files = sorted(p for p in self._profile_dir.glob(PROFILE_PREFIX + "*")
+                           if p.is_file())
+        except OSError:
+            logger.warning("AppArmor: cannot list %s for the startup "
+                           "reconcile", self._profile_dir, exc_info=True)
+            return []
+        try:
+            owners = self._ledger().entries()
+        except Exception:  # noqa: BLE001 — an unreadable ledger is an empty one
+            owners = {}
+        worn = worn_profiles(self._proc_root)
+        reclaimed: List[str] = []
+        kept: Dict[str, int] = {}
+        for path in files:
+            verdict = reclaim_verdict(
+                path, ledger_owner=owners.get(path.name),
+                this_owner=self._owner_key(), worn=worn,
+                proc_root=self._proc_root)
+            if verdict == RECLAIM and self._held_by_name(path.name):
+                verdict = "held"
+            if verdict != RECLAIM:
+                kept[verdict] = kept.get(verdict, 0) + 1
+                continue
+            if self._remove_orphan_file(path, kernel_name_for_file(path.name)):
+                reclaimed.append(path.name)
+        self._prune_ledger(owners, {p.name for p in files})
+        logger.info(
+            "AppArmor startup reconcile: reclaimed %d orphaned profile(s) "
+            "in %s%s; kept %s", len(reclaimed), self._profile_dir,
+            (": " + ", ".join(reclaimed)) if reclaimed else "",
+            kept or "none")
+        return reclaimed
+
+    def _prune_ledger(self, owners: Dict[str, str], present: set) -> None:
+        """Forget ledger rows for files that are gone and whose owner is dead.
+
+        A provision whose parser run failed removes its file and leaves its
+        row; a live owner's row is left alone (it may be mid-write).
+        """
+        from jaato_server.server.apparmor_reclaim import owner_alive
+        for name, owner in owners.items():
+            if name not in present and not owner_alive(owner, self._proc_root):
+                self._forget_owner(name)
+
+    def _held_by_name(self, filename: str) -> bool:
+        from jaato_server.server.confinement_id import (
+            confinement_id_from_profile_name,
+        )
+        cid = confinement_id_from_profile_name(filename)
+        return bool(cid) and self._is_held(cid)
+
+    def _remove_orphan_file(self, path: Path, kernel_name: str) -> bool:
+        """``apparmor_parser -R`` + unlink one orphan; ``_unload_profile``
+        for a base profile, so its refs dir and state go with it."""
+        from jaato_server.server.apparmor_reclaim import SUB_PROFILE_FILE_SEP
+        from jaato_server.server.confinement_id import (
+            confinement_id_from_profile_name,
+        )
+        cid = confinement_id_from_profile_name(path.name)
+        if SUB_PROFILE_FILE_SEP not in path.name and cid:
+            try:
+                return self._unload_profile(cid)
+            except ValueError:
+                pass  # unsafe id: removed below as a plain file
+        try:
+            subprocess.run(
+                ["sudo", "apparmor_parser", "-R", "--cache-loc",
+                 str(self._cache_dir), str(path)],
+                capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError):
+            logger.exception("Failed to unload AppArmor profile %s", kernel_name)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to delete AppArmor profile file %s", path)
+            return False
+        self._forget_owner(path.name)
+        return True
 
     # ------------------------------------------------------------------
     # Reference fragments (per-selectReferences readonly grants)

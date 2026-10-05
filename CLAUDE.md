@@ -2637,6 +2637,74 @@ system abstraction (`abstractions/base`) until the profile is next loaded.
 Guard: `jaato_server/server/tests/test_apparmor_profile_reuse_1501.py`, nine
 reversions. No kernel: the parser and securityfs are stubbed.
 
+### A Boundary No IPC Session Ever Released (#1506)
+
+#1501 gave a boundary profile a refcount and an unload grace, and only
+`_teardown_profile_impl` starts the grace. Nothing on the IPC path called
+it: `_do_session_unload` had no AppArmor release, and the only daemon
+callers were the cascade slot transition, the dead-slot reaper and the WS
+workspace reaper. So an IPC session's profile stayed loaded after its last
+session, after daemon stop, and on disk (148 `jaato-ws-*` files on one
+VPS). With grace 0 the next session still logged `reload=skipped`.
+
+**One release, on every end.** `SessionManager._release_apparmor_boundary`
+calls `teardown_profile(session_id)` on the manager (IPC or WS) that
+provisioned the session (`AppArmorManager.holds_session`), after
+`server.shutdown()`:
+
+| Path | Releases through |
+|---|---|
+| unload, which the #812 orphan stop, `session.stop` and the #1106 grace expiry all reach | `_do_session_unload` |
+| `session.delete` | `delete_session` |
+| a cascade-exhausted refusal | the refusal branch |
+| daemon stop | `shutdown()`, after `_stop_apparmor_grace` |
+
+**A release decrements; it never unloads outright.** Another live session
+on the boundary keeps it (as before), and now so does an idle pool slot
+wearing it (`_slot_holds`, read at release time). Before, grace 0 unloaded
+without asking the pool, which would have stripped the profile off a slot
+returned to the pool. Slot ownership stays with the pool: the slot's death
+releases through `_reap_apparmor_profile_for_dead_slot`, which now refuses
+while a session of either manager holds the boundary and releases on the
+manager that provisioned it.
+
+**Daemon stop unloads what it held.** `AppArmorManager.stop_grace` sets the
+grace to 0 before sessions are released, so the session releases and the
+pool's slot reaps after them unload at once; `JaatoDaemon` then unloads any
+boundary still idle.
+
+**Startup reconcile.** Before the pool forks, the daemon runs
+`reclaim_orphaned_profiles` on a manager of its own. Which files are its to
+reclaim is decided in `server/apparmor_reclaim.py`:
+
+| File | Verdict |
+|---|---|
+| ledgered to another live daemon (`pid:starttime` from `/proc/<pid>/stat`) | kept |
+| ledgered to this daemon | kept (live state) |
+| not ledgered, owned by another uid | kept |
+| worn by any task (`/proc/*/task/*/attr/current`, `//child` counts) or held by this daemon's slots | kept |
+| ledgered to a dead owner, or not ledgered and ours, unworn | unloaded and removed (sub-profiles and refs dirs too) |
+
+The ledger is `~/.jaato/apparmor-owned.json`, `flock`ed, written before the
+profile file so a concurrent reconcile never sees one of ours unledgered.
+One INFO line names what was reclaimed.
+
+Stated limits:
+
+- **A pre-#1506 file is judged by uid alone.** An older daemon of the same
+  account still running when a new one starts can lose an idle profile it
+  holds no task in; its next provision reloads it.
+- **A session refused at `initialize_or_refuse` releases nothing** (its
+  runner is not shut down either); the next startup reconcile reclaims it.
+- **Kernel profiles with no file are not reclaimed** (`apparmor_parser -R`
+  is given the file).
+- **Not verified on an enforcing kernel.** The parser and securityfs are
+  stubbed; `TestOnAnEnforcingKernel` (root + enforcing AppArmor) runs the
+  issue's checks for real and is skipped here.
+
+Guard: `jaato_server/server/tests/test_apparmor_ipc_release_1506.py`, nine
+reversions. One-off cleanup of an existing host is the next daemon start.
+
 ### A Tmpdir Two Modules Named Differently (#1171)
 
 `RunnerSpawner` decided where a runner's temp files go; `AppArmorManager`

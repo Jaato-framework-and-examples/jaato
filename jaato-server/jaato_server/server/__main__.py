@@ -788,6 +788,9 @@ class JaatoDaemon:
         # ChildProcessError-swallow path, just slightly less tidy.
         self._configure_subreaper()
 
+        # #1506: before the pool forks, so no slot of ours wears a profile.
+        await self._reconcile_apparmor_profiles()
+
         # Pool PR 2: spawn the pre-warm runner template.  The template
         # subprocess imports runner-tier plugin modules at startup so
         # pool slots (PR 3) can fork from it and inherit warm imports
@@ -875,6 +878,7 @@ class JaatoDaemon:
                 "Pool teardown raised: %s; daemon will exit anyway",
                 exc,
             )
+        self._unload_idle_apparmor_profiles_at_stop()
 
         # Pool PR 2: tear down the runner template as part of daemon
         # exit.  The template is daemon-lifetime — alive across all
@@ -893,6 +897,30 @@ class JaatoDaemon:
         self._remove_pid()
         # Note: Don't remove config on normal stop - needed for restart
         logger.info("Jaato server stopped")
+
+    async def _reconcile_apparmor_profiles(self) -> None:
+        """Reclaim the ``jaato-ws-*`` profiles a previous daemon left (#1506).
+
+        A crash, a kill, or a release that never ran (every IPC session
+        before #1506) leaves profiles loaded and on disk.  Called from
+        :meth:`start` before the pool forks, so no slot of ours wears one;
+        off the loop, because each unload is dispatched back onto it
+        (#1355).  ``SessionManager.reconcile_apparmor_profiles`` decides
+        which files are this daemon's to reclaim.
+        """
+        if self._session_manager is not None:
+            await asyncio.to_thread(
+                self._session_manager.reconcile_apparmor_profiles)
+
+    def _unload_idle_apparmor_profiles_at_stop(self) -> None:
+        """After the pool's teardown: unload any boundary left idle (#1506).
+
+        The session manager's shutdown disabled the grace, so the slot
+        reaper unloaded each boundary its last slot wore; this catches one
+        that went idle in between.
+        """
+        if self._session_manager:
+            self._session_manager._unload_idle_apparmor_profiles()
 
     async def _run_health_checks(self) -> None:
         """Periodic health-check loop (server 0.6.54+).
