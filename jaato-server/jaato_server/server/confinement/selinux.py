@@ -32,9 +32,11 @@ import ctypes
 import logging
 import os
 import platform
+import re
+import stat
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_server.server.confinement import selinux_labels
 from jaato_server.server.confinement.base import Boundary, ConfinementHandle
@@ -60,6 +62,29 @@ REQUIRED_POLICY_VERSION = 4
 
 #: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
 USER_DIR_TYPE = "jaato_user_dir_t"
+
+#: The user tier ``jaato.fc`` labels, as (type, the regex under
+#: ``<home>/\.jaato``, ``semanage -f`` file type or ``""`` for all).  Kept
+#: in step with ``jaato.fc`` (a test compares them); the doctor renders these
+#: as ``semanage fcontext`` rules for a ``HOME`` the module's own patterns do
+#: not cover (``/root`` and ``HOME_DIR`` only).
+USER_TIER_FCONTEXTS: Tuple[Tuple[str, str, str], ...] = (
+    (USER_DIR_TYPE, "", "d"),
+    ("jaato_user_config_t", "/(agents|profiles|references|services)(/.*)?", ""),
+    ("jaato_user_config_t", "/gc\\.json", "f"),
+    ("jaato_user_config_t", "/memories\\.jsonl", "f"),
+    ("jaato_user_data_t", "/(memories|prompts|skills)(/.*)?", ""),
+)
+
+
+def user_tier_fcontext_commands(user_dir: str) -> List[str]:
+    """The commands that label *user_dir* (a ``~/.jaato``) where
+    ``jaato.fc`` has no rule for it, ending with the ``restorecon``."""
+    base = re.escape(os.path.normpath(user_dir))
+    rules = [f"semanage fcontext -a {f'-f {ftype} ' if ftype else ''}"
+             f"-t {kind} '{base}{tail}'"
+             for kind, tail, ftype in USER_TIER_FCONTEXTS]
+    return rules + [f"restorecon -Rv {user_dir}"]
 
 #: jaato's runner domain, as a context the kernel can validate.
 RUNNER_PROBE_CONTEXT = "system_u:system_r:jaato_runner_t:s0"
@@ -158,6 +183,20 @@ class _Kernel:
             return None
         return bool(avd.allowed & bit)
 
+    def default_context(self, path: str, mode: int) -> Optional[str]:
+        """``matchpathcon``: the label ``restorecon`` would give *path*.
+
+        ``None`` when the file-context database could not be asked or has
+        no entry for it.
+        """
+        fn = self._lib.matchpathcon
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_char_p)]
+        fn.restype = ctypes.c_int
+        out = ctypes.c_char_p()
+        if fn(path.encode("utf-8"), mode, ctypes.byref(out)) < 0 or not out.value:
+            return None
+        return out.value.decode("utf-8", "replace")
+
     def set_file_context(self, path: str, context: str) -> None:
         """``lsetfilecon``: label *path* itself, never a symlink's target."""
         fn = self._lib.lsetfilecon
@@ -249,7 +288,9 @@ class SELinuxBackend:
             ``mode`` (enforcing / permissive), ``runner_domain`` (whether
             the policy has made ``jaato_runner_t`` permissive), the
             interpreter and its label, ``~/.jaato`` and its label
-            (``None`` where one could not be read), and ``policy_version``:
+            (``None`` where one could not be read), the label
+            ``restorecon`` would give it (``user_dir_default_label``,
+            ``None`` when unknown), and ``policy_version``:
             the module version readiness found the marker for, since a host
             reaching this method has passed that check.
         """
@@ -267,6 +308,9 @@ class SELinuxBackend:
             "user_dir": user_dir,
             "user_dir_label": (
                 kernel.link_context(user_dir)
+                if kernel and os.path.lexists(user_dir) else None),
+            "user_dir_default_label": (
+                kernel.default_context(user_dir, stat.S_IFDIR)
                 if kernel and os.path.lexists(user_dir) else None),
             "policy_version": str(REQUIRED_POLICY_VERSION),
         }
@@ -342,6 +386,12 @@ class SELinuxBackend:
         try:
             selinux_labels.check_root(workspace)
             level = self._level_table().level_for(workspace)
+            label = f"{own.user}:{own.role}:{domain}:{level}"
+            child_label = f"{own.user}:{own.role}:{child_domain}:{level}"
+            blocked = _unsearchable_ancestor(
+                kernel, workspace, (label, child_label))
+            if blocked is not None:
+                raise ValueError(blocked)
             plan = selinux_labels.Plan(
                 workspace=workspace, level=level, managed=boundary.managed,
                 private_tmp_dir=(os.path.realpath(boundary.private_tmp_dir)
@@ -352,8 +402,6 @@ class SELinuxBackend:
             logger.error("SELinux provision for %s at %s failed: %s",
                          session_id, workspace, exc)
             return None
-        label = f"{own.user}:{own.role}:{domain}:{level}"
-        child_label = f"{own.user}:{own.role}:{child_domain}:{level}"
         permissive = self._domain_permissive(label)
         handle = ConfinementHandle(
             backend=BACKEND_SELINUX,
@@ -451,6 +499,52 @@ class SELinuxBackend:
     def release(self, handle: ConfinementHandle) -> None:
         """Nothing to unload: labels persist with the workspace (design §6)."""
         return None
+
+
+def _unsearchable_ancestor(
+    kernel: _Kernel, workspace: str, labels: Tuple[str, ...],
+) -> Optional[str]:
+    """Why a runner could not reach *workspace*, or ``None`` when it can.
+
+    The daemon labels the workspace tree, never its ancestors, and a runner
+    must ``search`` every one of them to reach its own workspace.  A
+    workspace under a ``mktemp -d`` directory in ``/tmp`` (``user_tmp_t``)
+    is the common case: without this check the session is labelled, the
+    runner starts, and its bootstrap dies on an ``EACCES`` for
+    ``.jaato/permissions.json`` that names nothing about the cause.
+
+    Asks the policy (``security_compute_av``) for each ancestor and each of
+    *labels*.  Only a definite refusal counts (#1014's rule, inverted for a
+    refusal): an ancestor whose label could not be read, or a question the
+    policy could not answer, is not reported, and the kernel decides.
+
+    Returns:
+        A sentence naming the ancestor, its context and the domain that
+        cannot search it, with the remedies; ``None`` when every ancestor
+        is searchable or nothing could be determined.
+    """
+    path = os.path.dirname(workspace)
+    while True:
+        target = kernel.file_context(path)
+        if target is not None:
+            for label in labels:
+                if kernel.allowed(label, target, "dir", "search") is False:
+                    domain = parse_selinux_context(label)
+                    name = domain.type if domain else label
+                    kind = parse_selinux_context(target)
+                    return (
+                        f"{name} may not search the workspace's ancestor "
+                        f"{path} ({kind.type if kind else target}), so the "
+                        "runner could not reach its own workspace; move the "
+                        "workspace under a directory the jaato domains may "
+                        "traverse (not a mktemp -d directory in /tmp), or "
+                        "give that directory a searchable type with "
+                        "`semanage fcontext -a -t <type> ...` and "
+                        "`restorecon`")
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
 
 
 def _grants(plan: "selinux_labels.Plan", label: str,

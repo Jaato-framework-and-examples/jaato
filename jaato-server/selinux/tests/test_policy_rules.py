@@ -263,6 +263,14 @@ def _allows(src, tgt, cls, perms):
     return lambda p: granted(p, src, tgt, cls, perms, conditional=False) == perms
 
 
+def _boolean_default(policy, name: str) -> Optional[bool]:
+    """A boolean's default state in the policy, ``None`` when undefined."""
+    try:
+        return bool(policy.lookup_boolean(name).state)
+    except Exception:  # setools raises InvalidBoolean
+        return None
+
+
 def _forbids(src, tgt, cls, perms):
     perms = frozenset(perms)
     return lambda p: not granted(p, src, tgt, cls, perms)
@@ -827,6 +835,33 @@ RULES: Tuple[Rule, ...] = (
                                  "unconfined_t", "unconfined_service_t")),
          "AppArmor: deny ptrace",
          append="allow jaato_child_t jaato_runner_t:process ptrace;\n"),
+    # --- JIT runtimes (execmem) -----------------------------------------
+    Rule("a child may use execmem while jaato_child_execmem is on (its default)",
+         lambda p: (_boolean_default(p, "jaato_child_execmem") is True
+                    and granted(p, "jaato_child_t", "jaato_child_t", "process",
+                                frozenset({"execmem"})) == {"execmem"}),
+         "node (V8), Java, .NET, LuaJIT and PyPy abort without it: node "
+         "exited 133 on the 2026-10-05 SELinux run, with the filter off too",
+         find="gen_tunable(jaato_child_execmem, true)\n",
+         replace="gen_tunable(jaato_child_execmem, false)\n"),
+    Rule("a child's execmem is behind a boolean an operator can turn off",
+         lambda p: "execmem" not in granted(
+             p, "jaato_child_t", "jaato_child_t", "process",
+             frozenset({"execmem"}), conditional=False),
+         "a host whose sessions run no JIT may withdraw it",
+         append="allow jaato_child_t self:process execmem;\n"),
+    Rule("the runner holds no execmem",
+         _forbids("jaato_runner_t", "jaato_runner_t", "process", {"execmem"}),
+         "CPython needs none; only the payloads a child runs do",
+         append="allow jaato_runner_t self:process execmem;\n"),
+    Rule("neither domain holds execmod",
+         lambda p: all(not granted(p, d, t, "file", frozenset({"execmod"}))
+                       for d in ("jaato_runner_t", "jaato_child_t")
+                       for t in ("jaato_workspace_t", "jaato_managed_ws_t",
+                                 "jaato_tmp_t")),
+         "execmem is anonymous memory; a file the session wrote stays "
+         "unmappable as code",
+         append="allow jaato_child_t jaato_tmp_t:file execmod;\n"),
     Rule("neither domain may create files in the host's /tmp",
          lambda p: all(not granted(p, d, "tmp_t", "dir",
                                    frozenset({"add_name", "write"}))

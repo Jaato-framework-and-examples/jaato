@@ -267,11 +267,31 @@ user-tier type, for the runner, the child and the isolated domains, and the
 `selinux-policy` job asserts each one unconditionally, so a grant cannot rest
 on the boolean. What it does not open: a mapping with `PROT_EXEC` also needs
 `execute` on the file, which `jaato_workspace_t` still does not grant, and
-`execmod` / `execmem` are separate permissions this module grants nowhere.
+`execmod` is a separate permission this module grants nowhere.
 The payload still cannot run a binary it wrote into a user's own checkout
-(#1511's "by design" property), and a job assertion says so. Related and
-separate: `execmem` for JIT runtimes (#1521) and `search` on a `user_tmp_t`
-parent of a workspace under `/tmp` (#1522).
+(#1511's "by design" property), and a job assertion says so.
+
+**`execmem` for `jaato_child_t`, behind a boolean (#1521, module 1.9.0).**
+Every JIT runtime needs anonymous writable-then-executable memory: `node`
+(V8) aborted with exit 133 before running a line, with the seccomp filter
+off too, and Java, .NET, LuaJIT and PyPy are in the same position. The
+tunable `jaato_child_execmem` grants `jaato_child_t self:process execmem`
+and defaults **on**, as AppArmor and most targeted user domains allow it;
+`setsebool -P jaato_child_execmem off` withdraws it on a host whose sessions
+run no JIT. It covers anonymous memory only: `execmod`, and `execute` on a
+user checkout, stay ungranted, and the runner (CPython) has no `execmem`.
+The `io_uring` anon-inode `create` the same run logged is refused on
+purpose: libuv falls back, and the #1503 filter denies `io_uring` anyway.
+
+**A workspace whose ancestor the domains cannot search is refused at
+provisioning (#1522).** The daemon labels the workspace tree, never its
+ancestors. A workspace under a `mktemp -d` directory in `/tmp`
+(`user_tmp_t`) used to be labelled, then fail bootstrap on an `EACCES` for
+`.jaato/permissions.json`. `SELinuxBackend._provision` now asks the policy
+(`security_compute_av`) whether the runner and child labels may `search`
+each ancestor, and refuses before labelling anything, naming the directory
+and its type. No `search` on `user_tmp_t` is granted: that would let a
+session walk every user's temp directories.
 
 ### 4.3 Everything else, as type rules
 
@@ -623,6 +643,7 @@ job checks it does (the repository meta-guard cannot: it runs on Ubuntu).
 | 3 | **shipped, verified on a kernel** (five runs, the last at 6aabd3d4: probe 61/61 and live 8/8 in both modes, as root and as a uid-1000 runner, with the same plugins and GC at both uids): `jaato_isolated_t` / `jaato_isolated_ro_t`, `jaato_agent_config_t`, `jaato_prompts_t`, `jaato_runner_log_t`, module 1.6.0 (marker `jaato_policy_v3_t`, `REQUIRED_POLICY_VERSION = 3`), `SELinuxBackend.provision_isolated`, the daemon's isolated spawn through it. Runbook: [handoff](selinux-phase3-handoff.md) | isolated subagents confined on SELinux; a v1 module is refused |
 | 4 | **shipped, verified on a kernel** (three runs, the last at 8874c5c0: probe 67/67, live 13/13 as root and as uid 1000 and 11/11 isolated, each session with its own runner log and no refused write):  pool slots forked on demand into an SELinux boundary (`FORK_SLOT <json>`, `setcon` in the single-threaded child), reused per boundary and uid (`SlotKey.selinux_boundary`); module 1.7.0 (marker `jaato_policy_v4_t`, `dyntransition` from the daemon's domains). Runbook: [handoff](selinux-phase4-handoff.md) | confined sessions warm again |
 | 4.1 | **shipped, not yet verified on a kernel**: module 1.8.0, `map` beside every read of a jaato file type (#1520), so `git` runs in a confined workspace; marker unchanged (`jaato_policy_v4_t`): an older module still confines, it only refuses `mmap`. `probe_policy.py` runs `git init` / `commit` / `log` in a child and checks a `PROT_EXEC` mapping of the checkout stays refused | git in confined sessions |
+| 4.2 | **shipped, not yet verified on a kernel**: module 1.9.0, `execmem` for `jaato_child_t` behind `jaato_child_execmem` (default on, #1521); provisioning refuses a workspace whose ancestor the domains cannot search (#1522); the notebook kernel takes the SELinux tier when `/sys/kernel/security/lsm` and `/sys/fs/selinux` are unreadable from `jaato_child_t`, which they always are; `jaato-doctor` gives `semanage fcontext` rules when `restorecon` has no rule for `~/.jaato`. Marker unchanged (`jaato_policy_v4_t`) | node and numpy in confined sessions |
 | 5 | RPM packaging, AVC-based denial hints | operator convenience |
 
 ### What the phase 2a kernel run found

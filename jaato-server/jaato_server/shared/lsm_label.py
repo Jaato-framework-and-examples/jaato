@@ -427,7 +427,8 @@ def selinux_cell_boundary(
 
     Positive evidence only (#1014).  A context is returned when ALL hold:
 
-    * the active LSM is SELinux;
+    * the active LSM is SELinux, or it could not be read and the spawner
+      named the label (see below);
     * this task's own context is readable and its domain is in
       :data:`SELINUX_CELL_BOUNDARY_DOMAINS`;
     * it is the ``expected_label`` the spawner set, when one is given;
@@ -452,8 +453,21 @@ def selinux_cell_boundary(
         backend: The active LSM; :func:`active_lsm_backend` when ``None``.
         host_enforcing: Reads the host switch;
             :func:`selinux_host_enforcing` when ``None``.
+
+    Inside ``jaato_child_t`` the active LSM usually cannot be read:
+    ``/sys/kernel/security/lsm`` and ``/sys/fs/selinux`` are ``security_t``,
+    which the domain may neither read nor ``getattr``, so
+    :func:`active_lsm_backend` answers ``"none"`` on every SELinux host.  A
+    ``"none"`` is therefore absence of evidence, not a refusal: the tier is
+    still granted when the spawner named the label (``expected_label``) and
+    this task's own readable context IS that label, in a cell-boundary
+    domain.  Only a positive AppArmor answer, or ``"none"`` with no
+    expected label, refuses here.
     """
-    if (backend or active_lsm_backend()) != BACKEND_SELINUX:
+    detected = backend or active_lsm_backend()
+    if detected == BACKEND_APPARMOR:
+        return None
+    if detected != BACKEND_SELINUX and not expected_label:
         return None
     context_raw = read_own_context() if raw is None else raw
     context = parse_selinux_context(context_raw)

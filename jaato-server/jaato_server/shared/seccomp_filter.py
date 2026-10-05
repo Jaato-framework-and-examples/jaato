@@ -655,6 +655,10 @@ class SeccompPlan:
         reason: Why the posture is not ``filter``, or ``""``.
         required: Whether a kernel boundary was required.
         libseccomp: The library version, when one compiled the filter.
+        ignored: Names in ``seccomp_allow`` that are no family, so nothing
+            was allowed back for them.  Carried in the posture so the
+            DAEMON log says it too (the runner's WARNING is in the runner's
+            log, which is not the one an operator reads first).
     """
 
     posture: str
@@ -663,12 +667,15 @@ class SeccompPlan:
     reason: str = ""
     required: bool = False
     libseccomp: str = ""
+    ignored: Tuple[str, ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
         """The record / runtime-aspect shape."""
         out: Dict[str, Any] = {"posture": self.posture}
         if self.allowed:
             out["allowed_families"] = list(self.allowed)
+        if self.ignored:
+            out["ignored_families"] = list(self.ignored)
         if self.reason:
             out["reason"] = self.reason
         if self.required:
@@ -762,7 +769,7 @@ def plan_for_session(
             "unshare, keyctl, ...) behind the LSM boundary alone")
         return _record(SeccompPlan(
             POSTURE_OFF, reason="runtime_limits.seccomp: off", required=required))
-    unknown = unknown_families(allow)
+    unknown = tuple(unknown_families(allow))
     if unknown:
         logger.warning(
             "seccomp: ignoring unknown runtime_limits.seccomp_allow "
@@ -779,11 +786,11 @@ def plan_for_session(
                 "model-driven subprocess will be refused", reason)
             return _record(SeccompPlan(
                 POSTURE_ABSENT, installer=_refuser(reason), reason=reason,
-                required=True))
+                required=True, ignored=unknown))
         logger.warning(
             "seccomp: %s -- model-driven subprocesses run behind the LSM "
             "boundary with no syscall filter", reason)
-        return _record(SeccompPlan(POSTURE_ABSENT, reason=reason))
+        return _record(SeccompPlan(POSTURE_ABSENT, reason=reason, ignored=unknown))
     if allowed:
         logger.warning(
             "seccomp: families allowed back for this session: %s",
@@ -795,7 +802,7 @@ def plan_for_session(
         ", ".join(allowed) or "none")
     return _record(SeccompPlan(
         POSTURE_FILTER, installer=compiled.install, allowed=allowed,
-        required=required, libseccomp=compiled.libseccomp))
+        required=required, libseccomp=compiled.libseccomp, ignored=unknown))
 
 
 def compose_child_preexec(

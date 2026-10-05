@@ -1,4 +1,4 @@
-policy_module(jaato, 1.8.0)
+policy_module(jaato, 1.9.0)
 
 ########################################
 #
@@ -44,6 +44,18 @@ gen_require(`
 ## domain, which is how a pool slot enters it at fork.
 type jaato_policy_v4_t;
 files_type(jaato_policy_v4_t)
+
+## <desc>
+## <p>
+## Allow model-driven subprocesses (jaato_child_t) to make anonymous
+## memory executable (execmem). Every JIT runtime needs it: node (V8)
+## aborts before running a line without it, as do Java, .NET, LuaJIT and
+## PyPy. On by default, as AppArmor and most targeted user domains allow
+## it; set it off on a host whose sessions run no JIT. execmod (making a
+## mapped FILE executable after writing it) is never granted either way.
+## </p>
+## </desc>
+gen_tunable(jaato_child_execmem, true)
 
 ## The session runner (AppArmor: the base profile jaato-ws-<id>).
 type jaato_runner_t;
@@ -250,6 +262,20 @@ kernel_read_kernel_sysctls(jaato_child_t)
 dev_read_sysfs(jaato_child_t)
 fs_getattr_all_fs(jaato_child_t)
 
+# execmem: anonymous writable-then-executable memory, which every JIT
+# runtime needs (node aborts with a V8 fatal error without it, exit 133,
+# with or without the seccomp filter). Behind jaato_child_execmem, default
+# on. Anonymous memory only: execmod and execute on the workspace types
+# stay ungranted, so a file the session wrote still cannot be mapped
+# executable. The runner itself (CPython) needs none, and has none.
+#
+# Not granted: create on io_uring anon inodes. libuv falls back when
+# io_uring_setup fails, and the #1503 seccomp filter denies io_uring for
+# the same subprocesses anyway; the AVC it leaves is expected.
+tunable_policy(`jaato_child_execmem',`
+	allow jaato_child_t self:process execmem;
+')
+
 # Deliberately absent: jaato_child_t self:process { setexec dyntransition
 # setcurrent }. A child cannot leave //child, and cannot choose the
 # domain of what it runs next: it runs its own children in jaato_child_t.
@@ -422,8 +448,10 @@ allow { jaato_runner_t jaato_child_t } jaato_workspace_t:file { lock map };
 # already read(2). Fedora grants map to every domain only under the
 # domain_can_mmap_files boolean, off by default. map alone permits
 # PROT_READ / PROT_WRITE mappings: PROT_EXEC on a file also needs execute,
-# and execmod / execmem are separate permissions this module grants
-# nowhere, so a mapping cannot be used to run what the session wrote.
+# and execmod is a separate permission this module grants nowhere, so a
+# mapping cannot be used to run what the session wrote. (execmem, granted
+# to jaato_child_t behind jaato_child_execmem for JIT runtimes, covers
+# anonymous memory only.)
 #
 # Deliberately absent: execute on jaato_workspace_t. A user's own
 # checkout is not a place the session runs binaries from.

@@ -51,6 +51,21 @@ REVERSIONS = [
     ),
     Reversion(
         target=_DOCTOR,
+        find="    if default is not None and default.type == want:\n",
+        replace="    if True:\n",
+        test="test_a_home_jaato_fc_does_not_cover_gets_semanage_rules",
+        because="restorecon has no rule for a HOME outside /root and the users' "
+                "homes, so following the remedy never clears the warning",
+    ),
+    Reversion(
+        target="jaato-server/jaato_server/server/confinement/selinux.py",
+        find='    ("jaato_user_data_t", "/(memories|prompts|skills)(/.*)?", ""),\n',
+        replace="",
+        test="test_the_semanage_rules_match_jaato_fc",
+        because="the rendered rules would leave memories/ unlabelled",
+    ),
+    Reversion(
+        target=_DOCTOR,
         find="    checks += _guarded(lambda: check_confinement())\n",
         replace="",
         test="test_run_checks_runs_the_confinement_check",
@@ -134,6 +149,49 @@ def test_an_unlabelled_user_dir_is_a_warning(selinux_selected):
     assert "restorecon -Rv /home/u/.jaato" in checks[1].detail
 
 
+def test_a_home_restorecon_covers_gets_only_restorecon(selinux_selected):
+    selinux_selected(_facts(
+        user_dir_label="unconfined_u:object_r:user_home_t:s0",
+        user_dir_default_label="system_u:object_r:jaato_user_dir_t:s0"))
+    detail = doctor.check_confinement()[1].detail
+    assert "restorecon -Rv /home/u/.jaato" in detail
+    assert "semanage" not in detail
+
+
+def test_a_home_jaato_fc_does_not_cover_gets_semanage_rules(selinux_selected):
+    # HOME=/root/bench-home: matchpathcon answers the home's own type.
+    selinux_selected(_facts(
+        user_dir="/root/bench-home/.jaato",
+        user_dir_label="system_u:object_r:admin_home_t:s0",
+        user_dir_default_label="system_u:object_r:admin_home_t:s0"))
+    detail = doctor.check_confinement()[1].detail
+    assert "semanage fcontext -a -f d -t jaato_user_dir_t '/root/bench\\-home/\\.jaato'" in detail
+    assert "jaato_user_config_t" in detail and "jaato_user_data_t" in detail
+    # restorecon still ends it: the rules alone relabel nothing.
+    assert detail.rstrip().endswith("restorecon -Rv /root/bench-home/.jaato")
+
+
+def test_the_semanage_rules_match_jaato_fc():
+    """The rendered rules say what jaato.fc says for /root/.jaato."""
+    import re
+    from jaato_server.server.confinement.selinux import user_tier_fcontext_commands
+
+    fc = (Path(__file__).resolve().parents[3] / "selinux" / "jaato.fc").read_text()
+    want = set()
+    for line in fc.splitlines():
+        if not line.startswith("/root/"):
+            continue
+        parts = line.split()
+        flag = {"-d": "d", "--": "f"}.get(parts[1], "") if len(parts) == 3 else ""
+        kind = re.search(r":object_r:(\w+),", line).group(1)
+        want.add((kind, parts[0], flag))
+    got = set()
+    for cmd in user_tier_fcontext_commands("/root/.jaato")[:-1]:
+        m = re.match(r"semanage fcontext -a (?:-f (\w) )?-t (\w+) '(.*)'$", cmd)
+        got.add((m.group(2), m.group(3), m.group(1) or ""))
+    assert got == want
+
+
 def test_a_missing_user_dir_is_not_a_warning(selinux_selected):
     selinux_selected(_facts(user_dir_label=None))
     assert _statuses(doctor.check_confinement()) == [doctor.PASS]
@@ -155,6 +213,9 @@ class _Kernel:
     def link_context(self, path):
         return "unconfined_u:object_r:jaato_user_dir_t:s0"
 
+    def default_context(self, path, mode):
+        return "system_u:object_r:jaato_user_dir_t:s0"
+
 
 def test_host_facts_reads_the_kernel(tmp_path):
     (tmp_path / ".jaato").mkdir()
@@ -169,6 +230,7 @@ def test_host_facts_reads_the_kernel(tmp_path):
         "interpreter_label": "system_u:object_r:bin_t:s0",
         "user_dir": str(tmp_path / ".jaato"),
         "user_dir_label": "unconfined_u:object_r:jaato_user_dir_t:s0",
+        "user_dir_default_label": "system_u:object_r:jaato_user_dir_t:s0",
         "policy_version": str(REQUIRED_POLICY_VERSION),
     }
 
