@@ -128,11 +128,31 @@ def prepare_workspace(ws: Path, command: str, args: argparse.Namespace) -> None:
             raise SystemExit(f"--fragments: expected {prof} (echo_workspace layout changed?)")
 
 
+def record_event(ev, out: dict) -> bool:
+    """File one daemon event into ``out``; True when the turn is over."""
+    from jaato_sdk.events import (ErrorEvent, SessionInfoEvent, SystemMessageEvent,
+                                  ToolCallEndEvent, ToolOutputEvent, TurnCompletedEvent)
+
+    if isinstance(ev, ToolOutputEvent):
+        out["output"] += ev.chunk or ""
+    elif isinstance(ev, ToolCallEndEvent):
+        out["tool_end"] = {"tool": ev.tool_name, "success": ev.success,
+                           "error": ev.error_message}
+    elif isinstance(ev, SystemMessageEvent):
+        msg = getattr(ev, "message", "") or ""
+        if any(k in msg.lower() for k in ("apparmor", "selinux", "confine", "seccomp")):
+            out["notes"].append(msg.strip())
+    elif isinstance(ev, SessionInfoEvent):
+        out["sessions"] = [s for s in (ev.sessions or []) if isinstance(s, dict)]
+    elif isinstance(ev, ErrorEvent):
+        out["errors"].append(str(getattr(ev, "error", ev)))
+        return True
+    return isinstance(ev, TurnCompletedEvent)
+
+
 async def run(sock: Path, ws: Path, confine: bool, timeout: float) -> dict:
     from jaato_sdk.client.ipc import IPCClient
-    from jaato_sdk.events import (ClientType, ErrorEvent, PermissionRequestedEvent,
-                                  SessionInfoEvent, SystemMessageEvent, ToolCallEndEvent,
-                                  ToolOutputEvent, TurnCompletedEvent)
+    from jaato_sdk.events import ClientType, PermissionRequestedEvent
 
     out: dict = {"output": "", "tool_end": None, "errors": [], "notes": [], "sessions": []}
     c = IPCClient(socket_path=str(sock), client_type=ClientType.API, workspace_path=str(ws),
@@ -145,21 +165,7 @@ async def run(sock: Path, ws: Path, confine: bool, timeout: float) -> dict:
         async for ev in c.events():
             if isinstance(ev, PermissionRequestedEvent):
                 await c.respond_to_permission(ev.request_id, "a")
-            elif isinstance(ev, ToolOutputEvent):
-                out["output"] += ev.chunk or ""
-            elif isinstance(ev, ToolCallEndEvent):
-                out["tool_end"] = {"tool": ev.tool_name, "success": ev.success,
-                                   "error": ev.error_message}
-            elif isinstance(ev, SystemMessageEvent):
-                msg = getattr(ev, "message", "") or ""
-                if any(k in msg.lower() for k in ("apparmor", "selinux", "confine", "seccomp")):
-                    out["notes"].append(msg.strip())
-            elif isinstance(ev, SessionInfoEvent):
-                out["sessions"] = [s for s in (ev.sessions or []) if isinstance(s, dict)]
-            elif isinstance(ev, ErrorEvent):
-                out["errors"].append(str(getattr(ev, "error", ev)))
-                done.set()
-            elif isinstance(ev, TurnCompletedEvent):
+            elif record_event(ev, out):
                 done.set()
 
     t0 = time.perf_counter()
@@ -209,7 +215,7 @@ def tool_result_from_history(ws: Path, sid) -> dict:
     return {}
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--command",
                     help="the shell command to run in the payload (required unless --stop-daemon)")
@@ -229,7 +235,49 @@ def main() -> int:
     args = ap.parse_args()
     if args.command is None and not args.stop_daemon:
         ap.error("--command is required (except with --stop-daemon)")
+    return args
 
+
+def read_payload_result(res: dict, ws: Path, args: argparse.Namespace) -> None:
+    """Add what the payload wrote into the workspace (output, exit status) to ``res``."""
+    res["command"] = args.command
+    out_f, rc_f = ws / OUT_FILE, ws / RC_FILE
+    res["output"] = out_f.read_text(errors="replace") if out_f.exists() else res["output"]
+    if not out_f.exists():
+        res["tool_result"] = tool_result_from_history(ws, res.get("session_id"))
+    rc = rc_f.read_text().strip() if rc_f.exists() else ""
+    res["exit_status"] = int(rc) if rc.isdigit() else None
+    res["confinement_requested"] = not args.unconfined
+
+
+def exit_status_for(res: dict, unconfined: bool) -> int:
+    if "refused" in res:
+        return 2
+    if not unconfined and res.get("sandbox_mode") not in ("apparmor", "selinux"):
+        # Enforcing kernel boundary only: "soft", "apparmor-complain" and
+        # "selinux-permissive" are NOT a boundary (#1014), and a missing mode
+        # is not evidence of one (#1253 / #1299).
+        res["errors"].append(
+            f"confinement requested but sandbox_mode={res.get('sandbox_mode')!r}")
+        return 2
+    if "timeout" in res["errors"]:
+        return 3
+    return 0
+
+
+def print_result(res: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(res, indent=2))
+        return
+    print(res["output"], end="" if res["output"].endswith("\n") else "\n")
+    print("----")
+    for k in ("exit_status", "tool_result", "sandbox_mode", "seccomp", "tool_end", "elapsed_s", "refused", "errors", "notes"):
+        if res.get(k) not in (None, [], ""):
+            print(f"{k}: {res[k]}")
+
+
+def main() -> int:
+    args = parse_args()
     root = Path(args.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if args.stop_daemon:
@@ -243,35 +291,9 @@ def main() -> int:
     finally:
         if not args.keep_daemon:
             stop_daemon(root)
-    res["command"] = args.command
-    out_f, rc_f = ws / OUT_FILE, ws / RC_FILE
-    res["output"] = out_f.read_text(errors="replace") if out_f.exists() else res["output"]
-    if not out_f.exists():
-        res["tool_result"] = tool_result_from_history(ws, res.get("session_id"))
-    res["exit_status"] = int(rc_f.read_text().strip()) if rc_f.exists() and rc_f.read_text().strip().isdigit() else None
-    res["confinement_requested"] = not args.unconfined
-
-    status = 0
-    if "refused" in res:
-        status = 2
-    elif not args.unconfined and res.get("sandbox_mode") not in ("apparmor", "selinux"):
-        # Enforcing kernel boundary only: "soft", "apparmor-complain" and
-        # "selinux-permissive" are NOT a boundary (#1014), and a missing mode
-        # is not evidence of one (#1253 / #1299).
-        res["errors"].append(
-            f"confinement requested but sandbox_mode={res.get('sandbox_mode')!r}")
-        status = 2
-    elif "timeout" in res["errors"]:
-        status = 3
-
-    if args.json:
-        print(json.dumps(res, indent=2))
-    else:
-        print(res["output"], end="" if res["output"].endswith("\n") else "\n")
-        print("----")
-        for k in ("exit_status", "tool_result", "sandbox_mode", "seccomp", "tool_end", "elapsed_s", "refused", "errors", "notes"):
-            if res.get(k) not in (None, [], ""):
-                print(f"{k}: {res[k]}")
+    read_payload_result(res, ws, args)
+    status = exit_status_for(res, args.unconfined)
+    print_result(res, args.json)
     return status
 
 

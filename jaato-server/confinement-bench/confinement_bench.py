@@ -158,6 +158,48 @@ def docker_case(rounds: int) -> dict | None:
     return {"docker_run_rm_alpine_true": summarise(xs)}
 
 
+def bench_daemon(pool: bool, args: argparse.Namespace, results: dict) -> None:
+    """One daemon (pool off or on): its unconfined and confined cases, then its provision timings."""
+    base = Path(args.root).resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="jaato-bench-", dir=str(base)))
+    ws = root / "workspace"
+    ws.mkdir()
+    d = Daemon(root, pool)
+    d.start()
+    try:
+        for confine in (False, True):
+            name = f"{'pool' if pool else 'cold'}/{'confined' if confine else 'unconfined'}"
+            print(f"… {name}", file=sys.stderr, flush=True)
+            results["cases"][name] = run_case(d, ws, confine, args.rounds)
+    finally:
+        d.stop()
+    try:
+        lines = [l.strip() for l in Path(d.log).read_text(errors="replace").splitlines()
+                 if "provision timings" in l]
+    except OSError:
+        lines = []
+    results.setdefault("provision_timings", {})["pool" if pool else "cold"] = lines
+
+
+def report(results: dict, out: Path) -> None:
+    print(json.dumps(results["meta"], indent=2))
+    print(f"\n{'case':<22}{'create median':>15}{'p90':>9}{'first answer median':>22}{'p90':>9}")
+    for name, c in results["cases"].items():
+        print(f"{name:<22}{c['create']['median']:>14.3f}s{c['create']['p90']:>8.3f}s"
+              f"{c['first_answer']['median']:>21.3f}s{c['first_answer']['p90']:>8.3f}s")
+    for name, c in results["cases"].items():
+        print(f"\n{name} confinement lines: {c['confinement_lines'] or 'NONE SEEN'}")
+    if results.get("docker"):
+        d = results["docker"]["docker_run_rm_alpine_true"]
+        print(f"\ndocker run --rm alpine true: median {d['median']:.3f}s  p90 {d['p90']:.3f}s")
+    for name, lines in results.get("provision_timings", {}).items():
+        print(f"\n{name} daemon, AppArmor provision timings (#1501): {len(lines)} line(s)")
+        for l in lines[-4:]:
+            print("   ", l[-200:])
+    print(f"\nwritten: {out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=10)
@@ -180,50 +222,14 @@ def main() -> None:
             "rounds": args.rounds, "when": time.strftime("%Y-%m-%d %H:%M:%S %z")}
     results: dict = {"meta": meta, "cases": {}}
 
-    pools = [False] if args.no_pool_run else [False, True]
-    for pool in pools:
-        base = Path(args.root).resolve()
-        base.mkdir(parents=True, exist_ok=True)
-        root = Path(tempfile.mkdtemp(prefix="jaato-bench-", dir=str(base)))
-        ws = root / "workspace"
-        ws.mkdir()
-        d = Daemon(root, pool)
-        d.start()
-        try:
-            for confine in (False, True):
-                name = f"{'pool' if pool else 'cold'}/{'confined' if confine else 'unconfined'}"
-                print(f"… {name}", file=sys.stderr, flush=True)
-                results["cases"][name] = run_case(d, ws, confine, args.rounds)
-        finally:
-            d.stop()
-        try:
-            lines = [l.strip() for l in Path(d.log).read_text(errors="replace").splitlines()
-                     if "provision timings" in l]
-        except OSError:
-            lines = []
-        results.setdefault("provision_timings", {})["pool" if pool else "cold"] = lines
-
+    for pool in ([False] if args.no_pool_run else [False, True]):
+        bench_daemon(pool, args, results)
     if args.docker:
         results["docker"] = docker_case(args.rounds)
 
     out = Path(__file__).with_name("confinement_bench.json")
     out.write_text(json.dumps(results, indent=2))
-
-    print(json.dumps(meta, indent=2))
-    print(f"\n{'case':<22}{'create median':>15}{'p90':>9}{'first answer median':>22}{'p90':>9}")
-    for name, c in results["cases"].items():
-        print(f"{name:<22}{c['create']['median']:>14.3f}s{c['create']['p90']:>8.3f}s"
-              f"{c['first_answer']['median']:>21.3f}s{c['first_answer']['p90']:>8.3f}s")
-    for name, c in results["cases"].items():
-        print(f"\n{name} confinement lines: {c['confinement_lines'] or 'NONE SEEN'}")
-    if results.get("docker"):
-        d = results["docker"]["docker_run_rm_alpine_true"]
-        print(f"\ndocker run --rm alpine true: median {d['median']:.3f}s  p90 {d['p90']:.3f}s")
-    for name, lines in results.get("provision_timings", {}).items():
-        print(f"\n{name} daemon, AppArmor provision timings (#1501): {len(lines)} line(s)")
-        for l in lines[-4:]:
-            print("   ", l[-200:])
-    print(f"\nwritten: {out}")
+    report(results, out)
 
 
 if __name__ == "__main__":
