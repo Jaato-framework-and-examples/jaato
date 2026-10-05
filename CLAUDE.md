@@ -11219,6 +11219,29 @@ Stated limits:
 - Not addressed: #693 (SIGTERM skips `SessionManager`) and #1061 (the
   shutdown triple captured without a lock).
 
+### A Save That Erased a Mark It Never Saw (#1542)
+
+After #1506 a rerun logged `Not saving session <id>: its runner was already
+released` for 3 of 4 sessions, and their last turns were not persisted. The
+unload already saved before `server.shutdown()` and the boundary release; it
+skipped the save because `is_dirty` read `False`. A tool call start spawns an
+async save that reads history mid-turn; the turn then ends and marks the
+session dirty (and its `done` schedules the unload); the async save finished
+and wrote `is_dirty = False`, erasing marks it never saw. The unload found a
+clean session, released the runner, and a second queued async save logged the
+warning.
+
+| Piece | Where |
+|---|---|
+| every `is_dirty = True` bumps `Session.dirty_generation` (`__setattr__`, so no call site can opt out) | `session_manager.py`, `Session` |
+| a save reads the generation before the history and clears the flag only if it is unchanged, atomically (`clear_dirty_if_unchanged`) | `_save_session` |
+| a save after the release of a CLEAN session is superseded and skipped at DEBUG; the WARNING now means a change no save captured | `_history_for_save` |
+
+The unload order is unchanged: save, runner release, boundary release. Not
+verified on an enforcing kernel (the issue's N-sequential-sessions check).
+Guard: `jaato_server/server/tests/test_the_last_turn_is_saved_before_release_1542.py`,
+four reversions.
+
 ### A Lock Held Across the Loop (#1452)
 
 The daemon loop stopped for 121 s inside `SessionManager._emit_to_session`,
