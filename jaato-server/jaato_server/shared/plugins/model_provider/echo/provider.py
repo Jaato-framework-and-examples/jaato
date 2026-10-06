@@ -45,6 +45,29 @@ lmstudio read ``extra.get("host")`` etc.):
           output_tokens: 200
           cost_usd: 0.0042
 
+* **Simulated latency.**  ``delay_ms`` makes every ``complete()`` wait
+  before answering, so a turn spends time "on inference" the way a real
+  provider's does; ``jitter_ms`` spreads it uniformly over
+  ``delay_ms ± jitter_ms`` (clamped at 0); ``token_delay_ms`` streams a text
+  reply word by word with that pause between words.  Echo exists so that
+  the framework can be measured without a live model, and anything about
+  concurrency (how parallel sessions share runners, how a pool behaves
+  while sessions wait) measures nothing when every turn returns instantly.
+
+  The jitter is RANDOM BUT REPRODUCIBLE.  The draw is seeded from
+  ``(seed, first user message, number of messages)``, so the same
+  conversation under the same ``seed`` waits the same time on every run,
+  while two sessions with different prompts wait differently.  Nothing in
+  the provider is stateful: a revived session draws what it would have
+  drawn live.  The wait honours the cancel token.
+
+      plugin_configs:
+        echo:
+          delay_ms: 3000          # base wait per turn
+          jitter_ms: 2000         # uniform spread: 1000..5000 ms
+          seed: bench-1           # optional; default ""
+          token_delay_ms: 50      # optional; per-word pause in text mode
+
 * **Simulated spend.**  Echo costs nothing but can REPORT a cost, so the
   budget subsystem becomes assertable without a provider that actually
   spends.  Every ceiling test -- does a limit refuse, does a reported cost
@@ -60,13 +83,17 @@ message list and passes it to ``complete()`` each turn), matching the
 """
 
 import dataclasses
+import hashlib
 import json
 import logging
+import random
+import time
 from typing import Any, Dict, List, Optional, Set
 
 from ..base import ModalityCapabilityMixin, ProviderConfig
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
+    CancelledException,
     FinishReason,
     FunctionCall,
     Message,
@@ -170,6 +197,12 @@ class EchoProvider(ModalityCapabilityMixin):
         # a provider that spends.
         self._last_usage: TokenUsage = TokenUsage(reported=False)
         self._usage: TokenUsage = TokenUsage(reported=False)
+        # Simulated latency, populated in initialize().  All zero means
+        # echo answers instantly, as it always has.
+        self._delay_ms: float = 0.0
+        self._jitter_ms: float = 0.0
+        self._token_delay_ms: float = 0.0
+        self._seed: str = ""
 
     @property
     def name(self) -> str:
@@ -196,6 +229,67 @@ class EchoProvider(ModalityCapabilityMixin):
         self._retry_tool_call = bool(config.extra.get("retry_tool_call"))
         self._response = config.extra.get("response")
         self._usage = self._build_usage(config.extra.get("usage"))
+        self._delay_ms = self._non_negative_ms(config.extra, "delay_ms")
+        self._jitter_ms = self._non_negative_ms(config.extra, "jitter_ms")
+        self._token_delay_ms = self._non_negative_ms(
+            config.extra, "token_delay_ms")
+        self._seed = str(config.extra.get("seed", ""))
+
+    @staticmethod
+    def _non_negative_ms(extra: Dict[str, Any], key: str) -> float:
+        """Read a millisecond knob, refusing what cannot be a duration.
+
+        Unset is 0 (no wait).  A negative, non-numeric or boolean value
+        RAISES rather than being read as 0: a benchmark whose latency
+        silently fell back to instant would report numbers about a
+        different experiment than the one its profile describes.
+        """
+        value = extra.get(key)
+        if value is None:
+            return 0.0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"echo: {key} must be a number of milliseconds, got "
+                f"{type(value).__name__}")
+        if value < 0 or value != value:
+            raise ValueError(f"echo: {key} must be >= 0, got {value!r}")
+        return float(value)
+
+    def _turn_delay_seconds(self, messages: List[Message]) -> float:
+        """The wait for this turn, in seconds: ``delay_ms ± jitter_ms``.
+
+        Drawn from a generator seeded by ``(seed, first user message,
+        len(messages))``, so it is a function of the conversation rather
+        than of process state: reproducible across runs and across a
+        revive, and different between sessions whose prompts differ.
+        """
+        if not self._jitter_ms:
+            return self._delay_ms / 1000.0
+        first_user = ""
+        for msg in messages:
+            if msg.role == Role.USER:
+                first_user = msg.text or ""
+                break
+        key = f"{self._seed}\0{first_user}\0{len(messages)}".encode()
+        rng = random.Random(hashlib.sha256(key).digest())
+        ms = self._delay_ms + rng.uniform(-self._jitter_ms, self._jitter_ms)
+        return max(0.0, ms) / 1000.0
+
+    @staticmethod
+    def _wait(seconds: float, cancel_token: Optional[CancelToken]) -> None:
+        """Sleep ``seconds``, raising ``CancelledException`` if cancelled.
+
+        Polls the token every 50 ms so a stop lands promptly on a long
+        simulated turn, the way it would on a real streaming provider.
+        """
+        deadline = time.monotonic() + seconds
+        while True:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                raise CancelledException()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.05))
 
     @staticmethod
     def _build_usage(spec: Optional[Dict[str, Any]]) -> TokenUsage:
@@ -367,6 +461,7 @@ class EchoProvider(ModalityCapabilityMixin):
         # what makes "how many turns until it refuses" arithmetic rather than
         # observation.
         self._last_usage = self._usage
+        self._wait(self._turn_delay_seconds(messages), cancel_token)
 
         if self._tool_call is not None and (
                 self._retry_tool_call or not self._has_tool_result(messages)):
@@ -388,7 +483,14 @@ class EchoProvider(ModalityCapabilityMixin):
         # Text mode: configured response, else echo the last user prompt.
         text = self._response if self._response is not None else self._last_user_text(messages)
         if on_chunk and text:
-            on_chunk(text)
+            if self._token_delay_ms:
+                pieces = text.split(" ")
+                for i, piece in enumerate(pieces):
+                    if i:
+                        self._wait(self._token_delay_ms / 1000.0, cancel_token)
+                    on_chunk(piece if i == len(pieces) - 1 else piece + " ")
+            else:
+                on_chunk(text)
         response = ProviderResponse(
             parts=[Part.from_text(text)],
             usage=self._last_usage,
