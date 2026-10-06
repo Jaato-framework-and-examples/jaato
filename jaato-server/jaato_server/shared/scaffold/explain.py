@@ -2761,7 +2761,8 @@ def profile() -> Rendered:
     return data, "\n".join(lines)
 
 
-def profile_cost(name: str, workspace: str) -> Rendered:
+def profile_cost(name: str, workspace: str,
+                 profile_set: Optional[str] = None) -> Rendered:
     """What a session built from *name* INHERITS, and what it costs.
 
     A profile file says what it ADDS.  It never says what it INHERITS -- and
@@ -2779,18 +2780,24 @@ def profile_cost(name: str, workspace: str) -> Rendered:
     Token figures are ESTIMATES (bytes / 4), labelled as such.  A real count
     needs the model's tokenizer; the point here is the order of magnitude
     that makes a knob worth reaching for.
+
+    The profile is the one a session would get: resolved through
+    ``discover_profiles`` with the workspace's profile set (``profile_set``,
+    else ``JAATO_PROFILE_SET`` from the workspace ``.env``) and its
+    ``inherits:`` chain merged, so an inherited ``suppress_base_instructions``
+    counts (#1548).  The file reported is the one that won precedence.  A
+    profile discovery refused is reported with the refusal, never replaced
+    by some other file of the same name.
     """
     from jaato_server.shared.instruction_suppression import (
         PIECE_DISK, normalize_suppression,
     )
-    ws = Path(workspace).resolve()
+    prof, where, ws, pset, missing = _cost_profile(name, workspace, profile_set)
+    if missing is not None:
+        return missing
 
-    prof, where = _find_profile_file(ws, name)
-    if prof is None:
-        return ({"profile": name, "found": False},
-                f"no profile {name!r} under {ws}/.jaato/profiles/")
-
-    suppressed = normalize_suppression(prof.get("suppress_base_instructions"))
+    suppressed = normalize_suppression(
+        getattr(prof, "suppress_base_instructions", None))
     disk_suppressed = PIECE_DISK in suppressed
 
     layers = []
@@ -2831,6 +2838,7 @@ def profile_cost(name: str, workspace: str) -> Rendered:
     total = inherited + persona_bytes
     data = {
         "profile": name, "found": True, "profile_file": str(where),
+        "profile_set": pset,
         "suppress_base_instructions": sorted(suppressed),
         "disk_layer_suppressed": disk_suppressed,
         "layers": layers,
@@ -2842,7 +2850,8 @@ def profile_cost(name: str, workspace: str) -> Rendered:
         "note": "token figures are estimates (bytes/4), not a tokenizer count",
     }
 
-    lines = [f"instruction cost for profile {name!r}  ({where})", ""]
+    lines = [f"instruction cost for profile {name!r}  ({where})"
+             f"{_set_note(pset, '  [profile set {!r}]')}", ""]
     if not layers:
         lines.append("  no instruction layers found on the search path")
     for l in layers:
@@ -2883,27 +2892,35 @@ def profile_cost(name: str, workspace: str) -> Rendered:
     return (data, "\n".join(lines))
 
 
-def _find_profile_file(ws: Path, name: str):
-    """The profile's parsed dict + its path, or ``(None, None)``.
+def _set_note(pset: Optional[str], fmt: str) -> str:
+    """*fmt* filled with the profile set's name, or ``""`` with no set."""
+    return fmt.format(pset) if pset else ""
 
-    Searches the set subdirectories and the tier-1 root, matching the layout
-    ``discover_profiles`` reads.
+
+def _cost_profile(name: str, workspace: str, profile_set: Optional[str]):
+    """Resolve *name* for :func:`profile_cost` the way a session would.
+
+    Returns ``(profile, file, workspace_path, profile_set, missing)``;
+    ``missing`` is the :data:`Rendered` answer when the name does not
+    resolve (``None`` otherwise).  A profile discovery REFUSED (a broken
+    ``inherits:``, an invalid block) is reported with the refusal rather than
+    as absent: the file is there, and saying "no profile" sends the author
+    looking for something they already wrote.
     """
-    import yaml
-    pdir = ws / ".jaato" / "profiles"
-    if not pdir.is_dir():
-        return None, None
-    for cand in sorted(pdir.rglob("*.y*ml")) + sorted(pdir.rglob("*.json")):
-        if cand.stem != name:
-            continue
-        try:
-            with open(cand, "r", encoding="utf-8") as fh:
-                parsed = yaml.safe_load(fh) or {}
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            return parsed, cand
-    return None, None
+    result, ws, pset = _discover_workspace_profiles(workspace, profile_set)
+    prof = (result.profiles or {}).get(name)
+    if prof is not None:
+        where = (result.sources or {}).get(name) or "premium tier"
+        return prof, where, ws, pset, None
+    in_set = _set_note(pset, " (profile set {!r})")
+    data = {"profile": name, "found": False, "profile_set": pset}
+    refusal = (result.errors or {}).get(name)
+    if refusal:
+        data["refused"] = refusal
+        text = f"profile {name!r}{in_set} does not resolve: {refusal}"
+    else:
+        text = f"no profile {name!r}{in_set} under {ws}/.jaato/profiles/"
+    return None, None, ws, pset, (data, text)
 
 
 def _instruction_search_order(ws: Path):
@@ -4342,20 +4359,36 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _discover_workspace_profiles(workspace: str,
+                                 profile_set: Optional[str] = None):
+    """The workspace's profiles as the DAEMON would load them.
+
+    The ONE resolver every ``explain`` topic about a named profile uses:
+    ``discover_profiles`` with the workspace's ``config_root`` and profile
+    set — ``profile_set`` when the caller names one (``--set``), else
+    ``JAATO_PROFILE_SET`` from the workspace ``.env``.
+
+    Returns ``(ProfileDiscoveryResult, workspace_path, profile_set_or_None)``.
+    """
+    from jaato_server.shared.plugins.subagent.config import discover_profiles
+
+    ws = Path(workspace).resolve()
+    pset = profile_set or workspace_profile_set(str(ws))
+    result = discover_profiles(
+        profiles_dir=".jaato/profiles", base_path=str(ws),
+        config_root=str(ws / ".jaato"),
+        force_profile_set=pset,
+    )
+    return result, ws, pset
+
+
 def _resolve_workspace_profile(name: str, workspace: str,
                                profile_set: Optional[str] = None):
     """A named profile as the DAEMON would load it, set selection included.
 
     Returns ``(profile_or_None, workspace_path)``.
     """
-    from jaato_server.shared.plugins.subagent.config import discover_profiles
-
-    ws = Path(workspace).resolve()
-    result = discover_profiles(
-        profiles_dir=".jaato/profiles", base_path=str(ws),
-        config_root=str(ws / ".jaato"),
-        force_profile_set=profile_set or workspace_profile_set(str(ws)),
-    )
+    result, ws, _pset = _discover_workspace_profiles(workspace, profile_set)
     return (result.profiles or {}).get(name), ws
 
 

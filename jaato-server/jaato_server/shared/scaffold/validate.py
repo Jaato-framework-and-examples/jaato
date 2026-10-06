@@ -2658,7 +2658,7 @@ def validate_profile_file(file_path: str) -> List[Diagnostic]:
     # Build via the framework scanner so the profile object matches runtime.
     scanned: Dict[str, SubagentProfile] = {}
     scan_errors: Dict[str, str] = {}
-    _scan_profiles_dir(fp.parent, scanned, scan_errors)
+    _scan_profiles_dir(fp.parent, scanned, scan_errors, {})
     resolved, resolve_errors = resolve_profiles(scanned)
 
     out: List[Diagnostic] = []

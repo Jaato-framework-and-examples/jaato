@@ -4797,6 +4797,15 @@ class ProfileDiscoveryResult:
 
     profiles: Dict[str, 'SubagentProfile'] = field(default_factory=dict)
     errors: Dict[str, str] = field(default_factory=dict)
+    #: The FILE each name in ``profiles`` was read from — the one that won
+    #: precedence (a selected set's subdirectory before ``profiles/``, the
+    #: workspace tier before the user tier).  It is the child's own file,
+    #: never a parent's: ``inherits:`` is merged into the profile, not into
+    #: this path.  A premium profile has no entry; a name whose resolution
+    #: failed (it is in ``errors``) keeps the file it was read from.  Recorded here so a
+    #: report about a resolved profile (``jaato-scaffold explain profile``)
+    #: can name its file without a second resolver that might pick another.
+    sources: Dict[str, str] = field(default_factory=dict)
 
 
 #: Every key :func:`_scan_profiles_dir` reads out of a profile FILE.
@@ -4881,6 +4890,7 @@ def _scan_profiles_dir(
     directory: Path,
     profiles: Dict[str, 'SubagentProfile'],
     errors: Dict[str, str],
+    sources: Dict[str, str],
 ) -> None:
     """Scan a directory for profile files and populate profiles/errors dicts.
 
@@ -4891,6 +4901,9 @@ def _scan_profiles_dir(
         directory: Directory to scan for .json/.yaml/.yml profile files.
         profiles: Accumulator dict — discovered profiles are added here.
         errors: Accumulator dict — parse errors are added here.
+        sources: Accumulator dict — the file each profile registered in
+            THIS pass was read from (see
+            :attr:`ProfileDiscoveryResult.sources`).
     """
     try:
         if not directory.is_dir():
@@ -5076,6 +5089,7 @@ def _scan_profiles_dir(
                 "Move to .jaato/agents/%s.md instead.",
                 name, name,
             )
+        sources[name] = str(file_path)
         found += 1
         found_names.append(name)
         logger.debug("Discovered profile '%s' from %s", name, file_path)
@@ -5339,6 +5353,7 @@ def discover_profiles(
 
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}
+    sources: Dict[str, str] = {}
 
     # 1.a Workspace profile-set overlay (optional).
     #
@@ -5375,7 +5390,7 @@ def discover_profiles(
             Path(effective_config_root).expanduser().resolve()
             / PROFILES_SUBDIR / profile_set
         )
-        _scan_profiles_dir(set_path, profiles, errors)
+        _scan_profiles_dir(set_path, profiles, errors, sources)
     elif profile_set and not effective_config_root:
         # No ``config_root`` override — fall back to scanning
         # ``<base_path>/<profiles_dir>/<set>/`` so qualified resolution
@@ -5384,7 +5399,7 @@ def discover_profiles(
         fallback_set_path = Path(profiles_dir)
         if not fallback_set_path.is_absolute():
             fallback_set_path = Path(base_path) / fallback_set_path
-        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors)
+        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors, sources)
 
     # 1.b Workspace tier — config_root override takes precedence; fall
     #    back to <base_path>/<profiles_dir> when no override is in effect.
@@ -5394,12 +5409,12 @@ def discover_profiles(
         profiles_path = Path(profiles_dir)
         if not profiles_path.is_absolute():
             profiles_path = Path(base_path) / profiles_path
-    _scan_profiles_dir(profiles_path, profiles, errors)
+    _scan_profiles_dir(profiles_path, profiles, errors, sources)
 
     # 2. User-level profiles from ~/.jaato/profiles/
     #    Workspace profiles take precedence.
     user_profiles_path = Path.home() / ".jaato" / PROFILES_SUBDIR
-    _scan_profiles_dir(user_profiles_path, profiles, errors)
+    _scan_profiles_dir(user_profiles_path, profiles, errors, sources)
 
     # 3. Premium entry-point profiles (if installed).
     #    Workspace and user profiles take precedence over premium ones.
@@ -5412,7 +5427,8 @@ def discover_profiles(
     resolved, inheritance_errors = resolve_profiles(profiles)
     errors.update(inheritance_errors)
 
-    return ProfileDiscoveryResult(profiles=resolved, errors=errors)
+    return ProfileDiscoveryResult(
+        profiles=resolved, errors=errors, sources=sources)
 
 
 def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:

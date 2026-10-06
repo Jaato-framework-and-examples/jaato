@@ -180,7 +180,7 @@ def test_inherit_yaml_is_refused_at_discovery():
             "description: fine\nplugins: [cli]\n", encoding="utf-8")
         profiles: dict = {}
         errors: dict = {}
-        _scan_profiles_dir(Path(d), profiles, errors)
+        _scan_profiles_dir(Path(d), profiles, errors, {})
     assert "inherit" not in profiles, "reserved name was loaded from disk"
     assert "inherit" in errors
     assert "reserved" in errors["inherit"].lower()
@@ -196,7 +196,7 @@ def test_inherit_name_via_the_name_key_is_also_refused():
             "name: inherit\nplugins: [cli]\n", encoding="utf-8")
         profiles: dict = {}
         errors: dict = {}
-        _scan_profiles_dir(Path(d), profiles, errors)
+        _scan_profiles_dir(Path(d), profiles, errors, {})
     assert "inherit" not in profiles
 
 
