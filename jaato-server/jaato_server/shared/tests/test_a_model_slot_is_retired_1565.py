@@ -45,7 +45,7 @@ REVERSIONS = [
     Reversion(
         target=_RPC,
         find="            reasons.append(reason)\n",
-        replace="",
+        replace="            pass\n",
         because="the runner would drop every plugin's reason (#1565)",
         test="TestRunnerReports::test_reasons_are_collected",
     ),
