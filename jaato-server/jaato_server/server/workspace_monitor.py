@@ -312,7 +312,9 @@ class WorkspaceMonitor:
             return
 
         # Gitignore filter is already built in __init__; seed baseline.
+        seed_started = time.monotonic()
         self._seed_baseline()
+        seed_ms = (time.monotonic() - seed_started) * 1000.0
 
         # Start watchdog observer.
         self._observer = Observer()
@@ -322,9 +324,10 @@ class WorkspaceMonitor:
         self._observer.start()
         self._running = True
         logger.info(
-            "Workspace monitor started: %s (%d baseline files)",
+            "Workspace monitor started: %s (%d baseline files, walked in %.0f ms)",
             self.workspace_path,
             len(self.baseline),
+            seed_ms,
         )
 
         # Schedule watches for any sandbox paths that were added before start().
@@ -575,19 +578,7 @@ class WorkspaceMonitor:
             List of change dicts representing what changed while the
             server was down (may be empty).
         """
-        ws = Path(self.workspace_path)
-        current_files: Set[str] = set()
-        for dirpath, dirnames, filenames in os.walk(self.workspace_path):
-            # Prune ignored directories in-place.
-            dirnames[:] = [
-                d for d in dirnames
-                if not self._is_ignored(os.path.join(dirpath, d), is_dir=True)
-            ]
-            for fname in filenames:
-                full = os.path.join(dirpath, fname)
-                if not self._is_ignored(full, is_dir=False):
-                    rel = os.path.relpath(full, self.workspace_path)
-                    current_files.add(rel)
+        current_files = self._walk_unignored()
 
         # Also scan sandbox paths.  Apply the same hidden-file + gitignore
         # filter used by add_sandbox_path so reconciliation doesn't resurrect
@@ -675,21 +666,68 @@ class WorkspaceMonitor:
 
     def _seed_baseline(self) -> None:
         """Walk the workspace and populate ``self.baseline``."""
-        baseline: Set[str] = set()
-        for dirpath, dirnames, filenames in os.walk(self.workspace_path):
-            # Prune ignored directories in-place so os.walk skips them.
-            dirnames[:] = [
-                d for d in dirnames
-                if not self._is_ignored(os.path.join(dirpath, d), is_dir=True)
-            ]
-            for fname in filenames:
-                full = os.path.join(dirpath, fname)
-                if not self._is_ignored(full, is_dir=False):
-                    rel = os.path.relpath(full, self.workspace_path)
-                    baseline.add(rel)
-
+        baseline = self._walk_unignored()
         with self._lock:
             self.baseline = baseline
+
+    def _walk_unignored(self) -> Set[str]:
+        """Every non-ignored file in the workspace, relative to it.
+
+        The same verdict :meth:`_is_ignored` gives, computed a directory at
+        a time: the parser is asked with the relative path the walk already
+        has (its ancestors were judged on the way down), and git is asked
+        about a directory's whole listing in one exchange.
+
+        Runs on ``session.new``'s critical path (``start()`` before the
+        session is confirmed) and again on a revive (``reconcile``).  Asked
+        per file, through ``pathlib`` and one git round trip each, four
+        concurrent creates in one cascade walked for ~45 s together and
+        three of them missed their caller's 60 s budget (#1553): the walks
+        are pure Python on one GIL, and every blocking git read waited out
+        the switch interval to get it back.
+        """
+        files: Set[str] = set()
+        root = self.workspace_path
+        for dirpath, dirnames, filenames in os.walk(root):
+            keep_dirs, keep_files = self._unignored_children(
+                dirpath, dirnames, filenames)
+            dirnames[:] = keep_dirs
+            for fname in keep_files:
+                files.add(os.path.relpath(os.path.join(dirpath, fname), root))
+        return files
+
+    def _unignored_children(self, dirpath: str, dirnames: List[str],
+                            filenames: List[str]):
+        """``(dirs, files)`` of one listing that neither the parser nor git ignores."""
+        rel_dir = os.path.relpath(dirpath, self.workspace_path)
+        rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/") + "/"
+        keep_dirs = [d for d in dirnames
+                     if not self._parser_ignores(rel_dir + d, True)]
+        keep_files = [f for f in filenames
+                      if not self._parser_ignores(rel_dir + f, False)]
+        if self._git_ignore is None or not (keep_dirs or keep_files):
+            return keep_dirs, keep_files
+        return self._git_keeps(dirpath, keep_dirs, keep_files)
+
+    def _git_keeps(self, dirpath: str, keep_dirs: List[str],
+                   keep_files: List[str]):
+        """Drop what git ignores from one listing, asking about it in one exchange."""
+        names = keep_dirs + keep_files
+        verdicts = self._git_ignore.is_ignored_many(
+            [os.path.join(dirpath, n) for n in names])
+        ignored = {n for n, v in zip(names, verdicts) if v}
+        return ([d for d in keep_dirs if d not in ignored],
+                [f for f in keep_files if f not in ignored])
+
+    def _parser_ignores(self, rel_posix: str, is_dir: bool) -> bool:
+        """The parser's own verdict for a path whose ancestors were not ignored."""
+        parser = self._gitignore
+        if parser is None:
+            return False
+        fast = getattr(parser, "is_ignored_relative", None)
+        if fast is None:  # an SDK older than this server
+            return parser.is_ignored(Path(self.workspace_path) / rel_posix)
+        return fast(rel_posix, is_dir)
 
     def _is_ignored(self, abs_path: str, is_dir: bool = False) -> bool:
         """Check if a path should be ignored.
