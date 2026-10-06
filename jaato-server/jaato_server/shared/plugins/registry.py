@@ -2200,9 +2200,13 @@ class PluginRegistry:
         (``references`` loading an embedding model) can defer it for a
         session that cannot reach its tools.
 
-        ``None`` (the default, and what the daemon and in-process callers
-        leave) means "not known": no key is stamped and plugins behave as
-        before.  The value describes the session that bootstrapped the
+        Both processes that build a registry for a session record it: the
+        runner from the envelope (``runner.session._record_session_plugins``)
+        and the daemon from the profile
+        (``JaatoServer._record_session_plugins_on_registry``, #1566).
+        ``None`` (the default: no profile, or an in-process caller that
+        records nothing) means "not known": no key is stamped and plugins
+        behave as before.  The value describes the session that bootstrapped the
         registry; an in-process subagent sharing it is not reflected, so
         a plugin must treat ``False`` as "defer", never as "refuse".
         """

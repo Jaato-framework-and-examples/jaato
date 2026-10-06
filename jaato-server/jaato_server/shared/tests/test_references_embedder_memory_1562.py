@@ -47,6 +47,7 @@ from jaato_server.shared.tests.reversion import Reversion
 
 _PLUGIN = "jaato-server/jaato_server/shared/plugins/references/plugin.py"
 _REGISTRY = "jaato-server/jaato_server/shared/plugins/registry.py"
+_CORE = "jaato-server/jaato_server/server/core.py"
 
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 OTHER_MODEL = "BAAI/bge-small-en-v1.5"
@@ -93,6 +94,20 @@ REVERSIONS = [
         replace="",
         because="a provider offering an explicit unload would never be asked for it (#1565)",
         test="TestReset::test_reset_asks_the_provider_to_unload",
+    ),
+    Reversion(
+        target=_CORE,
+        find="        setter(names)\n",
+        replace="        pass\n",
+        because="the daemon's own copy of the plugin would never be told the profile does not enable it (#1563, #1566)",
+        test="TestSessionEnables::test_daemon_records_the_profiles_plugins",
+    ),
+    Reversion(
+        target=_CORE,
+        find="                        self._record_session_plugins_on_registry()\n",
+        replace="",
+        because="the daemon's initialize() would build its plugins before recording the list (#1566)",
+        test="TestSessionEnables::test_daemon_records_before_initializing_plugins",
     ),
 ]
 
@@ -237,6 +252,40 @@ class TestSessionEnables:
                 lines.setdefault(name, node.lineno)
         assert "_record_session_plugins" in lines
         assert lines["_record_session_plugins"] < lines["expose_all"]
+
+    def test_daemon_records_the_profiles_plugins(self):
+        from jaato_server.server.core import JaatoServer
+        registry = PluginRegistry()
+        server = SimpleNamespace(registry=registry,
+                                 _profile=SimpleNamespace(plugins=["cli", "todo"]))
+        JaatoServer._record_session_plugins_on_registry(server)
+        assert registry._session_plugins == frozenset({"cli", "todo"})
+        assert registry._augment_plugin_config({}, "references")[SESSION_ENABLES_PLUGIN_KEY] is False
+        unknown = PluginRegistry()
+        JaatoServer._record_session_plugins_on_registry(
+            SimpleNamespace(registry=unknown, _profile=None))
+        assert unknown._session_plugins is None
+
+    def test_daemon_records_before_initializing_plugins(self):
+        """Both daemon paths record the list; the one that initializes does it first."""
+        path = Path(__file__).resolve().parents[2] / "server" / "core.py"
+        tree = ast.parse(path.read_text())
+
+        def first_calls(fn_name):
+            fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name)
+            lines = {}
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call):
+                    name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                    lines.setdefault(name, node.lineno)
+            return lines
+
+        pre = first_calls("create_registry_and_discover")
+        assert "_record_session_plugins_on_registry" in pre
+        load = first_calls("_run_load_plugins")
+        assert "_record_session_plugins_on_registry" in load
+        assert load["_record_session_plugins_on_registry"] < load["expose_all"]
 
 
 class TestReset:
