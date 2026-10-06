@@ -3288,6 +3288,10 @@ def pool() -> Rendered:
             for env, default, meaning in pa.STARTUP_KNOBS],
         "this_shell": {env: os.environ.get(env)
                        for env, _, _ in pa.STARTUP_KNOBS},
+        "start_with_flags": (
+            f"python -m jaato_server --daemon {pa.CLI_SIZE_FLAG} N "
+            f"[{pa.CLI_MAX_FLAG} M]  (also --web-socket, --restart); each "
+            f"flag outranks its env knob"),
         "resize": {
             "cli": f"python -m jaato_server {pa.CLI_SIZE_FLAG} N "
                    f"[{pa.CLI_MAX_FLAG} M]",
@@ -3333,6 +3337,12 @@ def pool() -> Rendered:
             f"{env}={os.environ.get(env, '(unset)')}"
             for env, _, _ in pa.STARTUP_KNOBS),
         "    (a daemon started elsewhere may differ; ask it, below)",
+        f"    Or on the start command: --daemon {pa.CLI_SIZE_FLAG} N "
+        f"[{pa.CLI_MAX_FLAG} M]",
+        "    (also with --web-socket or --restart).  Each flag outranks its",
+        "    env knob and leaves the other one alone; a foreground start",
+        "    (--ipc-socket alone) takes the env knobs, because there the",
+        "    flags resize the running daemon instead.",
         "",
         "  ON A RUNNING DAEMON (no restart, no session unloaded)",
         f"    python -m jaato_server {pa.CLI_SIZE_FLAG} N "

@@ -29,6 +29,9 @@ Usage:
     # Restart with same parameters (useful during development)
     python -m jaato_server --restart
 
+    # Start a daemon with 6 pre-warm runners (ceiling 12)
+    python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon --pool-size 6 --pool-max 12
+
     # Resize the running daemon's pre-warm runner pool (no restart)
     python -m jaato_server --pool-size 6
 """
@@ -46,7 +49,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     # Imported lazily at runtime (inside _resolve_ws_app_credentials)
@@ -300,6 +303,47 @@ def configure_logging(
 logger = logging.getLogger(__name__)
 
 
+def env_pool_sizes() -> Tuple[int, Optional[int]]:
+    """``(target_size, max_size)`` from the pool's env knobs.
+
+    ``JAATO_RUNNER_POOL_SIZE`` (default 2) is the floor on unreserved idle
+    runners; ``JAATO_RUNNER_POOL_MAX_SIZE`` the ceiling on all of them,
+    ``None`` when unset so the pool derives ``2 * target_size``.  A value
+    that is not an integer is logged and replaced by the default.
+
+    The one reader of both variables: the daemon's startup and a
+    ``--pool-size`` / ``--pool-max`` start command resolve the flag a
+    caller did not give from here, so the two cannot disagree.
+    """
+    # Pool size: number of idle pre-warm runner slots kept warm for
+    # sessions (#898: the floor on UNRESERVED slots).  Pool-empty fallback
+    # is a cold spawn.
+    size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")  # env: number of idle pre-warm runner slots to keep (raise for concurrent cascade fan-out)
+    try:
+        size = int(size_raw)
+    except ValueError:
+        logger.warning(
+            "JAATO_RUNNER_POOL_SIZE=%r is not an int; defaulting to 2",
+            size_raw,
+        )
+        size = 2
+    # Ceiling on TOTAL idle slots (#898).  Cascade reservations sit on
+    # top of the floor, one per live tenant, so the two are different
+    # numbers.  Unset means ``2 * target_size`` -- headroom for one
+    # reservation per unreserved slot.
+    max_raw = os.environ.get("JAATO_RUNNER_POOL_MAX_SIZE", "")  # env: hard ceiling on total idle pre-warm slots incl. per-cascade reservations
+    ceiling: Optional[int] = None
+    if max_raw.strip():
+        try:
+            ceiling = int(max_raw)
+        except ValueError:
+            logger.warning(
+                "JAATO_RUNNER_POOL_MAX_SIZE=%r is not an int; "
+                "defaulting to 2 * JAATO_RUNNER_POOL_SIZE", max_raw,
+            )
+    return size, ceiling
+
+
 class JaatoDaemon:
     """Main server daemon managing IPC and WebSocket servers."""
 
@@ -437,34 +481,11 @@ class JaatoDaemon:
         # configurable via ``JAATO_RUNNER_POOL_SIZE`` env var (default
         # 2).  Pool-empty fallback path = today's cold-spawn session-
         # mode (preserved through PR 4's flag-gated rollout).
-        _pool_size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")  # env: number of idle pre-warm runner slots to keep (raise for concurrent cascade fan-out)
-        try:
-            _pool_size = int(_pool_size_raw)
-        except ValueError:
-            logger.warning(
-                "JAATO_RUNNER_POOL_SIZE=%r is not an int; defaulting "
-                "to 2", _pool_size_raw,
-            )
-            _pool_size = 2
-        # Ceiling on TOTAL idle slots (#898).  ``JAATO_RUNNER_POOL_SIZE``
-        # is the floor on the UNRESERVED subset; cascade reservations sit
-        # on top of it, one per live tenant, so the two are different
-        # numbers.  Unset means ``2 * target_size`` -- headroom for one
-        # reservation per unreserved slot, which is what a two-tenant
-        # daemon needs and what the reported starvation lacked.
-        _pool_max_raw = os.environ.get("JAATO_RUNNER_POOL_MAX_SIZE", "")  # env: hard ceiling on total idle pre-warm slots incl. per-cascade reservations
-        _pool_max = None
-        if _pool_max_raw.strip():
-            try:
-                _pool_max = int(_pool_max_raw)
-            except ValueError:
-                logger.warning(
-                    "JAATO_RUNNER_POOL_MAX_SIZE=%r is not an int; "
-                    "defaulting to 2 * JAATO_RUNNER_POOL_SIZE",
-                    _pool_max_raw,
-                )
-        # A size a runtime resize set before a --restart outranks the env
-        # vars: the operator asked for it after the env was written.
+        _pool_size, _pool_max = env_pool_sizes()
+        # A size set by a runtime resize (kept by --restart) or by
+        # --pool-size on the start command outranks the env vars: the
+        # operator asked for it after the env was written.  See
+        # :func:`_startup_pool_sizes`, which resolves the pair.
         if pool_size is not None:
             _pool_size = pool_size
             _pool_max = pool_max_size
@@ -1775,16 +1796,41 @@ def _pool_cli_line(args: argparse.Namespace) -> str:
         return f"pool: unavailable ({reason})"
 
 
-def _exit_on_pool_flags(args: argparse.Namespace) -> None:
-    """``--pool-size`` / ``--pool-max``: resize, print, and exit.
+def _pool_flags_start_a_daemon(args: argparse.Namespace) -> bool:
+    """Whether ``--pool-size`` / ``--pool-max`` size a daemon this command starts.
 
-    Returns without doing anything when neither flag was given.  Exits 0
-    when the daemon resized the pool; 1 when it refused (another account,
-    a bad size) or nothing answers.
+    The two flags answer one question two ways: on a command that starts a
+    daemon (``--daemon``, ``--web-socket``, ``--restart``) they are that
+    daemon's starting sizes; on any other command they resize the daemon
+    already running at the socket.  ``--ipc-socket`` alone decides nothing,
+    because a resize names its daemon with it too, so a FOREGROUND start
+    takes its sizes from the env knobs.
+    """
+    return bool(args.daemon or args.web_socket or args.restart)
+
+
+def _exit_on_pool_flags(args: argparse.Namespace) -> None:
+    """``--pool-size`` / ``--pool-max`` on a command that starts nothing.
+
+    Resizes the running daemon, prints the pool and exits: 0 when the
+    daemon resized it, 1 when it refused (another account) or nothing
+    answers, 2 for a negative size.  Returns without doing anything when
+    neither flag was given, or when the command starts a daemon
+    (:func:`_pool_flags_start_a_daemon`), whose sizes they then are
+    (:func:`_startup_pool_sizes`).
     """
     if args.pool_size is None and args.pool_max is None:
         return
-    from jaato_server.server.pool_admin import describe
+    from jaato_server.server.pool_admin import (
+        CLI_MAX_FLAG, CLI_SIZE_FLAG, describe,
+    )
+    for flag, value in ((CLI_SIZE_FLAG, args.pool_size),
+                        (CLI_MAX_FLAG, args.pool_max)):
+        if value is not None and value < 0:
+            print(f"Error: {flag} must be >= 0, got {value}", file=sys.stderr)
+            sys.exit(2)
+    if _pool_flags_start_a_daemon(args):
+        return
     socket_path = args.ipc_socket or DEFAULT_SOCKET_PATH
     try:
         answer = asyncio.run(
@@ -1793,9 +1839,40 @@ def _exit_on_pool_flags(args: argparse.Namespace) -> None:
         reason = str(exc) or type(exc).__name__
         print(f"Error: could not resize the runner pool: {reason}",
               file=sys.stderr)
+        print(f"  To START a daemon with this pool, add --daemon "
+              f"(or set JAATO_RUNNER_POOL_SIZE for a foreground start).",
+              file=sys.stderr)
         sys.exit(1)
     print(describe(answer))
     sys.exit(0 if answer.ok else 1)
+
+
+def _startup_pool_sizes(
+    args: argparse.Namespace,
+) -> Tuple[Optional[int], Optional[int]]:
+    """``(pool_size, pool_max_size)`` to hand :class:`JaatoDaemon`.
+
+    ``(None, None)`` lets the daemon read the env knobs, as it always has.
+    Otherwise, highest first: a ``--pool-size`` / ``--pool-max`` flag on
+    this start command, then the sizes ``--restart`` read back from the
+    config a runtime resize wrote, then the env knobs -- per flag, so
+    ``--pool-size 6`` keeps a ``JAATO_RUNNER_POOL_MAX_SIZE`` the operator
+    set.  A ``None`` ceiling means "derive ``2 * pool_size``".
+
+    The daemon records the result for ``--restart`` like a resize, so a
+    size given at start survives a restart.
+    """
+    size = getattr(args, "restart_pool_size", None)
+    ceiling = getattr(args, "restart_pool_max_size", None)
+    if args.pool_size is None and args.pool_max is None:
+        return size, ceiling
+    if size is None:
+        size, ceiling = env_pool_sizes()
+    if args.pool_size is not None:
+        size = args.pool_size
+    if args.pool_max is not None:
+        ceiling = args.pool_max
+    return size, ceiling
 
 
 def stop_server(
@@ -2144,6 +2221,9 @@ Examples:
   # Restart with same parameters (development)
   python -m jaato_server --restart
 
+  # Start a daemon with 6 pre-warm runners
+  python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon --pool-size 6
+
   # Resize the running daemon's runner pool (no restart)
   python -m jaato_server --pool-size 6
         """,
@@ -2307,12 +2387,13 @@ Examples:
         metavar="N",
         type=int,
         default=None,
-        help="Resize the RUNNING daemon's pre-warm runner pool to N "
-             "unreserved idle runners (0 disables it), without a restart, "
-             "and print the pool.  Talks to the daemon over its IPC socket "
-             "and never starts one.  Run it as the account that runs the "
-             "daemon, or root; anyone else is refused.  --restart keeps "
-             "the new size.  Outranks JAATO_RUNNER_POOL_SIZE from then on.",
+        help="Pre-warm runner pool: N unreserved idle runners (0 disables "
+             "it).  On a command that starts a daemon (--daemon, "
+             "--web-socket, --restart) it is the starting size.  Otherwise "
+             "it resizes the RUNNING daemon over its IPC socket without a "
+             "restart, prints the pool, and never starts one; run that as "
+             "the account that runs the daemon, or root.  Outranks "
+             "JAATO_RUNNER_POOL_SIZE, and --restart keeps it.",
     )
     parser.add_argument(
         CLI_MAX_FLAG,
@@ -2320,10 +2401,10 @@ Examples:
         metavar="M",
         type=int,
         default=None,
-        help="With or without --pool-size: set the RUNNING daemon's ceiling "
-             "on total idle runners (reservations included).  Without it, a "
-             "derived ceiling (2 x pool size) follows --pool-size and a "
-             "chosen one is kept.",
+        help="Ceiling on total idle runners (reservations included), with "
+             "or without --pool-size; starting or resizing as --pool-size "
+             "decides.  Outranks JAATO_RUNNER_POOL_MAX_SIZE.  Without it, "
+             "the env value is kept, else a derived ceiling (2 x pool size).",
     )
 
     # Configuration
@@ -2380,7 +2461,8 @@ Examples:
             print("Jaato server is not running")
             sys.exit(1)
 
-    # Handle --pool-size / --pool-max: resize the RUNNING daemon's pool.
+    # Handle --pool-size / --pool-max: resize the RUNNING daemon's pool,
+    # unless this command starts one (then they are its starting sizes).
     _exit_on_pool_flags(args)
 
     # Handle --restart
@@ -2509,6 +2591,7 @@ Examples:
 
     # Create and run daemon
     socket_mode = int(args.socket_mode, 8)
+    start_pool_size, start_pool_max = _startup_pool_sizes(args)
     daemon = JaatoDaemon(
         ipc_socket=args.ipc_socket,
         web_socket=args.web_socket,
@@ -2525,8 +2608,8 @@ Examples:
         umask=args.umask,
         runner_uid_policy=args.runner_uid_policy,
         ws_max_message_size=args.ws_max_message_size,
-        pool_size=getattr(args, "restart_pool_size", None),
-        pool_max_size=getattr(args, "restart_pool_max_size", None),
+        pool_size=start_pool_size,
+        pool_max_size=start_pool_max,
     )
 
     try:
