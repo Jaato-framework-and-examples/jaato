@@ -248,7 +248,15 @@ async def _pool_misses(daemon: Daemon) -> Optional[int]:
 
 
 async def _run_fanout(daemon: Daemon, k: int, turns: int, echo: Dict,
-                      plugins: List[str], session_timeout: float) -> Dict:
+                      plugins: List[str], session_timeout: float,
+                      warmup: bool = True) -> Dict:
+    if warmup:
+        # One session first, in another cascade, so the run measures a
+        # daemon that has served a session before: its lazy imports and
+        # first-use caches are paid, as on any long-running daemon.
+        await _stage(daemon, -1, uuid.uuid4().hex, 1, dict(echo, delay_ms=0,
+                     jitter_ms=0), plugins, time.monotonic(), session_timeout)
+        await asyncio.sleep(2.0)  # let the pool refill its floor
     misses_before = await _pool_misses(daemon)
     sampler = Sampler(daemon_pid=daemon.proc.pid)
     sampler.start()
@@ -309,13 +317,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--plugins", nargs="*",
                     default=["cli", "file_edit", "todo"],
                     help="plugins each stage's profile enables")
+    ap.add_argument("--no-warmup", action="store_true",
+                    help="measure a daemon that has served no session yet")
     ap.add_argument("--keep", action="store_true",
                     help="keep each daemon's directory (log, workspace)")
     args = ap.parse_args(argv)
 
     print(f"# turns={args.turns} delay_ms={args.delay_ms:.0f} "
           f"pool_size={args.pool_size} pool_max={args.pool_max} "
-          f"plugins={args.plugins}")
+          f"plugins={args.plugins} warmup={not args.no_warmup}")
     print(HEADER, flush=True)
     for jitter in args.jitter_ms:
         for k in args.k:
@@ -326,7 +336,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "seed": args.seed, "response": "ok"}
                 result = asyncio.run(_run_fanout(
                     daemon, k, args.turns, echo, args.plugins,
-                    args.session_timeout))
+                    args.session_timeout, warmup=not args.no_warmup))
                 print(_row(jitter, result), flush=True)
                 for err in result["errors"]:
                     print(f"#   error: {err}", flush=True)
