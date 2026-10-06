@@ -89,19 +89,34 @@ def _provision_workspace(workspace: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def _start_daemon(socket_path: Path, log_path: Path) -> subprocess.Popen:
-    """Launch ``python -m server --ipc-socket <path> --daemon=False``.
+#: The daemon's entry point.  The package is ``jaato_server`` (see
+#: CLAUDE.md, "Running the Server"); this test used to launch
+#: ``python -m server``, a module that no longer exists, so on every host
+#: where the file does not skip it failed before any session existed
+#: (#1462).  ``test_integration_tests_launch_real_modules_1462.py`` checks
+#: every ``-m <module>`` launch under ``jaato-server/tests/`` resolves.
+DAEMON_MODULE = "jaato_server"
 
-    We deliberately do NOT use --daemon (double-fork) because we want
+#: How long the daemon may take to put its IPC socket on disk.  It spawns
+#: the pre-warm template before it listens, so 5 s was tight on a loaded
+#: host; a slow start is not what this gate measures.
+DAEMON_READY_SECONDS = 30
+
+
+def _start_daemon(socket_path: Path, log_path: Path) -> subprocess.Popen:
+    """Launch ``python -m jaato_server --ipc-socket <path>`` in the foreground.
+
+    We deliberately do NOT use ``--daemon`` (double-fork) because we want
     to own the subprocess lifecycle from this fixture.  Instead the
     daemon runs in the foreground; we kill it directly at teardown.
+    IPC only: no ``--web-socket``, so no WS bearer token is involved.
     """
     env = os.environ.copy()
     proc = subprocess.Popen(
         [
             sys.executable,
             "-m",
-            "server",
+            DAEMON_MODULE,
             "--ipc-socket",
             str(socket_path),
         ],
@@ -109,8 +124,8 @@ def _start_daemon(socket_path: Path, log_path: Path) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         env=env,
     )
-    # Wait for the socket to become ready (≤5 s).
-    deadline = time.monotonic() + 5
+    # Wait for the socket to become ready.
+    deadline = time.monotonic() + DAEMON_READY_SECONDS
     while time.monotonic() < deadline:
         if socket_path.exists():
             try:
@@ -127,7 +142,10 @@ def _start_daemon(socket_path: Path, log_path: Path) -> subprocess.Popen:
             )
         time.sleep(0.1)
     proc.terminate()
-    raise AssertionError(f"daemon socket {socket_path} did not appear in 5s")
+    raise AssertionError(
+        f"daemon socket {socket_path} did not appear in "
+        f"{DAEMON_READY_SECONDS}s; see {log_path}"
+    )
 
 
 def _stop_daemon(proc: subprocess.Popen) -> None:
@@ -198,10 +216,6 @@ async def _drive_two_workspaces(tmp_path: Path) -> None:
     daemon_log = tmp_path / "daemon.log"
     daemon = _start_daemon(sock, daemon_log)
 
-    # Per-test snapshot of the dmesg cursor so we can assert ONLY on
-    # apparmor entries produced during this run.
-    dmesg_baseline_t = time.time()
-
     client_a = client_b = None
     try:
         # ----- Client A: workspace_a session -----
@@ -242,47 +256,37 @@ async def _drive_two_workspaces(tmp_path: Path) -> None:
         )
         assert (ws_b / "sandbox" / "y").exists()
 
+        # ----- Which profile each runner wears -----
+        # Profiles are named after the BOUNDARY (workspace + rendered
+        # body), not the session (#1033 / #1037): ``jaato-ws-<slug>-
+        # <digest>``.  Read the name the daemon recorded for each runner
+        # (#812's runner identity, on the ``session.list`` rows) rather
+        # than reconstructing it.
+        profile_a = await _runner_profile(client_a, sid_a)
+        profile_b = await _runner_profile(client_b, sid_b)
+        assert profile_a and profile_b and profile_a != profile_b, (
+            f"two workspaces must be two AppArmor boundaries; got "
+            f"A={profile_a!r} B={profile_b!r}"
+        )
+
         # ----- Cross-workspace read MUST be kernel-denied -----
-        await _drive_turn(client_b, f"read file: cat {ws_a}/sandbox/x")
+        # Wrapped in ``sh -c`` on purpose: a bare ``cat <path>`` outside
+        # the workspace is refused by cli's own path check before
+        # anything runs, which proves the string layer and leaves the
+        # kernel untouched.  The analyzer does not descend into the
+        # quoted argument of ``sh -c``, so this read reaches the
+        # ``//child`` profile and is the kernel's to deny.
+        await _drive_turn(
+            client_b,
+            f"run exactly this with the cli tool, unchanged: "
+            f"sh -c 'cat {ws_a}/sandbox/x'",
+        )
         # The cli result on B should report Permission denied.  There is
         # no structured-result accessor on the SDK, so pull the session's
         # history and walk it for the last cli payload.
         history = await _history(client_b)
-        last_result = _last_cli_result(history)
-        assert last_result is not None, (
-            "expected a cli tool result in B's history after the "
-            "cross-workspace read attempt"
-        )
-        # Either the cli returns a non-zero exit (cat: ENOENT
-        # because apparmor masks the path as not-found) OR the
-        # result.error mentions Permission denied.  Both are
-        # legitimate apparmor-enforced outcomes.
-        assert (
-            "Permission denied" in (last_result.get("stderr") or "")
-            or "Permission denied" in (last_result.get("error") or "")
-            or last_result.get("returncode", 0) != 0
-        ), (
-            f"expected cross-workspace cat to fail but got {last_result!r}"
-        )
-
-        # ----- Kernel-side audit confirmation -----
-        if dmesg_available():
-            dmesg = subprocess.check_output(["dmesg", "-T"]).decode()
-            # The runner's profile name should appear in a DENIED
-            # audit line corresponding to the cross-workspace read.
-            expected_profile_marker = f'profile="jaato-ws-{sid_b}'
-            assert expected_profile_marker in dmesg, (
-                f"expected dmesg to carry an apparmor entry for "
-                f"profile jaato-ws-{sid_b} but no match found"
-            )
-            assert "DENIED" in dmesg, (
-                "expected at least one DENIED apparmor audit entry"
-            )
-        else:
-            print(
-                "dmesg unavailable — skipping kernel-audit assertion. "
-                "Userspace assertions still cover the deny."
-            )
+        _assert_cross_read_denied(_last_cli_result(history))
+        _assert_kernel_denial(profile_b, ws_a / "sandbox" / "x")
     except BaseException:
         # The daemon's stdout/stderr is the only account of WHY a step
         # failed, and until now this test wrote it to ``tmp_path`` and
@@ -346,6 +350,61 @@ def _print_daemon_log(log_path: Path, tail_lines: int = 120) -> None:
 
 
 
+def _assert_cross_read_denied(last_result: Optional[dict]) -> None:
+    """The cross-workspace read failed, and it was not cli's string
+    check that stopped it (that would leave the kernel unexercised)."""
+    assert last_result is not None, (
+        "expected a cli tool result in B's history after the "
+        "cross-workspace read attempt"
+    )
+    assert "cli containment" not in (last_result.get("error") or ""), (
+        "cli's string-level path check refused the read before it "
+        "ran, so the kernel boundary was never exercised: "
+        f"{last_result!r}"
+    )
+    # Either the cli returns a non-zero exit (cat: ENOENT
+    # because apparmor masks the path as not-found) OR the
+    # result.error mentions Permission denied.  Both are
+    # legitimate apparmor-enforced outcomes.
+    assert (
+        "Permission denied" in (last_result.get("stderr") or "")
+        or "Permission denied" in (last_result.get("error") or "")
+        or last_result.get("returncode", 0) != 0
+    ), (
+        f"expected cross-workspace cat to fail but got {last_result!r}"
+    )
+
+
+def _assert_kernel_denial(profile: str, path: Path) -> None:
+    """dmesg carries a DENIED line for *profile* on *path*.
+
+    ONE audit line must carry all three facts: a denial, the profile
+    (``//child`` included, hence the open quote), and the file.
+    ``tmp_path`` is unique per run, so the name alone scopes the match
+    to this test.  The old check looked for ``profile="jaato-ws-<session
+    id>`` -- a name no profile has carried since #1033 -- and for
+    "DENIED" anywhere in the ring buffer.
+    """
+    if not dmesg_available():
+        print(
+            "dmesg unavailable — skipping kernel-audit assertion. "
+            "Userspace assertions still cover the deny."
+        )
+        return
+    dmesg = subprocess.check_output(["dmesg", "-T"]).decode(errors="replace")
+    target = f'name="{path}"'
+    denials = [
+        line for line in dmesg.splitlines()
+        if 'apparmor="DENIED"' in line
+        and f'profile="{profile}' in line
+        and target in line
+    ]
+    assert denials, (
+        f"expected a DENIED apparmor audit line for profile {profile} "
+        f"on {path}; none found"
+    )
+
+
 async def _connect(ipc_client_cls, client_type_enum, sock: Path, ws: Path):
     """Connect one AppArmor-confined client to the shared daemon.
 
@@ -395,6 +454,42 @@ async def _drive_turn(client, prompt: str, timeout: float = 60.0) -> None:
         raise AssertionError(
             f"no TurnCompletedEvent within {timeout}s for prompt {prompt!r}"
         )
+
+
+async def _runner_profile(client, session_id: str,
+                          timeout: float = 30.0) -> str:
+    """The AppArmor profile the daemon recorded for a session's runner.
+
+    ``session.list`` rows carry ``runner`` -- the #812 runner identity,
+    whose ``apparmor_profile`` is the profile the runner was spawned
+    into.  An empty value means the session is NOT confined, which this
+    gate treats as a failure: everything after it would be measuring an
+    unconfined runner.
+    """
+    from jaato_sdk.events import SessionListEvent
+
+    async def collect():
+        async for ev in client.events():
+            if isinstance(ev, SessionListEvent):
+                return list(ev.sessions)
+        return []
+
+    task = asyncio.create_task(collect())
+    await asyncio.sleep(0.2)
+    await client.list_sessions()
+    try:
+        rows = await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        raise AssertionError(f"no SessionListEvent within {timeout}s")
+    row = next((r for r in rows if r.get("id") == session_id), None)
+    assert row is not None, f"session {session_id} not in session.list"
+    profile = ((row.get("runner") or {}).get("apparmor_profile") or "")
+    assert profile.startswith("jaato-ws-"), (
+        f"session {session_id}'s runner is not AppArmor-confined "
+        f"(runner identity: {row.get('runner')!r})"
+    )
+    return profile
 
 
 async def _history(client, timeout: float = 30.0) -> list:
