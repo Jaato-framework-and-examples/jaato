@@ -2164,6 +2164,35 @@ class JaatoServer:
         agent_name = getattr(self, "_main_agent_id", None) or "main"
         if agent_name:
             self.registry.set_agent_name(agent_name)
+        self._record_session_plugins_on_registry()
+
+    def _record_session_plugins_on_registry(self) -> None:
+        """Tell the daemon-side registry which plugins the profile enables (#1563, #1566).
+
+        The daemon builds its own registry for every session and initializes
+        every plugin an unfiltered ``discover()`` found (``expose_all`` with
+        no ``requested_plugins``), so its copy of ``references`` ran the same
+        bootstrap decision as the runner's and could load an embedding model
+        in the daemon process for a session that cannot reach that plugin.
+        The runner records the list from the envelope
+        (``runner.session._record_session_plugins``); this is the daemon's
+        half, read from the same ``profile.plugins`` the envelope is built
+        from.
+
+        No profile means every exposed plugin is on the wire, so nothing is
+        recorded and no plugin defers.  Best effort: a registry without the
+        setter records nothing, which is the pre-#1563 behaviour.  Called
+        before both daemon-side ``expose_all`` paths (the pre-init
+        :meth:`create_registry_and_discover` and stage 3 of
+        :meth:`initialize`); calling it twice records the same list.
+        """
+        profile = getattr(self, "_profile", None)
+        setter = getattr(self.registry, "set_session_plugins", None)
+        if profile is None or not callable(setter):
+            return
+        names = [n for n in (getattr(profile, "plugins", None) or [])
+                 if isinstance(n, str) and n]
+        setter(names)
 
     def get_session_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get a session-specific environment variable.
@@ -3409,6 +3438,7 @@ class JaatoServer:
                         agent_name = getattr(self, "_main_agent_id", None) or "main"
                         if agent_name:
                             self.registry.set_agent_name(agent_name)
+                        self._record_session_plugins_on_registry()
 
                         with _s3.sub("expose_all"):
                             self.registry.expose_all(

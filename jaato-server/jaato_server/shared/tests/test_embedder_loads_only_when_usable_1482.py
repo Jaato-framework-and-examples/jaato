@@ -48,18 +48,15 @@ MODEL = "all-MiniLM-L6-v2"
 REVERSIONS = [
     Reversion(
         target=_PLUGIN,
-        find='        return (self._lookup_strategy in ("hybrid", "semantic_only")\n'
-             "                and self._indexed_bundle_count() > 0)\n",
-        replace="        return self._indexed_bundle_count() > 0\n",
+        find='        elif self._lookup_strategy not in ("hybrid", "semantic_only"):\n',
+        replace="        elif False:\n",
         because="a tags_only session would load a model it never queries",
         test="TestBootstrap::test_tags_only_never_loads",
     ),
     Reversion(
         target=_PLUGIN,
-        find='        return (self._lookup_strategy in ("hybrid", "semantic_only")\n'
-             "                and self._indexed_bundle_count() > 0)\n",
-        replace='        return (self._lookup_strategy in ("hybrid", "semantic_only")\n'
-                "                and bool(self._bundles))\n",
+        find="        elif verdict.indexed == 0:\n",
+        replace="        elif not verdict.total:\n",
         because="any unindexed bundle would load the model at bootstrap (#1482)",
         test="TestBootstrap::test_hybrid_without_an_index_defers",
     ),

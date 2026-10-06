@@ -5188,6 +5188,47 @@ which needs a loaded provider. Memory does not share the provider.
 Guard: `jaato_server/shared/tests/test_embedder_loads_only_when_usable_1482.py`,
 five reversions, with a counting fake provider.
 
+### The Embedder for Nobody (#1562, #1563, #1565, #1566)
+
+#1482 still loaded, or kept, the model in three cases where nothing could
+use it:
+
+| Case | Before | Now |
+|---|---|---|
+| every indexed bundle was built with another model (#1562) | eager, then `_attach_matcher` skipped each one: ~680 MB, ~11 s for nothing | eager only when an indexed bundle's `embedding_model` equals the model the provider would load. That is `plugin_configs.references.embedding_model` when set (nothing constructed), else the provider's own `model_name`, read from a provider that is DISCOVERED but not loaded (`load_model` is a separate step). A provider naming no model keeps the eager load and says why. `_init_bundle_matchers` does not load the model to attach nothing either |
+| the profile does not list `references` (#1563) | the runner initializes every discovered plugin, so it loaded anyway | the runner records the profile's plugin list (`PluginRegistry.set_session_plugins`, from `envelope.plugins`), and `_augment_plugin_config` stamps `session_enables_plugin: true/false` into each plugin's config; `false` defers |
+| the daemon's own copy of the plugin (#1566) | the daemon builds a registry per session and `expose_all`s every plugin an unfiltered `discover()` found, so its `references` ran the same decision and could load a model in the DAEMON process | `JaatoServer._record_session_plugins_on_registry` records `profile.plugins` before both daemon-side paths (`create_registry_and_discover` and stage 3 of `initialize`), so the daemon's copy defers too. Building that registry at all is #1566 |
+| a pool slot after `session.end` (#1565) | `reset_for_next_session` was a no-op, so torch and the weights (~1.5 GB) stayed on the slot | `reset_for_next_session` and `shutdown` release the provider, every bundle matcher and the legacy matcher, ask the provider for `unload_model` / `unload` / `close` when it has one, and `gc.collect()`. `shutdown` also drops the cached init config |
+
+The bootstrap line names it: `indexed_bundles=1/1 compatible=0,
+model=all-MiniLM-L6-v2 [config], session_enabled=False; <reason>`.
+
+Rules:
+
+- **Deferred is never refused.** Every tool or command that needs vectors still
+  goes through `_ensure_embedding_provider` (bundle index, reconcile,
+  `embed_texts`, a mid-session index, #1145), so a deferred session loads
+  on first use. `reset_for_next_session` keeps the cached init config for
+  that reason.
+- **Why a stamped key, not `expose_all(requested_plugins=)`.** That gate
+  is the fix the runner rolled back (its Step 4 comment); and a plugin
+  cannot ask the registry at `initialize()`, because `set_plugin_registry`
+  runs after it. The key is added only once a list is recorded, by the
+  runner or the daemon, so the embedded client and a profile-less session
+  (all plugins on the wire) stamp nothing and behave as before. #950 is
+  unchanged: configs still reach every plugin.
+- **The stamp describes the session that bootstrapped the registry.** An
+  in-process subagent sharing it is not reflected, which is why `false`
+  only defers.
+
+Stated limit: with no `embedding_model` configured, deciding #1562 runs
+the provider's factory at bootstrap (as the eager path always did). If an
+out-of-tree factory loads its model on construction, the saving is lost
+there; set `embedding_model` to avoid constructing anything.
+
+Guard: `jaato_server/shared/tests/test_references_embedder_memory_1562.py`,
+eight reversions.
+
 ### Pages Only From Catalog Templates
 
 A profile gates tools (`plugins:`, `tools:[...]` scopes), and that is the
@@ -6793,6 +6834,39 @@ without closing is bounded by the slot boundary.
 "does the spawner's whitelist cover the spawnee's gated tools?" stops being a
 question — the cross-profile check the issue floated would now assert a
 relationship that no longer holds. Not added.
+
+### A Plugin Initialised Once Per Session (#1564)
+
+A librarian session's runner log showed its configured plugins initialised
+twice, ~0.3 s apart, and `references` loading its embedding model twice.
+The second pass was #950's loop: `JaatoSession._apply_plugin_configs` hands
+the profile's `plugin_configs` to `registry.expose_tool` after
+`bootstrap_session` had already initialised every plugin through
+`expose_all` with the same blocks. `expose_tool` rebuilt when the raw block
+differed from the stored config, and it always did: the stored one had been
+augmented (`workspace_path`, `config_root`, `session_id`, `agent_name`) and,
+on the runner, merged over runner defaults. So each configured plugin was
+shut down and re-initialised, and its second life ran without those
+defaults (`references` lost `channel_type: queue`).
+
+`PluginRegistry._config_requires_reinit` now also answers "no" when the
+config is already in force (`_config_already_in_force`): the incoming block
+is augmented the way an `initialize()` would see it, and every non-identity
+value must already hold in the stored config. Extra stored keys (runner
+defaults) are not a reason to rebuild. What still re-initialises: a value
+that differs, including a framework value such as a changed
+`workspace_path` (#950's subagent case). A child's own `agent_name` beside
+an unchanged block relabels in place (#951), and `permission` is still
+stashed for the scoped policy (#957).
+
+Not addressed here, and seen in the same log: the `subagent` plugin
+re-discovers profiles when `set_config_root` is broadcast after
+`expose_all` (cheap, by design), and the runner's registry initialises its
+own unread `permission` copy beside the Step 8 enforcer.
+
+Guard: `jaato_server/shared/tests/test_a_plugin_initialises_once_1564.py`,
+three reversions, through the real `_configure_runtime_plugins` and a real
+`JaatoSession.configure` with counting stand-in plugins.
 
 ### A Plan the Profile Names, Not the Model (#1195)
 

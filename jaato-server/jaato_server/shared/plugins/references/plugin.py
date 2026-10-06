@@ -16,6 +16,7 @@ Enrichment Support:
 """
 
 import dataclasses
+import gc
 import json
 from jaato_sdk.framework_note import framework_note
 import logging
@@ -111,6 +112,7 @@ from .claims import (
     write_claim,
 )
 from .embedding_load import load_model_offline_first
+from ..registry import SESSION_ENABLES_PLUGIN_KEY
 from .embedding_types import (
     EmbeddingProviderProtocol,
     SemanticMatcherProtocol,
@@ -236,6 +238,44 @@ _FORWARD_LINKS_NOTE = (
 )
 
 
+_PROVIDER_RELEASE_METHODS = ("unload_model", "unload", "close")
+
+
+def _ask_provider_to_release(provider: Any) -> None:
+    """Call the first release method ``provider`` offers, if any (#1565).
+
+    :class:`EmbeddingProviderProtocol` declares none, so this is duck-typed
+    and best effort: a provider without one is freed by dropping it.
+    """
+    for name in _PROVIDER_RELEASE_METHODS:
+        release = getattr(provider, name, None)
+        if callable(release):
+            try:
+                release()
+            except Exception as exc:  # noqa: BLE001 -- out-of-tree code
+                logger.debug("references: provider %s() raised: %s", name, exc)
+            return
+
+
+@dataclasses.dataclass
+class _EmbedderVerdict:
+    """Whether ``initialize()`` loads the embedding model, and why.
+
+    Built by :meth:`ReferencesPlugin._embedder_verdict` and rendered by
+    :meth:`ReferencesPlugin._log_embedder_decision`.  ``compatible`` is the
+    number of indexed bundles built with ``model`` (#1562), ``None`` when
+    the question was never reached (a cheaper condition decided first).
+    """
+
+    indexed: int = 0
+    total: int = 0
+    compatible: Optional[int] = None
+    model: Optional[str] = None
+    model_source: str = "-"
+    eager: bool = False
+    reason: str = ""
+
+
 class ReferencesPlugin(RunnerForwardingMixin):
     """Plugin for managing reference source injection into model context.
 
@@ -342,6 +382,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # load being retried (and warned about) on every call.
         self._embedding_lock = threading.Lock()
         self._embedding_load_failed = False
+        # Whether the session's profile lists this plugin (#1563), as the
+        # runner stamped it into ``initialize()``'s config; ``None`` when
+        # nobody said.  ``False`` defers the embedder, never refuses it.
+        self._session_enables_plugin: Optional[bool] = None
         # Retained for back-compat with tests that directly inspect the
         # plugin state; points at the root bundle's matcher when present.
         # New code should iterate self._bundles instead.
@@ -577,7 +621,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return
         # An index may have appeared since bootstrap (#1145): load the
         # deferred provider then, and only then (#1482).
-        if self._embedding_provider is None and self._indexed_bundle_count():
+        if (self._embedding_provider is None
+                and self._embedder_wanted_now(self._matcher_config)):
             self._ensure_embedding_provider()
         if self._embedding_provider is not None:
             self._init_bundle_matchers(self._matcher_config)
@@ -1874,16 +1919,18 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # vector index to match against.  An unindexed bundle (#1478) or
         # ``tags_only`` has nothing to match, and the model load (~13 s of
         # imports, hundreds of MB per runner) pushed bootstraps past their
-        # deadline.  Otherwise the load is deferred to the first caller
-        # that needs it -- see ``_ensure_embedding_provider``.
+        # deadline.  Two more conditions since then: the index must have
+        # been built with the model the provider would load (#1562), and
+        # the session must enable this plugin (#1563).  Otherwise the load
+        # is deferred to the first caller that needs it -- see
+        # ``_ensure_embedding_provider`` and ``_embedder_verdict``.
         self._cached_init_config = config
         self._embedding_load_failed = False
-        if self._embedder_needed_at_bootstrap():
+        self._session_enables_plugin = config.get(SESSION_ENABLES_PLUGIN_KEY)
+        verdict = self._embedder_verdict(config)
+        if verdict.eager:
             self._init_embedding_provider(config)
-            decision = "eager"
-        else:
-            decision = "deferred"
-        self._log_embedder_decision(decision)
+        self._log_embedder_decision(verdict)
 
         # Reconcile drift (new/edited/removed references) against each
         # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
@@ -1907,16 +1954,100 @@ class ReferencesPlugin(RunnerForwardingMixin):
         """How many loaded bundles (root included) carry a vector index."""
         return sum(1 for b in self._bundles if b.has_index)
 
-    def _embedder_needed_at_bootstrap(self) -> bool:
-        """Whether a session could use the embedder before anyone asks (#1482)."""
-        return (self._lookup_strategy in ("hybrid", "semantic_only")
-                and self._indexed_bundle_count() > 0)
+    def _compatible_indexed_bundle_count(self, model: Optional[str]) -> int:
+        """How many indexed bundles were built with ``model`` (#1562)."""
+        if not model:
+            return 0
+        return sum(1 for b in self._bundles
+                   if b.has_index and b.embedding_model == model)
 
-    def _log_embedder_decision(self, decision: str) -> None:
+    def _expected_provider_model(
+        self, config: Dict[str, Any],
+    ) -> Tuple[Optional[str], str]:
+        """The model the provider WOULD load, without loading it (#1562).
+
+        Returns ``(model, source)``.  ``source`` is ``"config"`` when the
+        profile names ``embedding_model`` (nothing is constructed), and
+        otherwise the provider is DISCOVERED -- its factory runs, its model
+        does not load (``load_model`` is a separate step, see
+        :class:`EmbeddingProviderProtocol`) -- so its default
+        ``model_name`` can be read: ``"provider_default"``.  ``"no_provider"``
+        means no ``jaato.embedding`` entry point is installed (nothing could
+        load anyway); ``"unknown"`` means a provider exists but names no
+        model, and the caller keeps the pre-#1562 eager behaviour.
+        """
+        configured = config.get("embedding_model")
+        if configured:
+            return str(configured), "config"
+        self._init_embedding_provider(config)
+        provider = self._embedding_provider
+        if provider is None:
+            return None, "no_provider"
+        try:
+            name = provider.model_name
+        except Exception:  # noqa: BLE001 -- a provider's property, out of tree
+            name = None
+        if not name:
+            return None, "unknown"
+        return str(name), "provider_default"
+
+    def _embedder_verdict(self, config: Dict[str, Any]) -> "_EmbedderVerdict":
+        """Whether a session could use the embedder before anyone asks.
+
+        Eager only when every one holds: the session enables this plugin
+        (#1563 -- ``False`` from the runner defers; absent is "not known"
+        and does not), a semantic strategy, an indexed bundle (#1482), and
+        an indexed bundle built with the model the provider would load
+        (#1562).  A provider whose model cannot be named keeps the eager
+        load, with the reason in the log line.
+        """
+        verdict = _EmbedderVerdict(indexed=self._indexed_bundle_count(),
+                                   total=len(self._bundles))
+        if self._session_enables_plugin is False:
+            verdict.reason = "plugin not enabled by the session"
+        elif self._lookup_strategy not in ("hybrid", "semantic_only"):
+            verdict.reason = "strategy uses no vectors"
+        elif verdict.indexed == 0:
+            verdict.reason = "no indexed bundle"
+        else:
+            self._judge_model_compatibility(config, verdict)
+        return verdict
+
+    def _judge_model_compatibility(
+        self, config: Dict[str, Any], verdict: "_EmbedderVerdict",
+    ) -> None:
+        """Fill ``verdict`` from the indexed bundles' models (#1562)."""
+        model, source = self._expected_provider_model(config)
+        verdict.model, verdict.model_source = model, source
+        if source == "unknown":
+            verdict.eager = True
+            verdict.reason = ("provider names no default model; loading to "
+                              "find out which bundles it can match")
+            return
+        if source == "no_provider":
+            verdict.reason = "no embedding provider installed"
+            return
+        verdict.compatible = self._compatible_indexed_bundle_count(model)
+        verdict.eager = verdict.compatible > 0
+        verdict.reason = (
+            "an indexed bundle matches the provider model" if verdict.eager
+            else f"no indexed bundle was built with '{model}'")
+
+    def _embedder_wanted_now(self, config: Dict[str, Any]) -> bool:
+        """Whether a catalog reload should load the provider (#1145, #1562)."""
+        return self._embedder_verdict(config).eager
+
+    def _log_embedder_decision(self, verdict: "_EmbedderVerdict") -> None:
         """One line naming whether the embedder loaded at bootstrap, and why."""
+        decision = "eager" if verdict.eager else "deferred"
+        compatible = ("?" if verdict.compatible is None
+                      else str(verdict.compatible))
         line = (f"references: embedding provider {decision} at bootstrap "
                 f"(strategy={self._lookup_strategy}, indexed_bundles="
-                f"{self._indexed_bundle_count()}/{len(self._bundles)})")
+                f"{verdict.indexed}/{verdict.total} compatible={compatible}, "
+                f"model={verdict.model or '?'} [{verdict.model_source}], "
+                f"session_enabled={self._session_enables_plugin}; "
+                f"{verdict.reason})")
         logger.info(line)
         self._trace(line)
 
@@ -2161,6 +2292,21 @@ class ReferencesPlugin(RunnerForwardingMixin):
             )
             return
 
+        provider_model = config.get(
+            "embedding_model", self._embedding_provider.model_name
+        )
+        # #1562: every bundle below would be skipped for the model
+        # mismatch, so loading the model (hundreds of MB, seconds) to
+        # attach nothing is pure cost.  The provider stays constructed and
+        # unloaded; a caller that needs vectors loads it on demand.
+        if (not self._embedding_provider.available
+                and not self._compatible_indexed_bundle_count(provider_model)):
+            self._trace(
+                f"_init_bundle_matchers: no indexed bundle built with "
+                f"'{provider_model}'; model not loaded, no matcher attached"
+            )
+            return
+
         if not self._embedding_provider.available:
             load_model_offline_first(self._embedding_provider, self._trace)
 
@@ -2170,10 +2316,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
             )
             self._embedding_provider = None
             return
-
-        provider_model = config.get(
-            "embedding_model", self._embedding_provider.model_name
-        )
 
         for bundle in self._bundles:
             bundle.matcher = self._attach_matcher(bundle, provider_model)
@@ -2317,7 +2459,13 @@ class ReferencesPlugin(RunnerForwardingMixin):
         return all_matches[:top_k]
 
     def shutdown(self) -> None:
-        """Shutdown the plugin and clean up resources."""
+        """Shutdown the plugin and clean up resources.
+
+        Releases the embedding provider the way
+        :meth:`reset_for_next_session` does (#1565) and also drops the
+        cached init config, so nothing on this instance can reload the
+        model until ``initialize()`` runs again.
+        """
         self._trace("shutdown: cleaning up resources")
         # Unregister the bundle handler so a stale plugin reference
         # isn't left in the registry. Idempotent — the registry
@@ -2329,10 +2477,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._channel = None
         self._sources = []
         self._selected_source_ids = []
-        self._embedding_provider = None
-        self._semantic_matcher = None
-        for bundle in self._bundles:
-            bundle.matcher = None
+        self._release_embedder("shutdown")
+        self._cached_init_config = None
         self._bundles = []
         self._preselected_paths = {}
         self._transitive_parent_map = {}
@@ -2344,18 +2490,53 @@ class ReferencesPlugin(RunnerForwardingMixin):
             self._plugin_registry.clear_authorized_paths(self._name)
 
     def reset_for_next_session(self) -> None:
-        """Cascade-sharing reset — NO-OP for this plugin.
+        """Release the embedding model at the session boundary (#1565).
 
-        Phase 1 hotfix (server 0.6.148+): added to satisfy the
-        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
-        ``isinstance`` check.  Per Daniel's litmus test (see
-        ``docs/design/runner-cascade-sharing.md`` §4.3), this
-        plugin holds no per-session state that the next cascade
-        session would benefit from having cleared.  Override in
-        future PRs if the litmus test changes.
+        Called on every plugin at ``session.end`` on a pool slot
+        (``RunnerRPC`` session-end sweep), before the registry is released.
+        This used to be a no-op on the litmus test of
+        ``docs/design/runner-cascade-sharing.md`` §4.3 ("no per-session
+        state the next session would benefit from having cleared").  That
+        test predates the eager embedder of #1482: the provider holds the
+        embedding model (torch plus weights, ~1.5 GB resident), and keeping
+        it on an idle slot for a next session that may not want it -- an
+        unindexed workspace, ``tags_only``, a profile without this plugin --
+        is the cost #1562 and #1563 exist to avoid.  So the provider, the
+        bundles' matchers (which hold it too) and the legacy matcher field
+        are released here; the next session's ``initialize()`` loads a
+        provider again only when its own config needs one.
+
+        The cached init config is KEPT: it is a small dict, and it is what
+        lets a later caller on this same instance (a semantic call before
+        any re-initialize) reload the provider through
+        :meth:`_ensure_embedding_provider`.  :meth:`shutdown` drops it.
         """
-        pass
+        self._release_embedder("reset_for_next_session")
 
+    def _release_embedder(self, why: str) -> None:
+        """Drop every reference to the embedding provider and free it (#1565).
+
+        The provider is out of tree, so whatever release it offers is
+        asked for by name (``unload_model`` / ``unload`` / ``close``, the
+        first one present) and a failure there never propagates.  Then the
+        references this plugin holds -- the provider, each bundle's matcher
+        (``set_provider`` gave it the provider), the legacy
+        ``_semantic_matcher`` -- are dropped and ``gc.collect()`` runs, so
+        the model is freed now rather than at the next collection.
+        """
+        with self._embedding_lock:  # never mid-load in another thread
+            provider = self._embedding_provider
+            self._embedding_provider = None
+            self._semantic_matcher = None
+            for bundle in self._bundles:
+                bundle.matcher = None
+            self._embedding_load_failed = False
+        if provider is None:
+            return
+        _ask_provider_to_release(provider)
+        del provider
+        gc.collect()
+        self._trace(f"{why}: embedding provider released")
 
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""

@@ -1585,6 +1585,13 @@ class JaatoSession:
         stashed for :meth:`_apply_scoped_permission_policy` (#957).
         The rationale for both is in the comment block at the call
         site in :meth:`configure`.
+
+        A block the plugin is already running under is not applied again
+        (#1564): ``PluginRegistry._config_requires_reinit`` compares it,
+        augmented the way an ``initialize()`` would see it, against the
+        stored config, so the root session re-applying the blocks the
+        runner bootstrap's ``expose_all`` used costs no second
+        ``initialize()``.
         """
         self._declared_plugin_configs = dict(plugin_configs or {})
         if not plugin_configs or not self._runtime.registry:
@@ -1601,7 +1608,11 @@ class JaatoSession:
                 # Inject agent_name into plugin config for trace logging
                 if self._agent_name and "agent_name" not in config:
                     config = {**config, "agent_name": self._agent_name}
-                # expose_tool with new config will re-initialize
+                # expose_tool re-initializes only a config that changes
+                # something: on the runner the bootstrap's expose_all has
+                # already initialized this block (#1564), so re-applying
+                # it here is a no-op, while a subagent's differing block
+                # still reaches the shared plugin (#950).
                 registry.expose_tool(plugin_name, config)
             except Exception as e:
                 logger.warning(

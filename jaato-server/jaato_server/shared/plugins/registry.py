@@ -56,6 +56,13 @@ from jaato_server.shared.trace import trace as _trace_write
 # :meth:`PluginRegistry._config_requires_reinit` (#951).
 _IDENTITY_ONLY_CONFIG_KEYS = frozenset({"agent_name"})
 
+# Config key stamped by :meth:`PluginRegistry._augment_plugin_config`
+# when the runner recorded the session's plugin list
+# (:meth:`PluginRegistry.set_session_plugins`): ``True`` when the profile
+# enables the plugin, ``False`` when it does not.  Absent means "not
+# known".  Read by ``references`` to defer its embedding model (#1563).
+SESSION_ENABLES_PLUGIN_KEY = "session_enables_plugin"
+
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
@@ -491,6 +498,9 @@ class PluginRegistry:
         # mid-session changes.
         self._session_id: Optional[str] = None
         self._agent_name: Optional[str] = None
+        # The plugin names the session's profile enables (#1563), or
+        # ``None`` when nobody said.  See :meth:`set_session_plugins`.
+        self._session_plugins: Optional[frozenset] = None
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
         # Bootstrap timing: plugin name -> timing data
@@ -1502,8 +1512,10 @@ class PluginRegistry:
         re-initialized when the config actually reconfigures it; a
         config that only names a different agent relabels it in place
         instead, because the instance is shared with the caller's parent
-        and siblings.  :meth:`_config_requires_reinit` is that decision,
-        and documents what the rebuild used to destroy (#951).
+        and siblings (#951), and a config whose every value the plugin
+        already runs under is a no-op (#1564).
+        :meth:`_config_requires_reinit` is that decision, and documents
+        what the rebuild used to destroy.
 
         If a model_name is set and the plugin has model_requirements that
         don't match, the plugin is skipped with a warning.
@@ -1533,7 +1545,7 @@ class PluginRegistry:
                 # (workspace_path, config_root, session_id,
                 # agent_name) injected into config via setdefault.
                 # See :meth:`_augment_plugin_config` for the contract.
-                effective_config = self._augment_plugin_config(config)
+                effective_config = self._augment_plugin_config(config, name)
                 plugin.initialize(effective_config)
                 plugin._initialized = True
                 if effective_config:
@@ -1555,7 +1567,7 @@ class PluginRegistry:
             # Server 0.6.129+: inject framework-known values into the
             # plugin's config before initialize.  See
             # :meth:`_augment_plugin_config`.
-            effective_config = self._augment_plugin_config(config)
+            effective_config = self._augment_plugin_config(config, name)
             t0 = time.perf_counter()
             try:
                 plugin.initialize(effective_config)
@@ -1610,7 +1622,7 @@ class PluginRegistry:
                     name, exc, exc_info=True,
                 )
             # Server 0.6.129+: framework-key injection for re-init too.
-            effective_config = self._augment_plugin_config(config)
+            effective_config = self._augment_plugin_config(config, name)
             try:
                 plugin.initialize(effective_config)
             except Exception as exc:
@@ -1807,7 +1819,7 @@ class PluginRegistry:
                 # Server 0.6.129+: framework-key injection also for
                 # parallel-init path (PARALLEL_INIT plugins like MCP).
                 # See :meth:`_augment_plugin_config`.
-                cfg = self._augment_plugin_config(config.get(name))
+                cfg = self._augment_plugin_config(config.get(name), name)
                 _trace(f"Starting parallel init for plugin '{name}'")
                 futures[name] = executor.submit(plugin.initialize, cfg)
             executor.shutdown(wait=False)
@@ -2173,6 +2185,34 @@ class PluginRegistry:
         """
         self._agent_name = agent_name
 
+    def set_session_plugins(self, names: Optional[List[str]]) -> None:
+        """Record which plugins the session's profile enables (#1563).
+
+        The runner initializes every discovered plugin whether or not
+        the profile lists it (``expose_all`` is called without
+        ``requested_plugins``; see the comment at its runner call site),
+        and #950 applies a profile's ``plugin_configs`` to every plugin
+        the registry knows.  Neither is changed here.  What this adds is
+        a fact a plugin can read at ``initialize()``: once a list is set,
+        :meth:`_augment_plugin_config` stamps
+        :data:`SESSION_ENABLES_PLUGIN_KEY` (``True``/``False``) into each
+        plugin's config, so a plugin whose initialize does expensive work
+        (``references`` loading an embedding model) can defer it for a
+        session that cannot reach its tools.
+
+        Both processes that build a registry for a session record it: the
+        runner from the envelope (``runner.session._record_session_plugins``)
+        and the daemon from the profile
+        (``JaatoServer._record_session_plugins_on_registry``, #1566).
+        ``None`` (the default: no profile, or an in-process caller that
+        records nothing) means "not known": no key is stamped and plugins
+        behave as before.  The value describes the session that bootstrapped the
+        registry; an in-process subagent sharing it is not reflected, so
+        a plugin must treat ``False`` as "defer", never as "refuse".
+        """
+        self._session_plugins = (
+            frozenset(names) if names is not None else None)
+
     def _config_requires_reinit(
         self, name: str, config: Dict[str, Any],
     ) -> bool:
@@ -2210,6 +2250,24 @@ class PluginRegistry:
         contract — a profile's ``plugin_configs`` reach the plugin it
         names — is unchanged.
 
+        A config the plugin is ALREADY running under is not a
+        reconfiguration either (#1564): when every operator key it
+        carries, after the same framework-key augmentation the stored
+        config received, already holds that value in the stored config,
+        re-initializing would add nothing and could only remove keys.
+        That is the normal shape on the runner path: ``bootstrap_session``
+        initializes every plugin through ``expose_all`` with the
+        profile's block merged over runner defaults (``channel_type:
+        queue`` and the like) and augmented with ``workspace_path`` /
+        ``config_root`` / ``session_id`` / ``agent_name``, and then
+        ``JaatoSession._apply_plugin_configs`` hands the same profile
+        block — raw, without either — back to :meth:`expose_tool`.  The
+        old ``config == stored`` test compared a raw dict against an
+        augmented one, never matched, and so every configured plugin was
+        initialized twice per session: ``references`` loaded its
+        embedding model twice, and its second life ran without the
+        runner's ``channel_type: queue`` default.
+
         Args:
             name: Name of a plugin already in ``self._exposed``.
             config: The raw, un-augmented config handed to
@@ -2220,18 +2278,64 @@ class PluginRegistry:
         """
         if config == self._configs.get(name):
             return False
-        if not set(config) <= _IDENTITY_ONLY_CONFIG_KEYS:
+        if set(config) <= _IDENTITY_ONLY_CONFIG_KEYS:
+            reason = "identity-only config"
+        elif self._config_already_in_force(name, config):
+            reason = "config already in force"
+        else:
             return True
-        agent_name = config.get("agent_name")
+        if "agent_name" in config:
+            self._relabel_in_place(name, config["agent_name"])
+        _trace(f" Plugin '{name}' {reason} "
+               f"(agent_name={config.get('agent_name')!r}): "
+               f"not re-initialized")
+        return False
+
+    def _config_already_in_force(
+        self, name: str, config: Dict[str, Any],
+    ) -> bool:
+        """Whether exposed plugin ``name`` already runs under every
+        non-identity value ``config`` carries (#1564).
+
+        ``config`` is augmented exactly as :meth:`expose_tool` would
+        augment it before an ``initialize()``, so like is compared with
+        like: the stored config in :attr:`_configs` is the augmented one.
+        Identity keys (:data:`_IDENTITY_ONLY_CONFIG_KEYS`) are left out
+        of the comparison; :meth:`_config_requires_reinit` relabels them
+        in place.  A stored config may carry MORE keys than ``config``
+        (runner defaults merged under the profile block) — those are
+        already in force and are not a reason to rebuild.
+
+        Args:
+            name: Name of a plugin already in ``self._exposed``.
+            config: The raw, un-augmented config handed to
+                :meth:`expose_tool`.
+
+        Returns:
+            True when re-initializing with ``config`` would change no
+            value the plugin was initialized with.
+        """
+        stored = self._configs.get(name)
+        if not stored:
+            return False
+        missing = object()
+        effective = self._augment_plugin_config(config, name) or {}
+        return all(
+            stored.get(key, missing) == value
+            for key, value in effective.items()
+            if key not in _IDENTITY_ONLY_CONFIG_KEYS
+        )
+
+    def _relabel_in_place(self, name: str, agent_name: Any) -> None:
+        """Hand a new agent label to a live plugin without rebuilding it
+        (#951): plugins that implement ``set_agent_name`` take it, the
+        rest keep tracing under their existing label."""
         relabel = getattr(self._plugins[name], "set_agent_name", None)
         if callable(relabel):
             relabel(agent_name)
-        _trace(f" Plugin '{name}' identity-only config "
-               f"(agent_name={agent_name!r}): not re-initialized")
-        return False
 
     def _augment_plugin_config(
-        self, config: Optional[Dict[str, Any]],
+        self, config: Optional[Dict[str, Any]], name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Pre-populate plugin config with framework-known values.
 
@@ -2259,6 +2363,11 @@ class PluginRegistry:
         explicit ``plugin_configs.<plugin>.workspace_path`` in a
         profile YAML overrides the framework-known value.
 
+        ``name`` is the plugin the config is for.  When it is given and
+        :meth:`set_session_plugins` recorded the session's plugin list,
+        :data:`SESSION_ENABLES_PLUGIN_KEY` says whether that list names
+        the plugin (#1563).
+
         Returns the augmented config dict, or the original
         ``config`` if no framework values are set yet (preserving
         the pre-fix behavior when callers bypass the setters).
@@ -2272,6 +2381,9 @@ class PluginRegistry:
             framework_keys["session_id"] = self._session_id
         if self._agent_name is not None:
             framework_keys["agent_name"] = self._agent_name
+        if name is not None and self._session_plugins is not None:
+            framework_keys[SESSION_ENABLES_PLUGIN_KEY] = (
+                name in self._session_plugins)
 
         if not framework_keys:
             return config
