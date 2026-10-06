@@ -48,8 +48,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SPAWN,
-        find="    if slot is not None or not selinux:\n        return slot\n",
-        replace="    return slot\n",
+        find="    return pool_manager.fork_slot_into(SlotKey.build(**fields), entry)\n",
+        replace="    return None\n",
         test="test_an_selinux_miss_forks_a_slot_into_the_boundary",
         because="every SELinux session would cold-spawn, as before phase 4",
     ),
@@ -153,6 +153,24 @@ def test_fork_slot_into_asks_the_template_and_stamps_the_key():
     assert pool.get_telemetry()["pool_selinux_fork_total"] == 1
 
 
+def test_fork_slot_on_demand_forks_a_virgin_slot_and_stamps_the_key():
+    """The plain miss: no boundary entry, the key stamped, counted."""
+    pool = _pool()
+    pool._template_manager.request_fork_slot.return_value = (43, MagicMock())
+    key = SlotKey.build(cascade_driver_id="c1", workspace_root="/w")
+    slot = pool.fork_slot_on_demand(key)
+    pool._template_manager.request_fork_slot.assert_called_once_with()
+    assert SlotKey.of_slot(slot) == key and slot.pid == 43
+    assert pool.get_telemetry()["pool_demand_fork_total"] == 1
+
+
+def test_a_failed_demand_fork_is_a_cold_spawn():
+    pool = _pool()
+    pool._template_manager.request_fork_slot.return_value = None
+    assert pool.fork_slot_on_demand(SlotKey.build(workspace_root="/w")) is None
+    assert pool.get_telemetry()["pool_demand_fork_failures_total"] == 1
+
+
 def test_a_failed_fork_is_a_miss():
     pool = _pool()
     pool._template_manager.request_fork_slot.return_value = None
@@ -186,13 +204,14 @@ def test_an_selinux_miss_forks_a_slot_into_the_boundary():
                      "private_tmp": "/w/.tmp", "runner_user": _USER.to_dict()}
 
 
-def test_an_unconfined_miss_is_a_cold_spawn():
+def test_an_unconfined_miss_forks_a_virgin_slot_not_into_a_boundary():
     pool = MagicMock()
     pool.acquire_slot.return_value = None
-    assert runner_spawn._acquire_pool_slot(
+    runner_spawn._acquire_pool_slot(
         pool, _server(), cascade_driver_id=None, workspace_path="/w",
-        profile_name="", runner_user=None, confinement=None) is None
+        profile_name="", runner_user=None, confinement=None)
     pool.fork_slot_into.assert_not_called()
+    pool.fork_slot_on_demand.assert_called_once()
 
 
 # ------------------------------------------------------------------ template

@@ -257,6 +257,11 @@ def _acquire_pool_slot(
 ) -> Any:
     """A pool slot for this session, or ``None`` (cold spawn).
 
+    An idle slot that fits the key if there is one; otherwise one forked
+    for this session from the template (:meth:`PoolManager.fork_slot_on_demand`),
+    so a miss costs a fork, not a cold-spawned runner that holds its whole
+    working set privately.  ``None`` only when the template cannot fork.
+
     The key: a slot's warm plugin state was built from ITS config root;
     its threads are stuck in the AppArmor profile it was last confined to
     (#1023); a dropped slot is that uid for life (#1168); and an SELinux
@@ -282,8 +287,10 @@ def _acquire_pool_slot(
         selinux_boundary=confinement.confinement_id if selinux else None,
     )
     slot = pool_manager.acquire_slot(**fields)
-    if slot is not None or not selinux:
+    if slot is not None:
         return slot
+    if not selinux:
+        return pool_manager.fork_slot_on_demand(SlotKey.build(**fields))
     entry = {
         "context": confinement.label,
         "log_path": log_path,
@@ -559,8 +566,9 @@ def spawn_session_runner(
             )
         else:
             logger.info(
-                "spawn_session_runner: session %s — pool empty, falling "
-                "back to cold-spawn", session_id,
+                "spawn_session_runner: session %s — no slot fitted and the "
+                "template could not fork one; falling back to cold-spawn",
+                session_id,
             )
 
     # ----- Cold-spawn fallback (pre-PR-4 behavior) -----

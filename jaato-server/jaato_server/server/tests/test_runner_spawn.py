@@ -481,6 +481,21 @@ def test_partial_app_layer_supplied_forwards_only_set_fields(
 # ----------------------------------------------------------------------
 
 
+from jaato_server.shared.tests.reversion import Reversion  # noqa: E402
+
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/jaato_server/server/runner_spawn.py",
+        find=("        return pool_manager.fork_slot_on_demand("
+              "SlotKey.build(**fields))"),
+        replace="        return None",
+        test="test_a_miss_is_served_by_a_slot_forked_on_demand",
+        because=("a miss cold-spawning again: each stage of a fan-out past "
+                 "the pool floor pays a runner holding ~135 MB privately"),
+    ),
+]
+
+
 class _FakePoolManager:
     """Stand-in for :class:`server.runner_pool.PoolManager`.
 
@@ -492,8 +507,12 @@ class _FakePoolManager:
     :class:`PoolSlot` instead of a raw tuple.
     """
 
-    def __init__(self, slot=None) -> None:
+    def __init__(self, slot=None, forked=None) -> None:
         self.slot = slot
+        # What ``fork_slot_on_demand`` returns on a miss: a slot, or
+        # ``None`` for a template that cannot fork.
+        self.forked = forked
+        self.fork_calls = 0
         self.acquire_calls = 0
         self.last_cascade_id = None
         self.last_key = None
@@ -513,6 +532,10 @@ class _FakePoolManager:
             "runner_uid": runner_uid,
         }
         return self.slot
+
+    def fork_slot_on_demand(self, key):
+        self.fork_calls += 1
+        return self.forked
 
 
 def _stub_socket() -> Any:
@@ -607,10 +630,42 @@ def test_pool_routing_enabled_by_default(
     assert _FakeSpawner.instances == []  # pool-served, no cold-spawn
 
 
+def test_a_miss_is_served_by_a_slot_forked_on_demand(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """No idle slot fits → a slot is forked for the session, no cold spawn.
+
+    A cold-spawned runner imports everything itself and holds ~135 MB
+    private; a slot forked from the template holds ~25 MB.  A cascade
+    fanning out past the pool's floor used to pay the former per stage.
+    """
+    from jaato_server.server.runner_pool import PoolSlot
+    from jaato_server.server.runner_spawn import spawn_session_runner
+
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "1")
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(
+        slot=None, forked=PoolSlot(pid=99998, sock=_stub_socket()))
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-miss",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        pool_manager=pool,
+    )
+
+    assert pool.acquire_calls == 1
+    assert pool.fork_calls == 1
+    assert _FakeSpawner.instances == []  # no cold spawn
+
+
 def test_pool_routing_falls_back_when_pool_empty(
     daemon_loop, tmp_path, monkeypatch,
 ) -> None:
-    """Empty pool → cold-spawn."""
+    """Empty pool and a template that cannot fork → cold-spawn."""
     from jaato_server.server.runner_spawn import spawn_session_runner
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "1")

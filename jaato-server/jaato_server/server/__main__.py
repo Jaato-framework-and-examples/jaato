@@ -541,6 +541,12 @@ class JaatoDaemon:
         self._loop_watchdog = LoopWatchdog()
         self._loop_watchdog.start()
 
+        # Session requests run on the loop's default executor and mostly
+        # block on their runner; Python's default size (cpu + 4) queued
+        # a burst of creates, and every other request behind them.
+        from jaato_server.server.daemon_executor import install_daemon_executor
+        install_daemon_executor(asyncio.get_running_loop())
+
         # Phase 2 (confined runner): the daemon never confines its own
         # threads to per-session AppArmor profiles — confinement happens
         # in the per-session runner subprocess (see server/runner/).
