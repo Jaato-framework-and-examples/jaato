@@ -30,6 +30,9 @@ from ..registry import is_runner_hosted_mirror
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
+from jaato_server.shared.mcp_remote import (
+    MCPConfigError, REMOTE_TRANSPORTS, describe_failure, remote_endpoint,
+    server_transport)
 
 
 # Message types for background thread communication
@@ -40,6 +43,43 @@ MSG_SERVER_STATUS = 'server_status'
 MSG_CONNECT_SERVER = 'connect_server'
 MSG_DISCONNECT_SERVER = 'disconnect_server'
 MSG_RELOAD_CONFIG = 'reload_config'
+
+def _connect_call(mgr, name: str, spec: dict, expand_env) -> Tuple[Any, str]:
+    """Return ``(coroutine, log_details)`` connecting one ``.mcp.json`` entry.
+
+    The transport is decided by :func:`server_transport` (an unknown
+    ``"type"`` raises :class:`MCPConfigError`).  stdio is unchanged: command
+    and args expanded, ``env`` granted.  A remote entry's url and header
+    TEMPLATES are validated here and resolved by the manager at connect
+    time; the log details name header KEYS only.
+    """
+    transport = server_transport(name, spec)
+    if transport in REMOTE_TRANSPORTS:
+        url, headers = remote_endpoint(name, spec)
+        names = ', '.join(sorted(headers)) or 'none'
+        return (mgr.connect_remote(name, transport, url, headers),
+                f"{transport}: {url} (headers: {names})")
+    # Expand variables in command and args (e.g., ${workspaceRoot})
+    cmd = expand_variables(spec.get('command', 'unknown'))
+    args = expand_variables(spec.get('args', []))
+    args_str = ' '.join(str(a) for a in args) if args else ''
+    return (mgr.connect(name, cmd, args, expand_env(spec.get('env', {}))),
+            f"command: {cmd} {args_str}".strip())
+
+
+def _connect_request_spec(data: dict) -> dict:
+    """The ``.mcp.json`` entry a MSG_CONNECT_SERVER request carries.
+
+    ``mcp connect`` sends the whole entry under ``spec`` (#1580, so a remote
+    entry keeps its type/url/headers); the older shape carried stdio
+    ``command`` / ``args`` / ``env`` keys directly.
+    """
+    return data.get('spec') or {
+        'command': data.get('command'),
+        'args': data.get('args', []),
+        'env': data.get('env', {}),
+    }
+
 
 # Log entry levels
 LOG_INFO = 'INFO'
@@ -428,7 +468,14 @@ class MCPToolPlugin(RunnerForwardingMixin):
                     "type": "string",
                     "description": (
                         "Explicit path to a .mcp.json (overrides the default "
-                        "workspace/user search)."
+                        "workspace/user search). Each server entry's \"type\" "
+                        "is stdio (default: command/args/env), http (streamable "
+                        "HTTP: url/headers) or sse (url/headers); any other type "
+                        "is refused for that server. Remote header values may "
+                        "use ${VAR} or a whole pass:// / vault:// URI, resolved "
+                        "at connect time and sent only to the url's host. A "
+                        "remote server is an outbound connection from the "
+                        "runner, so an egress allowlist must include its host."
                     ),
                 },
                 "scrub_secret_env": {
@@ -446,7 +493,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
                         "set (*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off "
                         "(announced at WARNING); a list may carry 'default' and "
                         "'!NAME' exemption entries. Overrides the profile-level "
-                        "scrub_secret_env for this surface."
+                        "scrub_secret_env for this surface. Applies to stdio "
+                        "servers only: an http/sse server is not a subprocess "
+                        "and inherits no environment."
                     ),
                 },
             },
@@ -567,7 +616,13 @@ class MCPToolPlugin(RunnerForwardingMixin):
         for server_name, tools in self._tool_cache.items():
             for tool in tools:
                 try:
-                    cleaned_schema = self._clean_schema_for_vertex(tool.inputSchema)
+                    # mcp 1.x names the field ``inputSchema``; mcp 2.x's
+                    # pydantic model exposes it as ``input_schema`` (the
+                    # camelCase name is only the wire alias).
+                    raw_schema = getattr(tool, 'inputSchema', None)
+                    if raw_schema is None:
+                        raw_schema = getattr(tool, 'input_schema', None)
+                    cleaned_schema = self._clean_schema_for_vertex(raw_schema)
                     normalized_name = self._normalize_tool_name(server_name, tool.name)
                     schema = ToolSchema(
                         name=normalized_name,
@@ -958,18 +1013,26 @@ class MCPToolPlugin(RunnerForwardingMixin):
             ('          "command": "mcp-server-command",', "dim"),
             ('          "args": ["--flag", "value"],', "dim"),
             ('          "env": {"VAR": "value"}', "dim"),
+            ('        },', "dim"),
+            ('        "Remote": {', "dim"),
+            ('          "type": "http",', "dim"),
+            ('          "url": "https://mcp.example.com/mcp",', "dim"),
+            ('          "headers": {"Authorization": "Bearer ${KEY}"}', "dim"),
             ('        }', "dim"),
             ('      }', "dim"),
             ('    }', "dim"),
             ("", ""),
             ("CONNECTION TYPES", "bold"),
-            ("    stdio             Communicate via stdin/stdout -- the ONLY", "dim"),
-            ("                      transport implemented.  The \"type\" key above", "dim"),
-            ("                      is accepted for compatibility but ignored;", "dim"),
-            ("                      every server is launched as a subprocess.", "dim"),
-            ("                      Remote servers (SSE / streamable HTTP) are", "dim"),
-            ("                      NOT supported -- a URL-based entry will not", "dim"),
-            ("                      connect.", "dim"),
+            ("    stdio             Subprocess over stdin/stdout (default when", "dim"),
+            ("                      \"type\" is absent): command, args, env", "dim"),
+            ("    http              Streamable HTTP: url, headers", "dim"),
+            ("                      (alias \"streamable-http\")", "dim"),
+            ("    sse               HTTP + server-sent events: url, headers", "dim"),
+            ("    Any other type is refused for that server.  Header values", "dim"),
+            ("    may use ${VAR} or a whole pass:// / vault:// URI, resolved at", "dim"),
+            ("    connect time and sent ONLY to the url's host.  A remote", "dim"),
+            ("    server is an outbound connection from the runner: an egress", "dim"),
+            ("    allowlist must include its host.", "dim"),
             ("", ""),
             ("NOTES", "bold"),
             ("    - Servers auto-connect on startup if configured in .mcp.json", "dim"),
@@ -1037,8 +1100,14 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
         spec = servers[server_name]
         lines = [f"Configuration for '{server_name}':"]
-        lines.append(f"  Command: {spec.get('command', 'N/A')}")
-        lines.append(f"  Args: {spec.get('args', [])}")
+        if spec.get('url'):
+            # Header VALUES are never shown: they may be secret templates.
+            lines.append(f"  Type: {spec.get('type', '(none)')}")
+            lines.append(f"  URL: {spec.get('url')}")
+            lines.append(f"  Headers: {', '.join(sorted(spec.get('headers') or {})) or 'none'}")
+        else:
+            lines.append(f"  Command: {spec.get('command', 'N/A')}")
+            lines.append(f"  Args: {spec.get('args', [])}")
 
         env = spec.get('env', {})
         if env:
@@ -1140,13 +1209,12 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
         # Send connect request to background thread
         try:
-            spec = servers[server_name]
-            # Expand variables in command and args (e.g., ${workspaceRoot})
+            # The whole entry travels: the background thread decides the
+            # transport and expands command/args (stdio) or resolves headers
+            # (http/sse) at connect time.
             self._request_queue.put((MSG_CONNECT_SERVER, {
                 'name': server_name,
-                'command': expand_variables(spec.get('command')),
-                'args': expand_variables(spec.get('args', [])),
-                'env': spec.get('env', {}),
+                'spec': dict(servers[server_name]),
             }))
 
             status, result = self._response_queue.get(timeout=30)
@@ -1918,22 +1986,26 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
             # Helper to connect a single server
             async def connect_server(mgr: MCPClientManager, name: str, spec: dict) -> Tuple[bool, str]:
-                """Connect to a server and return (success, error_message)."""
-                # Expand variables in command and args (e.g., ${workspaceRoot})
-                cmd = expand_variables(spec.get('command', 'unknown'))
-                args = expand_variables(spec.get('args', []))
-                args_str = ' '.join(str(a) for a in args) if args else ''
+                """Connect to a server and return (success, error_message).
+
+                A failure (a bad entry, an unreachable url, a missing command)
+                is reported ONCE at WARNING naming the server, and the session
+                carries on without that server's tools (#1580).
+                """
+                try:
+                    coro, details = _connect_call(mgr, name, spec, expand_env)
+                except MCPConfigError as exc:
+                    error_msg = str(exc)
+                    self._failed_servers[name] = error_msg
+                    self._log_event(LOG_WARN, "Connection refused (configuration)",
+                                    server=name, details=error_msg)
+                    return False, error_msg
                 self._log_event(LOG_INFO, "Connecting to server", server=name,
-                              details=f"command: {cmd} {args_str}".strip())
+                              details=details)
                 try:
                     # Add timeout to prevent hanging on unresponsive servers
                     await asyncio.wait_for(
-                        mgr.connect(
-                            name,
-                            cmd,
-                            args,
-                            expand_env(spec.get('env', {}))
-                        ),
+                        coro,
                         timeout=15.0  # 15 second timeout per server
                     )
                     self._connected_servers.add(name)
@@ -1951,12 +2023,12 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 except asyncio.TimeoutError:
                     error_msg = "Connection timed out (15s)"
                     self._failed_servers[name] = error_msg
-                    self._log_event(LOG_ERROR, "Connection timed out", server=name, details="Server did not respond within 15 seconds")
+                    self._log_event(LOG_WARN, "Connection timed out", server=name, details="Server did not respond within 15 seconds")
                     return False, error_msg
                 except Exception as exc:
-                    error_msg = str(exc)
+                    error_msg = describe_failure(exc)
                     self._failed_servers[name] = error_msg
-                    self._log_event(LOG_ERROR, "Connection failed", server=name, details=error_msg, include_traceback=True)
+                    self._log_event(LOG_WARN, "Connection failed", server=name, details=error_msg)
                     return False, error_msg
 
             # Helper to update tool cache
@@ -2100,11 +2172,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
                         elif msg_type == MSG_CONNECT_SERVER:
                             # Connect to a specific server
                             name = data.get('name')
-                            spec = {
-                                'command': data.get('command'),
-                                'args': data.get('args', []),
-                                'env': data.get('env', {}),
-                            }
+                            spec = _connect_request_spec(data)
                             success, error = await connect_server(manager, name, spec)
                             if success:
                                 update_tool_cache(manager)

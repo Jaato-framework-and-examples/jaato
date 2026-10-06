@@ -15793,7 +15793,7 @@
      {
       "children": null,
       "default": null,
-      "description": "Explicit path to a .mcp.json (overrides the default workspace/user search).",
+      "description": "Explicit path to a .mcp.json (overrides the default workspace/user search). Each server entry's \"type\" is stdio (default: command/args/env), http (streamable HTTP: url/headers) or sse (url/headers); any other type is refused for that server. Remote header values may use ${VAR} or a whole pass:// / vault:// URI, resolved at connect time and sent only to the url's host. A remote server is an outbound connection from the runner, so an egress allowlist must include its host.",
       "enum": null,
       "free_form": false,
       "name": "config_path",
@@ -15802,7 +15802,7 @@
      {
       "children": null,
       "default": "default",
-      "description": "Env-var name globs (case-insensitive fnmatch) stripped from the INHERITED environment of every MCP server subprocess, so a model-invokable / third-party MCP server named in .mcp.json cannot read raw credentials the runner itself holds (provider key, tokens). A secret listed in a server's own 'env' is an explicit grant and is NOT scrubbed. 'default' (also when absent) = the framework set (*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off (announced at WARNING); a list may carry 'default' and '!NAME' exemption entries. Overrides the profile-level scrub_secret_env for this surface.",
+      "description": "Env-var name globs (case-insensitive fnmatch) stripped from the INHERITED environment of every MCP server subprocess, so a model-invokable / third-party MCP server named in .mcp.json cannot read raw credentials the runner itself holds (provider key, tokens). A secret listed in a server's own 'env' is an explicit grant and is NOT scrubbed. 'default' (also when absent) = the framework set (*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off (announced at WARNING); a list may carry 'default' and '!NAME' exemption entries. Overrides the profile-level scrub_secret_env for this surface. Applies to stdio servers only: an http/sse server is not a subprocess and inherits no environment.",
       "enum": null,
       "free_form": false,
       "name": "scrub_secret_env",
@@ -15813,10 +15813,36 @@
     "dynamic": false,
     "initial_plan_file": [],
     "kind": "tool",
+    "remote_rules": [
+     "any other \"type\" is refused for that server, never treated as stdio",
+     "url must be http:// or https:// with a host, no user:password@ and no ${VAR} (a secret belongs in a header, not a url)",
+     "a header value may use ${VAR} and may be a whole pass:// / vault:// secret URI; resolved at connect time in the runner, never stored expanded, never logged",
+     "configured headers are sent ONLY to the url's host; a request to another host (a redirect) has them removed",
+     "a remote server is an outbound connection from the runner: an egress allowlist must include its host",
+     "scrub_secret_env applies to stdio subprocesses only; a remote server inherits no environment",
+     "a stale Mcp-Session-Id (404 'Session terminated') reconnects once on the next call; a server that cannot connect leaves the session up without its tools, reported once at WARNING"
+    ],
     "tier": "runner",
-    "tools": []
+    "tools": [],
+    "transport_aliases": {
+     "streamable-http": "http"
+    },
+    "transports": [
+     {
+      "description": "subprocess over stdin/stdout: command, args, env (the default when \"type\" is absent)",
+      "type": "stdio"
+     },
+     {
+      "description": "streamable HTTP: url, headers (alias \"streamable-http\")",
+      "type": "http"
+     },
+     {
+      "description": "HTTP + server-sent events (the older remote transport): url, headers",
+      "type": "sse"
+     }
+    ]
    },
-   "text": "plugin: mcp\n  Plugin that provides MCP (Model Context Protocol) tool execution.\n  kind=tool  tier=runner\n  commands (typed directly in the TUI, not via the model):\n    mcp  subcommands: list, status, show, add, remove, connect, disconnect, reload, logs, help\n           Manage MCP server configuration (subcommands: list, show, add, remove, connect, disconnect, reload, status)\n  config (plugin_configs.mcp.*):\n    config_path            string        Explicit path to a .mcp.json (overrides the default workspace/user search).\n    scrub_secret_env       string|array  Env-var name globs (case-insensitive fnmatch) stripped from the INHERITED environment of every MCP server subprocess, so a model-invokable / third-party MCP server named in .mcp.json cannot read raw credentials the runner itself holds (provider key, tokens). A secret listed in a server's own 'env' is an explicit grant and is NOT scrubbed. 'default' (also when absent) = the framework set (*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off (announced at WARNING); a list may carry 'default' and '!NAME' exemption entries. Overrides the profile-level scrub_secret_env for this surface.  (default 'default')"
+   "text": "plugin: mcp\n  Plugin that provides MCP (Model Context Protocol) tool execution.\n  kind=tool  tier=runner\n  commands (typed directly in the TUI, not via the model):\n    mcp  subcommands: list, status, show, add, remove, connect, disconnect, reload, logs, help\n           Manage MCP server configuration (subcommands: list, show, add, remove, connect, disconnect, reload, status)\n  config (plugin_configs.mcp.*):\n    config_path            string        Explicit path to a .mcp.json (overrides the default workspace/user search). Each server entry's \"type\" is stdio (default: command/args/env), http (streamable HTTP: url/headers) or sse (url/headers); any other type is refused for that server. Remote header values may use ${VAR} or a whole pass:// / vault:// URI, resolved at connect time and sent only to the url's host. A remote server is an outbound connection from the runner, so an egress allowlist must include its host.\n    scrub_secret_env       string|array  Env-var name globs (case-insensitive fnmatch) stripped from the INHERITED environment of every MCP server subprocess, so a model-invokable / third-party MCP server named in .mcp.json cannot read raw credentials the runner itself holds (provider key, tokens). A secret listed in a server's own 'env' is an explicit grant and is NOT scrubbed. 'default' (also when absent) = the framework set (*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off (announced at WARNING); a list may carry 'default' and '!NAME' exemption entries. Overrides the profile-level scrub_secret_env for this surface. Applies to stdio servers only: an http/sse server is not a subprocess and inherits no environment.  (default 'default')\n  .mcp.json server \"type\":\n    stdio  subprocess over stdin/stdout: command, args, env (the default when \"type\" is absent)\n    http   streamable HTTP: url, headers (alias \"streamable-http\")\n    sse    HTTP + server-sent events (the older remote transport): url, headers\n  remote servers (http / sse):\n    - any other \"type\" is refused for that server, never treated as stdio\n    - url must be http:// or https:// with a host, no user:password@ and no ${VAR} (a secret belongs in a header, not a url)\n    - a header value may use ${VAR} and may be a whole pass:// / vault:// secret URI; resolved at connect time in the runner, never stored expanded, never logged\n    - configured headers are sent ONLY to the url's host; a request to another host (a redirect) has them removed\n    - a remote server is an outbound connection from the runner: an egress allowlist must include its host\n    - scrub_secret_env applies to stdio subprocesses only; a remote server inherits no environment\n    - a stale Mcp-Session-Id (404 'Session terminated') reconnects once on the next call; a server that cannot connect leaves the session up without its tools, reported once at WARNING"
   },
   "plugin memory": {
    "data": {

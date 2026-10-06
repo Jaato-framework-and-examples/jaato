@@ -31,10 +31,60 @@ MCP servers are configured in `.mcp.json` files. The plugin searches for configu
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Connection type (currently `stdio` supported) |
-| `command` | string | Command to start the MCP server |
-| `args` | array | Arguments to pass to the command |
-| `env` | object | Environment variables (supports `${VAR}` expansion) |
+| `type` | string | `stdio` (default when absent), `http` (streamable HTTP; alias `streamable-http`) or `sse`. Any other value is refused for that server |
+| `command` | string | stdio: command to start the MCP server |
+| `args` | array | stdio: arguments to pass to the command |
+| `env` | object | stdio: environment variables (supports `${VAR}` expansion) |
+| `url` | string | http/sse: the server endpoint, `http://` or `https://` |
+| `headers` | object | http/sse: request headers; values may use `${VAR}` or be a whole `pass://` / `vault://` URI |
+
+### Remote servers (`http` / `sse`)
+
+```json
+{
+  "mcpServers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {"Authorization": "Bearer ${CONTEXT7_API_KEY}"}
+    }
+  }
+}
+```
+
+No local proxy process (`npx mcp-remote`) is needed. The rules:
+
+- **The url is literal.** `http://` or `https://` with a host; no
+  `user:password@` and no `${VAR}` (a secret belongs in a header, where it
+  does not end up in logs). An http/sse entry without a valid url is refused.
+- **Header values are resolved at connect time**, in the runner, through the
+  same `expand_variables` every plugin config uses: `${VAR}` from the session
+  env / process env, then a value that is *wholly* a `pass://` / `vault://`
+  URI through the registered secret resolver. A value that does not resolve
+  (an unset variable, a scheme with no resolver) refuses that server, naming
+  the header, never the value. Resolved values live only inside the HTTP
+  client: the stored config, `mcp show`, logs and traces carry the template
+  or the header *name*.
+- **Headers are bound to the url's host**, the `web_fetch`
+  `secret_host_bindings` rule with the binding implied: a request to any other
+  host (a redirect the HTTP client follows) has every configured header
+  removed. Whoever writes `.mcp.json` chooses that host, so a header secret
+  is a grant to it, as a server's `env` is a grant to a stdio server; the
+  model-facing `mcp_reload` that would pick up an edited file is not
+  auto-approved.
+- **A remote server is an outbound connection from the runner.** An egress
+  allowlist must include its host. (The AppArmor runner profile already
+  allows outbound TCP.)
+- **`scrub_secret_env` does not apply**: it filters a subprocess's inherited
+  environment, and a remote server is not a subprocess.
+- **A stale session reconnects once.** When the server answers 404 to our
+  `Mcp-Session-Id` (it restarted or expired the session), the next call
+  reconnects once and retries once. A server that cannot connect at all leaves
+  the session running without its tools, reported once at WARNING naming the
+  server.
+
+Tool names (`mcp__<server>__<tool>`), `TRAIT_UNTRUSTED_SCHEMA` sanitization
+and untrusted-content wrapping are the same for remote and stdio servers.
 
 ### Example: GitHub MCP Server
 
