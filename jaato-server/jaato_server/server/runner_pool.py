@@ -700,6 +700,11 @@ class PoolManager:
             # no idle slot fitted, and the requests the template refused.
             "pool_selinux_fork_total": 0,
             "pool_selinux_fork_failures_total": 0,
+            # A virgin slot forked for a session no idle slot fitted,
+            # instead of a cold-spawned runner, and the requests the
+            # template could not fork (the session then cold-spawns).
+            "pool_demand_fork_total": 0,
+            "pool_demand_fork_failures_total": 0,
             # Number of times ``acquire_slot`` returned None (pool
             # empty when called).  Sessions in this state fall back
             # to cold-spawn — useful for sizing decisions.
@@ -1249,6 +1254,41 @@ class PoolManager:
         )
         return slot
 
+    def fork_slot_on_demand(self, key: SlotKey) -> Optional[PoolSlot]:
+        """Fork a virgin slot for a session no idle slot fitted.
+
+        The miss used to be served by a cold-spawned runner, which
+        imports everything itself and so holds its whole working set as
+        private memory (~135 MB measured, against ~25 MB for a slot
+        sharing the template's pages), and takes seconds to start.  A
+        cascade fanning out past the pool's floor paid that per stage.
+
+        A slot forked here is exactly what the replenish loop would have
+        forked: virgin, with the template's warm imports.  Everything
+        that binds it to the session (private ``/tmp``, the uid drop,
+        the AppArmor transition) happens at ``session.bootstrap``, as for
+        an idle virgin slot.  It is checked out to the caller, stamped
+        with *key*, and returns to the pool like any other.
+
+        Not bounded by ``max_size``: that bounds IDLE slots, and the
+        session this serves would have had a process either way.
+
+        ``None`` when the template could not fork; the caller cold-spawns.
+        """
+        raw = self._template_manager.request_fork_slot()
+        if raw is None:
+            self._incr("pool_demand_fork_failures_total")
+            return None
+        pid, sock = raw
+        slot = PoolSlot(pid=pid, sock=sock)
+        key.stamp(slot)
+        self._incr("pool_demand_fork_total")
+        logger.info(
+            "PoolManager: forked slot pid=%d on demand (no idle slot fitted; "
+            "cascade=%s)", pid, key.cascade_driver_id or "(standalone)",
+        )
+        return slot
+
     def return_slot_after_session(self, slot: PoolSlot) -> bool:
         """Return a slot to the idle pool after its session ended (Phase 2).
 
@@ -1509,11 +1549,14 @@ class PoolManager:
             slot.  High value relative to ``pool_acquire_miss_total``
             means pool is well-sized for the workload.
           - ``pool_acquire_miss_total``: ``acquire_slot`` returned
-            None.  Sessions fell back to cold-spawn.  If this is
-            growing fast, raise ``target_size`` or check
-            ``pool_replenish_failures_total``.  An SELinux session's
-            miss is followed by :meth:`fork_slot_into`, not a cold
-            spawn.
+            None.  The session then gets a slot forked for it
+            (:meth:`fork_slot_on_demand`, or :meth:`fork_slot_into` for
+            an SELinux session), and a cold spawn only if the template
+            cannot fork.  Growing fast means the floor is too low for
+            the workload: each miss pays a fork and a plugin bootstrap.
+          - ``pool_demand_fork_total`` / ``..._failures_total``: virgin
+            slots forked for a session at a miss, and the requests the
+            template could not fork (those sessions cold-spawned).
           - ``pool_selinux_fork_total`` / ``..._failures_total`` (phase
             4): slots forked into an SELinux boundary, and the requests
             the template could not fork.
