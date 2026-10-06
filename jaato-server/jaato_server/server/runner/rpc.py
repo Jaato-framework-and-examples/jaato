@@ -340,7 +340,6 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
 SEEN_REQUEST_ID_MEMORY = 256
 
 
-
 def slot_retire_reasons(registry: Any) -> List[str]:
     """The reasons plugins give for not reusing this pool slot (#1565).
 
@@ -369,6 +368,7 @@ def slot_retire_reasons(registry: Any) -> List[str]:
         if isinstance(reason, str) and reason:
             reasons.append(reason)
     return reasons
+
 
 class RunnerRPC:
     """Bidirectional dispatcher serving on a blocking Unix socket.
@@ -2250,7 +2250,8 @@ class RunnerRPC:
             reasons plugins gave through ``slot_retire_reason()`` (#1565):
             the reset succeeded but the process keeps memory nothing can
             free, so the daemon tears the slot down instead of pooling
-            it.  Empty when every plugin can be reused as is.  ``plugins_carried`` names the instances parked
+            it.  Empty when every plugin can be reused as is.
+            ``plugins_carried`` names the instances parked
             for the next session (empty for a standalone session, or
             when ``errors`` made the slot unpoolable).  ``(False,
             error)`` only on the structural "no session host" case

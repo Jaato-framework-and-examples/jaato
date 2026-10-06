@@ -522,7 +522,6 @@ def merge_pending_continuations(
     return text, attachments
 
 
-
 def _slot_retire_reasons(result: Any) -> List[str]:
     """The ``retire_slot`` reasons a runner's ``session.end`` answer carries (#1565).
 

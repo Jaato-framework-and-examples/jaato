@@ -120,7 +120,9 @@ class _StubServer:
                 try:
                     result = session_end(timeout=10.0)
                     errors = result.get("errors") if isinstance(result, dict) else None
-                    if errors == []:
+                    # #1565: a retire_slot reason closes the slot.
+                    retire = result.get("retire_slot") if isinstance(result, dict) else None
+                    if errors == [] and not retire:
                         pool_manager.return_slot_after_session(pool_slot)
                         cascade_returned = True
                 except Exception:  # noqa: BLE001
