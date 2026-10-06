@@ -67,6 +67,7 @@ from __future__ import annotations
 import os
 import pkgutil
 import re
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, FrozenSet, Optional, Set
@@ -212,8 +213,32 @@ def entry_point_distribution(ep: Any) -> Optional[str]:
     that is not a plain string yields ``None``.
     """
     dist = getattr(ep, "dist", None)
-    name = getattr(dist, "name", None) if dist is not None else None
-    return name if isinstance(name, str) else None
+    if dist is None:
+        return None
+    # ``Distribution.name`` re-reads and parses METADATA on every access.
+    # The registry reuses entry points across sessions (#1566), so the
+    # answer is memoised per real ``Distribution`` object (identity; mocks
+    # are not memoised).
+    memo = _dist_name_memo(dist)
+    if memo is not None and dist in memo:
+        return memo[dist]
+    name = getattr(dist, "name", None)
+    name = name if isinstance(name, str) else None
+    if memo is not None:
+        memo[dist] = name
+    return name
+
+
+_DIST_NAMES: "weakref.WeakKeyDictionary[Any, Optional[str]]" = (
+    weakref.WeakKeyDictionary())
+
+
+def _dist_name_memo(dist: Any):
+    """The memo for a real ``importlib.metadata.Distribution``, else ``None``."""
+    import importlib.metadata as _md
+    if not isinstance(dist, _md.Distribution) or type(dist).__hash__ is None:
+        return None
+    return _DIST_NAMES
 
 
 def is_builtin_module(module: str) -> bool:

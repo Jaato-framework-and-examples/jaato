@@ -112,7 +112,7 @@ from .claims import (
     write_claim,
 )
 from .embedding_load import load_model_offline_first
-from ..registry import SESSION_ENABLES_PLUGIN_KEY
+from ..registry import SESSION_ENABLES_PLUGIN_KEY, is_runner_hosted_mirror
 from .embedding_types import (
     EmbeddingProviderProtocol,
     SemanticMatcherProtocol,
@@ -392,6 +392,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # runner stamped it into ``initialize()``'s config; ``None`` when
         # nobody said.  ``False`` defers the embedder, never refuses it.
         self._session_enables_plugin: Optional[bool] = None
+        # True on the daemon's copy of a runner-served session (#1566): the
+        # embedding model is never loaded in this process.
+        self._runner_hosted_mirror: bool = False
         # Retained for back-compat with tests that directly inspect the
         # plugin state; points at the root bundle's matcher when present.
         # New code should iterate self._bundles instead.
@@ -1933,6 +1936,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._cached_init_config = config
         self._embedding_load_failed = False
         self._session_enables_plugin = config.get(SESSION_ENABLES_PLUGIN_KEY)
+        self._runner_hosted_mirror = is_runner_hosted_mirror(config)
         verdict = self._embedder_verdict(config)
         if verdict.eager:
             self._init_embedding_provider(config)
@@ -2000,8 +2004,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
     def _embedder_verdict(self, config: Dict[str, Any]) -> "_EmbedderVerdict":
         """Whether a session could use the embedder before anyone asks.
 
-        Eager only when every one holds: the session enables this plugin
-        (#1563 -- ``False`` from the runner defers; absent is "not known"
+        Eager only when every one holds: this is not the daemon's mirror
+        of a runner-served session (#1566 -- that copy never loads the
+        model), the session enables this plugin (#1563 -- ``False`` from the runner defers; absent is "not known"
         and does not), a semantic strategy, an indexed bundle (#1482), and
         an indexed bundle built with the model the provider would load
         (#1562).  A provider whose model cannot be named keeps the eager
@@ -2009,6 +2014,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         """
         verdict = _EmbedderVerdict(indexed=self._indexed_bundle_count(),
                                    total=len(self._bundles))
+        if self._runner_hosted_mirror:
+            verdict.reason = "daemon mirror of a runner-served session (#1566)"
+            return verdict
         if self._session_enables_plugin is False:
             verdict.reason = "plugin not enabled by the session"
         elif self._lookup_strategy not in ("hybrid", "semantic_only"):
@@ -2075,6 +2083,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         warned about once and not retried; callers degrade to tag lookup
         as they do with no provider.
         """
+        if self._runner_hosted_mirror:
+            # The daemon's copy of a runner-served session never loads the
+            # model (#1566): reference matching runs in the runner, and a
+            # vector the daemon needs is asked of the runner
+            # (``JaatoServer.embed_texts``).
+            return None
         provider = self._embedding_provider
         if provider is not None and provider.available:
             return provider

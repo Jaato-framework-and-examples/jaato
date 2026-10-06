@@ -27,6 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from ..subagent.config import expand_variables
+from ..registry import is_runner_hosted_mirror
 from .lsp_client import (
     LSPClient, ServerConfig, Location, Diagnostic, Hover,
     TextEdit, WorkspaceEdit, CodeAction, Range, Position
@@ -692,8 +693,15 @@ class LSPToolPlugin(RunnerForwardingMixin):
             debug_log_raw = ''
         self._debug_log_path_raw = str(debug_log_raw)
 
-        self._trace("initialize: starting background thread")
-        self._ensure_thread()
+        if is_runner_hosted_mirror(config):
+            # The daemon's copy of a runner-served session (#1566): the
+            # runner's copy starts the language servers; this one keeps
+            # its configuration for completions and the AppArmor walk.
+            self._trace("initialize: daemon mirror of a runner session; "
+                        "no background thread, no language servers")
+        else:
+            self._trace("initialize: starting background thread")
+            self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
 

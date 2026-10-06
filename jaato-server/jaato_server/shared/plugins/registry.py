@@ -63,6 +63,75 @@ _IDENTITY_ONLY_CONFIG_KEYS = frozenset({"agent_name"})
 # known".  Read by ``references`` to defer its embedding model (#1563).
 SESSION_ENABLES_PLUGIN_KEY = "session_enables_plugin"
 
+# Config key stamped by :meth:`PluginRegistry._augment_plugin_config`
+# when :meth:`PluginRegistry.set_runner_hosted` marked the registry as the
+# DAEMON's copy of a session whose tools run in a runner process (#1566).
+# ``True`` means "nothing in this process will execute your tools": a
+# plugin must not start per-session process resources here (a background
+# thread, a server subprocess, a model load), because the runner's own
+# copy already does and the daemon's would be a duplicate nobody uses.
+# Only ever ``True`` when present; a profile cannot set it (the registry
+# drops a supplied value), and the embedded / standalone paths never see
+# it.  Read through :func:`is_runner_hosted_mirror`.
+RUNNER_HOSTED_SESSION_KEY = "runner_hosted_session"
+
+
+def is_runner_hosted_mirror(config: Optional[Dict[str, Any]]) -> bool:
+    """Whether ``config`` says this plugin instance is the daemon's mirror (#1566).
+
+    The one reading of :data:`RUNNER_HOSTED_SESSION_KEY`, so every plugin
+    that honours it agrees on what counts: the literal ``True`` and
+    nothing else.  ``None`` / a missing key / any other value is "this
+    process runs the tools", which is what every non-runner caller gets.
+    """
+    return bool(config) and config.get(RUNNER_HOSTED_SESSION_KEY) is True
+
+
+# Process-level memo of ``importlib.metadata.entry_points(group=...)``
+# (#1566).  The scan reads every installed distribution's metadata and was
+# the largest single cost of building a registry: a daemon serving a
+# K-stage cascade paid it once per stage, and the runner again.  A
+# distribution set changes only when something is installed or removed,
+# and that changes the mtime of the ``sys.path`` directory it lands in,
+# so the key carries every ``sys.path`` entry's mtime: a plugin installed
+# while the daemon runs is still seen by the next session.  The function
+# object is in the key too, so a test that patches ``entry_points`` gets
+# its own answer rather than a cached real one.
+_ENTRY_POINT_SCAN_CACHE: Dict[tuple, tuple] = {}
+_ENTRY_POINT_SCAN_CACHE_MAX = 32
+
+
+def _sys_path_signature() -> tuple:
+    """Every ``sys.path`` entry with its mtime (``None`` when unreadable)."""
+    sig = []
+    for entry in sys.path:
+        try:
+            mtime = os.stat(entry or os.getcwd()).st_mtime_ns
+        except OSError:
+            mtime = None
+        sig.append((entry, mtime))
+    if "" in sys.path:
+        sig.append(("<cwd>", os.getcwd()))
+    return tuple(sig)
+
+
+def scan_entry_points(group: str) -> tuple:
+    """``importlib.metadata.entry_points(group=group)``, memoised per process.
+
+    Returns a tuple of the entry points.  See
+    :data:`_ENTRY_POINT_SCAN_CACHE` for when an answer is reused.
+    """
+    scan = importlib.metadata.entry_points
+    key = (group, scan, _sys_path_signature())
+    cached = _ENTRY_POINT_SCAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    eps = tuple(scan(group=group))
+    if len(_ENTRY_POINT_SCAN_CACHE) >= _ENTRY_POINT_SCAN_CACHE_MAX:
+        _ENTRY_POINT_SCAN_CACHE.clear()
+    _ENTRY_POINT_SCAN_CACHE[key] = eps
+    return eps
+
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
@@ -501,6 +570,9 @@ class PluginRegistry:
         # The plugin names the session's profile enables (#1563), or
         # ``None`` when nobody said.  See :meth:`set_session_plugins`.
         self._session_plugins: Optional[frozenset] = None
+        # Whether this registry is the daemon's copy of a runner-served
+        # session (#1566).  See :meth:`set_runner_hosted`.
+        self._runner_hosted: bool = False
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
         # Bootstrap timing: plugin name -> timing data
@@ -830,9 +902,9 @@ class PluginRegistry:
             return discovered
 
         try:
-            # Python 3.10+ API
+            # Python 3.10+ API; memoised per process (#1566).
             if sys.version_info >= (3, 10):
-                eps = importlib.metadata.entry_points(group=entry_point_group)
+                eps = scan_entry_points(entry_point_group)
             else:
                 # Python 3.9 compatibility
                 all_eps = importlib.metadata.entry_points()
@@ -2213,6 +2285,29 @@ class PluginRegistry:
         self._session_plugins = (
             frozenset(names) if names is not None else None)
 
+    def set_runner_hosted(self, hosted: bool) -> None:
+        """Mark this registry as the daemon's copy of a runner-served session (#1566).
+
+        On the default path a session's tools run in a runner process
+        with its own registry, while the daemon keeps a second one whose
+        instances it reads for completions, tool status, the AppArmor
+        rule walk, auth commands, ``daemon_callable`` bodies and the
+        plugin-status replay.  Those readers need the instances to exist
+        and be configured; none of them needs a plugin's per-session
+        process resources.  Once set, :meth:`_augment_plugin_config`
+        stamps :data:`RUNNER_HOSTED_SESSION_KEY` into every plugin's
+        config, and the plugins that start such resources in
+        ``initialize()`` (``mcp`` and ``lsp`` threads with their server
+        subprocesses, the ``interactive_shell`` reaper, the
+        ``references`` embedding model) skip them.  Nothing else changes:
+        every plugin is still discovered, initialized and exposed.
+
+        Set by ``JaatoServer._mark_registry_runner_hosted`` when the
+        session has a runner; never set by the runner, the embedded
+        client or the standalone WS path.
+        """
+        self._runner_hosted = bool(hosted)
+
     def _config_requires_reinit(
         self, name: str, config: Dict[str, Any],
     ) -> bool:
@@ -2368,6 +2463,10 @@ class PluginRegistry:
         :data:`SESSION_ENABLES_PLUGIN_KEY` says whether that list names
         the plugin (#1563).
 
+        :data:`RUNNER_HOSTED_SESSION_KEY` is stamped (``True``) only when
+        :meth:`set_runner_hosted` marked the registry, and a caller-supplied
+        value is always dropped (#1566).
+
         Returns the augmented config dict, or the original
         ``config`` if no framework values are set yet (preserving
         the pre-fix behavior when callers bypass the setters).
@@ -2385,12 +2484,19 @@ class PluginRegistry:
             framework_keys[SESSION_ENABLES_PLUGIN_KEY] = (
                 name in self._session_plugins)
 
-        if not framework_keys:
+        supplied_mirror = bool(config) and RUNNER_HOSTED_SESSION_KEY in config
+        if not framework_keys and not self._runner_hosted and not supplied_mirror:
             return config
 
         augmented = dict(config) if config else {}
         for k, v in framework_keys.items():
             augmented.setdefault(k, v)
+        # The mirror stamp is the registry's alone (#1566): forced when
+        # set, removed when a caller supplied it, so a profile cannot turn
+        # the runner's own copy of a plugin into a resource-less mirror.
+        augmented.pop(RUNNER_HOSTED_SESSION_KEY, None)
+        if self._runner_hosted:
+            augmented[RUNNER_HOSTED_SESSION_KEY] = True
         return augmented
 
     def get_config_root(self) -> Optional[str]:

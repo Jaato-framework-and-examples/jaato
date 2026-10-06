@@ -76,8 +76,9 @@ def discover_providers() -> Dict[str, Callable[[], ModelProviderPlugin]]:
     """
     try:
         if sys.version_info >= (3, 10):
-            from importlib.metadata import entry_points
-            eps = entry_points(group=MODEL_PROVIDER_ENTRY_POINT)
+            # Memoised per process, like the plugin registry's scan (#1566).
+            from ..registry import scan_entry_points
+            eps = scan_entry_points(MODEL_PROVIDER_ENTRY_POINT)
         else:
             from importlib.metadata import entry_points
             all_eps = entry_points()

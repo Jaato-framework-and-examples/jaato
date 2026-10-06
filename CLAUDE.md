@@ -5197,7 +5197,7 @@ use it:
 |---|---|---|
 | every indexed bundle was built with another model (#1562) | eager, then `_attach_matcher` skipped each one: ~680 MB, ~11 s for nothing | eager only when an indexed bundle's `embedding_model` equals the model the provider would load. That is `plugin_configs.references.embedding_model` when set (nothing constructed), else the provider's own `model_name`, read from a provider that is DISCOVERED but not loaded (`load_model` is a separate step). A provider naming no model keeps the eager load and says why. `_init_bundle_matchers` does not load the model to attach nothing either |
 | the profile does not list `references` (#1563) | the runner initializes every discovered plugin, so it loaded anyway | the runner records the profile's plugin list (`PluginRegistry.set_session_plugins`, from `envelope.plugins`), and `_augment_plugin_config` stamps `session_enables_plugin: true/false` into each plugin's config; `false` defers |
-| the daemon's own copy of the plugin (#1566) | the daemon builds a registry per session and `expose_all`s every plugin an unfiltered `discover()` found, so its `references` ran the same decision and could load a model in the DAEMON process | `JaatoServer._record_session_plugins_on_registry` records `profile.plugins` before both daemon-side paths (`create_registry_and_discover` and stage 3 of `initialize`), so the daemon's copy defers too. Building that registry at all is #1566 |
+| the daemon's own copy of the plugin (#1566) | the daemon builds a registry per session and `expose_all`s every plugin an unfiltered `discover()` found, so its `references` ran the same decision and could load a model in the DAEMON process | `JaatoServer._record_session_plugins_on_registry` records `profile.plugins` before both daemon-side paths (`create_registry_and_discover` and stage 3 of `initialize`), so the daemon's copy defers too. When the profile DOES list it, the daemon's registry of a runner-served session is a mirror and never loads the model (see [The Daemon's Registry Is a Mirror](#the-daemons-registry-is-a-mirror-1566)) |
 | a pool slot after `session.end` (#1565) | `reset_for_next_session` was a no-op, so torch and the weights (~1.5 GB) stayed on the slot | `reset_for_next_session` and `shutdown` release the provider, every bundle matcher and the legacy matcher, ask the provider for `unload_model` / `unload` / `close` when it has one, and `gc.collect()`. `shutdown` also drops the cached init config. That frees the objects, not the memory (measured: ~1.07 GB of anonymous heap stayed on the returned slot; glibc keeps the pages and torch's import-time heap goes only with the process), so a slot on which a model load was attempted is **retired**: the plugin's `slot_retire_reason()` says so, the runner's `session.end` reports it as `retire_slot` (and parks nothing), and `JaatoServer._settle_pool_slot` closes the slot instead of returning it, counted as `pool_slot_retired_total` |
 
 The bootstrap line names it: `indexed_bundles=1/1 compatible=0,
@@ -5232,6 +5232,68 @@ stages all load the model gets no warm reuse.
 
 Guards: `jaato_server/shared/tests/test_references_embedder_memory_1562.py`,
 eight reversions, and `test_a_model_slot_is_retired_1565.py`, three.
+
+### The Daemon's Registry Is a Mirror (#1566)
+
+On a runner-served session (the default) the tools run in the runner,
+against the runner's registry. The daemon built a second registry for
+every `session.new` and initialized every plugin in it: discovery twice,
+and every per-session process resource twice. With one stdio server in
+`.mcp.json` the daemon's copy cost ~1.1 s and a server subprocess per
+session; the `references` copy could load an embedding model in the
+daemon, which never runs reference matching.
+
+The daemon still reads that registry, so every plugin is still
+discovered, initialized and exposed:
+
+| Reader | Needs |
+|---|---|
+| `resolve_plugin_apparmor_rules` (before `initialize`) | discovered instances (`all_plugins`, `get_apparmor_rules`) |
+| `CommandRouter` completions, `tools list/enable/disable` | exposed instances, `get_user_commands` / `get_command_completions` / `get_tool_status` |
+| `daemon_callable` bodies (`courier`) | the instance wired by `set_session_manager` |
+| subagent restore and hooks, todo, permission verbs, prompt library, `environment` aspects, `_find_plugin_for_command` | `get_plugin` |
+| plugin-status replay (`emit_current_state`) | exposed instances |
+
+None of them needs a thread, a server subprocess or a model.
+`JaatoServer._mark_registry_runner_hosted` (stage 3 of `initialize`,
+before `expose_all`) calls `PluginRegistry.set_runner_hosted(True)` when
+`_runner_rpc` is set; the registry then stamps `runner_hosted_session:
+True` into every plugin's config (`is_runner_hosted_mirror`). A profile
+cannot set the key: the registry drops a supplied value. Honoured by:
+
+| Plugin | On the mirror |
+|---|---|
+| `mcp` | no background thread, no server connections |
+| `lsp` | no background thread, no language servers |
+| `interactive_shell` | no reaper thread |
+| `references` | the embedder verdict is never eager and `_ensure_embedding_provider` answers `None`: the model is never loaded in the daemon (vectors the daemon needs are asked of the runner, `JaatoServer.embed_texts`) |
+
+The embedded client, standalone WS and a session whose runner spawn fell
+back have no `_runner_rpc`, are unmarked, and behave as before. An
+out-of-tree plugin that starts resources in `initialize()` should read
+`is_runner_hosted_mirror(config)` too.
+
+**Discovery is memoised per process.** `importlib.metadata.entry_points`
+read every installed distribution's metadata on every registry build
+(the largest single cost of discovery, in the daemon and the runner
+alike). `registry.scan_entry_points` caches it keyed on the group, the
+`entry_points` function object and every `sys.path` entry's mtime, so a
+distribution installed while the daemon runs is seen by the next
+session; `entry_point_distribution` memoises the parsed name per real
+`Distribution`. Model-provider discovery uses the same scan.
+
+Measured (this container, echo provider): a warm registry build went
+from discover 28 ms / teardown 106 ms / 42 ms CPU to 4 ms / 0.4 ms /
+12 ms; with one MCP server, 1080 ms to 17 ms per session.
+`scripts/bench_cascade_fanout.py` (now with a `daemon_cpu` column) at
+K=16 went from 20.4-21.7 to 19.2-19.4 daemon CPU seconds; registry
+frames in a py-spy profile of that run fell from 114 to 65 samples, 30
+of them first-use imports. Not done: the directory scan
+(`pkgutil.iter_modules`) still runs per build, and the daemon still
+constructs every plugin.
+
+Guard: `jaato_server/shared/tests/test_daemon_registry_is_a_mirror_1566.py`,
+ten reversions.
 
 ### Pages Only From Catalog Templates
 

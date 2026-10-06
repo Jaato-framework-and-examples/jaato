@@ -59,6 +59,7 @@ from jaato_server.shared.secret_scrub import (
 )
 from jaato_server.shared.command_analysis import UnanalyzableCommand
 from ..command_containment import first_denied_path
+from ..registry import is_runner_hosted_mirror
 from ..workspace_home import resolve_home_path, home_exec_apparmor_rules
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
@@ -248,7 +249,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
 
         self._initialized = True
         self._unconfined_announced = False
-        self._start_reaper()
+        self._start_reaper_unless_mirror(config)
         self._trace(
             f"initialize: max_sessions={self._max_sessions}, "
             f"max_lifetime={self._max_lifetime}, "
@@ -1424,6 +1425,15 @@ IMPORTANT NOTES:
         return result
 
     # --- Reaper thread ---
+
+    def _start_reaper_unless_mirror(self, config: Optional[Dict[str, Any]]) -> None:
+        """Start the reaper, except on the daemon's copy of a runner-served session (#1566).
+
+        That copy spawns no shells (the runner's copy does), so a reaper
+        there would be one idle thread per session for nothing.
+        """
+        if not is_runner_hosted_mirror(config):
+            self._start_reaper()
 
     def _start_reaper(self) -> None:
         """Start the background reaper thread."""

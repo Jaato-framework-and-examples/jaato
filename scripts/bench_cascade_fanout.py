@@ -28,6 +28,8 @@ Per configuration it prints one row:
     misses       pool acquire misses during the run (cold spawns)
     runners_max  most runner processes alive at once (template excluded)
     priv_mb_max  most Private_Dirty summed over those runners (MB)
+    daemon_cpu   CPU seconds the DAEMON process spent during the fan-out
+                 (utime + stime, all threads; runners not included)
 
 Usage:
     .venv/bin/python scripts/bench_cascade_fanout.py --k 2 4 8 \\
@@ -93,6 +95,16 @@ def _runner_pids(daemon_pid: int) -> List[int]:
             continue
         pids.append(pid)
     return pids
+
+
+def _cpu_seconds(pid: int) -> float:
+    """User + system CPU seconds of one process (all its threads)."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except OSError:
+        return 0.0
+    # Fields after the ``)``: state is index 0, utime 11, stime 12.
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
 def _private_dirty_kb(pid: int) -> int:
@@ -261,12 +273,14 @@ async def _run_fanout(daemon: Daemon, k: int, turns: int, echo: Dict,
     sampler = Sampler(daemon_pid=daemon.proc.pid)
     sampler.start()
     cascade = uuid.uuid4().hex
+    cpu0 = _cpu_seconds(daemon.proc.pid)
     t0 = time.monotonic()
     results = await asyncio.gather(*(
         _stage(daemon, i, cascade, turns, echo, plugins, t0,
                session_timeout)
         for i in range(k)))
     wall = time.monotonic() - t0
+    daemon_cpu = _cpu_seconds(daemon.proc.pid) - cpu0
     sampler.stop()
     misses_after = await _pool_misses(daemon)
     opens = [r.open_s for r in results]
@@ -284,6 +298,7 @@ async def _run_fanout(daemon: Daemon, k: int, turns: int, echo: Dict,
         "misses": misses,
         "runners_max": sampler.runners_max,
         "priv_mb_max": sampler.priv_kb_max / 1024.0,
+        "daemon_cpu": daemon_cpu,
         "errors": [r.error for r in results if r.error],
     }
 
@@ -297,11 +312,11 @@ def _row(jitter: float, r: Dict) -> str:
             f"{r['open_max']:>8.2f} {r['all_open']:>8.2f} "
             f"{r['turn_p50']:>8.2f} {r['turn_max']:>8.2f} "
             f"{r['wall']:>7.2f} {misses:>6} {r['runners_max']:>11} "
-            f"{r['priv_mb_max']:>11.1f}")
+            f"{r['priv_mb_max']:>11.1f} {r['daemon_cpu']:>10.2f}")
 
 
 HEADER = ("  k jitter_ms open_p50 open_max all_open turn_p50 turn_max "
-          "   wall misses runners_max priv_mb_max")
+          "   wall misses runners_max priv_mb_max daemon_cpu")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
