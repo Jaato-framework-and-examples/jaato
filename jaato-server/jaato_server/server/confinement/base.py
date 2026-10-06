@@ -83,6 +83,13 @@ class ConfinementHandle:
         complain: The kernel loaded the label and does not enforce it
             (AppArmor complain mode, SELinux permissive domain, #1014).
             A session record must then not claim a boundary.
+        enforcing_attested: SELinux only: the daemon saw the host enforcing
+            and neither the runner nor the child domain permissive when it
+            provisioned the boundary (#1519).  Positive evidence, so
+            ``False`` when either half could not be read.  Shipped on the
+            envelope because a confined task cannot ask it: neither jaato
+            domain may read ``/sys/fs/selinux`` or compute an access vector,
+            and the notebook kernel needs it to claim the SELinux tier.
     """
 
     backend: str
@@ -91,6 +98,7 @@ class ConfinementHandle:
     child_label: str
     grants: Dict[str, Any] = field(default_factory=dict)
     complain: bool = False
+    enforcing_attested: bool = False
 
 
 @runtime_checkable
@@ -128,13 +136,16 @@ def selinux_descriptor(handle: "ConfinementHandle") -> Dict[str, str]:
 
     Carries ``confinement_id`` beside the two domains: SELinux has no
     profile name to read the id back out of, and the runner keys its
-    session tmpdir on it (#1171).
+    session tmpdir on it (#1171).  ``enforcing`` is
+    :attr:`ConfinementHandle.enforcing_attested` (#1519); a runner reads an
+    absent key, an older daemon's, as "not attested".
     """
     return {
         "backend": handle.backend,
         "label": handle.label,
         "child_label": handle.child_label,
         "confinement_id": handle.confinement_id,
+        "enforcing": bool(handle.enforcing_attested),
     }
 
 

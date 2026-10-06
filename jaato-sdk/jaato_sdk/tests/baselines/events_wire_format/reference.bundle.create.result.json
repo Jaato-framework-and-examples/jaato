@@ -1,0 +1,12 @@
+{
+  "type": "reference.bundle.create.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "ok": true,
+  "category": "",
+  "error": "",
+  "bundle": "",
+  "indexed": false,
+  "bundles": []
+}

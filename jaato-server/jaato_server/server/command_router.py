@@ -21,9 +21,13 @@ from jaato_server.server import pool_admin
 from jaato_server.server.event_sink import EventSink, client_peer
 from jaato_server.server.session_manager import SessionManager, session_picker_fields
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
+from jaato_server.shared.workspace_ownership import inherit_owner, inherit_owner_files
 from jaato_server.shared.path_utils import describe_relative_path
 from jaato_server.shared.session_id import is_safe_session_id
-from jaato_server.shared.peer_identity import unreachable_client_paths
+from jaato_server.shared.peer_identity import (
+    ACCESS_READ,
+    unreachable_client_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,8 @@ _ROUTED_REQUEST_HANDLERS = {
     # The curator's view of the catalog and its typed links (1.33).
     "ReferenceCatalogRequest": "_handle_reference_catalog_request",
     "ReferenceLinksUpdateRequest": "_handle_reference_links_request",
+    # Creating a workspace sub-bundle, unindexed (1.36, #1478).
+    "ReferenceBundleCreateRequest": "_handle_reference_bundle_create_request",
     # The runner pool (1.35): read or resize it on a running daemon.
     "PoolStatusRequest": "_handle_pool_status_request",
 }
@@ -94,6 +100,18 @@ def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     raw = payload.get("attachments")
     return [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+
+
+def _hand_command_files_to_workspace(workspace: Optional[str]) -> None:
+    """Hand the files a daemon-side user command left in ``.jaato/`` to the workspace's owner.
+
+    An auth command (``<provider>-auth key``) stores its credential in
+    ``<workspace>/.jaato/`` on the daemon's account, and the workspace's
+    runner, which may run as the workspace owner, must read it.  No
+    workspace, nothing to hand.
+    """
+    if workspace:
+        inherit_owner_files(os.path.join(workspace, ".jaato"), workspace)
 
 
 @dataclass
@@ -489,7 +507,7 @@ class CommandRouter:
             ))
             return
         refusals = unreachable_client_paths(
-            [("workspace", workspace_path)],
+            [("workspace", workspace_path, ACCESS_READ)],
             # Through the shared tolerance, not a direct attribute read: a
             # sink predating ``get_client_peer`` must contribute "no peer"
             # rather than raise, exactly as it does inside the composite.
@@ -641,11 +659,13 @@ class CommandRouter:
             ReferenceClaimsRequest,
             ReferenceCurationRequest,
             ReferenceLinksUpdateRequest,
+            ReferenceBundleCreateRequest,
             PoolStatusRequest,
         )
         if isinstance(event, (HistoryRequest, HistoryPageRequest,
                               ReferenceClaimsRequest, ReferenceCurationRequest,
                               ReferenceCatalogRequest, ReferenceLinksUpdateRequest,
+                              ReferenceBundleCreateRequest,
                               PoolStatusRequest)):
             getattr(self, _ROUTED_REQUEST_HANDLERS[type(event).__name__])(
                 client_id, event, session_id)
@@ -746,6 +766,10 @@ class CommandRouter:
         if cmd in ("reference.promote", "reference.dismiss"):
             self._handle_reference_curation(
                 client_id, cmd, args, workspace_path, session_id=session_id)
+            return True
+        if cmd == "reference.bundle.create":
+            self._answer_reference_bundle_create(
+                client_id, " ".join(args), workspace_path, session_id, request_id="")
             return True
         if cmd in (pool_admin.VERB_STATUS, pool_admin.VERB_RESIZE):
             self._handle_pool_command(client_id, cmd, args)
@@ -922,6 +946,7 @@ class CommandRouter:
             new_content, ignored = toggle_gitignore_pattern(existing, pattern)
             with open(gitignore_path, "w", encoding="utf-8") as fh:
                 fh.write(new_content)
+            inherit_owner(gitignore_path, workspace)
         except OSError as exc:
             logger.warning("workspace.ignore: client=%s could not write %s: %s",
                            client_id, gitignore_path, exc)
@@ -1016,7 +1041,8 @@ class CommandRouter:
             reference_file=outcome.reference_file,
             warnings=list(outcome.warnings), bundle=outcome.bundle,
             reconcile=outcome.reconcile,
-            reconcile_detail=outcome.reconcile_detail))
+            reconcile_detail=outcome.reconcile_detail,
+            revised=outcome.revised))
 
     def _workspace_embedder(
         self, client_id: str, session_id: Optional[str], workspace: str,
@@ -1038,6 +1064,50 @@ class CommandRouter:
             if ws and os.path.realpath(ws) == target and hasattr(server, "embed_texts"):
                 return server.embed_texts
         return None
+
+    def _handle_reference_bundle_create_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``ReferenceBundleCreateRequest`` (1.36), echoing ``request_id``."""
+        self._answer_reference_bundle_create(
+            client_id, event.name, self._event_sink.get_client_workspace(client_id),
+            session_id, request_id=event.request_id)
+
+    def _answer_reference_bundle_create(
+        self, client_id: str, name: str, client_workspace: Optional[str],
+        session_id: Optional[str], *, request_id: str,
+    ) -> None:
+        """Create one unindexed workspace sub-bundle and send the one answer (#1478).
+
+        Daemon-level for the reason promotion is: a confined runner cannot
+        write ``.jaato/references/``.  The workspace is
+        :meth:`resolve_caller_workspace`'s; the owner gate reads the
+        transport's identity, never the request.  The work and every refusal
+        are :func:`~.reference_curation.create_bundle`'s.  The typed
+        ``reference.bundle.create <name>`` answers with ``request_id=""``.
+        """
+        from jaato_sdk.events import ReferenceBundleCreateResultEvent
+
+        from .reference_curation import create_bundle
+
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+        if not workspace:
+            self._event_sink.send_event(client_id, ReferenceBundleCreateResultEvent(
+                request_id=request_id, ok=False, category="no_workspace", bundle=name,
+                error="reference.bundle.create: the caller has no workspace "
+                      f"({_describe_sources(sources)})"))
+            return
+        user_id = self._event_sink.get_client_user(client_id)
+        outcome = create_bundle(workspace, name,
+                                owner=self._workspace_owner(workspace), user_id=user_id)
+        logger.info("reference.bundle.create: client=%s user=%s bundle=%s ok=%s "
+                    "category=%s", client_id, user_id or "-", name, outcome.ok,
+                    outcome.category or "-")
+        self._event_sink.send_event(client_id, ReferenceBundleCreateResultEvent(
+            request_id=request_id, ok=outcome.ok, category=outcome.category,
+            error=outcome.error, bundle=outcome.bundle, indexed=outcome.indexed,
+            bundles=outcome.bundles))
 
     def _handle_reference_claims_request(
         self, client_id: str, event, session_id: Optional[str] = None,
@@ -3053,6 +3123,7 @@ class CommandRouter:
 
             parsed_args = parse_command_args(cmd_def, ' '.join(args)) if cmd_def else {}
             result = plugin.execute_user_command(command, parsed_args)
+            _hand_command_files_to_workspace(workspace)
 
             # Send accumulated _emit() output as a single system message
             if output_parts:
@@ -3682,6 +3753,7 @@ class CommandRouter:
 
         with open(env_path, 'w') as f:
             f.writelines(lines)
+        inherit_owner(env_path, workspace_path)
 
 
 # Module-level helpers (moved from JaatoDaemon static methods)

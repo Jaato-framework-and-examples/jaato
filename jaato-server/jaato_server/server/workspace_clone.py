@@ -41,7 +41,9 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+from jaato_server.shared.workspace_ownership import tree_owner
 
 logger = logging.getLogger(__name__)
 
@@ -203,12 +205,47 @@ async def _drain_stderr(stream: asyncio.StreamReader, reader: _ProgressReader) -
     await reader.feed_line(pending)
 
 
+def _clone_identity(workspace: Path) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """``(subprocess kwargs, env overrides)`` that run git as the workspace's owner.
+
+    A root daemon cloning into a workspace an account owns runs ``git`` as
+    that account (:func:`jaato_server.shared.workspace_ownership.tree_owner`), so the checkout
+    is the account's from the first byte and a repository's content is
+    never handled by a root process.  ``HOME`` is the account's, so git
+    reads that account's configuration rather than root's.  Anything else
+    (a non-root daemon, a root-owned workspace) runs git as before.
+
+    Raises:
+        ValueError: the owning uid has no passwd entry, so no ``HOME`` and
+            no supplementary groups can be named for it.
+    """
+    owner = tree_owner(str(workspace))
+    if owner is None:
+        return {}, {}
+    import pwd  # POSIX only; reached only on a root POSIX daemon
+
+    uid, gid = owner
+    try:
+        pw = pwd.getpwuid(uid)
+    except KeyError as exc:
+        raise ValueError(f"the workspace owner uid {uid} has no passwd entry") from exc
+    groups = [g for g in os.getgrouplist(pw.pw_name, gid) if g != gid]
+    kwargs: Dict[str, Any] = {"user": uid, "group": gid, "extra_groups": groups}
+    env = {"HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name}
+    return kwargs, env
+
+
 async def _run_git_clone(
     argv: List[str], env: Dict[str, str], reader: _ProgressReader,
+    run_as: Optional[Dict[str, Any]] = None,
 ) -> int:
-    """Run the clone, streaming stderr through *reader*; returns the exit code."""
+    """Run the clone, streaming stderr through *reader*; returns the exit code.
+
+    *run_as* carries ``user`` / ``group`` / ``extra_groups`` for
+    :func:`asyncio.create_subprocess_exec` (see :func:`_clone_identity`).
+    """
     proc = await asyncio.create_subprocess_exec(
-        *argv, env=env,
+        *argv, env=env, **(run_as or {}),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -253,9 +290,13 @@ async def clone_one(
     if spec.branch:
         argv += ["--branch", spec.branch]
     argv += ["--", url_for(spec.repo), str(target)]
-    env = {**os.environ, **git_auth_env(token)}
     try:
-        code = await _run_git_clone(argv, env, reader)
+        run_as, identity_env = _clone_identity(workspace)
+    except (OSError, ValueError) as exc:
+        return f"could not run git as the workspace owner: {exc}"
+    env = {**os.environ, **identity_env, **git_auth_env(token)}
+    try:
+        code = await _run_git_clone(argv, env, reader, run_as)
     except OSError as exc:
         code, reader.messages = -1, [f"could not run git: {exc}"]
     if code == 0:

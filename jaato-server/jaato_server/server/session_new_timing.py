@@ -7,21 +7,23 @@ because the daemon loop was stalled for 121 s.  The log stopped at
 confirmation left.  This module logs one line per phase, with elapsed
 milliseconds since the request was read and since the previous phase:
 
-====================  ====================================================
-phase                 where
-====================  ====================================================
-received              the transport read the ``session.new`` frame
-handler_started       ``SessionManager.create_session`` began (the gap
-                      from ``received`` is executor queueing)
-runner_ready          a pool slot was claimed or a runner spawned
-bootstrap_acked       the runner acknowledged ``session.bootstrap``
-server_initialized    ``JaatoServer.initialize`` succeeded
-session_created       the session is registered and saved
-answer_queued         the confirmation (or refusal) went to the client's
-                      send queue
-answer_written        the transport WROTE that frame to the socket -- the
-                      phase the incident had no record of
-====================  ====================================================
+=========================  ====================================================
+phase                      where
+=========================  ====================================================
+received                   the transport read the ``session.new`` frame
+handler_started            ``SessionManager.create_session`` began (the gap
+                           from ``received`` is executor queueing)
+runner_ready               a pool slot was claimed or a runner spawned
+bootstrap_acked            the runner acknowledged ``session.bootstrap``
+server_initialized         ``JaatoServer.initialize`` succeeded
+workspace_monitor_started  the workspace monitor seeded its baseline (a walk
+                           of the whole tree; #1553)
+session_created            the session is registered and saved
+answer_queued              the confirmation (or refusal) went to the client's
+                           send queue
+answer_written             the transport WROTE that frame to the socket -- the
+                           phase the incident had no record of
+=========================  ====================================================
 
 Every line carries :data:`PHASE_TOKEN`, the request's correlation id and,
 once known, the session id, so one ``grep`` reconstructs a create.

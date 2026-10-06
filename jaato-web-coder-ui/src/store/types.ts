@@ -569,6 +569,34 @@ export interface ReferenceClaimRow {
   links?: ReferenceClaimLink[];
   /** What the curator should know that does NOT block Promote (a dangling edge). */
   warnings?: string[];
+  /**
+   * A REVISION claim (#1437): the catalog id it is a new version of.  Its
+   * promotion replaces that reference in place, keeping id and origin.
+   */
+  revises?: string;
+  /** Where the revised reference lives (workspace-relative). */
+  revises_file?: string;
+  /** The revised reference as it is now, for the diff; absent when it is gone. */
+  current?: ReferenceClaimCurrent;
+  /** Whether the revision sets the edges (``links``) or keeps the current ones. */
+  links_replaced?: boolean;
+  /**
+   * The reference changed since the revision was written (decided by the
+   * daemon at listing time): a promotion would be refused ``stale``.
+   */
+  stale?: boolean;
+  stale_reason?: string;
+}
+
+/** The fields of a reference a revision is diffed against (``ReferenceClaimRow.current``). */
+export interface ReferenceClaimCurrent {
+  name?: string;
+  description?: string;
+  tags?: string[];
+  type?: string;
+  path?: string;
+  content?: string;
+  links?: ReferenceClaimLink[];
 }
 
 /**
@@ -757,6 +785,16 @@ export interface DiagnosticsGrants {
  * NOT replaced by a blank one) or ``unsupported`` (a daemon below protocol
  * 1.25, which serves no diagnostics verb).
  */
+/** The ``seccomp`` block of a diagnostics answer (#1503). */
+export interface DiagnosticsSeccomp {
+  posture: string;
+  allowed_families?: string[];
+  reason?: string;
+  required?: boolean;
+  libseccomp?: string;
+  spawns_refused?: boolean;
+}
+
 export interface DiagnosticsState {
   status: "idle" | "loading" | "loaded" | "error" | "unsupported";
   error: string | null;
@@ -774,6 +812,10 @@ export interface DiagnosticsState {
   /** What the AppArmor profile grants (#1326); ``null`` when the session
    *  names no profile, or the daemon predates protocol 1.26. */
   apparmorGrants: DiagnosticsGrants | null;
+  /** The seccomp-bpf posture of the session's subprocesses (#1503):
+   *  ``{posture: "filter" | "off" | "absent" | "unconfined", ...}``;
+   *  ``null`` from a daemon or runner that does not report one. */
+  seccomp: DiagnosticsSeccomp | null;
   /** ``Date.now()`` of the answer that populated the fields above --
    *  when the record was last read AND the probe was last measured, since
    *  one call answers both. */

@@ -52,3 +52,21 @@ stale.
   `events.ts` step does), so unstaged edits to source files are reflected.
 - The guard `test_authoring_does_not_load_introspection_1267.py` (in the
   `suite (shared/tests)` CI job) remains the authority.
+
+### `explain_snapshot.json`
+
+When a staged path is a non-test `.py` file under `jaato-server/jaato_server/`
+or `jaato-sdk/jaato_sdk/`, or is `jaato-server/pyproject.toml`, the hook runs
+`python -m jaato_server.shared.scaffold.explain_snapshot --write` and stages
+`jaato-sdk/jaato_sdk/scaffold/explain_snapshot.json`.  That file ships in the
+jaato-sdk wheel and is what `jaato-scaffold explain` answers from when
+jaato-server is not installed: every built-in topic jaato-server renders
+without a workspace or the network.
+`test_explain_snapshot_mirrors_the_server.py` fails in CI when it is stale.
+
+- Needs both packages importable, with jaato-server's `[interactive]` extra:
+  generation refuses an environment where an in-tree plugin did not load,
+  and one holding a plugin or `explain` topic from another distribution.
+- Renders in a subprocess with an empty `$HOME` and working directory, so
+  nothing of yours (skills under `~/.claude`, a `.env`) reaches the file.
+- Takes about 10 seconds.

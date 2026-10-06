@@ -196,9 +196,16 @@ def test_sdk_only_authoring_commands_run(tmp_path):
     assert leaked == "[]"
 
 
+#: What each verb is asked here.  Bare ``explain`` is answered from the
+#: snapshot shipped with jaato-sdk (test_explain_snapshot_mirrors_the_server),
+#: so it is asked a topic the snapshot cannot answer, which still refuses.
+_REFUSED_ARGV = {"explain": ("explain", "releases")}
+
+
 @pytest.mark.parametrize("verb", cli.SERVER_VERBS)
 def test_sdk_only_introspection_verbs_refuse_with_the_fix(tmp_path, verb):
-    rc, out, err, leaked = _sdk_only(verb, cwd=tmp_path)
+    rc, out, err, leaked = _sdk_only(*_REFUSED_ARGV.get(verb, (verb,)),
+                                     cwd=tmp_path)
     assert rc == 2
     assert "pip install jaato-server" in err, err
     assert "Traceback" not in err and "ImportError" not in err

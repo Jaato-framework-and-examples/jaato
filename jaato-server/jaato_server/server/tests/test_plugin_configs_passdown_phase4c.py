@@ -296,12 +296,18 @@ def _capture_permission_init(envelope: SessionInitEnvelope) -> Dict[str, Any]:
 
 
 def test_permission_init_uses_default_when_no_profile_override() -> None:
-    """No plugin_configs.permission → PermissionPlugin gets the runner-
-    side fallback ``defaultPolicy: "ask"``.  This is the pre-§C behaviour
-    preserved for profiles that don't customize permission."""
+    """No plugin_configs.permission → the init config carries NO inline
+    policy, so ``initialize`` resolves the framework default
+    (``defaultPolicy: "ask"``) under any ``permissions.json`` (#1474).
+    Before #1474 the builder wrote the default inline, and its presence
+    made ``initialize`` discard the file."""
+    from jaato_server.shared.plugins.permission.policy_layers import (
+        FRAMEWORK_DEFAULT_POLICY,
+    )
     env = _bootstrap_envelope(plugin_configs={})
     init_cfg = _capture_permission_init(env)
-    assert init_cfg["policy"]["defaultPolicy"] == "ask"
+    assert "policy" not in init_cfg
+    assert FRAMEWORK_DEFAULT_POLICY["defaultPolicy"] == "ask"
 
 
 def test_permission_init_merges_profile_override() -> None:

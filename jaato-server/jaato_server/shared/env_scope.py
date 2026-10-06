@@ -184,6 +184,9 @@ CATALOG: Dict[str, EnvClass] = {
     # ---- daemon / runner lifecycle -----------------------------------
     "JAATO_APPARMOR_COMPLAIN": EnvClass(HOST, None,
         "kernel policy load mode; a host-wide diagnostic posture"),
+    "JAATO_APPARMOR_PROFILE_GRACE_SECONDS": EnvClass(HOST, None,
+        "how long the daemon keeps an unheld boundary profile loaded; a "
+        "property of the kernel policy the whole host shares, not of a session"),
     "JAATO_AZURE_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.azure_openai.api_key",
         "credential; azure_openai exposes the knob, so a profile can carry "
         "a pass:// URI instead of the env var"),
@@ -406,6 +409,17 @@ CATALOG: Dict[str, EnvClass] = {
         "knob"),
     "PATH": EnvClass(AMBIENT, None,
         "the host environment being read"),
+    "HF_HOME": EnvClass(AMBIENT, None,
+        "the Hugging Face cache location being read, to decide whether an "
+        "embedding model can load offline (#1482)"),
+    "HF_HUB_CACHE": EnvClass(AMBIENT, None,
+        "the Hugging Face hub cache being read, to decide whether an "
+        "embedding model can load offline (#1482)"),
+    "SENTENCE_TRANSFORMERS_HOME": EnvClass(AMBIENT, None,
+        "the sentence-transformers cache being read, to decide whether an "
+        "embedding model can load offline (#1482)"),
+    "XDG_CACHE_HOME": EnvClass(AMBIENT, None,
+        "the user cache root being read, to find the Hugging Face cache"),
     "PYTHONPATH": EnvClass(AMBIENT, None,
         "the host environment being read -- `explain dependencies` reports "
         "whether it is set, because importlib.metadata resolves a "
@@ -603,6 +617,9 @@ CATALOG: Dict[str, EnvClass] = {
     "KAGGLE_USERNAME": EnvClass(SESSION, None,
         "a credential with no typed key (see the credential "
         "policy)"),
+    "PERMISSION_CONFIG_PATH": EnvClass(SESSION, "plugin_configs.permission.config_path",
+        "names the project-layer permissions.json (#1474); the block's "
+        "config_path wins and the env var is its fallback"),
     "PERMISSION_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.permission.channel_config.auth_token",
         "config.get(auth_token) or os.environ -- the knob already WINS and "
         "the env var is its fallback"),

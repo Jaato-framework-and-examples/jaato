@@ -1806,10 +1806,19 @@ class RunnerRPC:
                 "registry.runner_rpc_client (Step 7.2)",
             )
 
+        # #1503: the seccomp posture the bootstrap decided for this
+        # session's subprocesses, so the daemon records it beside
+        # ``sandbox_mode`` (``filter`` / ``off`` / ``absent`` /
+        # ``unconfined``).  An older daemon ignores the key.
+        from jaato_server.shared.seccomp_filter import current_posture
+        from jaato_server.shared import capability_drop
         return True, {
             "ok": True,
             "ready": host.is_ready,
             "session_id": host.session_id,
+            "seccomp": current_posture(),
+            # #1543: the capability drop, beside it.
+            "capabilities": capability_drop.current_posture(),
         }
 
     def _handle_session_health_check(self) -> "tuple[bool, Any]":
@@ -1991,17 +2000,10 @@ class RunnerRPC:
         backend): a caller reading ``None`` cannot tell those apart, which
         is fine here -- neither is a confinement claim this verb owns.
         """
-        try:
-            notebook = registry.get_plugin("notebook") if registry else None
-            if notebook is None:
-                return None
-            backend = notebook._backends.get(notebook._active_backend_name)
-            if backend is None:
-                return None
-            kind = backend.boundary_kind()
-            return str(kind) if kind else None
-        except Exception:  # noqa: BLE001 -- a probe must not raise
-            return None
+        from jaato_server.shared.plugins.environment.runtime import (
+            notebook_boundary_kind,
+        )
+        return notebook_boundary_kind(registry)
 
     def _handle_session_diagnostics(
         self, args: Dict[str, Any],
@@ -2089,6 +2091,14 @@ class RunnerRPC:
         except Exception as exc:  # noqa: BLE001 -- diagnostics must not raise
             consumption = {"error": f"{type(exc).__name__}: {exc}"}
 
+        # #1503: the seccomp posture this runner installs in its
+        # subprocesses, read live beside the LSM probe so "LSM yes,
+        # seccomp no" is visible in the same answer.
+        if isinstance(probe, dict):
+            from jaato_server.shared.seccomp_filter import current_posture
+            probe["seccomp"] = current_posture()
+            from jaato_server.shared import capability_drop
+            probe["capabilities"] = capability_drop.current_posture()
         return True, {
             "probe": probe,
             "notebook_boundary_kind": notebook_boundary_kind,

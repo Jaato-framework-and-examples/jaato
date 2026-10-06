@@ -32,8 +32,9 @@ private ``/tmp``, and such a boundary's runner refuses to start
 set up the namespace.  It never runs under a ``/tmp/** rw`` grant against
 the host's real ``/tmp``.
 
-Stdlib-only with no jaato imports: the runner imports it before plugin
-discovery, the shape ``shared/apparmor_label.py`` has.
+Stdlib-only apart from :mod:`jaato_server.shared.workspace_ownership`,
+itself stdlib-only: the runner imports it before plugin discovery, the
+shape ``shared/apparmor_label.py`` has.
 """
 
 import ctypes
@@ -42,6 +43,7 @@ import os
 import sys
 import threading
 from typing import Any, Optional, Tuple
+from jaato_server.shared.workspace_ownership import inherit_owner
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,10 @@ def ensure_private_tmp_dir(path: Optional[str]) -> None:
         if not os.path.exists(gitignore):
             with open(gitignore, "w", encoding="utf-8") as handle:
                 handle.write("*\n")
+        # Both belong to the workspace's owner (the directory's parent).
+        workspace = os.path.dirname(os.path.abspath(path))
+        inherit_owner(path, workspace)
+        inherit_owner(gitignore, workspace)
     except OSError as exc:
         logger.warning(
             "private_tmp: could not prepare %s (%s: %s); the runner will "

@@ -16,11 +16,13 @@ called, looked up on their modules at call time so a test patching
 ``bootstrap.confine_to_profile`` still reaches them.
 
 SELinux (phase 2b) differs in one way that decides the rest: the runner
-does not enter its domain, the daemon's exec does (``setexeccon`` before
-``execve``, design §7.1).  So :func:`self_confine` only CONFIRMS the
-process already wears the label, and refuses when it does not: a pool slot
-cannot ``setcon`` a threaded process (phase 0), and SELinux sessions are
-routed away from the pool.  An envelope naming any other backend is
+does not enter its domain at bootstrap.  A cold-spawned runner entered it
+by the daemon's exec (``setexeccon`` before ``execve``, design §7.1); a
+pool slot entered it at fork, while it had one thread (phase 4, §7.2).
+So :func:`self_confine` only CONFIRMS the process already wears the label,
+and refuses when it does not: SELinux refuses ``setcon`` in a threaded
+process (phase 0), so a runner not already in its domain cannot be moved
+into it now.  An envelope naming any other backend is
 REFUSED by :func:`resolve`, before anything is entered: a runner that
 cannot enter the label it was given must not run the session unconfined.
 """
@@ -56,12 +58,17 @@ class RunnerConfinement:
         confinement_id: The boundary's id, carried for SELinux (which has
             no profile name to read it out of); ``""`` for AppArmor, whose
             id is read from the profile name.
+        enforcing_attested: SELinux only: the daemon attested the kernel
+            enforces both domains (``descriptor["enforcing"]``, #1519).
+            Only a literal ``True`` counts; absent (an older daemon) is
+            ``False``.
     """
 
     backend: str
     label: str
     child_label: str
     confinement_id: str = ""
+    enforcing_attested: bool = False
 
 
 def _refuse(message: str) -> Exception:
@@ -130,7 +137,8 @@ def _resolve_selinux(label: str, profile: str,
             "child_label; refusing to guess the domains")
     return RunnerConfinement(
         backend=BACKEND_SELINUX, label=label, child_label=child,
-        confinement_id=str(descriptor.get("confinement_id") or ""))
+        confinement_id=str(descriptor.get("confinement_id") or ""),
+        enforcing_attested=descriptor.get("enforcing") is True)
 
 
 def _own_selinux_label() -> str:
@@ -142,8 +150,8 @@ def self_confine(backend: str, label: str) -> None:
     """Enter *label* on the calling thread (bootstrap step 1c).
 
     SELinux: confirm instead.  The domain was entered by the exec that
-    started this process; a runner not already in it was not started by a
-    transition and cannot be moved into one now.
+    started this process, or by a pool slot at fork (phase 4); a runner
+    not already in it cannot be moved into one now.
     """
     if backend == BACKEND_APPARMOR:
         from jaato_server.server.runner import bootstrap
@@ -160,9 +168,9 @@ def self_confine(backend: str, label: str) -> None:
             raise _refuse(
                 f"this runner is {actual!r}, the session's boundary is "
                 f"{label!r}.  An SELinux runner enters its domain by the "
-                "exec transition the daemon sets before spawning it "
-                "(selinux-backend.md §7.1); a runner started any other way, "
-                "such as a pre-warm pool slot, cannot be confined.")
+                "exec transition the daemon sets before spawning it, or, as "
+                "a pool slot, at fork (selinux-backend.md §7.1, §7.2); a "
+                "threaded runner outside it cannot be confined.")
         return
     raise _refuse(f"cannot self-confine under backend {backend!r}")
 

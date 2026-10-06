@@ -131,7 +131,8 @@ AUTHORED: Tuple[AuthoredEntry, ...] = (
                   "under confinement so savePrompt works)"),
     AuthoredEntry("gc.json", "the GC strategy and thresholds"),
     AuthoredEntry("pricing.json", "the operator pricing table"),
-    AuthoredEntry("permissions.json", "permission policy and channel"),
+    AuthoredEntry("permissions.json", "permission policy and channel "
+                  "(a policy layer since #1474)", confined=True),
     AuthoredEntry("reliability-policies.json", "per-tool reliability policies "
                   "(reliability.json, the plugin's STATE, stays ignored)"),
     AuthoredEntry("webhook.json", "webhook listener + routes (secret as "
@@ -183,6 +184,10 @@ CONFINED_STATE: Tuple[Tuple[str, str], ...] = (
      "reference claims written by proposeReference (in-process, in the "
      "runner's base profile): denied to //child so a subprocess the model "
      "drives cannot write a claim, or its recorded witness, by hand"),
+    ("sessions/",
+     "session records and per-session state (#1529): a revive reads them "
+     "back, so //child may not write them; the runner itself still does, "
+     "and a record the daemon did not seal is narrowed on revive"),
 )
 
 #: Workspace-root scratch the framework writes OUTSIDE ``.jaato/``, which

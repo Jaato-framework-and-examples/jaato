@@ -22,8 +22,8 @@ _PL = "jaato-server/jaato_server/shared/plugins/prompt_library/plugin.py"
 REVERSIONS = [
     Reversion(
         target=_UT,
-        find='HOME_SHIPPED_DIRS: Tuple[str, ...] = (\n    ".claude/skills",\n)\n',
-        replace="HOME_SHIPPED_DIRS: Tuple[str, ...] = ()\n",
+        find='HOME_SHIPPED_DIRS: Tuple[str, ...] = (\n    ".claude/skills",\n',
+        replace="HOME_SHIPPED_DIRS: Tuple[str, ...] = (\n",
         test="test_the_snapshot_carries_claude_skills",
         because="a confined runner's prompt library would silently miss the "
                 "user's Claude Code skills under SELinux",

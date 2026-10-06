@@ -354,6 +354,12 @@ class ToolExecutor:
         self._permission_plugin: Optional['PermissionPlugin'] = None
         self._permission_context: Dict[str, Any] = {}
         self._ledger: Optional[TokenLedger] = ledger
+        # The owning session's tool surface (#1513): a predicate saying
+        # whether a tool exists for the session under its profile's
+        # ``plugin(tools:[...])`` scopes, and the sentence naming the scope
+        # that excludes one.  ``None`` (no session bound) admits every tool.
+        self._tool_surface: Optional[Callable[[str], bool]] = None
+        self._tool_surface_refusal: Optional[Callable[[str], str]] = None
 
         # Registry reference for plugin lookups (set via set_registry)
         self._registry: Optional['PluginRegistry'] = None
@@ -555,6 +561,63 @@ class ToolExecutor:
         self._permission_plugin = plugin
         self._permission_context = context or {}
 
+    def set_tool_surface(
+        self,
+        predicate: Optional[Callable[[str], bool]],
+        refusal: Optional[Callable[[str], str]] = None,
+    ) -> None:
+        """Bind the owning session's tool-scope predicate (#1513).
+
+        Set by ``JaatoSession.configure`` with ``tool_in_surface`` /
+        ``tool_scope_refusal``.  The gate in :meth:`check_permission_only`
+        asks it FIRST, so a tool the profile scoped out is refused before
+        any permission rule (a whitelist, ``auto_allow_housekeeping``) is
+        consulted.  ``None`` unbinds it.
+        """
+        self._tool_surface = predicate
+        self._tool_surface_refusal = refusal
+
+    def _scope_refusal(
+        self, name: str, args: Dict[str, Any], call_id: Optional[str]
+    ) -> Optional[PermissionGateOutcome]:
+        """The refusal for a call outside the session's tool surface, or
+        ``None`` when the tool is in it (or no surface is bound).
+
+        A predicate that raises admits the call: the scope is a surface
+        restriction, and the permission gate after it still runs.
+        """
+        if self._tool_surface is None:
+            return None
+        try:
+            in_surface = self._tool_surface(name)
+        except Exception as exc:
+            _trace_runner(
+                f"scope: tool={name} call_id={call_id} predicate raised "
+                f"{type(exc).__name__}: {exc}; treating as in scope"
+            )
+            return None
+        if in_surface:
+            return None
+        message = ""
+        if self._tool_surface_refusal is not None:
+            try:
+                message = self._tool_surface_refusal(name)
+            except Exception:
+                message = ""
+        if not message:
+            message = (
+                f"`{name}` is not available in this session: the profile's "
+                f"tool scope leaves it out"
+            )
+        _trace_runner(
+            f"scope: tool={name} call_id={call_id} verdict=OUT_OF_SCOPE "
+            f"— refused before the permission check"
+        )
+        meta = {'decision': 'denied', 'reason': message, 'method': 'tool_scope'}
+        denial = {'error': message, '_permission': meta}
+        _trace_tool_outcome(name, call_id, False, denial)
+        return PermissionGateOutcome(False, meta, args, denial)
+
     def check_permission_only(
         self,
         name: str,
@@ -599,6 +662,11 @@ class ToolExecutor:
             is ``False``, and execute with ``args`` rather than the dict
             they passed in.
         """
+        # A tool the session's profile scoped out does not exist for it
+        # (#1513): refused before any permission rule can re-admit it.
+        scope_refusal = self._scope_refusal(name, args, call_id)
+        if scope_refusal is not None:
+            return scope_refusal
         # askPermission is the gate's own tool and is always allowed.
         if self._permission_plugin is None or name == 'askPermission':
             return PermissionGateOutcome(True, None, args, None)
@@ -841,9 +909,17 @@ class ToolExecutor:
         so the forked child enters the per-session ``//child``
         sub-profile before the new program starts.
 
+        Since #1503 the callable the runner passes is the whole ``//child``
+        preexec step, not only the LSM write: the LSM transition, then
+        ``PR_SET_NO_NEW_PRIVS`` and the session's seccomp-bpf filter
+        (:func:`shared.seccomp_filter.compose_child_preexec`, built once per
+        session by ``server.runner.session._child_preexec``).  Plugins append
+        their cgroup attach after it, so every subprocess path gets the
+        filter from this one place.
+
         Forwarded to plugins that implement
         ``set_apparmor_child_transition_callback`` (cli,
-        interactive_shell) via the same mechanism as
+        interactive_shell, notebook) via the same mechanism as
         :meth:`set_runtime_limits`'s forwarding loop.  Plugins that
         don't implement the method (file_edit, todo, etc.) stay
         unaffected — only subprocess-spawning plugins care.

@@ -45,6 +45,8 @@ def test_telemetry_starts_at_zero() -> None:
     counters = pool.get_telemetry()
     assert counters == {
         "pool_slot_acquired_total": 0,
+        "pool_selinux_fork_total": 0,
+        "pool_selinux_fork_failures_total": 0,
         "pool_acquire_miss_total": 0,
         "pool_replenish_success_total": 0,
         "pool_replenish_failures_total": 0,
@@ -72,6 +74,13 @@ def test_telemetry_starts_at_zero() -> None:
         "pool_dead_slot_evicted_total": 0,
         "pool_duplicate_return_refused_total": 0,
         "pool_uid_mismatch_skips_total": 0,
+        # Posture-aware capacity (#1507): two counters, and the idle
+        # gauges that are always present (per-posture served gauges
+        # appear only while such slots are idle).
+        "pool_posture_miss_total": 0,
+        "pool_served_slot_evicted_total": 0,
+        "pool_idle_virgin": 0,
+        "pool_idle_reserved": 0,
     }
 
 

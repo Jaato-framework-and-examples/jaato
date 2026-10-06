@@ -111,6 +111,21 @@ class ExplainScope:
             ``arg`` does: the banner used to be hand-typed prose and had
             drifted to advertise 21 of 23 topics (#1006), so every string the
             banner prints is now a field of the entry it describes.
+        live_only: why this topic is NOT in the explain snapshot jaato-sdk
+            ships (:mod:`explain_snapshot`), or empty when it is.  Set on a
+            topic whose answer describes the machine or the moment rather
+            than the installed code (the network, ``$HOME``, this venv's
+            paths): a snapshot of it would be a snapshot of whoever generated
+            it.  A ``workspace`` topic, a filtered render and the named form
+            of an ``optional_named`` one are never snapshotted and need no
+            reason here: their argument is the caller's.
+        names: for a ``named`` topic, every name it renders, as
+            ``{canonical: [accepted spellings]}``.  The snapshot renders each
+            canonical name once and maps every spelling to it, so an SDK-only
+            ``explain provider zhipuai-openai`` finds what ``zhipuai_openai``
+            would.
+            A ``named`` topic without one cannot be snapshotted, and the
+            generator refuses rather than silently shipping without it.
     """
 
     render: Callable[..., Any]
@@ -118,6 +133,40 @@ class ExplainScope:
     arg: str = ""
     render_named: Callable[..., Any] | None = None
     blurb: str = ""
+    live_only: str = ""
+    names: Callable[[], Dict[str, Any]] | None = None
+
+
+def _plugin_names() -> Dict[str, Any]:
+    """Every name ``explain plugin`` renders: the registry's, plus ``lifecycle``."""
+    from . import introspect
+    names = {n: [n] for n in introspect.plugins()}
+    names[_explain.LIFECYCLE_TOPIC] = [_explain.LIFECYCLE_TOPIC]
+    return names
+
+
+def _provider_names() -> Dict[str, Any]:
+    """Every provider, with the spellings ``resolve_provider`` accepts."""
+    from . import introspect
+    return {n: sorted(i.normalized_names() | {n})
+            for n, i in introspect.providers().items()}
+
+
+def _event_names() -> Dict[str, Any]:
+    """Every event; ``explain event`` matches member or wire, any case."""
+    from . import introspect
+    out = {}
+    for key, e in introspect.events().items():
+        spellings = {key, e.name, e.wire}
+        out[key] = sorted(spellings | {s.lower() for s in spellings}
+                          | {s.upper() for s in spellings})
+    return out
+
+
+def _archetype_names() -> Dict[str, Any]:
+    """Every archetype with its aliases, as ``archetypes.resolve`` follows them."""
+    from . import archetypes
+    return {n: [n, *d.aliases] for n, d in archetypes.ARCHETYPES.items()}
 
 
 #: Every `explain` topic, in the order the help line lists them.
@@ -137,10 +186,12 @@ class ExplainScope:
 #:                       workspace.
 _SCOPES = {
     "plugins": ExplainScope(_explain.plugins),
-    "plugin": ExplainScope(_explain.plugin, "named", "<name>"),
+    "plugin": ExplainScope(_explain.plugin, "named", "<name>",
+                          names=_plugin_names),
     "commands": ExplainScope(_explain.commands),
     "providers": ExplainScope(_explain.providers),
-    "provider": ExplainScope(_explain.provider, "named", "<name>"),
+    "provider": ExplainScope(_explain.provider, "named", "<name>",
+                            names=_provider_names),
     "gc": ExplainScope(_explain.gc),
     "env": ExplainScope(_explain.env, "filter", "[<filter>]",
                         blurb="vars the daemon + plugins READ"),
@@ -150,18 +201,23 @@ _SCOPES = {
     # "|", so a hint carrying one is unreadable there and unparseable by
     # anything reading the line back.
     "event": ExplainScope(_explain.event, "named", "<NAME or wire.value>",
-                          blurb="one event's fields + docstring"),
+                          blurb="one event's fields + docstring",
+                          names=_event_names),
     "transports": ExplainScope(_explain.transports),
     "clients": ExplainScope(_explain.clients),
     "runtime": ExplainScope(_explain.runtime),
     "tiers": ExplainScope(_explain.tiers),
     "integrations": ExplainScope(_explain.integrations,
-                                 blurb="tools jaato can wire into"),
+                                 blurb="tools jaato can wire into",
+                                 live_only="reports whether each integration is "
+                                           "applied under THIS machine's $HOME"),
     # The only topic that reaches the network: our own indexes, asked what
     # they carry.  Its own topic rather than a section of `dependencies`,
     # which is an OFFLINE read of the installed tree and must stay one.
     "releases": ExplainScope(_explain.releases,
-                             blurb="newer builds on PyPI / TestPyPI"),
+                             blurb="newer builds on PyPI / TestPyPI",
+                             live_only="asks PyPI / TestPyPI at the time of "
+                                       "asking"),
     "sets": ExplainScope(_explain.sets, "workspace"),
     "agents": ExplainScope(_explain.agents, "workspace",
                            blurb="the PERSONA layer (.jaato/agents/)"),
@@ -193,7 +249,9 @@ _SCOPES = {
     "gh": ExplainScope(_explain.gh,
                        blurb="driving `gh` / `git` with a per-user token"),
     "runner-user": ExplainScope(_explain.runner_user,
-                                blurb="which OS account a root daemon's runners run as"),
+                                blurb="which OS account a root daemon's runners run as",
+                                live_only="names the import paths of the "
+                                          "install it runs in"),
     "pool": ExplainScope(_explain.pool,
                          blurb="the pre-warm runner pool, resized live"),
     "prefetch": ExplainScope(_explain.prefetch),
@@ -201,7 +259,8 @@ _SCOPES = {
                                blurb="the OUTPUT-side hook"),
     "archetypes": ExplainScope(_explain.archetypes,
                                blurb="what `new` WRITES"),
-    "archetype": ExplainScope(_explain.archetype, "named", "<name>"),
+    "archetype": ExplainScope(_explain.archetype, "named", "<name>",
+                              names=_archetype_names),
 }
 
 
@@ -223,19 +282,19 @@ def _scope_usage(scope: str, spec: ExplainScope) -> str:
     return f"explain {scope} {spec.arg}".rstrip()
 
 
-def _call_simple(spec, scope, name, ws):
+def _call_simple(spec, scope, name, ws, profile_set=None):
     return spec.render()
 
 
-def _call_filter(spec, scope, name, ws):
+def _call_filter(spec, scope, name, ws, profile_set=None):
     return spec.render(name)
 
 
-def _call_workspace(spec, scope, name, ws):
+def _call_workspace(spec, scope, name, ws, profile_set=None):
     return spec.render(ws)
 
 
-def _call_named(spec, scope, name, ws):
+def _call_named(spec, scope, name, ws, profile_set=None):
     if not name:
         raise _ScopeUsageError(f"usage: {_scope_usage(scope, spec)}")
     data, text = spec.render(name)
@@ -244,8 +303,15 @@ def _call_named(spec, scope, name, ws):
     return data, text
 
 
-def _call_optional_named(spec, scope, name, ws):
-    return spec.render_named(name, ws) if name else spec.render()
+def _call_optional_named(spec, scope, name, ws, profile_set=None):
+    # ``profile_set`` (``--set``) reaches only the NAMED renderer: every one
+    # of them resolves a profile through ``discover_profiles``, and a set is
+    # meaningless to the bare schema / contract a scope renders without one.
+    if not name:
+        return spec.render()
+    if profile_set:
+        return spec.render_named(name, ws, profile_set=profile_set)
+    return spec.render_named(name, ws)
 
 
 #: How each :attr:`ExplainScope.kind` is invoked.  Dispatch is a lookup here,
@@ -425,6 +491,7 @@ def _scope_renderer(scope: str):
 
 def render_topic(
     scope: Optional[str], name: Optional[str] = None, workspace: str = ".",
+    profile_set: Optional[str] = None,
 ) -> "tuple[bool, Dict[str, Any], str, str]":
     """Render one topic — the ONE dispatch, with no printing and no exit code.
 
@@ -439,6 +506,9 @@ def render_topic(
         scope: The topic, or ``None`` for the overview.
         name: The topic's argument, when it takes one.
         workspace: What a workspace-reading topic reads.
+        profile_set: The profile set a named-profile topic resolves under
+            (``--set``); ``None`` follows the workspace ``.env``.  Passed only
+            to built-in ``optional_named`` scopes.
 
     Returns:
         ``(ok, data, text, error)``.  ``ok`` is ``False`` for an unknown
@@ -456,7 +526,10 @@ def render_topic(
         return False, {}, "", (
             f"unknown explain scope {scope!r} — one of: {_all_scopes_help()}")
     try:
-        data, text = render(scope, name, workspace)
+        if profile_set and _SCOPES.get(scope) is not None:
+            data, text = render(scope, name, workspace, profile_set=profile_set)
+        else:
+            data, text = render(scope, name, workspace)
         # Contributed SECTIONS append to whatever rendered — a built-in or a
         # contributed topic alike — so two packages can answer about one
         # subject without either having to know the other exists.
@@ -488,12 +561,20 @@ def _cmd_explain(args) -> int:
         return 0
 
     asked = getattr(args, "connect", None)
+    pset = getattr(args, "set", None)
+    if asked and pset:
+        # The daemon's ``scaffold.explain`` carries no set: it reads the
+        # caller's workspace ``.env``.  Asking it while claiming a set would
+        # answer about a set nobody chose.
+        print("explain: --set cannot be combined with --connect (the daemon "
+              "reads JAATO_PROFILE_SET from the workspace .env)", file=sys.stderr)
+        return 2
     if asked:
         rc, _note = _remote.render_from_daemon(asked, scope, name, args,
                                                 required=True)
         return rc
 
-    ok, data, text, error = render_topic(scope, name, ws)
+    ok, data, text, error = render_topic(scope, name, ws, profile_set=pset)
     if not ok:
         # Only a topic this venv does not HAVE is worth a socket: a usage
         # error is about the caller's own command line, and asking a daemon
@@ -764,6 +845,9 @@ class ExplainVerb:
                              "of any scope: what it needs, what is installed, and "
                              "whether this environment agrees with itself")
         pe.add_argument("--workspace", help=_workspace_arg_help())
+        pe.add_argument("--set", help="JAATO_PROFILE_SET name a named-profile "
+                                      "topic (profile/oversight/audit <name>) "
+                                      "resolves under; default: the workspace .env")
         pe.add_argument("--connect", nargs="?", const=True, metavar="SOCKET",
                         help="ask a running daemon to render the topic instead of "
                              "this virtualenv — for a CLI installed beside an "

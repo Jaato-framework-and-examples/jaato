@@ -290,6 +290,54 @@ Permissions can be configured via `permissions.json`:
 }
 ```
 
+### Where the Policy Comes From (#1474)
+
+The STATIC policy is assembled from four layers, lowest precedence first
+(`jaato_server/shared/plugins/permission/policy_layers.py`, the one
+function both daemon enforcer builders call through
+`PermissionPlugin.initialize`):
+
+| # | Layer | Source |
+|---|-------|--------|
+| 1 | framework | `defaultPolicy: ask`, empty lists |
+| 2 | user | `~/.jaato/permissions.json` (the daemon user's; on a confined runner, the snapshot the daemon ships on the envelope, #1465) |
+| 3 | workspace | `<config_root>/permissions.json`, else `<workspace>/.jaato/permissions.json`; `plugin_configs.permission.config_path` or `PERMISSION_CONFIG_PATH` names it explicitly |
+| 4 | profile | `plugin_configs.permission.policy` (a #957 subagent's own block, for that subagent) |
+
+How they combine:
+
+- **`defaultPolicy`** is a scalar: the highest layer that sets it wins. A
+  file that omits the key does not set it.
+- **`whitelist` / `blacklist`** (`tools`, `patterns`, `arguments`) are a
+  **union** across every layer. A profile adds to the files; it never
+  replaces them.
+- **The blacklist beats the whitelist** (Part 2), so a deny written in any
+  layer survives a higher layer's allow of the same tool.
+- **Any other key** (`sanitization`, `cwd`, ...) is replaced **whole** by
+  the highest layer that sets it; nested keys are not merged.
+- `version` and `channel` in a file are not policy: the channel settings
+  are read from the file as before.
+
+Each session logs one INFO line naming its effective `defaultPolicy` and the
+layer that decided it. When a **file** makes it `allow`, a WARNING names the
+file: before #1474 the file was read and discarded on every daemon session,
+so on upgrade a host whose file says `allow` starts auto-approving every tool
+no list names. `jaato-scaffold validate` reports that as
+`permission_file_allow` before any session runs, and `jaato-scaffold explain
+plugin permission` prints the layers and rules.
+
+A file that is not a valid permissions file fails the session's permission
+initialisation; it does not silently fall back to the default.
+
+**Who can write the file.** On a confined host a session cannot: AppArmor
+template v44 write-denies `<ws>/.jaato/permissions.json` in every body (base,
+`tool_hat`, `//child`, the isolated sub-runner), and the `.jaato/`
+containment rule refuses it for the file tools and `cli`. On an unconfined
+host it is writable like any other config file the daemon's uid can write,
+so a session there can change the policy of later sessions in the workspace.
+SELinux confinement labels the workspace as a whole and does not single the
+file out.
+
 ### Pattern Matching (Glob-Style)
 
 ```
@@ -327,9 +375,9 @@ Permissions can be configured via `permissions.json`:
 │                                                                   │
 │  STATIC (permissions.json)          SESSION (runtime)            │
 │  ─────────────────────────          ────────────────             │
-│  • Loaded at startup                • Modified during session    │
+│  • Loaded at session start          • Modified during session    │
 │  • Persists across sessions         • Lost when session ends     │
-│  • Defines base policy              • Overrides static rules     │
+│  • ~/.jaato < workspace < profile   • Overrides static rules     │
 │  • Managed by editing file          • Managed via commands       │
 │                                                                   │
 │  Evaluation: Static ──► Session rules applied on top             │

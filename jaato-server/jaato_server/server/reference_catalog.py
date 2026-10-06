@@ -49,9 +49,8 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
-from jaato_server.shared.plugins.bundle_common.bundle import BUNDLE_MANIFEST_FILENAME
 from jaato_server.shared.plugins.references.bundle import REFERENCE_NON_SOURCE_FILENAMES
-from jaato_server.shared.plugins.references.claims import link_warnings, valid_id
+from jaato_server.shared.plugins.references.claims import catalog_dirs, link_warnings, valid_id
 from jaato_server.shared.plugins.references.links import (
     REL_SUPERSEDES,
     LinkIndex,
@@ -125,22 +124,6 @@ def _load(path: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _catalog_dirs(base: str) -> List[Tuple[str, str]]:
-    """``[(bundle, directory)]`` the loader reads: the root, then each sub-bundle.
-
-    A sub-bundle is an immediate subdirectory carrying ``bundle.json``
-    (``bundle_common.discover_bundles``); any other directory is not part
-    of the catalog, and a linked one is never followed.
-    """
-    dirs = [("", base)]
-    for name in sorted(os.listdir(base)):
-        path = os.path.join(base, name)
-        if (not os.path.islink(path) and os.path.isdir(path)
-                and os.path.isfile(os.path.join(path, BUNDLE_MANIFEST_FILENAME))):
-            dirs.append((name, path))
-    return dirs
-
-
 def catalog_files(root: str) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[str]]:
     """``([(relative_file, data)], unreadable)`` for every reference in the catalog.
 
@@ -155,7 +138,7 @@ def catalog_files(root: str) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[str
     unreadable: List[str] = []
     if not base:
         return entries, unreadable
-    for _bundle, directory in _catalog_dirs(base):
+    for _bundle, directory in catalog_dirs(base):
         for name in sorted(os.listdir(directory)):
             if not name.endswith(".json") or name in REFERENCE_NON_SOURCE_FILENAMES:
                 continue

@@ -3896,6 +3896,64 @@ _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
     _MIN_WINS_RUNTIME_LIMIT_FIELDS + _MIN_WINS_ZERO_TIGHTEST_FIELDS
 )
 
+#: The seccomp fields (#1503), resolved MOST-RESTRICTIVE-WINS but not by
+#: ``min()``: the mode by "``default`` beats ``off``", the allow-back list by
+#: INTERSECTION.  Normalised out of the ceilings agreement test like the
+#: min-wins fields, so two parents differing only here are resolved.
+_RESTRICTIVE_WINS_SECCOMP_FIELDS = ("seccomp", "seccomp_allow", "capabilities")
+
+
+def _merged_seccomp_fields(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Dict[str, Any]:
+    """Resolve ``seccomp`` / ``seccomp_allow`` across every declaring layer.
+
+    A child may narrow the filter and never widen it: ``seccomp: off`` in a
+    child does not survive a parent that declared ``default``, and a family
+    the child allows back stays denied unless every layer that declares an
+    allow-back list names it.  A layer that declares nothing has no opinion,
+    the reading every min-wins field here takes.
+
+    Returns:
+        ``{"seccomp": ..., "seccomp_allow": ...}``, each ``None`` when no
+        layer declares it.
+    """
+    layers = [p.runtime_limits for p in (*parents, child)
+              if p.runtime_limits is not None]
+    modes = [lim.seccomp for lim in layers if lim.seccomp is not None]
+    mode = None
+    if modes:
+        mode = "default" if "default" in modes else "off"
+    allows = [lim.seccomp_allow for lim in layers
+              if lim.seccomp_allow is not None]
+    allow = None
+    if allows:
+        kept = set(allows[0]).intersection(*allows[1:])
+        allow = tuple(a for a in allows[0] if a in kept)
+    return {"seccomp": mode, "seccomp_allow": allow,
+            "capabilities": _merged_capabilities(layers)}
+
+
+def _merged_capabilities(layers: List[RuntimeLimits]) -> Any:
+    """Resolve ``capabilities`` (#1543) across the declaring layers.
+
+    Most-restrictive-wins: ``none`` beats a list beats ``inherit``, and two
+    lists keep only what both keep, so a child can never keep a capability
+    a parent dropped.  ``None`` when no layer declares one.
+    """
+    values = [lim.capabilities for lim in layers
+              if lim.capabilities is not None]
+    if not values:
+        return None
+    if "none" in values:
+        return "none"
+    lists = [tuple(v) for v in values if not isinstance(v, str)]
+    if not lists:
+        return "inherit"
+    kept = set(lists[0]).intersection(*lists[1:])
+    return tuple(c for c in lists[0] if c in kept)
+
 
 def _merged_min_wins_limit(
     parents: List['SubagentProfile'],
@@ -3976,7 +4034,8 @@ def _resolve_runtime_limit_ceilings(
     declaring = [p for p in parents if p.runtime_limits is not None]
     if not declaring:
         return None, []
-    normalise = {f: None for f in _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS}
+    normalise = {f: None for f in (_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS
+                                   + _RESTRICTIVE_WINS_SECCOMP_FIELDS)}
     comparable = {
         p.name: replace(p.runtime_limits, **normalise)
         for p in declaring
@@ -4005,7 +4064,13 @@ def _merge_runtime_limits(
       across every layer that declares them
       (:func:`_merged_min_wins_limit`).  The last one reads ``0`` as the
       tightest value rather than as "unbounded"; see
-      :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`.
+      :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`;
+    * ``seccomp`` / ``seccomp_allow`` (#1503) — **most-restrictive-wins**
+      (:func:`_merged_seccomp_fields`): ``default`` beats ``off``, and the
+      allow-back list is the intersection of the declared ones;
+    * ``capabilities`` (#1543) — **most-restrictive-wins**
+      (:func:`_merged_capabilities`): ``none`` beats a list beats
+      ``inherit``, and lists intersect.
 
     Args:
         parents: The resolved parent profiles, in declaration order.
@@ -4025,6 +4090,7 @@ def _merge_runtime_limits(
             parents, child, name, zero_is_unbounded=False)
         for name in _MIN_WINS_ZERO_TIGHTEST_FIELDS
     })
+    min_wins.update(_merged_seccomp_fields(parents, child))
     base, conflicts = _resolve_runtime_limit_ceilings(parents, child)
     if base is None and all(v is None for v in min_wins.values()):
         return None, conflicts
@@ -4731,6 +4797,15 @@ class ProfileDiscoveryResult:
 
     profiles: Dict[str, 'SubagentProfile'] = field(default_factory=dict)
     errors: Dict[str, str] = field(default_factory=dict)
+    #: The FILE each name in ``profiles`` was read from — the one that won
+    #: precedence (a selected set's subdirectory before ``profiles/``, the
+    #: workspace tier before the user tier).  It is the child's own file,
+    #: never a parent's: ``inherits:`` is merged into the profile, not into
+    #: this path.  A premium profile has no entry; a name whose resolution
+    #: failed (it is in ``errors``) keeps the file it was read from.  Recorded here so a
+    #: report about a resolved profile (``jaato-scaffold explain profile``)
+    #: can name its file without a second resolver that might pick another.
+    sources: Dict[str, str] = field(default_factory=dict)
 
 
 #: Every key :func:`_scan_profiles_dir` reads out of a profile FILE.
@@ -4815,6 +4890,7 @@ def _scan_profiles_dir(
     directory: Path,
     profiles: Dict[str, 'SubagentProfile'],
     errors: Dict[str, str],
+    sources: Dict[str, str],
 ) -> None:
     """Scan a directory for profile files and populate profiles/errors dicts.
 
@@ -4825,6 +4901,9 @@ def _scan_profiles_dir(
         directory: Directory to scan for .json/.yaml/.yml profile files.
         profiles: Accumulator dict — discovered profiles are added here.
         errors: Accumulator dict — parse errors are added here.
+        sources: Accumulator dict — the file each profile registered in
+            THIS pass was read from (see
+            :attr:`ProfileDiscoveryResult.sources`).
     """
     try:
         if not directory.is_dir():
@@ -5010,6 +5089,7 @@ def _scan_profiles_dir(
                 "Move to .jaato/agents/%s.md instead.",
                 name, name,
             )
+        sources[name] = str(file_path)
         found += 1
         found_names.append(name)
         logger.debug("Discovered profile '%s' from %s", name, file_path)
@@ -5273,6 +5353,7 @@ def discover_profiles(
 
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}
+    sources: Dict[str, str] = {}
 
     # 1.a Workspace profile-set overlay (optional).
     #
@@ -5303,13 +5384,13 @@ def discover_profiles(
     # ``force_profile_set`` (explicit kwarg) wins over the env-var read
     # so callers resolving a qualified ``set/name`` path can pin the
     # set without mutating the per-session env contextvar.
-    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')  # == PROFILE_SET_ENV_VAR; literal for the env-scope scan
+    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')  # env: profile-set directory under <config_root>/profiles/ this workspace resolves profiles from (literal, == PROFILE_SET_ENV_VAR, so the env-scope scan sees it)
     if profile_set and effective_config_root:
         set_path = (
             Path(effective_config_root).expanduser().resolve()
             / PROFILES_SUBDIR / profile_set
         )
-        _scan_profiles_dir(set_path, profiles, errors)
+        _scan_profiles_dir(set_path, profiles, errors, sources)
     elif profile_set and not effective_config_root:
         # No ``config_root`` override — fall back to scanning
         # ``<base_path>/<profiles_dir>/<set>/`` so qualified resolution
@@ -5318,7 +5399,7 @@ def discover_profiles(
         fallback_set_path = Path(profiles_dir)
         if not fallback_set_path.is_absolute():
             fallback_set_path = Path(base_path) / fallback_set_path
-        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors)
+        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors, sources)
 
     # 1.b Workspace tier — config_root override takes precedence; fall
     #    back to <base_path>/<profiles_dir> when no override is in effect.
@@ -5328,12 +5409,12 @@ def discover_profiles(
         profiles_path = Path(profiles_dir)
         if not profiles_path.is_absolute():
             profiles_path = Path(base_path) / profiles_path
-    _scan_profiles_dir(profiles_path, profiles, errors)
+    _scan_profiles_dir(profiles_path, profiles, errors, sources)
 
     # 2. User-level profiles from ~/.jaato/profiles/
     #    Workspace profiles take precedence.
     user_profiles_path = Path.home() / ".jaato" / PROFILES_SUBDIR
-    _scan_profiles_dir(user_profiles_path, profiles, errors)
+    _scan_profiles_dir(user_profiles_path, profiles, errors, sources)
 
     # 3. Premium entry-point profiles (if installed).
     #    Workspace and user profiles take precedence over premium ones.
@@ -5346,7 +5427,8 @@ def discover_profiles(
     resolved, inheritance_errors = resolve_profiles(profiles)
     errors.update(inheritance_errors)
 
-    return ProfileDiscoveryResult(profiles=resolved, errors=errors)
+    return ProfileDiscoveryResult(
+        profiles=resolved, errors=errors, sources=sources)
 
 
 def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:

@@ -106,6 +106,17 @@ def _apparmor_grants(
     return result
 
 
+def _seccomp_record(session: Any, server: Any) -> Optional[Dict[str, Any]]:
+    """The seccomp posture the session record carries (#1503), or ``None``.
+
+    The running server's value (reported by the runner at bootstrap) wins
+    over the one restored from disk, which describes a previous runner.
+    """
+    live = getattr(server, "seccomp_posture", None) if server is not None else None
+    value = live if isinstance(live, dict) else getattr(session, "seccomp", None)
+    return dict(value) if isinstance(value, dict) else None
+
+
 def _compose_result(
     request_id: str, session: Any, probe_answer: Dict[str, Any],
     server: Any = None,
@@ -124,6 +135,7 @@ def _compose_result(
     identity = getattr(session, "runner_identity", None)
     confinement_id = str(getattr(identity, "apparmor_profile", "") or "")
     sandbox_mode = getattr(session, "sandbox_mode", None)
+    seccomp = _seccomp_record(session, server)
     runner_identity = _runner_identity_dict(session)
     apparmor_grants = _apparmor_grants(confinement_id, server)
 
@@ -140,6 +152,7 @@ def _compose_result(
             server_version=_daemon_version(),
             probe=probe_answer.get("probe"),
             apparmor_grants=apparmor_grants,
+            seccomp=seccomp,
         )
 
     # No runner to probe, or the runner did not answer.  The cached facts
@@ -155,6 +168,7 @@ def _compose_result(
         server_version=_daemon_version(),
         probe=None,
         apparmor_grants=apparmor_grants,
+        seccomp=seccomp,
         error=str(probe_answer.get("error") or ""),
         category=str(probe_answer.get("category") or "no_runner"),
     )

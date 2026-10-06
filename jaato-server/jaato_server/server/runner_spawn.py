@@ -137,6 +137,25 @@ def _ensure_session_tmpdir(
         )
 
 
+def _ensure_runner_log_dir(log_path: Optional[str]) -> None:
+    """Create ``<ws>/.jaato/logs`` before either spawn branch.
+
+    Best-effort and audible, as :func:`_ensure_session_tmpdir` is.  Created
+    before the runner user is resolved, so the hand-over (#1168) finds it
+    owned by the daemon and gives it to that user.  ``None`` does nothing.
+    """
+    if not log_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "spawn_session_runner: failed to create the runner log "
+            "directory for %s (%s: %s) — the runner will have no log",
+            log_path, type(exc).__name__, exc,
+        )
+
+
 def resolve_session_private_tmp(
     server: Any,
     workspace_path: Optional[str],
@@ -197,18 +216,81 @@ def _boundary_label(profile_name: Optional[str], confinement: Any) -> str:
     return profile_name or "(none)"
 
 
-def _pool_may_serve(pool_manager: Any, cgroup_attach: Any, confinement: Any) -> bool:
-    """May a pre-warm slot serve this session?
+def runner_log_path(workspace_path: Optional[str], session_id: str) -> Optional[str]:
+    """The session's runner log, ``<ws>/.jaato/logs/runner-<id>.log``.
 
-    Not with a cgroup to attach (a slot is already in the daemon's), and
-    not under SELinux: a slot is a forked, threaded process, and SELinux
-    refuses ``setcon`` there (phase 0), so the domain can only be entered
-    by the exec a cold spawn does (selinux-backend.md §7.2).
+    ``None`` without a workspace.  One definition for the two readers: the
+    cold spawn's child opens it before exec, and the envelope carries it so
+    every bootstrap, a pool slot's included, points fds 1 and 2 at it.
     """
+    if not workspace_path:
+        return None
+    return os.path.join(workspace_path, ".jaato", "logs", f"runner-{session_id}.log")
+
+
+def _slot_boundary_note(profile_name: Optional[str], confinement: Any) -> str:
+    """How a pool slot ends up in its boundary, for the spawn log line."""
     from jaato_server.server.confinement.base import is_selinux
 
+    if is_selinux(confinement):
+        return f"{confinement.label}, entered at fork"
+    if profile_name:
+        return f"{profile_name}, entered at bootstrap"
+    return "(unconfined)"
+
+
+def _pool_may_serve(pool_manager: Any, cgroup_attach: Any) -> bool:
+    """May a pre-warm slot serve this session?
+
+    Not with a cgroup to attach (a slot is already in the daemon's).  An
+    SELinux session may (phase 4): it is served by a slot forked into its
+    boundary, see :func:`_acquire_pool_slot`.
+    """
     return (pool_manager is not None and _pool_enabled()
-            and cgroup_attach is None and not is_selinux(confinement))
+            and cgroup_attach is None)
+
+
+def _acquire_pool_slot(
+    pool_manager: Any, server: Any, *, cascade_driver_id: Optional[str],
+    workspace_path: Optional[str], profile_name: Optional[str],
+    runner_user: Any, confinement: Any, log_path: Optional[str] = None,
+) -> Any:
+    """A pool slot for this session, or ``None`` (cold spawn).
+
+    The key: a slot's warm plugin state was built from ITS config root;
+    its threads are stuck in the AppArmor profile it was last confined to
+    (#1023); a dropped slot is that uid for life (#1168); and an SELinux
+    slot is in the domain it was forked into (phase 4).  See
+    ``runner_pool.SlotKey``.  Passed raw; ``SlotKey.build`` folds ``""``
+    to ``None``.
+
+    An SELinux session no idle slot fits gets a slot forked into its
+    boundary (selinux-backend.md §7.2): the child points its output at
+    *log_path* (the session's runner log), then enters the private
+    ``/tmp``, the uid and the domain while it has one thread.
+    """
+    from jaato_server.server.confinement.base import is_selinux
+    from jaato_server.server.runner_pool import SlotKey
+
+    selinux = is_selinux(confinement)
+    fields = dict(
+        cascade_driver_id=cascade_driver_id,
+        config_root=getattr(server, "config_root", None),
+        workspace_root=workspace_path,
+        profile_name=profile_name,
+        runner_uid=runner_uid_of(runner_user),
+        selinux_boundary=confinement.confinement_id if selinux else None,
+    )
+    slot = pool_manager.acquire_slot(**fields)
+    if slot is not None or not selinux:
+        return slot
+    entry = {
+        "context": confinement.label,
+        "log_path": log_path,
+        "private_tmp": session_private_tmp(server, profile_name, confinement),
+        "runner_user": runner_user.to_dict() if runner_user is not None else None,
+    }
+    return pool_manager.fork_slot_into(SlotKey.build(**fields), entry)
 
 
 def session_private_tmp(
@@ -369,10 +451,7 @@ def spawn_session_runner(
             "start RunnerRPCClient"
         )
 
-    log_path: Optional[str] = None
-    if workspace_path:
-        log_dir = os.path.join(workspace_path, ".jaato", "logs")
-        log_path = os.path.join(log_dir, f"runner-{session_id}.log")
+    log_path = runner_log_path(workspace_path, session_id)
 
     # ----- The session's tmpdir, before either branch (#1171) -----
     # ``RunnerSpawner.spawn`` makes this directory before it forks,
@@ -395,6 +474,11 @@ def spawn_session_runner(
     # which is #1171 itself — so this must not fail silently, and must
     # not take down a session that would otherwise run.
     _ensure_session_tmpdir(session_id, profile_name, confinement)
+    # ...and the runner log's directory, for the same reason: a cold
+    # spawn's child made it before exec, a pool slot never did, so the
+    # first pool-served session of a fresh workspace had nowhere to log
+    # (SELinux phase 4 kernel run).
+    _ensure_runner_log_dir(log_path)
 
     # ----- The session's workspace HOME, before either branch (#1225) -----
     # The daemon creates ``<ws>/.home/`` (+ its ``*`` gitignore) here, for
@@ -441,24 +525,12 @@ def spawn_session_runner(
     # to envelope.profile_name in bootstrap_session step 1c.)
     spawned: Optional[SpawnedRunner] = None
     pool_served = False
-    if _pool_may_serve(pool_manager, cgroup_attach, confinement):
-        slot = pool_manager.acquire_slot(
-            cascade_driver_id=cascade_driver_id,
-            # A slot's warm plugin state was built from ITS config root.
-            # Reusing across roots hands the next session whatever the first
-            # one's bootstrap derived -- profiles, agents, prompt library,
-            # permission config.
-            config_root=getattr(server, "config_root", None),
-            # ...and its THREADS are stuck in the AppArmor profile it was
-            # last confined to, which grants one workspace and cannot be
-            # changed for the threads that already exist (#1023).  Both
-            # are part of the reuse key; see ``runner_pool.SlotKey``.
-            # Passed raw; ``SlotKey.build`` folds "" to None so that
-            # "unconfined" and "no workspace" each have one spelling.
-            workspace_root=workspace_path,
-            profile_name=profile_name,
-            # #1168: a slot that dropped is that uid for life.
-            runner_uid=runner_uid_of(runner_user),
+    if _pool_may_serve(pool_manager, cgroup_attach):
+        slot = _acquire_pool_slot(
+            pool_manager, server, cascade_driver_id=cascade_driver_id,
+            workspace_path=workspace_path, profile_name=profile_name,
+            runner_user=runner_user, confinement=confinement,
+            log_path=log_path,
         )
         if slot is not None:
             spawned = SpawnedRunner(
@@ -481,10 +553,9 @@ def spawn_session_runner(
             server._pool_manager_ref = pool_manager
             logger.info(
                 "spawn_session_runner: session %s served by pool slot "
-                "pid=%d cascade=%s (warm imports inherited; slot will "
-                "self-confine to profile=%s)",
+                "pid=%d cascade=%s (warm imports inherited; boundary %s)",
                 session_id, slot.pid, slot.cascade_id or "(standalone)",
-                profile_name or "(unconfined)",
+                _slot_boundary_note(profile_name, confinement),
             )
         else:
             logger.info(
@@ -1482,12 +1553,47 @@ def build_session_envelope(
         # one value every spawn path already carries -- and cannot disagree
         # with it (the runner refuses a descriptor that does).
         confinement=_envelope_descriptor_of(profile_name, confinement),
+        # #1508: the session's seccomp filter, compiled HERE (the daemon is
+        # unconfined); the runner only installs the bytes.
+        seccomp_program=seccomp_program_of(
+            _envelope_descriptor_of(profile_name, confinement),
+            _profile_runtime_limits(profile),
+        ),
         # #1168: the user the runner drops to at step 1b3 (a pool slot) or
         # already dropped to before exec (a cold spawn), or ``None``.
         runner_user=_runner_user_wire(server),
         # #1465: the user tier the runner reads and is not granted.
         user_tier_files=user_tier_snapshot(stashed_runner_user(server)),
+        # SELinux phase 4: where this session's runner logs, so a pool
+        # slot stops writing the daemon's log (which it may not).
+        runner_log_path=runner_log_path(workspace_path, session_id),
     )
+
+
+def seccomp_program_of(
+    descriptor: Optional[Dict[str, Any]], limits: Optional[RuntimeLimits],
+) -> Optional[Dict[str, Any]]:
+    """``SessionInitEnvelope.seccomp_program`` for one session (#1508).
+
+    Compiled per session, because the program depends on the profile's
+    ``runtime_limits.seccomp`` and ``seccomp_allow``.  Compiled HERE, in the
+    unconfined daemon, because the confined runner may neither load
+    libseccomp by search (``find_library`` execs ``ldconfig``) nor write
+    the memfd libseccomp exports through (``tmpfs_t`` under SELinux).
+    Both spawn paths, cold and pool slot, read the envelope at bootstrap,
+    so both receive it.
+
+    ``None`` when the session has no kernel boundary (the runner records
+    ``unconfined``) or is a ``//`` sub-profile (an isolated sub-runner,
+    recorded ``absent``), and for ``seccomp: off``.
+    """
+    from jaato_server.shared import seccomp_filter
+
+    label = (descriptor or {}).get("label") or ""
+    if not label or "//" in label:
+        return None
+    return seccomp_filter.compile_for_envelope(
+        getattr(limits, "seccomp", None), getattr(limits, "seccomp_allow", None))
 
 
 def _apparmor_descriptor(profile_name: str) -> Optional[Dict[str, str]]:
@@ -1655,6 +1761,8 @@ def dispatch_bootstrap_envelope(
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)
+        _note_seccomp_posture(server, result, session_id)
+        _note_capability_posture(server, result, session_id)
         session_new_timing.mark("bootstrap_acked", session_id=session_id)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
@@ -1720,6 +1828,113 @@ def dispatch_bootstrap_envelope(
                 "post-bootstrap tool-id re-emit failed for %s",
                 session_id, exc_info=True,
             )
+
+
+def _note_seccomp_posture(
+    server: Any, result: Any, session_id: str = "",
+) -> None:
+    """Record the runner's reported seccomp posture on *server* (#1503).
+
+    And say it in the DAEMON log at the level it deserves (#1510): the
+    runner logs its own WARNING, but in the runner's log, which is not the
+    one an operator reads first.
+
+    ======================================  =========  ====================
+    posture                                 level      says
+    ======================================  =========  ====================
+    ``filter``, ``unconfined``              INFO       the posture
+    ``off``                                 WARNING    no syscall filter
+    ``absent``, best effort                 WARNING    no filter, and why
+    ``absent`` with ``spawns_refused``      ERROR      every model-driven
+                                                       subprocess spawn in
+                                                       this session will be
+                                                       refused, and why
+    any, with ``ignored_families``          WARNING    the unknown
+                                                       ``seccomp_allow``
+                                                       names, which allowed
+                                                       nothing back
+    ======================================  =========  ====================
+
+    Each names the session.  Best-effort, like
+    :func:`_note_bootstrap_outcome`: a recorder must not turn an
+    acknowledged bootstrap into a failed one.
+    """
+    note = getattr(server, "note_seccomp_posture", None)
+    if not callable(note):
+        return
+    try:
+        posture = result.get("seccomp") if isinstance(result, dict) else None
+        note(posture)
+        if isinstance(posture, dict):
+            _log_seccomp_posture(session_id, posture)
+    except Exception:  # noqa: BLE001 — a recorder must not fail the path
+        logger.debug("note_seccomp_posture raised", exc_info=True)
+
+
+def _log_seccomp_posture(session_id: str, posture: Dict[str, Any]) -> None:
+    """The daemon-log line for one session's seccomp posture (#1510)."""
+    from jaato_server.shared import seccomp_filter as sf
+
+    kind = posture.get("posture")
+    reason = posture.get("reason") or "no reason given"
+    ignored = posture.get("ignored_families")
+    if ignored:
+        logger.warning(
+            "seccomp: session %s: runtime_limits.seccomp_allow names unknown "
+            "famil%s %s (known: %s); ignored, the filter is unchanged and "
+            "nothing was allowed back for them",
+            session_id, "y" if len(ignored) == 1 else "ies", list(ignored),
+            ", ".join(sf.FAMILIES))
+    if kind == sf.POSTURE_ABSENT and posture.get("spawns_refused"):
+        logger.error(
+            "seccomp: session %s: the filter is REQUIRED and unavailable "
+            "(%s) -- every model-driven subprocess spawn in this session "
+            "(cli, interactive_shell, notebook) will be refused",
+            session_id, reason)
+    elif kind == sf.POSTURE_ABSENT:
+        logger.warning(
+            "seccomp: session %s: posture absent (%s) -- model-driven "
+            "subprocesses run behind the LSM boundary with no syscall filter",
+            session_id, reason)
+    elif kind == sf.POSTURE_OFF:
+        logger.warning(
+            "seccomp: session %s: posture off (%s) -- model-driven "
+            "subprocesses reach the whole syscall table behind the LSM "
+            "boundary alone", session_id, reason)
+    else:
+        logger.info("seccomp: session %s: runner posture %s",
+                    session_id, posture)
+
+
+def _note_capability_posture(
+    server: Any, result: Any, session_id: str = "",
+) -> None:
+    """Record the runner's capability-drop posture on *server* (#1543).
+
+    The sibling of :func:`_note_seccomp_posture`, and says it in the DAEMON
+    log for the same reason: ``dropped`` / ``unconfined`` at INFO,
+    ``partial`` / ``inherit`` / ``absent`` at WARNING with the reason, so
+    "LSM yes, capabilities kept" is never silent.  Best-effort.
+    """
+    note = getattr(server, "note_capability_posture", None)
+    if not callable(note):
+        return
+    try:
+        posture = result.get("capabilities") if isinstance(result, dict) else None
+        note(posture)
+        if not isinstance(posture, dict):
+            return
+        kind = posture.get("posture")
+        if kind in ("dropped", "unconfined"):
+            logger.info("capabilities: session %s: runner posture %s",
+                        session_id, posture)
+        else:
+            logger.warning(
+                "capabilities: session %s: posture %s (%s) -- model-driven "
+                "subprocesses are not fully stripped of capabilities",
+                session_id, kind, posture.get("reason") or "no reason given")
+    except Exception:  # noqa: BLE001 — a recorder must not fail the path
+        logger.debug("note_capability_posture raised", exc_info=True)
 
 
 def _note_bootstrap_outcome(server: Any, error: Optional[str]) -> None:

@@ -53,7 +53,9 @@ from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback
 from jaato_server.shared.apparmor_label import COMPLAIN_ENV_VAR, read_thread_label
-from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
+from jaato_server.shared.plugins.runner_forwarding import (
+    RunnerForwardingMixin, failures_explicit,
+)
 from jaato_server.shared.secret_scrub import (
     DEFAULT_SECRET_ENV_PATTERNS, granted_env_names, resolve_scrub_patterns,
 )
@@ -911,14 +913,16 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         the runner-side path uses the default cgroup attach the
         runner's ``set_runtime_limits`` already wires.
         """
-        return self.wrap_executors_for_runner_forwarding({
+        # #1510: an error dict is a failure, so a refused spawn is not
+        # reported as a success (``runner_forwarding.failures_explicit``).
+        return failures_explicit(self.wrap_executors_for_runner_forwarding({
             'shell_spawn': self._exec_spawn,
             'shell_input': self._exec_input,
             'shell_read': self._exec_read,
             'shell_control': self._exec_control,
             'shell_close': self._exec_close,
             'shell_list': self._exec_list,
-        })
+        }))
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for interactive shell tools."""

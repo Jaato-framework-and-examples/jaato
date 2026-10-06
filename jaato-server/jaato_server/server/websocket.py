@@ -55,6 +55,7 @@ from .cgroups import CgroupsManager
 from .session_logging import set_logging_context, clear_logging_context
 from .transfer_limits import STAGE_PER_FILE_LIMIT, STAGE_TOTAL_LIMIT
 from .contained_write import PathLeavesRoot, write_contained
+from jaato_server.shared.workspace_ownership import inherit_owner_tree
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -284,24 +285,24 @@ def _report_confined_spawn_failure(
     )
 
 
-def _hand_managed_root_to(session_manager: Any, workspace_root: Optional[str]) -> None:
-    """#1280: tell *session_manager* which workspaces this WS server manages.
+def _hand_managed_root_to(session_manager: Any, resolver: Any) -> None:
+    """#1280: tell *session_manager* how to find a workspace's managed root.
 
     The WS pre-init hook threads ``managed_workspace_root`` into its own
     spawn, but a premium WUI ``session.new`` is spawned by
     ``SessionManager._spawn_session_runner_unconditional``, which had no way
-    to learn the root: the daemon wires ``set_apparmor_dependencies`` before
+    to learn the roots: the daemon wires ``set_apparmor_dependencies`` before
     it constructs this server.  Called from :meth:`JaatoWSServer.set_command_router`,
-    the seam that registers the pre-init hook, so both spawn paths see the
-    same root.
+    the seam that registers the pre-init hook, so both spawn paths answer
+    from :meth:`JaatoWSServer.managed_root_for`.
 
-    A session manager without ``set_managed_workspace_root`` (a test double,
+    A session manager without ``set_managed_root_resolver`` (a test double,
     an out-of-tree manager) is left alone.  Extracted so
     ``set_command_router`` gains no branch.
     """
-    setter = getattr(session_manager, "set_managed_workspace_root", None)
+    setter = getattr(session_manager, "set_managed_root_resolver", None)
     if callable(setter):
-        setter(workspace_root)
+        setter(resolver)
 
 
 # Default path for servers.json (contains TLS config)
@@ -648,7 +649,7 @@ class WSEventSinkAdapter:
         declared = self._client_workspaces.get(client_id)
         if declared:
             return declared
-        manager = getattr(self._ws, "_workspace_manager", None)
+        manager = self._ws._workspace_manager_for(client_id)
         if manager is None:
             return None
         try:
@@ -1024,6 +1025,13 @@ class JaatoWSServer:
         # Workspace provisioner for auto-provisioning session workspaces
         self._provisioner: Optional[WorkspaceProvisioner] = None
 
+        # Per-application workspace roots (``--ws-app-credentials`` entries
+        # carrying ``account`` / ``workspace_root``): one manager and one
+        # provisioner per application, built in :meth:`start`.  Keyed by
+        # ``app_id``; empty when no application declares a root.
+        self._app_managers: Dict[str, WorkspaceManager] = {}
+        self._app_provisioners: Dict[str, WorkspaceProvisioner] = {}
+
         # AppArmor manager for per-session confinement
         self._apparmor: Optional[AppArmorManager] = None
         self._apparmor_mode = apparmor  # None=auto, True=required, False=disabled
@@ -1084,7 +1092,7 @@ class JaatoWSServer:
         Registers a session hook to apply AppArmor confinement and set
         ``sandbox_mode`` on each newly created session, and hands this
         server's ``workspace_root`` to the router's session manager
-        (``set_managed_workspace_root``, #1280) so the session manager's own
+        (``set_managed_root_resolver``, #1280) so the session manager's own
         runner-spawn path treats the same workspaces as daemon-managed as
         the pre-init hook does.
 
@@ -1120,7 +1128,7 @@ class JaatoWSServer:
         sm = router._session_manager
         # #1280: the session manager's own spawn path (the one a WUI
         # ``session.new`` takes) needs this root as much as the hook below.
-        _hand_managed_root_to(sm, getattr(self, "_workspace_root", None))
+        _hand_managed_root_to(sm, self.managed_root_for)
 
         def _apparmor_pre_init_hook(
             server: JaatoServer,
@@ -1190,12 +1198,13 @@ class JaatoWSServer:
                 )
                 return
 
-            # Gate: only WS-provisioned sessions (workspace under
-            # WS server's root) take this path.  Non-WS sessions
+            # Gate: only WS-provisioned sessions (workspace under one of
+            # the WS server's managed roots -- its own, or an
+            # application's) take this path.  Non-WS sessions
             # (IPC / user-CWD) are handled by the IPC hook.
             try:
-                ws_workspace_root = os.path.realpath(ws_server._workspace_root)
                 sess_workspace = os.path.realpath(workspace_path)
+                ws_workspace_root = ws_server.managed_root_for(sess_workspace)
             except OSError as exc:
                 # #1296: unlike the two branches around it, this one is
                 # NOT the routine "this session isn't mine" exit — it
@@ -1213,10 +1222,7 @@ class JaatoWSServer:
                     type(exc).__name__, exc,
                 )
                 return
-            if not (
-                sess_workspace == ws_workspace_root
-                or sess_workspace.startswith(ws_workspace_root + os.sep)
-            ):
+            if ws_workspace_root is None:
                 # #1296: the ROUTINE exit — every non-WS session
                 # (IPC / user-CWD) takes this branch, since the hook is
                 # registered for every session bootstrap regardless of
@@ -1224,10 +1230,10 @@ class JaatoWSServer:
                 # demand without adding one line per ordinary session
                 # creation at the daemon's default log level.
                 logger.debug(
-                    "AppArmor pre-init: session %s workspace %s is not "
-                    "under the WS server's workspace_root %s — IPC or "
+                    "AppArmor pre-init: session %s workspace %s is under "
+                    "none of the WS server's workspace roots %s — IPC or "
                     "user-CWD session, not WS-provisioned",
-                    session_id, sess_workspace, ws_workspace_root,
+                    session_id, sess_workspace, ws_server._managed_roots(),
                 )
                 return  # IPC or user-CWD session — not WS-provisioned
 
@@ -1470,18 +1476,15 @@ class JaatoWSServer:
             # same WS server workspace_root, so this gate is correct for
             # cgroups too.
             try:
-                ws_workspace_root = os.path.realpath(ws_server._workspace_root)
                 sess_workspace = os.path.realpath(sess.workspace_path)
+                ws_workspace_root = ws_server.managed_root_for(sess_workspace)
             except OSError:
                 return
-            if not (
-                sess_workspace == ws_workspace_root
-                or sess_workspace.startswith(ws_workspace_root + os.sep)
-            ):
+            if ws_workspace_root is None:
                 logger.debug(
                     "Sandbox/limits skipped for non-provisioned session %s "
-                    "(workspace %s not under %s — IPC or user-CWD session)",
-                    session_id, sess_workspace, ws_workspace_root,
+                    "(workspace %s under none of %s — IPC or user-CWD session)",
+                    session_id, sess_workspace, ws_server._managed_roots(),
                 )
                 return
 
@@ -1685,14 +1688,105 @@ class JaatoWSServer:
         client = self._clients.get(client_id)
         return client.user_id if client else None
 
+    def _init_app_workspaces(self) -> None:
+        """Build one manager and one provisioner per application root.
+
+        Each application's registry is its own file beside the daemon's
+        (``~/.jaato/workspaces-<app_id>.json``), daemon-side: the rows hold
+        the ``owner`` that decides who sees which workspace, so they are
+        kept where the application's account cannot write.
+
+        Raises:
+            RuntimeError: an application's root equals, contains or lies
+                inside the daemon's own root.  The daemon's manager would
+                discover that application's workspaces as its own.
+        """
+        own_root = os.path.realpath(self._workspace_root)
+        registry_dir = Path.home() / ".jaato"
+        for app_id, app_ws in sorted(self._app_credentials.workspaces().items()):
+            root = app_ws.workspace_root
+            if root == own_root or root.startswith(own_root + os.sep) or own_root.startswith(root + os.sep):
+                raise RuntimeError(
+                    f"application {app_id!r}: workspace_root {root} overlaps the "
+                    f"daemon's own workspace root {own_root}"
+                )
+            manager = WorkspaceManager(
+                root, registry_path=registry_dir / f"workspaces-{app_id}.json")
+            manager.discover_workspaces()
+            self._app_managers[app_id] = manager
+            self._app_provisioners[app_id] = WorkspaceProvisioner(
+                root, default_template=self._default_template)
+            logger.info("Workspace root for application %s: %s (account %s)",
+                        app_id, root, app_ws.account)
+
+    def _client_app_id(self, client_id: Optional[str]) -> Optional[str]:
+        """The application a connection authenticated as, when it declared a root.
+
+        Only an application whose ``--ws-app-credentials`` entry carries a
+        workspace root (:class:`~.ws_tickets.AppWorkspace`) counts; any
+        other connection is served from the daemon's own root.
+        """
+        client = self._clients.get(client_id) if client_id else None
+        app_id = getattr(client, "app_id", None)
+        return app_id if app_id in self._app_managers else None
+
+    def _workspace_manager_for(self, client_id: Optional[str]) -> Optional[WorkspaceManager]:
+        """The :class:`WorkspaceManager` that serves *client_id*.
+
+        A connection of an application with its own workspace root lists,
+        creates and opens workspaces under that root only; every other
+        connection gets the daemon's root, as before per-application roots.
+        """
+        app_id = self._client_app_id(client_id)
+        if app_id is not None:
+            return self._app_managers[app_id]
+        return self._workspace_manager
+
+    def _provisioner_for(self, client_id: Optional[str]) -> Optional[WorkspaceProvisioner]:
+        """The provisioner for *client_id*'s root (see :meth:`_workspace_manager_for`)."""
+        app_id = self._client_app_id(client_id)
+        if app_id is not None:
+            return self._app_provisioners[app_id]
+        return self._provisioner
+
+    def _all_workspace_managers(self) -> List[WorkspaceManager]:
+        """The daemon's manager (when there is one) and every application's."""
+        managers = [self._workspace_manager] if self._workspace_manager else []
+        return managers + list(self._app_managers.values())
+
+    def _managed_roots(self) -> List[str]:
+        """Resolved roots of every workspace tree this server provisions."""
+        roots: List[str] = []
+        if self._workspace_root:
+            roots.append(os.path.realpath(self._workspace_root))
+        roots.extend(ws.workspace_root for ws in self._app_credentials.workspaces().values())
+        return roots
+
+    def managed_root_for(self, workspace_path: Optional[str]) -> Optional[str]:
+        """The managed root *workspace_path* lies under, or ``None``.
+
+        The question every "is this a WS-provisioned workspace" decision
+        asks (AppArmor and cgroup gates, the #1225 workspace HOME, the
+        #1274 venv and #1381 private ``/tmp`` defaults): it was a single
+        root and is now whichever configured root contains the workspace.
+        """
+        if not workspace_path:
+            return None
+        real = os.path.realpath(workspace_path)
+        for root in self._managed_roots():
+            if real == root or real.startswith(root + os.sep):
+                return root
+        return None
+
     def visible_workspace_paths(self, client_id: str) -> Optional[List[str]]:
         """See ``WSEventSinkAdapter.visible_workspace_paths``."""
-        if not self._workspace_manager:
+        manager = self._workspace_manager_for(client_id)
+        if not manager:
             return None
         user = self.get_client_user(client_id)
         if user is None:
             return None
-        return [ws.path for ws in self._workspace_manager.list_workspaces(for_user=user)
+        return [ws.path for ws in manager.list_workspaces(for_user=user)
                 if ws.path]
 
     def _sessions_loaded_in(self, workspace_path: str) -> List[str]:
@@ -1784,6 +1878,8 @@ class JaatoWSServer:
             workspace_root=self._workspace_root,
             loop=loop,
         )
+        # #1501: an idle-grace profile a pooled slot still wears is held.
+        self._apparmor.slot_in_use = self._apparmor_slot_in_use
         if self._apparmor_mode is False:
             if self._apparmor_required_env:
                 # Contradiction: env requires confinement, flag disables
@@ -1853,6 +1949,8 @@ class JaatoWSServer:
                 default_template=self._default_template,
             )
 
+            self._init_app_workspaces()
+
             self._init_apparmor(asyncio.get_running_loop())
 
             # Initialize cgroups manager (orthogonal to AppArmor — runtime
@@ -1903,11 +2001,12 @@ class JaatoWSServer:
                     self._cgroups.teardown_cgroup(session_id)
                 self._workspace_to_session_id.pop(workspace_id, None)
 
-            self._provisioner.start_reaper(
-                interval_seconds=3600,
-                max_age_seconds=self._workspace_max_age,
-                on_teardown=_on_workspace_reaped,
-            )
+            for provisioner in [self._provisioner, *self._app_provisioners.values()]:
+                provisioner.start_reaper(
+                    interval_seconds=3600,
+                    max_age_seconds=self._workspace_max_age,
+                    on_teardown=_on_workspace_reaped,
+                )
 
         # Bind event loop for the WSEventSinkAdapter (thread-safe scheduling)
         if self._event_sink_adapter:
@@ -1973,13 +2072,29 @@ class JaatoWSServer:
         # Give server time to start
         await asyncio.sleep(0.1)
 
+    def _apparmor_slot_in_use(self, profile_name: str) -> bool:
+        """``AppArmorManager.slot_in_use`` for this server's manager (#1501)."""
+        pool = getattr(self, "_pool_manager_ref", None)
+        return bool(pool is not None and pool.profile_in_use(profile_name))
+
     async def stop(self) -> None:
         """Stop the server gracefully."""
         self._shutdown_event.set()
 
+        # #1501: unload boundary profiles kept loaded for their idle grace.
+        # Off the loop: the unload is dispatched back onto it (#1355).
+        apparmor = getattr(self, "_apparmor", None)
+        if apparmor is not None and hasattr(apparmor, "unload_idle_profiles"):
+            try:
+                await asyncio.to_thread(apparmor.unload_idle_profiles)
+            except Exception:  # noqa: BLE001 — stopping carries on
+                logger.warning("unloading idle AppArmor profiles failed",
+                               exc_info=True)
+
         # Stop workspace reaper
-        if self._provisioner:
-            self._provisioner.stop_reaper()
+        for provisioner in [self._provisioner, *self._app_provisioners.values()]:
+            if provisioner:
+                provisioner.stop_reaper()
 
         # Close all client connections
         async with self._lock:
@@ -2318,8 +2433,8 @@ class JaatoWSServer:
             if self._command_router:
                 self._command_router.handle_client_disconnect(client_id)
             # Clean up per-client state
-            if self._workspace_manager:
-                self._workspace_manager.remove_client(client_id)
+            for manager in self._all_workspace_managers():
+                manager.remove_client(client_id)
             self._client_provisioned.pop(client_id, None)
             if self._event_sink_adapter:
                 self._event_sink_adapter.remove_client(client_id)
@@ -2562,14 +2677,16 @@ class JaatoWSServer:
     def _owner_for_workspace_path(self, workspace_path: str) -> Optional[str]:
         """The qualified owner ``app:user`` of the workspace at ``workspace_path``.
 
-        Reads ``WorkspaceManager``, so ``None`` on a server with no workspace
-        manager (which cannot own workspaces anyway) and for a path that is not
-        a known, owned workspace.
+        Asks every :class:`WorkspaceManager` (the daemon's and each
+        application's), so ``None`` on a server with none (which cannot own
+        workspaces anyway) and for a path that is not a known, owned
+        workspace.
         """
-        manager = self._workspace_manager
-        if manager is None:
-            return None
-        return manager.owner_for_path(workspace_path)
+        for manager in self._all_workspace_managers():
+            owner = manager.owner_for_path(workspace_path)
+            if owner is not None:
+                return owner
+        return None
 
     async def _handle_secret_bind_message(
         self, client_id: str, verb: str, message: str
@@ -2868,8 +2985,8 @@ class JaatoWSServer:
             return
 
         # Set logging context for session-specific log routing
-        if self._jaato_server and self._workspace_manager:
-            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+        if self._jaato_server and self._workspace_manager_for(client_id):
+            selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
             workspace_path = selected.path if selected else None
             session_env = self._jaato_server.get_all_session_env()
             # Use workspace name as session_id for WebSocket mode
@@ -2890,8 +3007,8 @@ class JaatoWSServer:
         not propagate to threads).
         """
         # Capture context for thread (ContextVars don't propagate to threads)
-        if self._jaato_server and self._workspace_manager:
-            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+        if self._jaato_server and self._workspace_manager_for(client_id):
+            selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
             ctx_workspace = selected.path if selected else None
             ctx_session_env = self._jaato_server.get_all_session_env()
             ctx_session_id = selected.name if selected else "websocket"
@@ -3086,8 +3203,8 @@ class JaatoWSServer:
             await self._handle_workspace_select(client_id, event.name)
             # Bridge selected workspace path to the event sink adapter
             # so CommandRouter can resolve it via get_client_workspace()
-            if self._event_sink_adapter and self._workspace_manager:
-                selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+            if self._event_sink_adapter and self._workspace_manager_for(client_id):
+                selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
                 if selected and selected.path:
                     self._event_sink_adapter.set_client_workspace(client_id, selected.path)
         elif isinstance(event, ConfigUpdateRequest):
@@ -3321,8 +3438,8 @@ class JaatoWSServer:
         """
         adapter = self._event_sink_adapter
         declared = adapter.get_client_workspace(client_id) if adapter else None
-        if not declared and self._workspace_manager is not None:
-            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+        if not declared and self._workspace_manager_for(client_id) is not None:
+            selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
             declared = selected.path if selected else None
 
         router = getattr(self, "_command_router", None)
@@ -3594,7 +3711,7 @@ class JaatoWSServer:
         from jaato_sdk.events import CommandRequest
         if (isinstance(event, CommandRequest)
                 and event.command.lower() == "session.new"
-                and self._provisioner
+                and self._provisioner_for(client_id)
                 and self._event_sink_adapter
                 and not self._event_sink_adapter.get_client_workspace(client_id)):
             import uuid as _uuid
@@ -3646,6 +3763,7 @@ class JaatoWSServer:
                                 shutil.copytree(item, dest, dirs_exist_ok=True)
                             else:
                                 shutil.copy2(item, dest)
+                            inherit_owner_tree(str(dest), str(ws_path))
                         shutil.rmtree(staging_dir, ignore_errors=True)
                         logger.info(
                             "Copied staged artifacts %s into workspace %s",
@@ -3985,30 +4103,30 @@ class JaatoWSServer:
 
     async def _handle_workspace_list(self, client_id: str) -> None:
         """Handle workspace list request."""
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
         # Scoped to the connection's authenticated user (#1074 tickets):
         # their own and the unowned workspaces.  No identity, no scoping.
-        workspaces = self._workspace_manager.list_workspaces(
+        workspaces = self._workspace_manager_for(client_id).list_workspaces(
             for_user=self.get_client_user(client_id))
         await self._send_to_client(
             client_id,
             WorkspaceListEvent(
-                root=str(self._workspace_manager.workspace_root),
+                root=str(self._workspace_manager_for(client_id).workspace_root),
                 workspaces=[ws.to_dict() for ws in workspaces],
             )
         )
 
     async def _handle_workspace_create(self, client_id: str, name: str) -> None:
         """Handle workspace creation request."""
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
         try:
-            ws_info = self._workspace_manager.create_workspace(
+            ws_info = self._workspace_manager_for(client_id).create_workspace(
                 name, owner=self.get_client_user(client_id))
             # name/path are the event's declared identity fields; the dict is
             # the whole row.  Sending the dict ALONE reached clients as an
@@ -4041,22 +4159,22 @@ class JaatoWSServer:
         anyway (another user's workspace, another client's selection,
         retention) never stops a session.
         """
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await self._send_error(client_id, "Workspace mode not enabled")
             return
         user = self.get_client_user(client_id)
         try:
-            path = self._workspace_manager.get_workspace_path(name)
+            path = self._workspace_manager_for(client_id).get_workspace_path(name)
             # Off the loop (#1355): listing asks each runner for history.
             in_use = (await asyncio.to_thread(
                 self._sessions_loaded_in, str(path)) if path else [])
             if stop_sessions and in_use:
-                self._workspace_manager.check_deletable(
+                self._workspace_manager_for(client_id).check_deletable(
                     name, user=user, client_id=client_id)
                 await asyncio.to_thread(self._delete_sessions, in_use)
                 in_use = await asyncio.to_thread(
                     self._sessions_loaded_in, str(path))
-            self._workspace_manager.delete_workspace(
+            self._workspace_manager_for(client_id).delete_workspace(
                 name, user=user, in_use_by=in_use, client_id=client_id,
             )
         except ValueError as e:
@@ -4100,12 +4218,12 @@ class JaatoWSServer:
         runs in a worker thread so the loop is never blocked on it.
         """
         name, request_id = event.name, event.request_id
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await self._send_error(client_id, "Workspace mode not enabled")
             return
         from .workspace_inspect import inspect_workspace
         try:
-            path, _ = self._workspace_manager.resolve_visible(
+            path, _ = self._workspace_manager_for(client_id).resolve_visible(
                 name, self.get_client_user(client_id))
         except ValueError as e:
             await self._send_to_client(client_id, WorkspaceInspectEvent(
@@ -4148,12 +4266,12 @@ class JaatoWSServer:
             await self._send_to_client(client_id, WorkspaceCloneProgressEvent(
                 name=name, request_id=request_id, **fields))
 
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await emit({"state": "failed", "error": "Workspace mode not enabled"})
             return
         from .workspace_clone import clone_repos, resolve_workspace_token
         try:
-            path, _ = self._workspace_manager.resolve_visible(
+            path, _ = self._workspace_manager_for(client_id).resolve_visible(
                 name, self.get_client_user(client_id))
         except ValueError as e:
             await emit({"state": "failed", "error": str(e)})
@@ -4196,14 +4314,14 @@ class JaatoWSServer:
         Per-client workspace tracking is used so multiple clients can
         select different workspaces simultaneously.
         """
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
         try:
-            ws_info = self._workspace_manager.select_workspace(
+            ws_info = self._workspace_manager_for(client_id).select_workspace(
                 name, client_id=client_id, user=self.get_client_user(client_id))
-            config_status = self._workspace_manager.get_config_status(name)
+            config_status = self._workspace_manager_for(client_id).get_config_status(name)
 
             # Send config status to client
             await self._send_to_client(
@@ -4240,12 +4358,13 @@ class JaatoWSServer:
         Returns:
             The provisioned workspace, or None on failure.
         """
-        if not self._provisioner:
+        provisioner = self._provisioner_for(client_id)
+        if not provisioner:
             logger.warning("Cannot provision workspace: no provisioner configured")
             return None
 
         try:
-            workspace = self._provisioner.provision(
+            workspace = provisioner.provision(
                 session_id=session_id,
                 client_id=client_id,
                 template=template,
@@ -4359,17 +4478,17 @@ class JaatoWSServer:
         which must neither rebind the workspace's provider nor start a
         second server beside that session.
         """
-        if not self._workspace_manager:
+        if not self._workspace_manager_for(client_id):
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
-        selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+        selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
         if not selected:
             await self._send_error(client_id, "No workspace selected")
             return
 
         try:
-            result = self._workspace_manager.update_config(
+            result = self._workspace_manager_for(client_id).update_config(
                 provider=provider,
                 model=model,
                 api_key=api_key,
@@ -4412,7 +4531,7 @@ class JaatoWSServer:
             client_id: The requesting client.
             workspace_info: The ``WorkspaceInfo`` for the selected workspace.
         """
-        env_file = self._workspace_manager.get_env_file(workspace_info.name)
+        env_file = self._workspace_manager_for(client_id).get_env_file(workspace_info.name)
         if not env_file or not env_file.exists():
             await self._send_error(client_id, "Workspace .env file not found")
             return
@@ -4422,7 +4541,7 @@ class JaatoWSServer:
         # {root}/sessions/ with template contents and AppArmor confinement.
         session_id = workspace_info.name  # Use workspace name as session ID
         provisioned_ws = None
-        if self._provisioner:
+        if self._provisioner_for(client_id):
             provisioned_ws = await self.provision_workspace(
                 client_id=client_id,
                 session_id=session_id,
@@ -4529,6 +4648,11 @@ class JaatoWSServer:
             selected = self._workspace_manager.get_selected_workspace()
             info["workspace_root"] = str(self._workspace_manager.workspace_root)
             info["selected_workspace"] = selected.name if selected else None
+        if self._app_managers:
+            info["application_workspace_roots"] = {
+                app_id: str(manager.workspace_root)
+                for app_id, manager in sorted(self._app_managers.items())
+            }
 
         if self._provisioner:
             info["provisioned_workspaces"] = len(self._provisioner.list_workspaces())

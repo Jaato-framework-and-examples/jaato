@@ -73,8 +73,13 @@ SHIPPED_DIRS: Tuple[str, ...] = (
 )
 
 #: Read-only directories under the HOME (not ``~/.jaato``) shipped whole.
+#: ``.config/jaato`` holds plugin config files (``todo.json``,
+#: ``filesystem_query.json``, ``references.json``); an isolated SELinux
+#: domain is refused even a ``search`` on a user's home, and an existence
+#: probe that raises EACCES costs the session the plugin (phase 3 kernel run).
 HOME_SHIPPED_DIRS: Tuple[str, ...] = (
     ".claude/skills",
+    ".config/jaato",
 )
 
 #: Snapshot-key prefix of a :data:`HOME_SHIPPED_DIRS` entry.

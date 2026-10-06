@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
-from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
+from jaato_server.shared.plugins.runner_forwarding import (
+    RunnerForwardingMixin, failures_explicit,
+)
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     EditableContent,
@@ -426,7 +428,11 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
           preexec_fn — today's pre-§5.10 behavior).
 
         Apparmor-first ordering matches §6.1 of the audit doc — the
-        new profile applies during the cgroup write.  Both writes
+        new profile applies during the cgroup write.  The "apparmor"
+        callable also carries the seccomp step (#1503): after the LSM
+        transition it sets ``PR_SET_NO_NEW_PRIVS`` and installs the
+        session's syscall filter, so the cgroup write happens under the
+        filter (an ordinary open/write it allows).  Both writes
         succeed today on either profile; ordering is defensive
         against future tightening.
 
@@ -651,9 +657,11 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         shared ``RunnerForwardingMixin`` — same wire path, same
         cancellation contract, less per-plugin duplication.
         """
-        return self.wrap_executors_for_runner_forwarding({
+        # #1510: an error dict is a failure, so a refused spawn is not
+        # reported as a success (``runner_forwarding.failures_explicit``).
+        return failures_explicit(self.wrap_executors_for_runner_forwarding({
             'cli_based_tool': self._execute,
-        })
+        }))
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the CLI tool."""

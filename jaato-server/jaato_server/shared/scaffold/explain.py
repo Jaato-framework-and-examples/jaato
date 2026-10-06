@@ -205,6 +205,15 @@ def transports() -> Rendered:
         "  simply not send.  An application credential binds and revokes; it\n"
         "  cannot open a session.  With the flag absent, none of this exists and\n"
         "  WS auth is the single shared token above.\n\n"
+        "per-application workspaces (the same file):\n"
+        '  {"<app_id>": {"credential": "...", "account": "<os account>",\n'
+        '               "workspace_root": "<dir owned by that account>"}}\n'
+        "  The application's users list, create and open workspaces under its\n"
+        "  root only; each workspace and everything the daemon writes into it\n"
+        "  (clone, staged files, .env, .gitconfig) belongs to the account, so\n"
+        "  --runner-uid-policy workspace-owner runs those sessions as it.  The\n"
+        "  daemon refuses to start if an account is missing, a root is not\n"
+        "  owned or reachable by its account, or two roots overlap.\n\n"
         "preflight the WS daemon side (port + token file + auth mode):\n"
         "  jaato-doctor --web-socket [host:]port\n\n"
         "scaffold any transport:\n"
@@ -659,6 +668,14 @@ _RUNTIME_LIMIT_FIELDS = (
     ("unload_grace_seconds", "daemon",
      "wall-clock the daemon holds an unwatched session in memory before "
      "UNLOADING it (a reconnect inside it costs nothing); 0 = no grace"),
+    ("seccomp", "kernel (seccomp)",
+     "syscall deny-list in every cli / shell / notebook subprocess: "
+     "default | off (off is announced at WARNING)"),
+    ("seccomp_allow", "kernel (seccomp)",
+     "deny-list families allowed back for this stage, e.g. [ptrace]"),
+    ("capabilities", "kernel (capabilities)",
+     "capabilities a cli / shell / notebook subprocess keeps: none | "
+     "[names] | inherit (inherit is announced at WARNING)"),
 )
 
 
@@ -688,6 +705,12 @@ def _runtime_limits_report() -> Dict[str, Any]:
         "unload_grace_seconds": (
             f"{rl.DEFAULT_UNLOAD_GRACE_SECONDS:g}s (framework default)"
         ),
+        "seccomp": "default while a kernel boundary is active; no filter "
+                   "when unconfined",
+        "seccomp_allow": "none (every family denied)",
+        "capabilities": "none while a kernel boundary is active (bounding, "
+                        "permitted, effective, inheritable and ambient "
+                        "empty); untouched when unconfined",
     }
     iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
     return {
@@ -713,8 +736,22 @@ def _runtime_limits_report() -> Dict[str, Any]:
                 "MIN across every layer that declares it (0 is the TIGHTEST "
                 "value here, not 'unbounded')"
             ),
+            "seccomp": "'default' beats 'off' across every layer that "
+                       "declares it",
+            "seccomp_allow": "INTERSECTION across every layer that declares "
+                             "one",
+            "capabilities": "'none' beats a list beats 'inherit'; lists "
+                            "INTERSECT",
         },
+        "seccomp_families": _seccomp_families(),
     }
+
+
+def _seccomp_families() -> List[Dict[str, Any]]:
+    """The deny-list families, read from :mod:`shared.seccomp_filter`."""
+    from jaato_server.shared.seccomp_filter import FAMILIES
+    return [{"name": f.name, "syscalls": list(f.syscalls), "note": f.note}
+            for f in FAMILIES.values()]
 
 
 def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
@@ -747,6 +784,21 @@ def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
     lines.append(
         "               may only ever narrow what it was spawned under."
     )
+    lines.append(
+        "  seccomp is MOST-RESTRICTIVE-WINS too: 'default' beats 'off', and"
+    )
+    lines.append(
+        "  seccomp_allow is the intersection of every declared list (#1503)."
+    )
+    lines.append(
+        "  capabilities likewise: 'none' beats a list beats 'inherit', and"
+    )
+    lines.append(
+        "  two lists keep only what both keep (#1543)."
+    )
+    lines.append("  seccomp families (each answers EPERM unless allowed back):")
+    for fam in report.get("seccomp_families", ()):
+        lines.append(f"    {fam['name']:<12} {fam['note']}")
     lines.append(
         "  the 'daemon' layer is enforced by the SessionManager watchdog, not"
     )
@@ -1588,7 +1640,34 @@ def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
     """
     if name == "references":
         return _reference_link_lines(), {"link_relations": _reference_link_rels()}
+    if name == "permission":
+        return _permission_policy_layers()
     return [], {}
+
+
+def _permission_policy_layers() -> Tuple[List[str], Dict[str, Any]]:
+    """Where a session's permission policy comes from (#1474).
+
+    Read from ``policy_layers`` -- the tables ``resolve_effective_policy``
+    is written against -- so this page cannot describe a precedence the
+    enforcer does not apply.
+    """
+    from jaato_server.shared.plugins.permission import policy_layers as PL
+    lines = ["  policy layers (lowest precedence first; the effective policy "
+             "is logged once per session):"]
+    for i, (layer, what) in enumerate(PL.POLICY_LAYERS, 1):
+        lines.append(f"    {i}. {layer:<10} {what}")
+    lines.append("  how they combine:")
+    lines.extend(f"    - {rule}" for rule in PL.MERGE_RULES)
+    lines.append("  a confined session cannot write <ws>/.jaato/permissions.json "
+                 "(AppArmor template v44, and the .jaato/ containment rule for "
+                 "file tools and cli); on an unconfined host it is writable "
+                 "like any config file")
+    data = {"policy_layers": [{"layer": layer, "source": what}
+                              for layer, what in PL.POLICY_LAYERS],
+            "policy_merge_rules": list(PL.MERGE_RULES),
+            "framework_default_policy": PL.FRAMEWORK_DEFAULT_POLICY}
+    return lines, data
 
 
 def plugin(name: str) -> Rendered:
@@ -2682,7 +2761,8 @@ def profile() -> Rendered:
     return data, "\n".join(lines)
 
 
-def profile_cost(name: str, workspace: str) -> Rendered:
+def profile_cost(name: str, workspace: str,
+                 profile_set: Optional[str] = None) -> Rendered:
     """What a session built from *name* INHERITS, and what it costs.
 
     A profile file says what it ADDS.  It never says what it INHERITS -- and
@@ -2700,18 +2780,24 @@ def profile_cost(name: str, workspace: str) -> Rendered:
     Token figures are ESTIMATES (bytes / 4), labelled as such.  A real count
     needs the model's tokenizer; the point here is the order of magnitude
     that makes a knob worth reaching for.
+
+    The profile is the one a session would get: resolved through
+    ``discover_profiles`` with the workspace's profile set (``profile_set``,
+    else ``JAATO_PROFILE_SET`` from the workspace ``.env``) and its
+    ``inherits:`` chain merged, so an inherited ``suppress_base_instructions``
+    counts (#1548).  The file reported is the one that won precedence.  A
+    profile discovery refused is reported with the refusal, never replaced
+    by some other file of the same name.
     """
     from jaato_server.shared.instruction_suppression import (
         PIECE_DISK, normalize_suppression,
     )
-    ws = Path(workspace).resolve()
+    prof, where, ws, pset, missing = _cost_profile(name, workspace, profile_set)
+    if missing is not None:
+        return missing
 
-    prof, where = _find_profile_file(ws, name)
-    if prof is None:
-        return ({"profile": name, "found": False},
-                f"no profile {name!r} under {ws}/.jaato/profiles/")
-
-    suppressed = normalize_suppression(prof.get("suppress_base_instructions"))
+    suppressed = normalize_suppression(
+        getattr(prof, "suppress_base_instructions", None))
     disk_suppressed = PIECE_DISK in suppressed
 
     layers = []
@@ -2752,6 +2838,7 @@ def profile_cost(name: str, workspace: str) -> Rendered:
     total = inherited + persona_bytes
     data = {
         "profile": name, "found": True, "profile_file": str(where),
+        "profile_set": pset,
         "suppress_base_instructions": sorted(suppressed),
         "disk_layer_suppressed": disk_suppressed,
         "layers": layers,
@@ -2763,7 +2850,8 @@ def profile_cost(name: str, workspace: str) -> Rendered:
         "note": "token figures are estimates (bytes/4), not a tokenizer count",
     }
 
-    lines = [f"instruction cost for profile {name!r}  ({where})", ""]
+    lines = [f"instruction cost for profile {name!r}  ({where})"
+             f"{_set_note(pset, '  [profile set {!r}]')}", ""]
     if not layers:
         lines.append("  no instruction layers found on the search path")
     for l in layers:
@@ -2804,27 +2892,35 @@ def profile_cost(name: str, workspace: str) -> Rendered:
     return (data, "\n".join(lines))
 
 
-def _find_profile_file(ws: Path, name: str):
-    """The profile's parsed dict + its path, or ``(None, None)``.
+def _set_note(pset: Optional[str], fmt: str) -> str:
+    """*fmt* filled with the profile set's name, or ``""`` with no set."""
+    return fmt.format(pset) if pset else ""
 
-    Searches the set subdirectories and the tier-1 root, matching the layout
-    ``discover_profiles`` reads.
+
+def _cost_profile(name: str, workspace: str, profile_set: Optional[str]):
+    """Resolve *name* for :func:`profile_cost` the way a session would.
+
+    Returns ``(profile, file, workspace_path, profile_set, missing)``;
+    ``missing`` is the :data:`Rendered` answer when the name does not
+    resolve (``None`` otherwise).  A profile discovery REFUSED (a broken
+    ``inherits:``, an invalid block) is reported with the refusal rather than
+    as absent: the file is there, and saying "no profile" sends the author
+    looking for something they already wrote.
     """
-    import yaml
-    pdir = ws / ".jaato" / "profiles"
-    if not pdir.is_dir():
-        return None, None
-    for cand in sorted(pdir.rglob("*.y*ml")) + sorted(pdir.rglob("*.json")):
-        if cand.stem != name:
-            continue
-        try:
-            with open(cand, "r", encoding="utf-8") as fh:
-                parsed = yaml.safe_load(fh) or {}
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            return parsed, cand
-    return None, None
+    result, ws, pset = _discover_workspace_profiles(workspace, profile_set)
+    prof = (result.profiles or {}).get(name)
+    if prof is not None:
+        where = (result.sources or {}).get(name) or "premium tier"
+        return prof, where, ws, pset, None
+    in_set = _set_note(pset, " (profile set {!r})")
+    data = {"profile": name, "found": False, "profile_set": pset}
+    refusal = (result.errors or {}).get(name)
+    if refusal:
+        data["refused"] = refusal
+        text = f"profile {name!r}{in_set} does not resolve: {refusal}"
+    else:
+        text = f"no profile {name!r}{in_set} under {ws}/.jaato/profiles/"
+    return None, None, ws, pset, (data, text)
 
 
 def _instruction_search_order(ws: Path):
@@ -2862,6 +2958,34 @@ def _authored_workspace_paths(*names: str) -> List[Tuple[str, str]]:
     from . import gitignore as _gi
     by_path = {e.path: e for e in _gi.AUTHORED}
     return [(f".jaato/{n}", by_path[n].why) for n in names if n in by_path]
+
+
+def _user_tier_snapshot_lines() -> List[str]:
+    """What a runner reads of ``~/.jaato`` WITHOUT reading it (#1465).
+
+    A confined runner is granted only the ``~/.jaato`` subtrees plugins
+    declare, so the daemon reads the rest and ships it on the session
+    envelope.  The names are read from ``shared/user_tier.py`` -- the one
+    list both the daemon's collector and the runner's installer use -- so
+    this cannot name a file the snapshot does not carry.
+    """
+    from jaato_server.shared import user_tier
+
+    import textwrap
+
+    names = (", ".join(user_tier.SHIPPED_FILES) + "; and "
+             + ", ".join(f"{d}/" for d in user_tier.SHIPPED_DIRS) + " whole.")
+    return [
+        "    -> Runners read these user-tier files from a SNAPSHOT the daemon",
+        "       takes at spawn and ships on the envelope, not from ~/.jaato:",
+        *textwrap.wrap(names, width=72, initial_indent="       ",
+                       subsequent_indent="       "),
+        "       An edit reaches the NEXT session.  Credentials (*_auth.json,",
+        "       *_oauth.json, *_accounts.json) are never shipped.",
+        "       permissions.json is layer 2 of the permission policy (framework <",
+        "       ~/.jaato < <config_root>|<workspace>/.jaato < profile, #1474);",
+        "       `explain plugin permission` prints the merge rules.",
+    ]
 
 
 def paths() -> Rendered:
@@ -2935,6 +3059,7 @@ def paths() -> Rendered:
         "    -> SHARED across every session on the daemon.  Do NOT override $HOME",
         "       to 'isolate' a run: creds + the auto-installed reactors live here",
         "       BY DESIGN, and a $HOME override hides them from the daemon.",
+        *_user_tier_snapshot_lines(),
         "",
         "  <workspace>/   — PER-SESSION (this is the isolation boundary):",
         "    .jaato/profiles/<set>/<agent>.yaml   profiles (resolved under config_root)",
@@ -3254,6 +3379,9 @@ _POOL_SIZING_SIGNALS = (
      "the ceiling stopped a refill: raise the max"),
     ("pool_stale_reservation_evicted_total",
      "a cascade's warm runner was spent at the ceiling: raise the max"),
+    ("pool_posture_miss_total",
+     "a session found only warm runners of another confinement posture "
+     "and no fresh one: raise the size"),
 )
 
 
@@ -3307,10 +3435,11 @@ def pool() -> Rendered:
                    "socket's SO_PEERCRED; never from the request",
         "refusals": dict(pa.REFUSAL_CATEGORIES),
         "grow": "wakes the replenish loop; forking starts at once",
-        "shrink": "drops idle runners only: unreserved above the floor "
-                  "first (newest first), then the stalest reservations "
-                  "while over the ceiling; a runner serving a session "
-                  "finishes it",
+        "shrink": "drops idle runners only: never-served ones above the "
+                  "floor first (newest first), then the stalest "
+                  "reservations and served runners of the least recently "
+                  "used posture while over the ceiling; a runner serving "
+                  "a session finishes it",
         "ceiling": "a chosen max is kept (clamped up to the floor); a "
                    "derived one (2 x floor) follows the floor",
         "restart": "--restart keeps the resized values; they outrank "
@@ -3324,9 +3453,11 @@ def pool() -> Rendered:
         "the pre-warm runner pool, and resizing it without a restart:",
         "",
         "  Sessions take a warm runner from the pool instead of cold-",
-        "  spawning one.  The FLOOR is how many unreserved idle runners",
-        "  are kept; the CEILING bounds all idle runners, cascade",
-        "  reservations included (each is 129-187 MB).",
+        "  spawning one.  The FLOOR is how many never-served idle runners",
+        "  are kept (a runner that served fits only that session's",
+        "  confinement posture, so it sits on top of the floor); the",
+        "  CEILING bounds all idle runners, cascade reservations and",
+        "  served runners included (each is 129-187 MB).",
         "",
         "  AT STARTUP",
     ] + [
@@ -3365,9 +3496,10 @@ def pool() -> Rendered:
     ] + [f"    {c:<{cwidth}}  {why}" for c, why in pa.REFUSAL_CATEGORIES] + [
         "",
         "  GROWING  wakes the replenish loop; forking starts at once.",
-        "  SHRINKING  drops IDLE runners only: unreserved above the floor",
-        "    first (newest first), then the stalest reservations while over",
-        "    the ceiling.  A runner serving a session finishes it.",
+        "  SHRINKING  drops IDLE runners only: never-served ones above the",
+        "    floor first (newest first), then, while over the ceiling, the",
+        "    stalest reservations and served runners of the least recently",
+        "    used posture.  A runner serving a session finishes it.",
         "  CEILING  a chosen max is kept (clamped up to the floor); a",
         "    derived one (2 x floor) follows the floor.",
         "  RESTART  --restart keeps the resized values; they outrank the",
@@ -4153,10 +4285,13 @@ def _profile_oversight(prof: Any) -> Dict[str, Any]:
 
 def _permission_line(perm: Dict[str, Any]) -> str:
     if not perm["declared"]:
-        return ("  DECIDE / OVERRIDE  NO permission policy declared -- the runtime "
-                "policy of the root session applies (a subagent inherits it)")
-    return (f"  DECIDE / OVERRIDE  permission policy declared: "
-            f"defaultPolicy={perm['defaultPolicy'] or 'ask'}, "
+        return ("  DECIDE / OVERRIDE  NO permission policy declared -- the "
+                "permissions.json files decide, else the framework default "
+                "(ask); a subagent inherits the root's (see `explain plugin "
+                "permission`)")
+    return (f"  DECIDE / OVERRIDE  permission policy declared (layered over "
+            f"permissions.json): "
+            f"defaultPolicy={perm['defaultPolicy'] or 'from the files, else ask'}, "
             f"{perm['whitelist_tools']} whitelisted, "
             f"{perm['blacklist_tools']} blacklisted, "
             f"channel={perm['channel_type'] or 'console'}")
@@ -4234,20 +4369,36 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _discover_workspace_profiles(workspace: str,
+                                 profile_set: Optional[str] = None):
+    """The workspace's profiles as the DAEMON would load them.
+
+    The ONE resolver every ``explain`` topic about a named profile uses:
+    ``discover_profiles`` with the workspace's ``config_root`` and profile
+    set — ``profile_set`` when the caller names one (``--set``), else
+    ``JAATO_PROFILE_SET`` from the workspace ``.env``.
+
+    Returns ``(ProfileDiscoveryResult, workspace_path, profile_set_or_None)``.
+    """
+    from jaato_server.shared.plugins.subagent.config import discover_profiles
+
+    ws = Path(workspace).resolve()
+    pset = profile_set or workspace_profile_set(str(ws))
+    result = discover_profiles(
+        profiles_dir=".jaato/profiles", base_path=str(ws),
+        config_root=str(ws / ".jaato"),
+        force_profile_set=pset,
+    )
+    return result, ws, pset
+
+
 def _resolve_workspace_profile(name: str, workspace: str,
                                profile_set: Optional[str] = None):
     """A named profile as the DAEMON would load it, set selection included.
 
     Returns ``(profile_or_None, workspace_path)``.
     """
-    from jaato_server.shared.plugins.subagent.config import discover_profiles
-
-    ws = Path(workspace).resolve()
-    result = discover_profiles(
-        profiles_dir=".jaato/profiles", base_path=str(ws),
-        config_root=str(ws / ".jaato"),
-        force_profile_set=profile_set or workspace_profile_set(str(ws)),
-    )
+    result, ws, _pset = _discover_workspace_profiles(workspace, profile_set)
     return (result.profiles or {}).get(name), ws
 
 

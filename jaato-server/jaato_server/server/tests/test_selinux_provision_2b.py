@@ -27,6 +27,7 @@ import pytest
 
 from jaato_server.server.confinement import Boundary
 from jaato_server.server.confinement.selinux import (
+    REQUIRED_POLICY_VERSION,
     RUNNER_PROBE_CONTEXT,
     SELinuxBackend,
     policy_marker_context,
@@ -48,6 +49,15 @@ REVERSIONS = [
         because="the daemon's bare makedirs leaves it user_tmp_t, which the "
                 "runner cannot write: every bootstrap was refused on the "
                 "phase 2b kernel run",
+    ),
+    Reversion(
+        target=_SELINUX,
+        find="            if blocked is not None:\n                raise ValueError(blocked)\n",
+        replace="",
+        test="test_a_workspace_under_an_unsearchable_ancestor_is_refused",
+        because="a workspace under a mktemp -d directory in /tmp is labelled, the "
+                "runner starts, and bootstrap dies on an EACCES that names "
+                "permissions.json rather than the ancestor",
     ),
     Reversion(
         target=_LABELS,
@@ -115,7 +125,7 @@ def _session_tmpdirs_under_tmp_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         selinux, "session_tmpdir",
         lambda sid, cid=None: str(tmp_path / "systmp" / f"jaato-{cid}" / sid))
-_POLICY = {RUNNER_PROBE_CONTEXT, policy_marker_context(1),
+_POLICY = {RUNNER_PROBE_CONTEXT, policy_marker_context(REQUIRED_POLICY_VERSION),
            "unconfined_u:unconfined_r:jaato_runner_t:s0"}
 
 
@@ -216,8 +226,10 @@ def test_each_entry_gets_its_type(tmp_path):
     got = {os.path.relpath(p, ws): _type(l) for p, l in kernel.labels.items()}
     assert got["."] == "jaato_managed_ws_t"
     assert got["src/m.py"] == "jaato_managed_ws_t"
-    assert got[".jaato/agents"] == "jaato_authored_t"
-    assert got[".jaato/agents/a.md"] == "jaato_authored_t"
+    assert got[".jaato/agents"] == "jaato_agent_config_t"
+    assert got[".jaato/agents/a.md"] == "jaato_agent_config_t"
+    assert got[".jaato/templates"] == "jaato_authored_t"
+    assert got[".jaato/prompts"] == "jaato_prompts_t"
     assert got[".jaato/references-claims"] == "jaato_claims_t"
     assert got[".jaato/sessions"] == "jaato_managed_ws_t"
     assert got[".tmp"] == "jaato_tmp_t"
@@ -250,8 +262,11 @@ def test_missing_authored_dirs_are_created_before_the_walk(tmp_path):
     ws = tmp_path / "bare"
     ws.mkdir()
     _backend(kernel, tmp_path).provision("s1", Boundary(workspace_path=str(ws)))
-    for name in ("profiles", "instructions", "scripts", "templates"):
+    for name in ("profiles", "instructions", "scripts"):
+        assert _type(kernel.labels[str(ws / ".jaato" / name)]) == "jaato_agent_config_t"
+    for name in ("templates", "references"):
         assert _type(kernel.labels[str(ws / ".jaato" / name)]) == "jaato_authored_t"
+    assert _type(kernel.labels[str(ws / ".jaato" / "prompts")]) == "jaato_prompts_t"
 
 
 def test_a_home_directory_is_refused(tmp_path, monkeypatch):
@@ -326,3 +341,43 @@ def test_provision_labels_the_session_tmpdir(tmp_path):
     level = _level(handle.label)
     for entry in (session_dir.parent, session_dir):
         assert kernel.labels[str(entry)] == f"system_u:object_r:jaato_tmp_t:{level}"
+
+
+class _TmpAncestorKernel(_Kernel):
+    """The workspace's parent is user_tmp_t, which no jaato domain may search."""
+
+    def __init__(self, blocked):
+        super().__init__()
+        self.blocked = str(blocked)
+
+    def file_context(self, path):
+        if path == self.blocked:
+            return "unconfined_u:object_r:user_tmp_t:s0"
+        return super().file_context(path)
+
+    def allowed(self, source, target, tclass, perm):
+        if tclass == "dir" and perm == "search" and ":user_tmp_t:" in target:
+            return False
+        return True
+
+
+def test_a_workspace_under_an_unsearchable_ancestor_is_refused(tmp_path, caplog):
+    ws = _workspace(tmp_path)
+    kernel = _TmpAncestorKernel(tmp_path)
+    with caplog.at_level("ERROR"):
+        handle = _backend(kernel, tmp_path).provision("s1", Boundary(workspace_path=str(ws)))
+    assert handle is None
+    assert kernel.labels == {}, "a refused workspace must not be labelled"
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert str(tmp_path) in text and "user_tmp_t" in text and "search" in text
+
+
+def test_an_ancestor_the_policy_cannot_judge_is_not_a_refusal(tmp_path):
+    class _Unknown(_TmpAncestorKernel):
+        def allowed(self, source, target, tclass, perm):
+            return None if tclass == "dir" else True
+
+    ws = _workspace(tmp_path)
+    handle = _backend(_Unknown(tmp_path), tmp_path).provision(
+        "s1", Boundary(workspace_path=str(ws)))
+    assert handle is not None

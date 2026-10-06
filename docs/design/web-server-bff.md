@@ -123,7 +123,7 @@ not assumed. Protocol **1.10**.
 
 | | BFF's use |
 |---|---|
-| **app credential** | one entry in the daemon's `--ws-app-credentials` JSON file, `{"jaato-web-coder": "<credential>"}` (mode 0600 enforced, at least 16 characters, the key is the `app_id`). The BFF presents it once, on the bind channel's Upgrade, as `Authorization: Bearer` (Node can set the header; no query string). It is **bind-only**: the daemon refuses every frame on that connection other than the two ticket verbs, so it can never open or attach a session |
+| **app credential** | one entry in the daemon's `--ws-app-credentials` JSON file, `{"jaato-web-coder": {"credential": "<credential>", "account": "webcoder", "workspace_root": "/home/webcoder/workspaces"}}` (mode 0600 enforced, credential at least 16 characters, the key is the `app_id`). `account` and `workspace_root` place the application's workspaces: the daemon lists, creates and opens them under that root only, and a root daemon hands what it writes inside a workspace to the account that owns it (#1496). The BFF presents it once, on the bind channel's Upgrade, as `Authorization: Bearer` (Node can set the header; no query string). It is **bind-only**: the daemon refuses every frame on that connection other than the two ticket verbs, so it can never open or attach a session |
 | **user ticket** | minted per connect through `ticket.bind`, handed to the browser in a JSON response body (never a URL), presented by the browser as `?token=` on its own Upgrade, exactly where the shared token goes today. Consumed at accept when `single_use` (the default) |
 
 Configuring `--ws-app-credentials` turns WS auth **on**, and the flag is
@@ -333,7 +333,9 @@ world-readable through `/proc`.
 The daemon side of the same pairing:
 
 ```bash
-# /etc/jaato/ws-apps.json, mode 0600:  {"jaato-web-coder": "<the same credential>"}
+# /etc/jaato/ws-apps.json, mode 0600:
+#   {"jaato-web-coder": {"credential": "<the same credential>",
+#                        "account": "webcoder", "workspace_root": "/home/webcoder/workspaces"}}
 python -m jaato_server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
 ```
 

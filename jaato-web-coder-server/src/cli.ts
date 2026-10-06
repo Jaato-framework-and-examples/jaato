@@ -17,12 +17,16 @@ import { startServer } from "./server.js";
 
 const USAGE = `Usage:
   jaato-web-coder-server serve --config /etc/jaato-web-coder/server.yaml
-  jaato-web-coder-server init  --dir /etc/jaato-web-coder [--app-id jaato-web-coder] [--force]
+  jaato-web-coder-server init  --dir /etc/jaato-web-coder --account webcoder \
+                               --workspace-root /home/webcoder/workspaces \
+                               [--app-id jaato-web-coder] [--force]
 
 serve   discover the issuer, open the bind channel to the daemon, listen.
 init    generate the app credential and the session secret (mode 0600), write
         a server.yaml template beside them, and print the daemon-side
-        --ws-app-credentials entry.
+        --ws-app-credentials entry.  --account is the OS account that owns
+        this application's workspaces and --workspace-root the directory
+        they live in (owned by that account); the daemon checks both.
 `;
 
 function arg(argv: string[], name: string): string | undefined {
@@ -87,7 +91,13 @@ notes:
 export function runInit(argv: string[]): number {
   const dir = resolve(arg(argv, "--dir") ?? ".");
   const appId = arg(argv, "--app-id") ?? "jaato-web-coder";
+  const account = arg(argv, "--account");
+  const workspaceRoot = arg(argv, "--workspace-root");
   const force = argv.includes("--force");
+  if (!account || !workspaceRoot) {
+    process.stderr.write("init needs --account and --workspace-root (the daemon entry names both)\n" + USAGE);
+    return 2;
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const credential = randomBytes(32).toString("base64url");
   const files: Array<[string, string, number]> = [
@@ -107,7 +117,7 @@ export function runInit(argv: string[]): number {
   process.stdout.write(`wrote ${dir}/{app.credential,session.secret,credentials.key,notes.key,server.yaml} (mode 0600)
 
 Daemon side — put this in the file named by --ws-app-credentials (mode 0600):
-  {"${appId}": "${credential}"}
+  ${JSON.stringify({ [appId]: { credential, account, workspace_root: workspaceRoot } })}
 
 Then: edit ${dir}/server.yaml (public_url, daemon.url, issuer), paste the
 Keycloak client secret into ${dir}/oidc.secret (mode 0600), and run

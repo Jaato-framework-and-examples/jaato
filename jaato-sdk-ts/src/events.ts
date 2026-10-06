@@ -127,6 +127,8 @@ export type JaatoEvents =
   | ReferenceCatalogRequest
   | ReferenceLinksUpdateRequest
   | ReferenceLinksUpdateResultEvent
+  | ReferenceBundleCreateRequest
+  | ReferenceBundleCreateResultEvent
   | ScaffoldExplainEvent
   | SessionMessageResultEvent
   | ScaffoldIntegrationEvent
@@ -298,6 +300,8 @@ export type EventType =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -468,6 +472,8 @@ export type EventType1 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -643,6 +649,8 @@ export type EventType2 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -816,6 +824,8 @@ export type EventType3 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -988,6 +998,8 @@ export type EventType4 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1168,6 +1180,8 @@ export type EventType5 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1345,6 +1359,8 @@ export type EventType6 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1521,6 +1537,8 @@ export type EventType7 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1691,6 +1709,8 @@ export type EventType8 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -1865,6 +1885,8 @@ export type EventType9 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2038,6 +2060,8 @@ export type EventType10 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2222,6 +2246,8 @@ export type EventType11 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2396,6 +2422,8 @@ export type EventType12 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2576,6 +2604,8 @@ export type EventType13 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2756,6 +2786,8 @@ export type EventType14 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -2938,6 +2970,8 @@ export type EventType15 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3115,6 +3149,8 @@ export type EventType16 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3287,6 +3323,8 @@ export type EventType17 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3461,6 +3499,8 @@ export type EventType18 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3635,6 +3675,8 @@ export type EventType19 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3815,6 +3857,8 @@ export type EventType20 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -3988,6 +4032,8 @@ export type EventType21 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4165,6 +4211,8 @@ export type EventType22 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4337,6 +4385,8 @@ export type EventType23 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4510,6 +4560,8 @@ export type EventType24 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4683,6 +4735,8 @@ export type EventType25 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -4854,6 +4908,8 @@ export type EventType26 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5030,6 +5086,8 @@ export type EventType27 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5202,6 +5260,8 @@ export type EventType28 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5373,6 +5433,8 @@ export type EventType29 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5552,6 +5614,8 @@ export type EventType30 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5725,6 +5789,8 @@ export type EventType31 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -5899,6 +5965,8 @@ export type EventType32 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6088,6 +6156,8 @@ export type EventType33 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6258,6 +6328,8 @@ export type EventType34 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6447,6 +6519,8 @@ export type EventType35 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6621,6 +6695,8 @@ export type EventType36 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6791,6 +6867,8 @@ export type EventType37 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -6969,6 +7047,8 @@ export type EventType38 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7143,6 +7223,8 @@ export type EventType39 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7314,6 +7396,8 @@ export type EventType40 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7484,6 +7568,8 @@ export type EventType41 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7658,6 +7744,8 @@ export type EventType42 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -7834,6 +7922,8 @@ export type EventType43 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8008,6 +8098,8 @@ export type EventType44 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8180,6 +8272,8 @@ export type EventType45 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8362,6 +8456,8 @@ export type EventType46 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8554,6 +8650,8 @@ export type EventType47 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8732,6 +8830,8 @@ export type EventType48 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -8910,6 +9010,8 @@ export type EventType49 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9088,6 +9190,8 @@ export type EventType50 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9263,6 +9367,8 @@ export type EventType51 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9328,6 +9434,9 @@ export type Probe = {
   [k: string]: unknown;
 } | null;
 export type ApparmorGrants = {
+  [k: string]: unknown;
+} | null;
+export type Seccomp = {
   [k: string]: unknown;
 } | null;
 /**
@@ -9453,6 +9562,8 @@ export type EventType52 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9625,6 +9736,8 @@ export type EventType53 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9797,6 +9910,8 @@ export type EventType54 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -9967,6 +10082,8 @@ export type EventType55 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10162,6 +10279,8 @@ export type EventType56 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10336,6 +10455,8 @@ export type EventType57 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10510,6 +10631,8 @@ export type EventType58 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10682,6 +10805,8 @@ export type EventType59 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -10852,6 +10977,8 @@ export type EventType60 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11022,6 +11149,8 @@ export type EventType61 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11193,6 +11322,8 @@ export type EventType62 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11367,6 +11498,8 @@ export type EventType63 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11537,6 +11670,8 @@ export type EventType64 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11707,6 +11842,8 @@ export type EventType65 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -11878,6 +12015,8 @@ export type EventType66 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12053,6 +12192,8 @@ export type EventType67 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12224,6 +12365,8 @@ export type EventType68 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12394,6 +12537,8 @@ export type EventType69 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12563,6 +12708,8 @@ export type EventType70 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12735,6 +12882,8 @@ export type EventType71 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -12904,6 +13053,8 @@ export type EventType72 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13077,6 +13228,8 @@ export type EventType73 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13246,6 +13399,8 @@ export type EventType74 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13416,6 +13571,8 @@ export type EventType75 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13588,6 +13745,8 @@ export type EventType76 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13760,6 +13919,8 @@ export type EventType77 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -13932,6 +14093,8 @@ export type EventType78 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14102,6 +14265,8 @@ export type EventType79 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14278,6 +14443,8 @@ export type EventType80 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14451,6 +14618,8 @@ export type EventType81 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14631,6 +14800,8 @@ export type EventType82 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14810,6 +14981,8 @@ export type EventType83 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -14981,6 +15154,8 @@ export type EventType84 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15151,6 +15326,8 @@ export type EventType85 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15328,6 +15505,8 @@ export type EventType86 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15504,6 +15683,8 @@ export type EventType87 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15675,6 +15856,8 @@ export type EventType88 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -15847,6 +16030,8 @@ export type EventType89 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16016,6 +16201,8 @@ export type EventType90 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16189,6 +16376,8 @@ export type EventType91 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16359,6 +16548,8 @@ export type EventType92 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16530,6 +16721,8 @@ export type EventType93 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16701,6 +16894,8 @@ export type EventType94 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -16873,6 +17068,8 @@ export type EventType95 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17044,6 +17241,8 @@ export type EventType96 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17222,6 +17421,8 @@ export type EventType97 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17396,6 +17597,8 @@ export type EventType98 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17574,6 +17777,8 @@ export type EventType99 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17744,6 +17949,8 @@ export type EventType100 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -17919,6 +18126,8 @@ export type EventType101 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18092,6 +18301,8 @@ export type EventType102 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18266,6 +18477,8 @@ export type EventType103 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18440,6 +18653,8 @@ export type EventType104 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18615,6 +18830,8 @@ export type EventType105 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18789,6 +19006,8 @@ export type EventType106 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -18847,6 +19066,7 @@ export type Warnings1 = string[];
 export type Bundle = string;
 export type Reconcile = string;
 export type ReconcileDetail = string;
+export type Revised = boolean;
 /**
  * All event types in the protocol.
  */
@@ -18970,6 +19190,8 @@ export type EventType107 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19151,6 +19373,8 @@ export type EventType108 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19321,6 +19545,8 @@ export type EventType109 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19494,6 +19720,8 @@ export type EventType110 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19672,6 +19900,8 @@ export type EventType111 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -19842,6 +20072,8 @@ export type EventType112 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20016,6 +20248,8 @@ export type EventType113 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20195,6 +20429,8 @@ export type EventType114 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20241,14 +20477,8 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type Topic = string;
-export type Ok13 = boolean;
-export type Text4 = string;
-export type Topics = {
-  [k: string]: unknown;
-}[];
-export type Error22 = string;
-export type ServerVersion1 = string;
+export type RequestId46 = string;
+export type Name12 = string;
 /**
  * All event types in the protocol.
  */
@@ -20372,6 +20602,8 @@ export type EventType115 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20418,22 +20650,15 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type RequestId46 = string | null;
-export type Target = string;
-export type Status3 = string;
-export type Ok14 = boolean;
-export type MessageId = string;
-export type TargetSessionId = string;
-export type SiblingName = string;
-export type GroupKey = string;
-export type Woken = boolean;
-export type Headless = boolean;
-export type Spooled = boolean;
-export type Candidates = string[];
-export type Files1 = {
+export type RequestId47 = string;
+export type Ok13 = boolean;
+export type Category9 = string;
+export type Error22 = string;
+export type Bundle2 = string;
+export type Indexed = boolean;
+export type Bundles1 = {
   [k: string]: unknown;
 }[];
-export type Error23 = string;
 /**
  * All event types in the protocol.
  */
@@ -20557,6 +20782,8 @@ export type EventType116 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20603,17 +20830,14 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type Integration = string;
-export type Ok15 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target1 = string;
-export type Text5 = string;
-export type Error24 = string;
-export type Available = string[];
-export type ServerVersion2 = string;
+export type Topic = string;
+export type Ok14 = boolean;
+export type Text4 = string;
+export type Topics = {
+  [k: string]: unknown;
+}[];
+export type Error23 = string;
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -20737,6 +20961,8 @@ export type EventType117 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20783,18 +21009,22 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type Ok16 = boolean;
-export type Workspace3 = string;
-export type ProfileSet = string;
-export type Profile = string;
-export type Scope = string;
-export type Findings = {
+export type RequestId48 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok15 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
   [k: string]: unknown;
 }[];
-export type Errors = number;
-export type Warnings3 = number;
-export type Error25 = string;
-export type ServerVersion3 = string;
+export type Error24 = string;
 /**
  * All event types in the protocol.
  */
@@ -20918,6 +21148,8 @@ export type EventType118 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -20964,12 +21196,17 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type WorkspaceId = string;
-export type Name12 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files2 = StagedFileSpec[];
+export type Integration = string;
+export type Ok16 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error25 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
 /**
  * All event types in the protocol.
  */
@@ -21093,6 +21330,8 @@ export type EventType119 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21139,11 +21378,18 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
+export type Ok17 = boolean;
+export type Workspace3 = string;
+export type ProfileSet = string;
+export type Profile = string;
+export type Scope = string;
+export type Findings = {
+  [k: string]: unknown;
 }[];
+export type Errors = number;
+export type Warnings3 = number;
+export type Error26 = string;
+export type ServerVersion3 = string;
 /**
  * All event types in the protocol.
  */
@@ -21267,6 +21513,8 @@ export type EventType120 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21313,9 +21561,12 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type RequestId47 = string;
-export type Path4 = string;
-export type MetadataOnly = boolean;
+export type WorkspaceId = string;
+export type Name13 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -21439,6 +21690,8 @@ export type EventType121 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21485,15 +21738,11 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type RequestId48 = string;
-export type Ok17 = boolean;
-export type Path5 = string;
-export type Name13 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category9 = string;
-export type Error26 = string;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -21617,6 +21866,8 @@ export type EventType122 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21664,8 +21915,8 @@ export type EventType122 =
 export type Timestamp122 = string;
 export type SessionId122 = string;
 export type RequestId49 = string;
-export type Query = string;
-export type MaxResults = number;
+export type Path4 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -21789,6 +22040,8 @@ export type EventType123 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -21837,12 +22090,11 @@ export type Timestamp123 = string;
 export type SessionId123 = string;
 export type RequestId50 = string;
 export type Ok18 = boolean;
-export type Query1 = string;
-export type Matches = {
-  [k: string]: unknown;
-}[];
-export type Total2 = number;
-export type Truncated = boolean;
+export type Path5 = string;
+export type Name14 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
 export type Category10 = string;
 export type Error27 = string;
 /**
@@ -21968,6 +22220,8 @@ export type EventType124 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22014,20 +22268,9 @@ export type EventType124 =
   | "gates.snapshot";
 export type Timestamp124 = string;
 export type SessionId124 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion4 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags1 = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId51 = string;
+export type Query = string;
+export type MaxResults = number;
 /**
  * All event types in the protocol.
  */
@@ -22151,6 +22394,8 @@ export type EventType125 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22197,17 +22442,16 @@ export type EventType125 =
   | "gates.snapshot";
 export type Timestamp125 = string;
 export type SessionId125 = string;
-export type RequestId51 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type RequestId52 = string;
+export type Ok19 = boolean;
+export type Query1 = string;
+export type Matches = {
+  [k: string]: unknown;
+}[];
+export type Total2 = number;
+export type Truncated = boolean;
+export type Category11 = string;
+export type Error28 = string;
 /**
  * All event types in the protocol.
  */
@@ -22331,6 +22575,8 @@ export type EventType126 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22377,8 +22623,20 @@ export type EventType126 =
   | "gates.snapshot";
 export type Timestamp126 = string;
 export type SessionId126 = string;
-export type RequestId52 = string;
-export type RemoteAgentId = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion4 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -22502,6 +22760,8 @@ export type EventType127 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22549,7 +22809,16 @@ export type EventType127 =
 export type Timestamp127 = string;
 export type SessionId127 = string;
 export type RequestId53 = string;
-export type Reason1 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -22673,6 +22942,8 @@ export type EventType128 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22720,9 +22991,7 @@ export type EventType128 =
 export type Timestamp128 = string;
 export type SessionId128 = string;
 export type RequestId54 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source6 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -22846,6 +23115,8 @@ export type EventType129 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -22893,11 +23164,7 @@ export type EventType129 =
 export type Timestamp129 = string;
 export type SessionId129 = string;
 export type RequestId55 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error28 = string;
-export type WorkspaceModified = boolean;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -23021,6 +23288,8 @@ export type EventType130 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23068,7 +23337,9 @@ export type EventType130 =
 export type Timestamp130 = string;
 export type SessionId130 = string;
 export type RequestId56 = string;
-export type RemoteAgentId3 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -23192,6 +23463,8 @@ export type EventType131 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23239,7 +23512,11 @@ export type EventType131 =
 export type Timestamp131 = string;
 export type SessionId131 = string;
 export type RequestId57 = string;
-export type RemoteAgentId4 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error29 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -23363,6 +23640,8 @@ export type EventType132 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23409,10 +23688,8 @@ export type EventType132 =
   | "gates.snapshot";
 export type Timestamp132 = string;
 export type SessionId132 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId58 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -23536,6 +23813,8 @@ export type EventType133 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23582,14 +23861,8 @@ export type EventType133 =
   | "gates.snapshot";
 export type Timestamp133 = string;
 export type SessionId133 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId59 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -23713,6 +23986,8 @@ export type EventType134 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23759,17 +24034,10 @@ export type EventType134 =
   | "gates.snapshot";
 export type Timestamp134 = string;
 export type SessionId134 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State1 = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -23893,6 +24161,8 @@ export type EventType135 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -23939,13 +24209,14 @@ export type EventType135 =
   | "gates.snapshot";
 export type Timestamp135 = string;
 export type SessionId135 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
-}[];
-export type RequestId58 = string | null;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -24069,6 +24340,8 @@ export type EventType136 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24115,9 +24388,17 @@ export type EventType136 =
   | "gates.snapshot";
 export type Timestamp136 = string;
 export type SessionId136 = string;
-export type RequestId59 = string;
-export type Status4 = string;
-export type Detail = string | null;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -24241,6 +24522,8 @@ export type EventType137 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24287,13 +24570,13 @@ export type EventType137 =
   | "gates.snapshot";
 export type Timestamp137 = string;
 export type SessionId137 = string;
-export type RequestId60 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId60 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -24417,6 +24700,8 @@ export type EventType138 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24464,8 +24749,8 @@ export type EventType138 =
 export type Timestamp138 = string;
 export type SessionId138 = string;
 export type RequestId61 = string;
-export type ResponseText = string;
-export type Error29 = string;
+export type Status4 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -24589,6 +24874,8 @@ export type EventType139 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24636,9 +24923,12 @@ export type EventType139 =
 export type Timestamp139 = string;
 export type SessionId139 = string;
 export type RequestId62 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -24762,6 +25052,8 @@ export type EventType140 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24809,7 +25101,7 @@ export type EventType140 =
 export type Timestamp140 = string;
 export type SessionId140 = string;
 export type RequestId63 = string;
-export type ForkIndex = number;
+export type ResponseText = string;
 export type Error30 = string;
 /**
  * All event types in the protocol.
@@ -24934,6 +25226,8 @@ export type EventType141 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -24980,11 +25274,10 @@ export type EventType141 =
   | "gates.snapshot";
 export type Timestamp141 = string;
 export type SessionId141 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId64 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -25108,6 +25401,8 @@ export type EventType142 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25154,8 +25449,9 @@ export type EventType142 =
   | "gates.snapshot";
 export type Timestamp142 = string;
 export type SessionId142 = string;
-export type WakeRef1 = string;
-export type Source7 = string;
+export type RequestId65 = string;
+export type ForkIndex = number;
+export type Error31 = string;
 /**
  * All event types in the protocol.
  */
@@ -25279,6 +25575,8 @@ export type EventType143 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25325,8 +25623,11 @@ export type EventType143 =
   | "gates.snapshot";
 export type Timestamp143 = string;
 export type SessionId143 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -25450,6 +25751,8 @@ export type EventType144 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25496,8 +25799,8 @@ export type EventType144 =
   | "gates.snapshot";
 export type Timestamp144 = string;
 export type SessionId144 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type WakeRef1 = string;
+export type Source7 = string;
 /**
  * All event types in the protocol.
  */
@@ -25621,6 +25924,8 @@ export type EventType145 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25667,9 +25972,8 @@ export type EventType145 =
   | "gates.snapshot";
 export type Timestamp145 = string;
 export type SessionId145 = string;
-export type Target2 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -25793,6 +26097,8 @@ export type EventType146 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -25839,7 +26145,8 @@ export type EventType146 =
   | "gates.snapshot";
 export type Timestamp146 = string;
 export type SessionId146 = string;
-export type Target3 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -25963,6 +26270,8 @@ export type EventType147 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26009,7 +26318,9 @@ export type EventType147 =
   | "gates.snapshot";
 export type Timestamp147 = string;
 export type SessionId147 = string;
-export type Policy = string;
+export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -26133,6 +26444,8 @@ export type EventType148 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26179,7 +26492,7 @@ export type EventType148 =
   | "gates.snapshot";
 export type Timestamp148 = string;
 export type SessionId148 = string;
-export type RequestId64 = string;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -26303,6 +26616,8 @@ export type EventType149 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26349,15 +26664,7 @@ export type EventType149 =
   | "gates.snapshot";
 export type Timestamp149 = string;
 export type SessionId149 = string;
-export type RequestId65 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -26481,6 +26788,8 @@ export type EventType150 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26528,9 +26837,6 @@ export type EventType150 =
 export type Timestamp150 = string;
 export type SessionId150 = string;
 export type RequestId66 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -26654,6 +26960,8 @@ export type EventType151 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26701,12 +27009,14 @@ export type EventType151 =
 export type Timestamp151 = string;
 export type SessionId151 = string;
 export type RequestId67 = string;
-export type Status5 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -26830,6 +27140,8 @@ export type EventType152 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -26877,8 +27189,9 @@ export type EventType152 =
 export type Timestamp152 = string;
 export type SessionId152 = string;
 export type RequestId68 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -27002,6 +27315,8 @@ export type EventType153 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -27049,9 +27364,12 @@ export type EventType153 =
 export type Timestamp153 = string;
 export type SessionId153 = string;
 export type RequestId69 = string;
-export type Status6 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -27175,6 +27493,8 @@ export type EventType154 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -27222,9 +27542,8 @@ export type EventType154 =
 export type Timestamp154 = string;
 export type SessionId154 = string;
 export type RequestId70 = string;
-export type User2 = string;
-export type Workspace4 = string;
-export type Name14 = string;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -27348,6 +27667,8 @@ export type EventType155 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -27395,10 +27716,9 @@ export type EventType155 =
 export type Timestamp155 = string;
 export type SessionId155 = string;
 export type RequestId71 = string;
-export type Status7 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -27522,6 +27842,8 @@ export type EventType156 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -27569,7 +27891,9 @@ export type EventType156 =
 export type Timestamp156 = string;
 export type SessionId156 = string;
 export type RequestId72 = string;
-export type User3 = string;
+export type User2 = string;
+export type Workspace4 = string;
+export type Name15 = string;
 /**
  * All event types in the protocol.
  */
@@ -27693,6 +28017,8 @@ export type EventType157 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -27740,9 +28066,10 @@ export type EventType157 =
 export type Timestamp157 = string;
 export type SessionId157 = string;
 export type RequestId73 = string;
-export type Status8 = string;
-export type Reloaded = number;
-export type Detail5 = string | null;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -27866,6 +28193,8 @@ export type EventType158 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -27913,11 +28242,7 @@ export type EventType158 =
 export type Timestamp158 = string;
 export type SessionId158 = string;
 export type RequestId74 = string;
-export type User4 = string;
-export type Workspace5 = string;
-export type Files3 = {
-  [k: string]: unknown;
-}[];
+export type User3 = string;
 /**
  * All event types in the protocol.
  */
@@ -28041,6 +28366,8 @@ export type EventType159 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -28088,11 +28415,9 @@ export type EventType159 =
 export type Timestamp159 = string;
 export type SessionId159 = string;
 export type RequestId75 = string;
-export type Status9 = string;
-export type Files4 = {
-  [k: string]: unknown;
-}[];
-export type Detail6 = string | null;
+export type Status8 = string;
+export type Reloaded = number;
+export type Detail5 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -28216,6 +28541,8 @@ export type EventType160 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -28263,8 +28590,11 @@ export type EventType160 =
 export type Timestamp160 = string;
 export type SessionId160 = string;
 export type RequestId76 = string;
-export type TargetSize = number | null;
-export type MaxSize = number | null;
+export type User4 = string;
+export type Workspace5 = string;
+export type Files3 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -28388,6 +28718,8 @@ export type EventType161 =
   | "reference.catalog.request"
   | "reference.links.request"
   | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
   | "scaffold.explain.result"
   | "session.message.result"
   | "scaffold.integration.result"
@@ -28435,9 +28767,360 @@ export type EventType161 =
 export type Timestamp161 = string;
 export type SessionId161 = string;
 export type RequestId77 = string;
-export type Ok19 = boolean;
-export type Category11 = string;
-export type Error31 = string;
+export type Status9 = string;
+export type Files4 = {
+  [k: string]: unknown;
+}[];
+export type Detail6 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType162 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp162 = string;
+export type SessionId162 = string;
+export type RequestId78 = string;
+export type TargetSize = number | null;
+export type MaxSize = number | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType163 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp163 = string;
+export type SessionId163 = string;
+export type RequestId79 = string;
+export type Ok20 = boolean;
+export type Category12 = string;
+export type Error32 = string;
 export type Changed1 = boolean;
 export type PreviousTargetSize = number | null;
 export type PreviousMaxSize = number | null;
@@ -29734,6 +30417,13 @@ export interface MemoryDeleteResultEvent {
  *         it).  ``recorded: False`` when the profile was loaded before
  *         this daemon started or was never loaded here.  ``None`` (the
  *         whole field) when the session is not AppArmor-confined.
+ *     ``seccomp`` (#1503, additive): the seccomp-bpf posture the
+ *         session's model-driven subprocesses get, as the runner
+ *         reported it at bootstrap -- ``{posture, allowed_families?,
+ *         reason?, required?, libseccomp?, spawns_refused?}`` where
+ *         ``posture`` is ``filter`` / ``off`` / ``absent`` /
+ *         ``unconfined``.  ``None`` from a daemon or runner that does not
+ *         report it.  The live value rides ``probe["seccomp"]``.
  *
  * **Live** (measured fresh, at the moment of this call, on the runner --
  * never a cached value):
@@ -29777,6 +30467,7 @@ export interface DiagnosticsResultEvent {
   server_version?: ServerVersion;
   probe?: Probe;
   apparmor_grants?: ApparmorGrants;
+  seccomp?: Seccomp;
 }
 /**
  * List of sandbox-allowed paths - for @@ completion cache.
@@ -30782,6 +31473,9 @@ export interface WorkspaceIgnoreResultEvent {
  *     category: ``""`` on success; else ``invalid_request``,
  *         ``no_workspace``, ``not_owner``, ``unknown_bundle``,
  *         ``not_found``, ``invalid_claim``, ``collision``,
+ *         ``stale`` (a revision claim written against a version of the
+ *         reference that has since changed; nothing is written),
+ *         ``ambiguous`` (the revised id is in two catalog files),
  *         ``unsafe_path`` or ``io_error``.  Branch on this, not on
  *         ``error``.
  *     error: The reason, for a person.
@@ -30799,6 +31493,11 @@ export interface WorkspaceIgnoreResultEvent {
  *         its row, similarity matching cannot find it.
  *     reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
  *         ``updated`` / ``clean``.
+ *     revised: ``True`` when the claim was a REVISION of a reference
+ *         already in the catalog (``proposeReference`` with ``revises``):
+ *         the catalog file was replaced in place, its ``origin`` kept and
+ *         a record appended to its ``revisions``.  Additive; an older
+ *         daemon never sends it (and answers a revision ``collision``).
  */
 export interface ReferenceCurationResultEvent {
   type?: EventType106;
@@ -30816,6 +31515,7 @@ export interface ReferenceCurationResultEvent {
   bundle?: Bundle;
   reconcile?: Reconcile;
   reconcile_detail?: ReconcileDetail;
+  revised?: Revised;
 }
 /**
  * The reference claims agents proposed in the caller's workspace (1.33).
@@ -30839,6 +31539,16 @@ export interface ReferenceCurationResultEvent {
  * catalog, the file is gone), empty when it would pass.  ``name``,
  * ``description`` and ``content`` were written by a MODEL and reviewed by
  * nobody: a client shows them as text, never as markup.
+ *
+ * A REVISION claim (``proposeReference`` with ``revises``: a new version
+ * of a reference already in the catalog) also carries ``revises`` (the
+ * id), ``revises_file`` (where it lives), ``current`` (its fields now:
+ * ``name``, ``description``, ``tags``, ``type``, ``path`` or ``content``,
+ * ``links``) for a client to diff against, ``links_replaced`` (whether
+ * the revision sets the edges or keeps them) and ``stale`` with
+ * ``stale_reason`` -- decided now: the reference changed since the claim
+ * was written, so a promotion would be refused ``stale``.  Additive keys
+ * on free-form rows; an older client shows the row as a new page.
  *
  * ``may_curate`` says whether THIS connection may promote or dismiss --
  * the workspace-owner rule the daemon also enforces.
@@ -30984,6 +31694,52 @@ export interface ReferenceLinksUpdateResultEvent {
   warnings?: Warnings2;
 }
 /**
+ * Create a workspace-tier reference sub-bundle (1.36, #1478).
+ *
+ * Answered by :class:`ReferenceBundleCreateResultEvent` carrying this
+ * ``request_id``.  ``name`` is one id token (the claim/reference id rule);
+ * the bundle is created UNINDEXED -- ``references bundle index <name>``
+ * adds a vector index later, from a session with an embedding provider.
+ */
+export interface ReferenceBundleCreateRequest {
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
+  request_id?: RequestId46;
+  name?: Name12;
+}
+/**
+ * What one bundle create did (1.36, #1478).
+ *
+ * Fields:
+ *     request_id: Echoed from the request (``""`` for the typed command).
+ *     ok: Whether the bundle was created.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``collision`` (a bundle, or any
+ *         directory, by that name already exists), ``unsafe_path`` or
+ *         ``io_error``.
+ *     error: The reason, for a person.
+ *     bundle: The bundle name, as created (or as refused).
+ *     indexed: Whether the bundle has a vector index (``False`` for every
+ *         bundle this verb creates).
+ *     bundles: The workspace's sub-bundles after the call, in
+ *         ``ReferenceClaimsEvent.bundles`` shape (``{name, indexed,
+ *         model?}``) -- answered on every outcome, so a ``collision`` also
+ *         says whether the existing one is indexed.
+ */
+export interface ReferenceBundleCreateResultEvent {
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId47;
+  ok?: Ok13;
+  category?: Category9;
+  error?: Error22;
+  bundle?: Bundle2;
+  indexed?: Indexed;
+  bundles?: Bundles1;
+}
+/**
  * One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
  *
  * ``explain`` introspects the framework installed in the CALLING process,
@@ -31026,15 +31782,15 @@ export interface ReferenceLinksUpdateResultEvent {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   topic?: Topic;
-  ok?: Ok13;
+  ok?: Ok14;
   text?: Text4;
   data?: Data2;
   topics?: Topics;
-  error?: Error22;
+  error?: Error23;
   server_version?: ServerVersion1;
 }
 export interface Data2 {
@@ -31102,13 +31858,13 @@ export interface Data2 {
  *     error: Why not, when ``ok`` is ``False``.
  */
 export interface SessionMessageResultEvent {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
-  request_id?: RequestId46;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
+  request_id?: RequestId48;
   target?: Target;
   status?: Status3;
-  ok?: Ok14;
+  ok?: Ok15;
   message_id?: MessageId;
   target_session_id?: TargetSessionId;
   sibling_name?: SiblingName;
@@ -31118,7 +31874,7 @@ export interface SessionMessageResultEvent {
   spooled?: Spooled;
   candidates?: Candidates;
   files?: Files1;
-  error?: Error23;
+  error?: Error24;
 }
 /**
  * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
@@ -31167,18 +31923,18 @@ export interface SessionMessageResultEvent {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   integration?: Integration;
-  ok?: Ok15;
+  ok?: Ok16;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
   target?: Target1;
   text?: Text5;
-  error?: Error24;
+  error?: Error25;
   available?: Available;
   server_version?: ServerVersion2;
 }
@@ -31214,10 +31970,10 @@ export interface ScaffoldIntegrationEvent {
  *         says whose install produced the findings.
  */
 export interface ScaffoldValidateEvent {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  ok?: Ok16;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  ok?: Ok17;
   workspace?: Workspace3;
   profile_set?: ProfileSet;
   profile?: Profile;
@@ -31225,7 +31981,7 @@ export interface ScaffoldValidateEvent {
   findings?: Findings;
   errors?: Errors;
   warnings?: Warnings3;
-  error?: Error25;
+  error?: Error26;
   server_version?: ServerVersion3;
 }
 /**
@@ -31268,9 +32024,9 @@ export interface ScaffoldValidateEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   workspace_id?: WorkspaceId;
   files?: Files2;
 }
@@ -31291,7 +32047,7 @@ export interface StageFilesRequest {
  * clients don't need a protocol bump later.
  */
 export interface StagedFileSpec {
-  name?: Name12;
+  name?: Name13;
   size?: Size;
   content_type?: ContentType;
   mode?: Mode1;
@@ -31318,9 +32074,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -31346,10 +32102,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId47;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId49;
   path?: Path4;
   metadata_only?: MetadataOnly;
 }
@@ -31375,18 +32131,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId48;
-  ok?: Ok17;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
+  request_id?: RequestId50;
+  ok?: Ok18;
   path?: Path5;
-  name?: Name13;
+  name?: Name14;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
-  category?: Category9;
-  error?: Error26;
+  category?: Category10;
+  error?: Error27;
 }
 /**
  * Find files in the caller's workspace by name (WS only, protocol 1.32).
@@ -31399,10 +32155,10 @@ export interface WorkspaceFileContentEvent {
  * :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
  */
 export interface WorkspaceFilesSearchRequest {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId49;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId51;
   query?: Query;
   max_results?: MaxResults;
 }
@@ -31422,17 +32178,17 @@ export interface WorkspaceFilesSearchRequest {
  * (this connection is in no workspace).
  */
 export interface WorkspaceFilesSearchResultEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
-  request_id?: RequestId50;
-  ok?: Ok18;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId52;
+  ok?: Ok19;
   query?: Query1;
   matches?: Matches;
   total?: Total2;
   truncated?: Truncated;
-  category?: Category10;
-  error?: Error27;
+  category?: Category11;
+  error?: Error28;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -31442,9 +32198,9 @@ export interface WorkspaceFilesSearchResultEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion4;
@@ -31469,10 +32225,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
-  request_id?: RequestId51;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId53;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -31491,10 +32247,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
-  request_id?: RequestId52;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId54;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -31504,10 +32260,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
-  request_id?: RequestId53;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId55;
   reason?: Reason1;
 }
 /**
@@ -31518,10 +32274,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
-  request_id?: RequestId54;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId56;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source6;
@@ -31534,14 +32290,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
-  request_id?: RequestId55;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
+  request_id?: RequestId57;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error28;
+  error?: Error29;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -31551,20 +32307,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType130;
-  timestamp?: Timestamp130;
-  session_id?: SessionId130;
-  request_id?: RequestId56;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
+  request_id?: RequestId58;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType131;
-  timestamp?: Timestamp131;
-  session_id?: SessionId131;
-  request_id?: RequestId57;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
+  request_id?: RequestId59;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -31576,9 +32332,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType132;
-  timestamp?: Timestamp132;
-  session_id?: SessionId132;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -31598,9 +32354,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType133;
-  timestamp?: Timestamp133;
-  session_id?: SessionId133;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -31616,9 +32372,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType134;
-  timestamp?: Timestamp134;
-  session_id?: SessionId134;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -31669,14 +32425,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType135;
-  timestamp?: Timestamp135;
-  session_id?: SessionId135;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId58;
+  request_id?: RequestId60;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -31728,10 +32484,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType136;
-  timestamp?: Timestamp136;
-  session_id?: SessionId136;
-  request_id?: RequestId59;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
+  request_id?: RequestId61;
   status?: Status4;
   detail?: Detail;
 }
@@ -31750,10 +32506,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType137;
-  timestamp?: Timestamp137;
-  session_id?: SessionId137;
-  request_id?: RequestId60;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
+  request_id?: RequestId62;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -31761,12 +32517,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType138;
-  timestamp?: Timestamp138;
-  session_id?: SessionId138;
-  request_id?: RequestId61;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
+  request_id?: RequestId63;
   response_text?: ResponseText;
-  error?: Error29;
+  error?: Error30;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -31784,10 +32540,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType139;
-  timestamp?: Timestamp139;
-  session_id?: SessionId139;
-  request_id?: RequestId62;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
+  request_id?: RequestId64;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -31796,12 +32552,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType140;
-  timestamp?: Timestamp140;
-  session_id?: SessionId140;
-  request_id?: RequestId63;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
+  request_id?: RequestId65;
   fork_index?: ForkIndex;
-  error?: Error30;
+  error?: Error31;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -31813,9 +32569,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType141;
-  timestamp?: Timestamp141;
-  session_id?: SessionId141;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -31842,9 +32598,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType142;
-  timestamp?: Timestamp142;
-  session_id?: SessionId142;
+  type?: EventType144;
+  timestamp?: Timestamp144;
+  session_id?: SessionId144;
   wake_ref?: WakeRef1;
   source?: Source7;
 }
@@ -31857,9 +32613,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType143;
-  timestamp?: Timestamp143;
-  session_id?: SessionId143;
+  type?: EventType145;
+  timestamp?: Timestamp145;
+  session_id?: SessionId145;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -31871,9 +32627,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType144;
-  timestamp?: Timestamp144;
-  session_id?: SessionId144;
+  type?: EventType146;
+  timestamp?: Timestamp146;
+  session_id?: SessionId146;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -31884,9 +32640,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType145;
-  timestamp?: Timestamp145;
-  session_id?: SessionId145;
+  type?: EventType147;
+  timestamp?: Timestamp147;
+  session_id?: SessionId147;
   target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -31900,9 +32656,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType146;
-  timestamp?: Timestamp146;
-  session_id?: SessionId146;
+  type?: EventType148;
+  timestamp?: Timestamp148;
+  session_id?: SessionId148;
   target?: Target3;
 }
 /**
@@ -31913,19 +32669,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType147;
-  timestamp?: Timestamp147;
-  session_id?: SessionId147;
+  type?: EventType149;
+  timestamp?: Timestamp149;
+  session_id?: SessionId149;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType148;
-  timestamp?: Timestamp148;
-  session_id?: SessionId148;
-  request_id?: RequestId64;
+  type?: EventType150;
+  timestamp?: Timestamp150;
+  session_id?: SessionId150;
+  request_id?: RequestId66;
 }
 /**
  * Structured permission policy snapshot.
@@ -31936,10 +32692,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType149;
-  timestamp?: Timestamp149;
-  session_id?: SessionId149;
-  request_id?: RequestId65;
+  type?: EventType151;
+  timestamp?: Timestamp151;
+  session_id?: SessionId151;
+  request_id?: RequestId67;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -31988,10 +32744,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType150;
-  timestamp?: Timestamp150;
-  session_id?: SessionId150;
-  request_id?: RequestId66;
+  type?: EventType152;
+  timestamp?: Timestamp152;
+  session_id?: SessionId152;
+  request_id?: RequestId68;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -32039,10 +32795,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType151;
-  timestamp?: Timestamp151;
-  session_id?: SessionId151;
-  request_id?: RequestId67;
+  type?: EventType153;
+  timestamp?: Timestamp153;
+  session_id?: SessionId153;
+  request_id?: RequestId69;
   status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -32079,10 +32835,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType152;
-  timestamp?: Timestamp152;
-  session_id?: SessionId152;
-  request_id?: RequestId68;
+  type?: EventType154;
+  timestamp?: Timestamp154;
+  session_id?: SessionId154;
+  request_id?: RequestId70;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -32108,10 +32864,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType153;
-  timestamp?: Timestamp153;
-  session_id?: SessionId153;
-  request_id?: RequestId69;
+  type?: EventType155;
+  timestamp?: Timestamp155;
+  session_id?: SessionId155;
+  request_id?: RequestId71;
   status?: Status6;
   revoked?: Revoked;
   detail?: Detail3;
@@ -32153,13 +32909,13 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType154;
-  timestamp?: Timestamp154;
-  session_id?: SessionId154;
-  request_id?: RequestId70;
+  type?: EventType156;
+  timestamp?: Timestamp156;
+  session_id?: SessionId156;
+  request_id?: RequestId72;
   user?: User2;
   workspace?: Workspace4;
-  name?: Name14;
+  name?: Name15;
 }
 /**
  * The application's answer to :class:`SecretResolveRequest` (#1226).
@@ -32195,10 +32951,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType155;
-  timestamp?: Timestamp155;
-  session_id?: SessionId155;
-  request_id?: RequestId71;
+  type?: EventType157;
+  timestamp?: Timestamp157;
+  session_id?: SessionId157;
+  request_id?: RequestId73;
   status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -32223,10 +32979,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType156;
-  timestamp?: Timestamp156;
-  session_id?: SessionId156;
-  request_id?: RequestId72;
+  type?: EventType158;
+  timestamp?: Timestamp158;
+  session_id?: SessionId158;
+  request_id?: RequestId74;
   user?: User3;
 }
 /**
@@ -32247,10 +33003,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType157;
-  timestamp?: Timestamp157;
-  session_id?: SessionId157;
-  request_id?: RequestId73;
+  type?: EventType159;
+  timestamp?: Timestamp159;
+  session_id?: SessionId159;
+  request_id?: RequestId75;
   status?: Status8;
   reloaded?: Reloaded;
   detail?: Detail5;
@@ -32296,10 +33052,10 @@ export interface SecretReloadResultEvent {
  *         copy the user made their own survives.  A removal requires it.
  */
 export interface WorkspaceAppWriteRequest {
-  type?: EventType158;
-  timestamp?: Timestamp158;
-  session_id?: SessionId158;
-  request_id?: RequestId74;
+  type?: EventType160;
+  timestamp?: Timestamp160;
+  session_id?: SessionId160;
+  request_id?: RequestId76;
   user?: User4;
   workspace?: Workspace5;
   env?: Env;
@@ -32327,10 +33083,10 @@ export interface Env {
  *     detail: Human-readable elaboration.
  */
 export interface WorkspaceAppWriteResultEvent {
-  type?: EventType159;
-  timestamp?: Timestamp159;
-  session_id?: SessionId159;
-  request_id?: RequestId75;
+  type?: EventType161;
+  timestamp?: Timestamp161;
+  session_id?: SessionId161;
+  request_id?: RequestId77;
   status?: Status9;
   env?: Env1;
   files?: Files4;
@@ -32353,10 +33109,10 @@ export interface Env1 {
  * daemon process, never of a session or a remote client.
  */
 export interface PoolStatusRequest {
-  type?: EventType160;
-  timestamp?: Timestamp160;
-  session_id?: SessionId160;
-  request_id?: RequestId76;
+  type?: EventType162;
+  timestamp?: Timestamp162;
+  session_id?: SessionId162;
+  request_id?: RequestId78;
   target_size?: TargetSize;
   max_size?: MaxSize;
 }
@@ -32399,13 +33155,13 @@ export interface PoolStatusRequest {
  *         friends), the numbers a resize is decided from.
  */
 export interface PoolStatusEvent {
-  type?: EventType161;
-  timestamp?: Timestamp161;
-  session_id?: SessionId161;
-  request_id?: RequestId77;
-  ok?: Ok19;
-  category?: Category11;
-  error?: Error31;
+  type?: EventType163;
+  timestamp?: Timestamp163;
+  session_id?: SessionId163;
+  request_id?: RequestId79;
+  ok?: Ok20;
+  category?: Category12;
+  error?: Error32;
   changed?: Changed1;
   previous_target_size?: PreviousTargetSize;
   previous_max_size?: PreviousMaxSize;
@@ -32565,6 +33321,8 @@ export const EventTypeValue = {
   REFERENCE_CATALOG_REQUEST: "reference.catalog.request",
   REFERENCE_LINKS_UPDATE_REQUEST: "reference.links.request",
   REFERENCE_LINKS_UPDATE_RESULT: "reference.links.result",
+  REFERENCE_BUNDLE_CREATE_REQUEST: "reference.bundle.create.request",
+  REFERENCE_BUNDLE_CREATE_RESULT: "reference.bundle.create.result",
   SCAFFOLD_EXPLAIN_RESULT: "scaffold.explain.result",
   SESSION_MESSAGE_RESULT: "session.message.result",
   SCAFFOLD_INTEGRATION_RESULT: "scaffold.integration.result",

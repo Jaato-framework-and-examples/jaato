@@ -74,6 +74,8 @@ from typing import Any, FrozenSet, Optional, Set
 __all__ = [
     "ENV_ENTRY_POINT_ALLOWLIST",
     "ENV_ALLOW_SHADOW",
+    "ENV_ALLOW_PRELOAD",
+    "preload_opt_ins",
     "BUILTIN_PLUGIN_PACKAGE",
     "NEVER_SHADOWABLE",
     "PluginOrigin",
@@ -98,6 +100,14 @@ ENV_ENTRY_POINT_ALLOWLIST = "JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST"
 #: third-party distribution IS allowed to replace.  Names in
 #: :data:`NEVER_SHADOWABLE` are refused even when listed here.
 ENV_ALLOW_SHADOW = "JAATO_PLUGIN_ALLOW_SHADOW"
+
+#: Operator knob: comma-separated distribution names whose plugins' and
+#: providers' ``PLUGIN_PRELOAD`` declarations the pool template honours.
+#: Unset means none: an out-of-tree declaration is ignored and logged,
+#: because preloading runs that distribution's import-time code in the
+#: template, whose environment is the daemon's and no session's.  The
+#: built-in package needs no listing.
+ENV_ALLOW_PRELOAD = "JAATO_PLUGIN_ALLOW_PRELOAD"
 
 #: Import package that owns the built-in plugins.  An entry point whose
 #: target module lives here is the framework's own declaration, not a
@@ -240,6 +250,11 @@ def allowed_distributions() -> Set[str]:
     above is what protects the default configuration.
     """
     return {normalize_distribution(n) for n in _env_name_set(ENV_ENTRY_POINT_ALLOWLIST)}
+
+
+def preload_opt_ins() -> Set[str]:
+    """Normalised distributions whose preload declarations are honoured."""
+    return {normalize_distribution(n) for n in _env_name_set(ENV_ALLOW_PRELOAD)}
 
 
 def shadow_opt_ins() -> Set[str]:

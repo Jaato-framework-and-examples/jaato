@@ -13,9 +13,12 @@ sufficient:
   Every writer of catalog files in this tree writes a temp file and
   ``os.replace``-s it into place (``write_contained``, ``reconcile``,
   ``merge``), so a framework EDIT of an existing reference is a rename and
-  moves the directory mtime too.  An in-place edit by another tool (an
-  editor saving over the file) does not, and is not seen until something
-  else in that directory changes or ``references reload`` is typed.
+  moves the directory mtime too.
+* **An in-place edit does not**, so each reference file present at the load
+  is stamped as well (:func:`json_files`; #1437).  An editor saving over a
+  file, or a promoted REVISION written by a writer that does not rename,
+  moves the file's own mtime and size.  One ``stat`` per file is the price;
+  a catalog is tens or hundreds of files, not thousands.
 * **A new sub-bundle is a new directory in a tier root**, which moves the
   root's mtime; the reload that follows rediscovers the bundle list, so the
   watched set grows with the catalog.
@@ -52,7 +55,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 #: One path's stamp: ``(mtime_ns, inode, size)``, or ``None`` when the path
 #: is absent or cannot be read.
@@ -76,6 +79,27 @@ def stat_path(path: str) -> Stamp:
     except OSError:
         return None
     return (st.st_mtime_ns, st.st_ino, st.st_size)
+
+
+def json_files(directories: Iterable[str]) -> List[str]:
+    """Every ``*.json`` regular file directly in each of ``directories``.
+
+    One ``scandir`` per directory; a link is not followed and an unreadable
+    directory contributes nothing.  These are the reference files a load
+    read (plus manifests, harmless to stamp), watched individually so an
+    in-place edit is seen.
+    """
+    out: List[str] = []
+    for directory in directories:
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if (entry.name.endswith(".json")
+                            and entry.is_file(follow_symlinks=False)):
+                        out.append(entry.path)
+        except OSError:
+            continue
+    return out
 
 
 def stat_paths(paths: Iterable[str]) -> Dict[str, Stamp]:

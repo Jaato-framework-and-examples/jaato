@@ -76,8 +76,14 @@ def layout(tmp_path):
 @pytest.fixture
 def ws_server():
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     server = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    server._clients = {}
+    server._app_managers = {}
+    server._app_provisioners = {}
+    server._app_credentials = AppCredentialStore({})
     server._clients = {}
     server._lock = asyncio.Lock()
     server._client_provisioned = {}

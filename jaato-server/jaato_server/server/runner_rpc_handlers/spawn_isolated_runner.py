@@ -59,6 +59,7 @@ not exercised in production.  The §4.3.1 stub still fires for
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -389,7 +390,12 @@ class SpawnIsolatedRunnerHandler:
                     if k != "isolated"
                     and k not in SUB_PROFILE_TIGHTENING_KEYS
                 }
-            return self._session_manager._spawn_isolated_runner(
+            # Off the loop: this runs on the daemon loop's thread, and the
+            # spawn waits on the loop (``rpc.start()``, the bootstrap
+            # RPC), so calling it here waits on itself until the 10 s
+            # timeout (#1355's rule; seen on the phase 3 kernel run).
+            return await asyncio.to_thread(
+                self._session_manager._spawn_isolated_runner,
                 parent_session_id=args["parent_session_id"],
                 subagent_id=args["subagent_id"],
                 profile_payload=args["profile_payload"],

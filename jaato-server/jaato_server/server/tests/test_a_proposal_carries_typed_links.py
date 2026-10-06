@@ -112,7 +112,8 @@ REVERSIONS = [
     Reversion(
         target=_CLAIMS,
         find='             "mode": "selectable", "tags": tags, **document}\n'
-             '    if links:\n        entry["links"] = links\n',
+             '    if links or (keep_links_key and args.get("links") is not None):\n'
+             '        entry["links"] = links\n',
         replace='             "mode": "selectable", "tags": tags, **document}\n',
         because="the proposed edges would be validated and then thrown away",
         test="TestPromotionCarriesTheEdges::test_the_catalog_file_has_the_links",

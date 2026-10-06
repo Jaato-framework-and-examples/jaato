@@ -262,3 +262,66 @@ def _reinject_envelope_telemetry(
     else:
         result["_telemetry"] = dict(telemetry)
     return result
+
+
+def _with_spawn_refusal(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Name the seccomp refusal behind an opaque preexec failure (#1510).
+
+    A spawn refused in the forked child surfaces as ``subprocess``'s
+    ``"Exception occurred in preexec_fn."``; when this session's posture
+    says every spawn is refused, the result gains ``refused_by`` with the
+    reason, so the model is told why rather than left to guess.
+    """
+    if "refused_by" in result or "preexec_fn" not in str(result.get("error")):
+        return result
+    from jaato_server.shared.seccomp_filter import spawn_refusal_reason
+    reason = spawn_refusal_reason()
+    if reason:
+        result = dict(result, refused_by=reason)
+    return result
+
+
+def failures_explicit(executors: Dict[str, ExecutorFn]) -> Dict[str, ExecutorFn]:
+    """Make every error-dict return of *executors* an explicit failure.
+
+    ``ToolExecutor`` derives its success flag from an executor's return
+    SHAPE: ``(ok, payload)`` says what it means, a bare value reads as a
+    success (``_normalize_executor_return``).  The subprocess plugins
+    report their failures as bare ``{"error": ...}`` dicts, so a refused
+    spawn (a REQUIRED seccomp filter that is absent, a failed LSM
+    transition), ``out of pty devices``, an unknown session id or a
+    containment refusal all reached the client as ``success: true`` and the
+    reliability plugin as a success (#1510; #1053's rule: failures
+    explicit, successes left bare).
+
+    The wrapper is structural rather than one edit per ``return``, so a
+    failure path added later is covered whether or not its author knew
+    the contract.  A dict whose ``error`` is ``None`` is NOT a failure
+    (the absence of one, as ``tool_result_is_error`` reads it); a tuple
+    or a ``WithMetadata`` passes through unchanged, and the payload the
+    model reads is the same dict either way.
+
+    Args:
+        executors: ``{tool_name: executor_fn}``, typically the result of
+            :meth:`RunnerForwardingMixin.wrap_executors_for_runner_forwarding`
+            so a result forwarded back from the runner is covered too.
+
+    Returns:
+        A new dict with the same keys and order.
+    """
+
+    def _wrap(fn: ExecutorFn) -> ExecutorFn:
+        def _explicit(args: Dict[str, Any]) -> Any:
+            result = fn(args)
+            if isinstance(result, dict) and result.get("error") is not None:
+                return (False, _with_spawn_refusal(result))
+            return result
+
+        try:
+            _explicit.__name__ = getattr(fn, "__name__", "_explicit")
+            _explicit.__wrapped__ = fn  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+        return _explicit
+
+    return {name: _wrap(fn) for name, fn in executors.items()}

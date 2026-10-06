@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple,
@@ -41,11 +42,13 @@ from jaato_server.server.confinement_id import (
 from jaato_server.shared.apparmor_label import (
     AppArmorLabel,
     COMPLAIN_ENV_VAR,
+    parse_label,
     profile_name_ignoring_mode,
 )
 from jaato_server.shared.session_envelope import SessionInitEnvelope
 from jaato_server.shared.privilege_drop import (
     PrivilegeDropError, RunnerUser, apply_user_env, drop_to,
+    ensure_dumpable,
 )
 from jaato_server.shared.private_tmp import (
     PRIVATE_TMP_TARGETS, PrivateTmpError, enter_private_tmp,
@@ -160,6 +163,7 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
         workspace_path=workspace_path,
         config_root=envelope.config_root,
         telemetry_config=(envelope.plugin_configs or {}).get("telemetry"),
+        read_config_tiers=not envelope.config_resolved_by_daemon,
     )
 
 
@@ -613,6 +617,53 @@ def _install_confinement_grants(envelope: SessionInitEnvelope) -> None:
         )
 
 
+def _point_log_at_session(envelope: SessionInitEnvelope) -> None:
+    """Point fds 1 and 2 at ``envelope.runner_log_path`` (step 1a).
+
+    A cold-spawned runner's child opened this file onto fds 1 and 2 before
+    exec, so for it this re-opens the same file.  A pool slot inherited
+    the template's fds, the daemon's own log: under AppArmor and unconfined
+    its lines landed there, and under SELinux ``jaato_runner_t`` may not
+    write it, so a slot's whole log was lost (phase 4 kernel run, ~700
+    denials per run).  Every bootstrap re-points them, so a reused slot's
+    next session gets a log of its own.  A slot logs through a stderr
+    handler (``_setup_logging(None)`` in the template), which now writes
+    here; a cold spawn's file handler is unaffected.
+
+    The flush writes what is buffered to the CURRENT fds, so one session's
+    lines never open the next session's log.  That is safe because a
+    confined slot never holds the daemon's log: an SELinux slot's child
+    pointed fds 1 and 2 at its session's log before it entered the domain
+    (``runner_spawner._redirect_output_in_child``), and an AppArmor or
+    unconfined slot may write the daemon's log.  Before that existed the
+    flush wrote to the daemon's log, was refused, and the bootstrap failed
+    (phase 4 kernel run 2).
+
+    Best-effort, as the cold spawn's redirect is: a runner that cannot
+    open its log still serves, with the refusal written to whatever fd 2
+    still is.  ``None`` (no workspace, an older daemon) changes nothing.
+    """
+    path = envelope.runner_log_path
+    if not path:
+        return
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as exc:
+        logger.warning("runner-session bootstrap: cannot open the runner "
+                       "log %s (%s); logging stays on the inherited fds",
+                       path, exc)
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+    logger.info("runner-session bootstrap: logging to %s (session %s)",
+                path, envelope.session_id)
+
+
 def _install_user_tier(envelope: SessionInitEnvelope) -> None:
     """Install the daemon's snapshot of ``~/.jaato`` (#1465).
 
@@ -899,6 +950,12 @@ def _drop_to_runner_user(envelope: SessionInitEnvelope) -> None:
         if user is None:
             return
         changed = drop_to(user)
+        # #1499: an in-process drop leaves the slot non-dumpable, so its
+        # /proc entries are root-owned and every ``owner /proc/*/...``
+        # rule of the profile 1c applies denies them.  Before 1c, so the
+        # label is applied and read back with /proc owned by the user.
+        # A no-op for a cold-spawned runner, which execve made dumpable.
+        ensure_dumpable(user)
     except PrivilegeDropError as exc:
         raise BootstrapError(
             "privilege_drop",
@@ -1008,6 +1065,49 @@ def _set_tempdir(path: str, envelope: SessionInitEnvelope) -> None:
     )
 
 
+def _confinement_mismatch_cause(actual: str, exc: Any) -> str:
+    """The "likely cause" sentence of a confinement-mismatch refusal.
+
+    *actual* is the label read before the transition; *exc* is the
+    :class:`ConfinementMismatchError` carrying ``expected`` and the label
+    read after it.  A stacked post-transition label is named as a stack
+    first (#1509): the transition happened, and the kernel stacked it.
+    """
+    current = profile_name_ignoring_mode(actual)
+    likely_cause: str
+    if parse_label(exc.actual).stacked:
+        # #1509: the transition happened, as a stack.  A stack with
+        # ``unconfined`` would have verified, so this one carries
+        # another real profile.
+        likely_cause = (
+            f"the kernel stacked the profile "
+            f"(``kernel.apparmor_restrict_unprivileged_unconfined=1`` "
+            f"turns an unprivileged, unconfined task's change_profile "
+            f"into a stack) and the stack holds more than "
+            f"{exc.expected!r} and 'unconfined'.  A stack with anything "
+            f"other than 'unconfined' is refused: the task is bounded "
+            f"by a profile jaato did not ask for."
+        )
+    elif current.startswith("jaato-ws-"):
+        likely_cause = (
+            f"current profile {current!r} doesn't permit "
+            f"``change_profile -> {exc.expected}``.  Almost "
+            f"always means the kernel has a pre-v28 template "
+            f"loaded (no cascade-sharing glob rule).  Restart "
+            f"the daemon to reload all per-session profiles "
+            f"against the current template."
+        )
+    else:
+        likely_cause = (
+            f"pool slot's current profile ({current!r}) "
+            f"doesn't permit ``change_profile -> {exc.expected}``.  "
+            f"Verify daemon-side ``AppArmorManager.provision_profile`` "
+            f"loaded {exc.expected} before the bootstrap RPC was "
+            f"dispatched."
+        )
+    return likely_cause
+
+
 def _maybe_self_confine(
     envelope: SessionInitEnvelope,
     recycle_pools: Optional[Callable[[str], Any]] = None,
@@ -1112,6 +1212,10 @@ def _maybe_self_confine(
     # is refused here, before the unconfined no-op below could read an empty
     # ``profile_name`` as "the operator opted out" (selinux-backend.md §3.2).
     from . import lsm_confine
+    from jaato_server.shared.lsm_label import set_selinux_session_boundary
+    # Cleared on every bootstrap so a pool slot never reports a previous
+    # session's boundary to the notebook backend (#1519).
+    set_selinux_session_boundary(None)
     confinement = lsm_confine.resolve(envelope)
     backend = confinement.backend if confinement else ""
     if backend == lsm_confine.BACKEND_SELINUX:
@@ -1218,25 +1322,7 @@ def _maybe_self_confine(
         # has an old template loaded (pre-v28, no
         # ``change_profile -> jaato-ws-*,`` rule).  Restart the
         # daemon to pick up the new template.
-        current = profile_name_ignoring_mode(actual)
-        likely_cause: str
-        if current.startswith("jaato-ws-"):
-            likely_cause = (
-                f"current profile {current!r} doesn't permit "
-                f"``change_profile -> {exc.expected}``.  Almost "
-                f"always means the kernel has a pre-v28 template "
-                f"loaded (no cascade-sharing glob rule).  Restart "
-                f"the daemon to reload all per-session profiles "
-                f"against the current template."
-            )
-        else:
-            likely_cause = (
-                f"pool slot's current profile ({current!r}) "
-                f"doesn't permit ``change_profile -> {exc.expected}``.  "
-                f"Verify daemon-side ``AppArmorManager.provision_profile`` "
-                f"loaded {exc.expected} before the bootstrap RPC was "
-                f"dispatched."
-            )
+        likely_cause = _confinement_mismatch_cause(actual, exc)
         raise BootstrapError(
             "confine",
             f"AppArmor confinement mismatch — kernel reports "
@@ -1296,11 +1382,23 @@ def _confirm_selinux_domain(
     """
     from . import lsm_confine
 
+    from jaato_server.shared.lsm_label import (
+        SELinuxSessionBoundary, set_selinux_session_boundary,
+    )
+
     lsm_confine.self_confine(confinement.backend, confinement.label)
     logger.info("runner-session bootstrap: running in SELinux domain %s",
                 confinement.label)
     _retire_and_verify_threads(confinement.label, recycle_pools,
                                backend=confinement.backend)
+    # Recorded only once the domain is confirmed and every thread verified:
+    # the notebook backend reads it to start kernels at the SELinux tier
+    # (#1519), and a boundary that failed either check is not one.
+    set_selinux_session_boundary(SELinuxSessionBoundary(
+        label=confinement.label,
+        child_label=confinement.child_label,
+        enforcing_attested=bool(getattr(confinement, "enforcing_attested", False)),
+    ))
 
 
 def _retire_and_verify_threads(
@@ -1413,6 +1511,94 @@ def _stamp_daemon_identity(envelope: SessionInitEnvelope, session: Any) -> None:
         session.set_client_user_id(created_by)
 
 
+#: The composed ``//child`` preexec per envelope (#1503), so the seccomp plan
+#: is built, logged and recorded once even though both the pre-arm (#1357)
+#: and step 4 ask for the callback.  One entry: a runner hosts one session.
+_CHILD_PREEXEC_CACHE: Dict[int, Tuple[Any, Callable[[], None]]] = {}
+
+
+def _child_preexec(
+    envelope: SessionInitEnvelope, confinement: Any,
+) -> Callable[[], None]:
+    """The ``preexec_fn`` step every model-driven subprocess gets (#1503).
+
+    The capability bounding-set drop, the LSM ``//child`` transition
+    (AppArmor ``changeprofile`` / SELinux ``setexeccon``), the process
+    capability sets cleared (#1543, :mod:`shared.capability_drop`), then
+    ``PR_SET_NO_NEW_PRIVS`` and the seccomp filter, composed by
+    :func:`shared.seccomp_filter.compose_child_preexec`.  This
+    is the one place the filter enters the chain: ``cli``,
+    ``interactive_shell`` and the notebook kernel all receive this callable
+    through ``set_apparmor_child_transition_callback``, and append their
+    cgroup attach / parent-death signal after it.
+
+    The filter is NOT compiled here (#1508): the daemon compiled it
+    (``runner_spawn.seccomp_program_of``) and it arrives as raw BPF on
+    ``envelope.seccomp_program``, the same way for a pool slot and a cold
+    spawn.  This runner only checks the architecture and shape
+    (:func:`shared.seccomp_filter.load_shipped`), so a confined runner needs
+    neither libseccomp nor a memfd; the forked child makes two calls.  The
+    posture is recorded by :func:`shared.seccomp_filter.plan_for_session`
+    whatever it is: a missing, foreign-arch or malformed program is
+    ``absent``, or every spawn refused when confinement is required.
+    """
+    from jaato_server.shared import seccomp_filter
+    from . import lsm_confine
+
+    cached = _CHILD_PREEXEC_CACHE.get(id(envelope))
+    if cached is not None and cached[0] is envelope:
+        return cached[1]
+    lsm_cb = lsm_confine.child_transition_callback(
+        confinement.backend, confinement.label, confinement.child_label,
+    )
+    limits = _runtime_limits_from_envelope(envelope)
+    # #1543: the capability drop wraps the LSM transition (bounding set
+    # before it, the process sets and NO_NEW_PRIVS after it); the seccomp
+    # filter is composed after that.
+    from jaato_server.shared import capability_drop
+    caps = capability_drop.plan_for_session(
+        getattr(limits, "capabilities", None), boundary_active=True)
+    lsm_cb = capability_drop.compose_child_preexec(lsm_cb, caps)
+    plan = seccomp_filter.plan_for_session(
+        getattr(limits, "seccomp", None),
+        getattr(limits, "seccomp_allow", None),
+        boundary_active=True,
+        shipped=getattr(envelope, "seccomp_program", None),
+    )
+    composed = seccomp_filter.compose_child_preexec(lsm_cb, plan.installer)
+    _CHILD_PREEXEC_CACHE.clear()
+    _CHILD_PREEXEC_CACHE[id(envelope)] = (envelope, composed)
+    return composed
+
+
+def _record_seccomp_without_filter(
+    envelope: SessionInitEnvelope, *, sub_runner: bool,
+) -> None:
+    """Record the posture of a session whose subprocesses get no filter.
+
+    An unconfined session is ``unconfined``: no kernel boundary, so no
+    filter is invented for it.  An isolated sub-runner wears a flat
+    sub-profile with no ``//child`` transition to compose a filter after,
+    so it is recorded ``absent`` with that reason (a stated limit of #1503,
+    never a silent one).
+    """
+    from jaato_server.shared import capability_drop, seccomp_filter
+    if not sub_runner:
+        seccomp_filter.plan_for_session(None, None, boundary_active=False)
+        capability_drop.plan_for_session(None, boundary_active=False)
+        return
+    capability_drop.record_plan(capability_drop.CapabilityPlan(
+        capability_drop.POSTURE_ABSENT,
+        reason="isolated sub-runner: no //child transition to drop "
+               "capabilities around",
+    ))
+    seccomp_filter.record_plan(seccomp_filter.SeccompPlan(
+        seccomp_filter.POSTURE_ABSENT,
+        reason="isolated sub-runner: no //child transition to install a "
+               "filter after",
+    ))
+
+
 def _prearm_child_callback(
     envelope: SessionInitEnvelope, runtime: Any,
 ) -> Optional[Callable[[], None]]:
@@ -1442,9 +1628,7 @@ def _prearm_child_callback(
     if not runner_profile or "//" in runner_profile:
         return None
     try:
-        child_cb = lsm_confine.child_transition_callback(
-            confinement.backend, confinement.label, confinement.child_label,
-        )
+        child_cb = _child_preexec(envelope, confinement)
         registry = getattr(runtime, "_registry", None)
         for name in (registry.list_exposed() if registry else ()):
             plugin = registry.get_plugin(name)
@@ -1526,6 +1710,8 @@ def _maybe_install_child_callback(
     from . import lsm_confine
     confinement = lsm_confine.resolve(envelope)
     runner_profile = confinement.label if confinement else ""
+    if not runner_profile or "//" in runner_profile:
+        _record_seccomp_without_filter(envelope, sub_runner=bool(runner_profile))
     if not runner_profile:
         logger.info(
             "runner-session bootstrap: envelope.profile_name empty; "
@@ -1549,9 +1735,7 @@ def _maybe_install_child_callback(
     # Case 3: main runner, install required + audibly failing.
     try:
         if child_cb is None:
-            child_cb = lsm_confine.child_transition_callback(
-                confinement.backend, confinement.label, confinement.child_label,
-            )
+            child_cb = _child_preexec(envelope, confinement)
         executor = getattr(session, "_executor", None)
         if executor is None or not hasattr(
             executor, "set_apparmor_child_transition_callback",
@@ -1606,24 +1790,24 @@ def build_session_permission_plugin(
     persistence`` (#1412) -- after ``initialize()`` here has loaded
     ``permissions.json``, which is the order #706 requires.
 
-    The default policy mirrors the daemon side; a profile's
-    ``plugin_configs.permission`` block (Phase 4 §C) replaces top-level keys.
+    The init config comes from ``enforcer_init_config``, the one helper the
+    daemon-local builder calls too; the policy is resolved by
+    ``initialize`` from the framework default, ``~/.jaato/permissions.json``
+    (the snapshot the daemon shipped, #1465), the project
+    ``permissions.json`` and the profile's ``plugin_configs.permission``
+    block, in that order (#1474).
     """
     from jaato_server.shared.plugins.permission.plugin import PermissionPlugin
+    from jaato_server.shared.plugins.permission.policy_layers import (
+        enforcer_init_config,
+    )
 
-    permission_init_config: Dict[str, Any] = {
-        "channel_type": "queue",
-        "channel_config": {"use_colors": False},
-        "workspace_path": workspace_path,
-        "policy": {
-            "defaultPolicy": "ask",
-            "whitelist": {"tools": [], "patterns": []},
-            "blacklist": {"tools": [], "patterns": []},
-        },
-    }
-    profile_perm_config = (envelope.plugin_configs or {}).get("permission")
-    if profile_perm_config:
-        permission_init_config.update(profile_perm_config)
+    permission_init_config = enforcer_init_config(
+        (envelope.plugin_configs or {}).get("permission"),
+        workspace_path=workspace_path,
+        config_root=getattr(envelope, "config_root", None),
+        session_id=getattr(envelope, "session_id", None),
+    )
     permission_plugin = PermissionPlugin()
     permission_plugin.initialize(permission_init_config)
     return permission_plugin
@@ -1686,6 +1870,10 @@ def bootstrap_session(
     except ValueError as exc:
         logger.error("runner-session bootstrap: validation failed: %s", exc)
         raise BootstrapError("validate", str(exc)) from exc
+
+    # ---- 1a. Log to this session's runner log (SELinux phase 4) ----
+    # Before anything else logs, so the whole bootstrap lands there.
+    _point_log_at_session(envelope)
 
     # ---- 1b. Apply daemon-resolved session env (PR #91 Y fix) ----
     # The daemon resolved workspace ``.env`` + profile.env +
@@ -2102,9 +2290,12 @@ def _install_gc(session: "JaatoSession", envelope: SessionInitEnvelope) -> None:
         session: The freshly built runner-side session.
         envelope: Its init envelope; ``gc`` carries the profile block
             (complete since #1133 — it previously carried only
-            ``type``) and ``workspace_path`` locates ``gc.json``.
+            ``type``) and ``workspace_path`` locates ``gc.json``.  When
+            ``config_resolved_by_daemon`` is set (an isolated sub-runner,
+            whose boundary denies ``gc.json``), the file is never read
+            here: ``gc_file`` carries what the daemon found.
     """
-    from jaato_server.shared.plugins.gc import load_gc_from_file
+    from jaato_server.shared.plugins.gc import load_gc_from_data, load_gc_from_file
     from jaato_server.shared.plugins.subagent.config import (
         GCProfileConfig, gc_profile_to_plugin_config,
     )
@@ -2118,7 +2309,16 @@ def _install_gc(session: "JaatoSession", envelope: SessionInitEnvelope) -> None:
                 agent_name=envelope.agent_id or None,
             )
             source = "profile"
-        if not gc_result and envelope.workspace_path:
+        if not gc_result and envelope.config_resolved_by_daemon:
+            # The daemon read gc.json for this session; its boundary
+            # denies the files, so they are not probed here.
+            if envelope.gc_file:
+                gc_result = load_gc_from_data(
+                    envelope.gc_file, agent_name=envelope.agent_id or None,
+                    source="the envelope (gc.json read by the daemon)",
+                )
+                source = "gc.json (via the daemon)"
+        elif not gc_result and envelope.workspace_path:
             gc_result = load_gc_from_file(
                 workspace_root=envelope.workspace_path,
                 agent_name=envelope.agent_id or None,

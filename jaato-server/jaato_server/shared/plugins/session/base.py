@@ -145,6 +145,13 @@ class SessionState:
     ``== "apparmor"`` reads it as "not confined", which is TRUE and is the
     safe direction.
 
+    Since #1529 a revive never DISARMS confinement from this value: a
+    kernel claim in a daemon-sealed record arms the revive's opt-in, any
+    other sealed value leaves the fresh opt-in to decide, and an unsealed
+    record arms confinement whatever it says (``session_manager.
+    revive_arms_confinement``).  The revived Session records what
+    provisioning produced then; this value is evidence.
+
     Persisted so disk-restore / orphan-revive re-applies the SAME
     confinement on runner re-spawn.  Without it a revived session's
     ``_load_session`` read of ``state.sandbox_mode`` was always None
@@ -152,6 +159,19 @@ class SessionState:
     after any idle detach — a security regression.  Mirrors the
     ``BootstrapEnvelope.sandbox_mode`` the restore path consumes;
     None on old records / never-confined sessions (unchanged behavior).
+    """
+
+    seccomp: Optional[Dict[str, Any]] = None
+    """The seccomp-bpf posture of the session's model-driven subprocesses
+    (#1503), as the runner reported it at bootstrap: ``{posture, ...}``
+    where ``posture`` is ``filter`` / ``off`` / ``absent`` / ``unconfined``.
+
+    Beside :attr:`sandbox_mode` because the two answer the two halves of
+    one question: the LSM decides what a subprocess may TOUCH, the filter
+    which kernel entry points it may REACH, and "LSM yes, seccomp no" must
+    be readable from the record rather than silent.  An additive key (an
+    older reader ignores it), so the record version is not bumped; ``None``
+    on older records and sessions with no runner.
     """
 
     agent_name: Optional[str] = None
@@ -366,6 +386,15 @@ class SessionState:
     end_reason: Optional[str] = None
     """The ``SessionTerminatedEvent.reason`` that finished it, beside
     ``ended_at`` (record 2.11).  ``None`` exactly when ``ended_at`` is."""
+
+    record_verified: Optional[bool] = field(default=None, compare=False)
+    """Whether the record this state was read from carries a valid daemon
+    seal (#1529).  NOT persisted: it is a fact about the bytes just read,
+    set by ``FileSessionPlugin.load(..., verify=...)``.  ``None`` = nobody
+    asked (a load without a verifier, or a state built in memory);
+    ``False`` = asked and the seal is absent or wrong, so a revive must not
+    trust the record's security-relevant fields
+    (:mod:`server.record_distrust`)."""
 
 
 @dataclass

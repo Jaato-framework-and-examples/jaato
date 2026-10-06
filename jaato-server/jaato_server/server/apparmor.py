@@ -114,6 +114,102 @@ def announce_complain_mode_once() -> None:
     )
 
 
+#: Host-scoped knob: how long a boundary profile nobody holds stays
+#: loaded before it is unloaded (#1501).  ``0`` = unload at once, the
+#: pre-#1501 behaviour.
+PROFILE_GRACE_ENV = "JAATO_APPARMOR_PROFILE_GRACE_SECONDS"
+DEFAULT_PROFILE_GRACE_SECONDS = 60.0
+
+#: Where the kernel lists the loaded profiles.  The flat file is tried
+#: first; the per-profile ``policy/profiles/<name>.<n>/{name,mode}`` tree
+#: second.  Neither readable = "cannot tell", which LOADS (#1501).
+SECURITYFS_PROFILES = "/sys/kernel/security/apparmor/profiles"
+SECURITYFS_POLICY_DIR = "/sys/kernel/security/apparmor/policy/profiles"
+
+_PROFILE_LISTING_LINE = re.compile(r"^(?P<name>.+) \((?P<mode>[^()]+)\)$")
+
+
+def profile_grace_seconds() -> float:
+    """``JAATO_APPARMOR_PROFILE_GRACE_SECONDS``, read once per manager (#1501).
+
+    Unset, unparseable or negative reads as the default: a typo must not
+    turn the grace off or make it unbounded.  ``0`` disables it.
+    """
+    raw = os.environ.get("JAATO_APPARMOR_PROFILE_GRACE_SECONDS", "").strip()  # env: seconds an unheld boundary profile stays loaded for reuse (default 60; 0 unloads at once)
+    if not raw:
+        return DEFAULT_PROFILE_GRACE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number; using the default %.0fs",
+            PROFILE_GRACE_ENV, raw, DEFAULT_PROFILE_GRACE_SECONDS,
+        )
+        return DEFAULT_PROFILE_GRACE_SECONDS
+    if value < 0 or value != value:  # negative or NaN
+        return DEFAULT_PROFILE_GRACE_SECONDS
+    return value
+
+
+def _ms(start: float, end: float) -> float:
+    return round((end - start) * 1000.0, 1)
+
+
+# Interpreter installations the included abstractions already cover:
+# ``abstractions/python`` grants the stdlib under ``/usr/lib/python3*`` and
+# ``/usr/local/lib/python3*``, and every body maps ``/usr/lib/**`` and
+# execs ``/usr/bin/**``.  A root among these needs no rule of its own.
+_SYSTEM_INTERPRETER_PREFIXES = (Path("/"), Path("/usr"), Path("/usr/local"))
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Whether *path* is *root* or lies under it (both already resolved)."""
+    return path == root or root in path.parents
+
+
+def interpreter_install_roots(
+    venv_path: Path,
+    workspace_root: Optional[Path] = None,
+    prefixes: Optional[List[str]] = None,
+) -> List[Path]:
+    """The interpreter installation dirs a confined body must read (#1511).
+
+    Derived from the RUNNING interpreter (``sys.base_prefix`` and
+    ``sys.base_exec_prefix``, resolved), which is the one the runner is
+    started with, the same way ``{venv_path}`` comes from ``sys.prefix``.
+    A uv-managed Python lives under ``~/.local/share/uv/python/<build>``,
+    pyenv under ``~/.pyenv/versions/<v>``, conda under its own root: none
+    is covered by ``abstractions/python``, so before template v45 a daemon
+    on one could start no confined session (the stdlib was unreadable).
+
+    Dropped: a system prefix (``/``, ``/usr``, ``/usr/local``), a root
+    equal to or inside *venv_path* (already granted), and a root inside
+    *workspace_root* (model-writable; an exec grant there would let a
+    session run what it wrote).  Order is kept, duplicates removed.
+    """
+    if prefixes is None:
+        import sys
+        prefixes = [sys.base_prefix, sys.base_exec_prefix]
+    roots: List[Path] = []
+    for raw in prefixes:
+        if not raw:
+            continue
+        root = Path(raw).resolve()
+        if root in roots or root in _SYSTEM_INTERPRETER_PREFIXES:
+            continue
+        if _is_within(root, venv_path):
+            continue
+        if workspace_root is not None and _is_within(root, workspace_root):
+            logger.warning(
+                "AppArmor: interpreter installation %s is inside the "
+                "workspace root %s; not granting it (model-writable)",
+                root, workspace_root,
+            )
+            continue
+        roots.append(root)
+    return roots
+
+
 class AppArmorManager:
     """Manages AppArmor profiles for per-session workspace confinement.
 
@@ -126,7 +222,15 @@ class AppArmorManager:
        ``apparmor_confine()`` context manager (see below), which the
        ``ToolExecutor`` wraps around every tool call.  Subprocesses
        inherit the parent thread's confinement via fork+exec.
-    3. ``teardown_profile(session_id)`` — unloads and removes the profile.
+    3. ``teardown_profile(session_id)`` — RELEASES the session's claim on
+       its boundary.  The profile leaves the kernel only when nobody else
+       holds it: another live session on the boundary keeps it, an idle
+       pool slot wearing it keeps it (the slot's death releases it again,
+       ``PoolManager._reap_slot_profile``), and a boundary-derived profile
+       then waits out the #1501 grace.  ``SessionManager`` calls it on
+       every session end (#1506); :meth:`stop_grace` makes daemon stop
+       unload at once; :meth:`reclaim_orphaned_profiles` cleans up after a
+       daemon that never got to release.
 
     All methods are safe to call even when AppArmor is unavailable; they
     degrade to no-ops.
@@ -662,7 +766,53 @@ class AppArmorManager:
     #       so does the flat isolated sub-runner, whose subprocesses and
     #       in-process tools share one body: there a hand-written claim is
     #       still possible.
-    _TEMPLATE_VERSION = 43
+    #   v44: write-deny ``<ws>/.jaato/permissions.json`` in base,
+    #       ``tool_hat``, ``//child`` and the isolated sub-runner (#1474).
+    #       Before #1474 the file was read and never applied, so a session
+    #       that rewrote it changed nothing.  It is now a policy layer
+    #       (``policy_layers.resolve_effective_policy``): a confined session
+    #       that could write ``defaultPolicy: allow`` there would auto-
+    #       approve every tool of every later session in the workspace.
+    #       Reads stay allowed -- the runner reads the file in-process.
+    #   v45 (#1511): four gaps found on an enforcing Ubuntu kernel.
+    #       ``/dev/ptmx rw`` in base and ``tool_hat``: pexpect opens the
+    #       pty in-process (in the runner) before its child execs, so
+    #       ``shell_spawn`` got no pty in any confined session.  The
+    #       ``/dev/pts/*`` grant was already there; ``//child`` and the
+    #       isolated sub-runner gain nothing.  ``//child`` (scoped or
+    #       not) reads ``/usr/share/python-wheels/`` (Debian's
+    #       ``ensurepip`` source, so ``python3 -m venv`` works) and
+    #       ``/usr/share/git-core/templates/`` (``git init`` / ``clone``).
+    #       Every body reads and maps the RESOLVED interpreter
+    #       installation (``sys.base_prefix`` / ``sys.base_exec_prefix``)
+    #       when it lies outside the system prefixes the abstractions
+    #       already cover: a uv-, pyenv- or conda-managed Python keeps
+    #       its stdlib under its own root, so a daemon on one could start
+    #       no confined session.  ``bin/* ix`` beside it, mirroring the
+    #       venv grant, because ``<venv>/bin/python`` resolves there.  A
+    #       root inside a workspace is never granted (model-writable).
+    #   v46 (#1529): write-deny ``<ws>/.jaato/sessions/`` (the directory
+    #       and everything under it) in ``//child``, and the top-level
+    #       records ``<ws>/.jaato/sessions/*.json`` in the isolated
+    #       sub-runner.  A revive rebuilt the session from its record, and
+    #       the record's profile snapshot, permission rules and
+    #       ``sandbox_mode`` decided the revived boundary, so a subprocess
+    #       that rewrote it widened the next lifetime of its own session.
+    #       Defence in depth only: the fix is that a revive no longer
+    #       trusts a record it cannot authenticate (``server.record_seal``,
+    #       ``server.record_distrust``).  Base and ``tool_hat`` keep the
+    #       grant: the runner itself writes per-session state there
+    #       (``sessions/<id>/plans``, a ``save`` tool call), and a record
+    #       written by the runner is unsealed and narrowed on revive.
+    #   v47 (#1543): ``capability setpcap,`` in base and ``tool_hat``,
+    #       never in ``//child``.  A model-driven subprocess drops its
+    #       capability BOUNDING set in its forked child, before the
+    #       ``//child`` transition, and ``PR_CAPBSET_DROP`` needs
+    #       ``CAP_SETPCAP``.  The capability only lowers sets here: every
+    #       other capability stays denied by the LSM, so raising an
+    #       inheritable bit from the bounding set gains nothing a
+    #       confined runner could use.  See ``shared.capability_drop``.
+    _TEMPLATE_VERSION = 47
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -714,6 +864,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
   audit deny "{workspace_path}/.jaato/services/*/"           wlk,
   audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+  # v44 (#1474): permissions.json is APPLIED now, so a confined
+  # session that rewrote it would widen the policy of every later
+  # session in this workspace.  Read stays allowed: the runner reads it.
+  audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
   audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
   audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
   audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -774,6 +928,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   {venv_path}/**/*.so    mr,
   {venv_path}/**/*.so.*  mr,
   {venv_path}/bin/*      ix,
+{interpreter_rules}
 
   # ---- jaato source tree (read-only, for editable installs) ----
   # Required so plugin discovery and module imports work when jaato
@@ -875,6 +1030,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /dev/null            rw,
   /dev/urandom         r,
   /dev/pts/*           rw,
+  # v45 (#1511): interactive_shell's pexpect opens the pty master
+  # in-process, in this profile, before its child execs.
+  /dev/ptmx            rw,
 
   # ---- procfs credential + memory hardening (template v30, #712) ----
   # The runner's own os.environ is a live credential store: provider API
@@ -929,6 +1087,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   deny capability sys_admin,
   deny capability net_admin,
   deny capability sys_ptrace,
+
+  # v47 (#1543): the one capability granted.  A model-driven
+  # subprocess drops its capability bounding set before it enters
+  # //child, and PR_CAPBSET_DROP needs CAP_SETPCAP.
+  capability setpcap,
 
   # ---- profile transitions ----
   # Required for the framework's apparmor_confine.__exit__ to restore
@@ -994,6 +1157,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # full LSM file-mediation check.  The ``owner`` qualifier covers
   # both read and write against the resolved path while preserving
   # the process-is-owner constraint.
+  # The constraint requires a DUMPABLE runner (#1499): after a uid
+  # drop without exec the kernel owns /proc/<pid>/ as root.  Cold spawn
+  # is dumpable after execve; a pool slot calls PR_SET_DUMPABLE.
   #
   # The ``r`` permission is required by the runner subprocess's
   # ``confine_to_profile.read_current_profile`` verify-after-write
@@ -1168,6 +1334,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         self._workspace_root = Path(workspace_root).expanduser().resolve()
         self._sessions_root = self._workspace_root / "sessions"
         self._venv_path = Path(venv_path or sys.prefix).resolve()
+        # v45 (#1511): where the interpreter's own stdlib lives, when the
+        # abstractions do not already cover it (uv / pyenv / conda).
+        self._interpreter_roots = interpreter_install_roots(
+            self._venv_path, self._workspace_root)
         self._profile_dir = Path(profile_dir)
 
         # session_id -> was this session's profile GENERATED in complain
@@ -1240,6 +1410,46 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         # thread.  Without this, confined workers EACCES on the file
         # write and the only recovery is a daemon restart.
         self._loop = loop
+
+        # #1501: reuse of a loaded profile, and a grace before unloading.
+        #
+        # ``_idle_since``: confinement id -> monotonic time its last holder
+        # released it.  The profile stays loaded until
+        # ``_grace_seconds`` pass; a session that provisions the same
+        # boundary first claims it (the entry is dropped) and pays no
+        # reload.  An id here is NOT held: ``_confinement_ids`` has no row
+        # for it, and the sweep re-checks ``slot_in_use`` before unloading.
+        self._grace_seconds = profile_grace_seconds()
+        self._idle_since: Dict[str, float] = {}
+        self._idle_lock = threading.Lock()
+        # Ids that are boundary-derived (provisioned with an explicit
+        # ``confinement_id``).  Only those get a grace: a per-session name
+        # can never be claimed by another session, so keeping it loaded
+        # would buy nothing.
+        self._boundary_ids: set = set()
+        # Ids whose kernel policy may differ from the files on disk: a
+        # reload that failed after a reference fragment was removed leaves
+        # the old rule loaded.  Never skipped until a reload succeeds.
+        self._kernel_may_diverge: set = set()
+        # id -> the mode the KERNEL reported when a reload was skipped
+        # (#1014: never assumed from the render).
+        self._loaded_modes: Dict[str, str] = {}
+        # id -> ms the probe render in ``confinement_id_for_boundary``
+        # took, picked up by the provisioning timing line.
+        self._probe_ms: Dict[str, float] = {}
+        # ``profile name -> is a live pool slot confined to it?``  Wired
+        # by whoever owns the pool; ``None`` = no pool, nothing worn.
+        self.slot_in_use: Optional[Callable[[str], bool]] = None
+        self._securityfs_profiles = Path(SECURITYFS_PROFILES)
+        # #1506: which daemon wrote each profile file, so a later daemon's
+        # startup reconcile (:meth:`reclaim_orphaned_profiles`) can tell an
+        # orphan from a profile another LIVE daemon is using.  Beside the
+        # parser cache, under the daemon account's ``~/.jaato``.
+        from jaato_server.server.apparmor_reclaim import LEDGER_FILENAME
+        self._owner_ledger_path = self._cache_dir.parent / LEDGER_FILENAME
+        self._proc_root = Path("/proc")
+        self._owner: Optional[str] = None
+        self._securityfs_policy_dir = Path(SECURITYFS_POLICY_DIR)
 
     # ------------------------------------------------------------------
     # Cross-thread dispatch: confined-worker → unconfined main loop
@@ -1509,6 +1719,8 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         """
         if not self.is_available():
             return False
+        import time as _time
+        t_start = _time.monotonic()
 
         # Record the boundary-derived name BEFORE rendering, so every
         # later lookup for this session — ``get_profile_name``, the refs
@@ -1517,11 +1729,22 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if confinement_id:
             validate_session_id(confinement_id)
             self._confinement_ids[session_id] = confinement_id
+            self._boundary_ids.add(confinement_id)
         render_id = self.confinement_id_of(session_id)
+        # #1501: a session provisioning this boundary CLAIMS it, so an
+        # idle-grace entry for it is dropped before anything else can
+        # expire it; then any other expired idle boundary is unloaded.
+        with self._idle_lock:
+            self._idle_since.pop(render_id, None)
+        self._sweep_idle_impl()
 
         profile_name = self.profile_name_for_confinement_id(render_id)
         profile_path = self._profile_dir / profile_name
+        # #1506: stamped BEFORE the file can exist, so a concurrent startup
+        # reconcile never sees one of ours unledgered.
+        self._record_owner(profile_name)
         composition: Dict[str, Any] = {}
+        t0 = _time.monotonic()
         profile_content = self._render_profile(
             render_id, workspace_path, config_root, env_file,
             requested_fragments=requested_fragments,
@@ -1529,13 +1752,57 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             composition_out=composition,
             private_tmp_dir=private_tmp_dir,
         )
+        t_render = _time.monotonic()
 
+        reuse, why = self._loaded_profile_matches(
+            render_id, profile_name, profile_path, profile_content)
+        t_check = _time.monotonic()
+        steps = {
+            "id": self._probe_ms.pop(render_id, None),
+            "render": _ms(t0, t_render),
+            "check": _ms(t_render, t_check),
+        }
+
+        if reuse:
+            logger.info(
+                "Reusing loaded AppArmor profile %s (%s); no reload",
+                profile_name, why)
+        else:
+            if not self._write_and_load(profile_path, profile_name,
+                                        profile_content, steps):
+                return False
+            self._kernel_may_diverge.discard(render_id)
+            self._loaded_modes.pop(render_id, None)
+            logger.info("Loaded AppArmor profile %s (%s)", profile_name, why)
+
+        steps["total"] = _ms(t_start, _time.monotonic())
+        self._log_provision_timings(session_id, profile_name, reuse, steps)
+        # On a skipped reload the record is refreshed from the same render
+        # the loaded profile was made from, so diagnostics keep showing its
+        # grants (#1326).
+        self._record_grants(session_id, render_id, profile_name,
+                            requested_fragments, plugin_rules, composition,
+                            profile_content)
+        return True
+
+    def _write_and_load(
+        self, profile_path: Path, profile_name: str, profile_content: str,
+        steps: Dict[str, Any],
+    ) -> bool:
+        """Write *profile_content* and ``apparmor_parser -r`` it.
+
+        Records ``write`` and ``parser`` wall times in *steps*.  On a
+        parser failure the file is removed, as before #1501.
+        """
+        import time as _time
+        t0 = _time.monotonic()
         try:
             profile_path.write_text(profile_content)
         except OSError:
             logger.exception("Failed to write AppArmor profile %s", profile_path)
             return False
-
+        t1 = _time.monotonic()
+        steps["write"] = _ms(t0, t1)
         try:
             result = subprocess.run(
                 ["sudo", "apparmor_parser", "-r", "--cache-loc", str(self._cache_dir), str(profile_path)],
@@ -1543,6 +1810,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
                 text=True,
                 timeout=30,
             )
+            steps["parser"] = _ms(t1, _time.monotonic())
             if result.returncode != 0:
                 logger.error(
                     "apparmor_parser failed for %s: %s",
@@ -1560,12 +1828,134 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             logger.exception("Failed to run apparmor_parser for %s", profile_name)
             profile_path.unlink(missing_ok=True)
             return False
-
-        logger.info("Loaded AppArmor profile %s", profile_name)
-        self._record_grants(session_id, render_id, profile_name,
-                            requested_fragments, plugin_rules, composition,
-                            profile_content)
         return True
+
+    @staticmethod
+    def _log_provision_timings(
+        session_id: str, profile_name: str, reused: bool,
+        steps: Dict[str, Any],
+    ) -> None:
+        """One INFO line per provisioned session with each step's wall time.
+
+        ``id`` is the probe render that derived the confinement id
+        (``confinement_id_for_boundary``), ``check`` the reuse check
+        (file compare + securityfs read), ``write`` / ``parser`` the
+        reload, absent when it was skipped.  #1501 asked for the cost to
+        be attributed rather than assumed.
+        """
+        order = ("id", "render", "check", "write", "parser", "total")
+        parts = [f"{k}={steps[k]}ms" for k in order if steps.get(k) is not None]
+        logger.info(
+            "AppArmor provision timings session=%s profile=%s reload=%s %s",
+            session_id, profile_name, "skipped" if reused else "ran",
+            " ".join(parts),
+        )
+
+    # ------------------------------------------------------------------
+    # Reuse of a loaded profile (#1501)
+    # ------------------------------------------------------------------
+
+    def _loaded_profile_mode(self, profile_name: str) -> Tuple[bool, Optional[str]]:
+        """Ask the kernel whether *profile_name* is loaded, and in which mode.
+
+        Returns ``(True, mode)`` when it is loaded, ``(True, None)`` when the
+        listing was read and does not name it, and ``(False, None)`` when
+        no listing could be read.  Only the exact name counts: its
+        ``//tool_hat`` and ``//child`` children are separate lines.
+        """
+        try:
+            text = self._securityfs_profiles.read_text()
+        except (OSError, UnicodeDecodeError):
+            text = None
+        if text is not None:
+            for line in text.splitlines():
+                m = _PROFILE_LISTING_LINE.match(line.strip())
+                if m and m.group("name") == profile_name:
+                    return True, m.group("mode").strip()
+            return True, None
+        try:
+            entries = list(self._securityfs_policy_dir.iterdir())
+        except OSError:
+            return False, None
+        try:
+            for entry in entries:
+                name_file = entry / "name"
+                if not name_file.is_file():
+                    continue
+                if name_file.read_text().strip() != profile_name:
+                    continue
+                return True, (entry / "mode").read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            return False, None
+        return True, None
+
+    def _refs_present(self, confinement_id: str) -> bool:
+        """Does the boundary's refs dir hold any reference fragment?
+
+        An unreadable directory counts as present: what it would add to the
+        parser output cannot be known, so the answer that forces a reload
+        (or an immediate unload) is the safe one.
+        """
+        refs_dir = self._refs_dir(confinement_id)
+        try:
+            return any(refs_dir.iterdir())
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+
+    def _loaded_profile_matches(
+        self, render_id: str, profile_name: str, profile_path: Path,
+        profile_content: str,
+    ) -> Tuple[bool, str]:
+        """May the ``apparmor_parser -r`` for this render be skipped? (#1501)
+
+        Only when every one of these is POSITIVELY known:
+
+        - the boundary has no reference fragments.  They are spliced in by
+          an ``include if exists`` the render cannot see, so the bytes say
+          nothing about them;
+        - no failed reload left the kernel ahead of the files;
+        - the file on disk is byte-identical to this render (kept although
+          the name embeds a digest of the render);
+        - the kernel lists exactly this name, in the mode this render asks
+          for (#1014: a complain render never reuses an enforce profile and
+          vice versa; the mode recorded is the one the kernel reported).
+
+        Anything that cannot be read answers "load" (#1253 / #1299).
+        Returns ``(skip, reason)``; the reason goes in the log line.
+        """
+        if self._refs_present(render_id):
+            return False, "reference fragments present"
+        if render_id in self._kernel_may_diverge:
+            return False, "kernel may differ from disk"
+        try:
+            on_disk = profile_path.read_bytes()
+        except FileNotFoundError:
+            return False, "not on disk"
+        except OSError as exc:
+            return False, f"profile file unreadable: {exc}"
+        if on_disk != profile_content.encode():
+            return False, "render changed"
+        known, mode = self._loaded_profile_mode(profile_name)
+        if not known:
+            return False, "securityfs unreadable"
+        if mode is None:
+            return False, "not loaded in the kernel"
+        expected = "complain" if self._complain_profiles.get(render_id) else "enforce"
+        if mode != expected:
+            return False, f"kernel mode {mode!r}, render wants {expected!r}"
+        self._loaded_modes[render_id] = mode
+        return True, f"identical render, kernel reports ({mode})"
+
+    def loaded_mode(self, session_id: str) -> Optional[str]:
+        """The mode the kernel reported for this session's profile on reuse.
+
+        ``None`` when its profile was (re)loaded rather than reused: the
+        mode is then the one the render asked for, which the runner's own
+        readback confirms (#1014).
+        """
+        return self._loaded_modes.get(self.confinement_id_of(session_id))
 
     def _record_grants(
         self,
@@ -2010,6 +2400,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
   audit deny "{workspace_path}/.jaato/services/*/"           wlk,
   audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+  # v44 (#1474): permissions.json is APPLIED now, so a confined
+  # session that rewrote it would widen the policy of every later
+  # session in this workspace.  Read stays allowed: the runner reads it.
+  audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
+  # Session records (v46, #1529): a revive reads them back.  The
+  # sub-runner hosts one subagent and writes no top-level record.
+  audit deny "{workspace_path}/.jaato/sessions/*.json"       wlk,
   audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
   audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
   audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -2059,6 +2456,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   {self._venv_path}/**/*.so    mr,
   {self._venv_path}/**/*.so.*  mr,
   {self._venv_path}/bin/*      ix,
+{self._interpreter_rules(workspace_path, "  ")}
   {self._source_root}/         r,
   {self._source_root}/**       r,
   {premium_rules}
@@ -2117,7 +2515,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # confine_to_profile.read_current_profile verify-after-write step
   # (server/runner/bootstrap.py:188).  ``owner`` qualifier matches the
   # kernel's resolved /proc/<pid>/ path AND verifies the process is
-  # the file's owner (always true for the process's own attr/current).
+  # the file's owner.  That holds only while the runner is DUMPABLE:
+  # a non-dumpable process's /proc/<pid>/ is root-owned (#1499).  A
+  # cold-spawned runner is dumpable after execve; a pool slot that
+  # dropped its uid in process restores it with PR_SET_DUMPABLE.
   # No write permission: by design the sub-runner stays in this
   # profile for its lifetime (no further self-transitions per the
   # DROP block below), so the write capability the parent + tool_hat
@@ -2169,10 +2570,15 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         return self.teardown_profile(confinement_id)
 
     def _teardown_profile_impl(self, session_id: str) -> bool:
-        """Inner body of :meth:`teardown_profile`.
+        """Inner body of :meth:`teardown_profile`: release one claim.
 
-        Runs ``apparmor_parser -R`` to unload the profile, then deletes
-        the profile file.
+        Drops *session_id*'s claim, then unloads (``apparmor_parser -R`` and
+        the file) only when nothing else holds the boundary: no other live
+        session of this manager, no idle pool slot wearing it
+        (``slot_in_use``, #1506 — slot ownership is the pool's, so a
+        session end never strips a slot), and no grace to wait out
+        (#1501).  The same path serves the pool's reaper, called with the
+        confinement id once the last slot wearing it has died.
 
         Server 0.6.47+: BEFORE running ``apparmor_parser -R``, sweeps
         every registered ``ApparmorSafeThreadPoolExecutor`` to dispatch
@@ -2194,6 +2600,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         confinement_id = self.confinement_id_of(session_id)
         profile_name = self.profile_name_for_confinement_id(confinement_id)
         profile_path = self._profile_dir / profile_name
+        self._sweep_idle_impl()
 
         # Release THIS session's claim on the name first, then ask whether
         # anybody else still holds one.  A boundary-derived profile is
@@ -2211,6 +2618,52 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                     if v == confinement_id),
             )
             return True
+        # #1506: the other holder is a pool SLOT.  A session's slot goes
+        # back to the pool still wearing the profile, and the pool's own
+        # reaper (``PoolManager._reap_slot_profile``) releases it again when
+        # the last such slot dies.  Slot ownership is the pool's; a session
+        # ending never unloads a profile a slot wears, grace or no grace.
+        if self._slot_holds(confinement_id):
+            logger.info(
+                "AppArmor: leaving profile %s loaded — session %s released "
+                "it and a pooled runner slot still wears it",
+                profile_name, session_id,
+            )
+            return True
+
+        # #1501: nobody holds it now.  Keep it loaded for the grace period,
+        # so the next session on this boundary reuses it instead of paying
+        # an unload plus a load — unless it carries reference fragments a
+        # session added: the next session must start with exactly the
+        # grants its own render gives, so those unload at once, as before.
+        if (self._grace_seconds > 0 and confinement_id in self._boundary_ids
+                and profile_path.exists()
+                and not self._refs_present(confinement_id)):
+            import time as _time
+            with self._idle_lock:
+                self._idle_since[confinement_id] = _time.monotonic()
+            logger.info(
+                "AppArmor: keeping profile %s loaded for %.0fs after its "
+                "last holder (%s) released it", profile_name,
+                self._grace_seconds, session_id,
+            )
+            return True
+
+        return self._unload_profile(confinement_id)
+
+    def _unload_profile(self, confinement_id: str) -> bool:
+        """Unload and delete the profile named after *confinement_id*.
+
+        The caller has established nobody holds it.  Runs on the unconfined
+        loop (every caller is reached through ``_run_unconfined``).
+        """
+        profile_name = self.profile_name_for_confinement_id(confinement_id)
+        profile_path = self._profile_dir / profile_name
+        with self._idle_lock:
+            self._idle_since.pop(confinement_id, None)
+        self._kernel_may_diverge.discard(confinement_id)
+        self._loaded_modes.pop(confinement_id, None)
+        self._boundary_ids.discard(confinement_id)
 
         # Drop the recorded enforcement mode with the profile it describes
         # (#1014); a stale entry would outlive its session on a long-lived
@@ -2268,8 +2721,247 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         self._remove_all_reference_fragments(confinement_id)
         with self._session_locks_guard:
             self._session_locks.pop(confinement_id, None)
+        self._forget_owner(profile_name)
 
         logger.info("Removed AppArmor profile %s", profile_name)
+        return True
+
+    # ------------------------------------------------------------------
+    # Idle-grace sweep (#1501)
+    # ------------------------------------------------------------------
+
+    def _is_held(self, confinement_id: str) -> bool:
+        """Does a live session or a live pool slot hold this boundary?"""
+        if any(v == confinement_id for v in self._confinement_ids.values()):
+            return True
+        return self._slot_holds(confinement_id)
+
+    def _slot_holds(self, confinement_id: str) -> bool:
+        """Is an idle pool slot confined to this boundary? (``slot_in_use``)
+
+        ``False`` when no pool is wired.  A predicate that raises reads as
+        held: never unload a worn profile.
+        """
+        check = self.slot_in_use
+        if check is None:
+            return False
+        try:
+            return bool(check(self.profile_name_for_confinement_id(confinement_id)))
+        except Exception:  # noqa: BLE001 — unknown reads as held: never unload a worn profile
+            logger.warning(
+                "AppArmor: slot_in_use check raised for %s; treating the "
+                "profile as held", confinement_id, exc_info=True)
+            return True
+
+    def _due_idle(self, now: Optional[float], all_idle: bool) -> List[str]:
+        import time as _time
+        now = _time.monotonic() if now is None else now
+        with self._idle_lock:
+            return [cid for cid, since in self._idle_since.items()
+                    if all_idle or now - since >= self._grace_seconds]
+
+    def _sweep_idle_impl(self, now: Optional[float] = None,
+                         all_idle: bool = False) -> List[str]:
+        """Unload each idle boundary whose grace has passed.
+
+        A boundary that a session or a pool slot holds again is HELD, not
+        idle: its entry is dropped and nothing is unloaded; its next
+        release starts a new grace.  Returns the ids unloaded.
+        """
+        unloaded: List[str] = []
+        for cid in self._due_idle(now, all_idle):
+            with self._idle_lock:
+                if cid not in self._idle_since:
+                    continue
+                self._idle_since.pop(cid, None)
+            if self._is_held(cid):
+                continue
+            if self._unload_profile(cid):
+                unloaded.append(cid)
+        return unloaded
+
+    def sweep_idle_profiles(self, now: Optional[float] = None) -> List[str]:
+        """Unload idle boundaries past their grace (#1501).
+
+        Called from the session-lifetime watchdog; also run at the start of
+        every provision and release, so expiry does not depend on the
+        watchdog alone.  Dispatches to the unconfined loop only when
+        something is due, so an idle sweep costs no loop hop.
+        """
+        if not self._idle_since or not self._due_idle(now, False):
+            return []
+        return self._run_unconfined(self._sweep_idle_impl, now)
+
+    def unload_idle_profiles(self) -> List[str]:
+        """Unload every idle boundary now, grace or not (daemon stop)."""
+        if not self._idle_since:
+            return []
+        return self._run_unconfined(self._sweep_idle_impl, None, True)
+
+    def idle_profiles(self) -> Dict[str, float]:
+        """``{confinement id: monotonic release time}`` for idle boundaries."""
+        with self._idle_lock:
+            return dict(self._idle_since)
+
+    def stop_grace(self) -> None:
+        """Daemon stop: every later release unloads at once (#1506).
+
+        Called before the daemon releases its sessions and tears down its
+        pool slots, so a boundary released on the way out (by a session or
+        by the last slot wearing it) does not enter a grace nothing will
+        ever expire.  Profiles already idle are unloaded by
+        :meth:`unload_idle_profiles`.  Irreversible for this manager.
+        """
+        self._grace_seconds = 0.0
+
+    def holds_session(self, session_id: str) -> bool:
+        """Did this manager provision a profile for *session_id*? (#1506)
+
+        A session provisioned under a boundary id has a row in
+        ``_confinement_ids``; one provisioned the pre-#1033 way (no id) has
+        a profile file named after itself.  Lets a caller that serves both
+        the IPC and the WS manager release a session on the one that holds
+        it, and nowhere else.
+        """
+        if session_id in self._confinement_ids:
+            return True
+        try:
+            name = self.profile_name_for_confinement_id(session_id)
+        except ValueError:
+            return False
+        return (self._profile_dir / name).exists()
+
+    # ------------------------------------------------------------------
+    # Ownership ledger + startup reconcile (#1506)
+    # ------------------------------------------------------------------
+
+    def _owner_key(self) -> str:
+        if self._owner is None:
+            from jaato_server.server.apparmor_reclaim import owner_key
+            self._owner = owner_key(proc_root=self._proc_root)
+        return self._owner
+
+    def _ledger(self):
+        from jaato_server.server.apparmor_reclaim import OwnerLedger
+        return OwnerLedger(self._owner_ledger_path)
+
+    def _record_owner(self, profile_name: str) -> None:
+        """Stamp *profile_name* as this daemon's in the owner ledger.
+
+        Best effort: a ledger that cannot be written costs only the
+        precision of a later reconcile (an unledgered file is still judged
+        by its uid and by whether a task wears it).
+        """
+        try:
+            self._ledger().record(profile_name, self._owner_key())
+        except Exception:  # noqa: BLE001 — bookkeeping, never a gate
+            logger.debug("AppArmor: could not record owner of %s",
+                         profile_name, exc_info=True)
+
+    def _forget_owner(self, profile_name: str) -> None:
+        try:
+            self._ledger().forget(profile_name)
+        except Exception:  # noqa: BLE001 — bookkeeping, never a gate
+            logger.debug("AppArmor: could not forget owner of %s",
+                         profile_name, exc_info=True)
+
+    def reclaim_orphaned_profiles(self) -> List[str]:
+        """Unload and remove ``jaato-ws-*`` profiles nobody holds (#1506).
+
+        Run once at daemon start.  Which files are this daemon's to
+        reclaim is decided by :mod:`server.apparmor_reclaim` (the owner
+        ledger, the file's uid, and every task's label); a profile a
+        session or pool slot of THIS manager holds is kept too.  Logs one
+        INFO line naming what was reclaimed.  Returns the profile names.
+        """
+        if not self.is_available():
+            return []
+        return self._run_unconfined(self._reclaim_orphaned_impl)
+
+    def _reclaim_orphaned_impl(self) -> List[str]:
+        from jaato_server.server.apparmor_reclaim import (
+            RECLAIM, kernel_name_for_file, reclaim_verdict, worn_profiles,
+        )
+        from jaato_server.server.confinement_id import PROFILE_PREFIX
+
+        try:
+            files = sorted(p for p in self._profile_dir.glob(PROFILE_PREFIX + "*")
+                           if p.is_file())
+        except OSError:
+            logger.warning("AppArmor: cannot list %s for the startup "
+                           "reconcile", self._profile_dir, exc_info=True)
+            return []
+        try:
+            owners = self._ledger().entries()
+        except Exception:  # noqa: BLE001 — an unreadable ledger is an empty one
+            owners = {}
+        worn = worn_profiles(self._proc_root)
+        reclaimed: List[str] = []
+        kept: Dict[str, int] = {}
+        for path in files:
+            verdict = reclaim_verdict(
+                path, ledger_owner=owners.get(path.name),
+                this_owner=self._owner_key(), worn=worn,
+                proc_root=self._proc_root)
+            if verdict == RECLAIM and self._held_by_name(path.name):
+                verdict = "held"
+            if verdict != RECLAIM:
+                kept[verdict] = kept.get(verdict, 0) + 1
+                continue
+            if self._remove_orphan_file(path, kernel_name_for_file(path.name)):
+                reclaimed.append(path.name)
+        self._prune_ledger(owners, {p.name for p in files})
+        logger.info(
+            "AppArmor startup reconcile: reclaimed %d orphaned profile(s) "
+            "in %s%s; kept %s", len(reclaimed), self._profile_dir,
+            (": " + ", ".join(reclaimed)) if reclaimed else "",
+            kept or "none")
+        return reclaimed
+
+    def _prune_ledger(self, owners: Dict[str, str], present: set) -> None:
+        """Forget ledger rows for files that are gone and whose owner is dead.
+
+        A provision whose parser run failed removes its file and leaves its
+        row; a live owner's row is left alone (it may be mid-write).
+        """
+        from jaato_server.server.apparmor_reclaim import owner_alive
+        for name, owner in owners.items():
+            if name not in present and not owner_alive(owner, self._proc_root):
+                self._forget_owner(name)
+
+    def _held_by_name(self, filename: str) -> bool:
+        from jaato_server.server.confinement_id import (
+            confinement_id_from_profile_name,
+        )
+        cid = confinement_id_from_profile_name(filename)
+        return bool(cid) and self._is_held(cid)
+
+    def _remove_orphan_file(self, path: Path, kernel_name: str) -> bool:
+        """``apparmor_parser -R`` + unlink one orphan; ``_unload_profile``
+        for a base profile, so its refs dir and state go with it."""
+        from jaato_server.server.apparmor_reclaim import SUB_PROFILE_FILE_SEP
+        from jaato_server.server.confinement_id import (
+            confinement_id_from_profile_name,
+        )
+        cid = confinement_id_from_profile_name(path.name)
+        if SUB_PROFILE_FILE_SEP not in path.name and cid:
+            try:
+                return self._unload_profile(cid)
+            except ValueError:
+                pass  # unsafe id: removed below as a plain file
+        try:
+            subprocess.run(
+                ["sudo", "apparmor_parser", "-R", "--cache-loc",
+                 str(self._cache_dir), str(path)],
+                capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError):
+            logger.exception("Failed to unload AppArmor profile %s", kernel_name)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to delete AppArmor profile file %s", path)
+            return False
+        self._forget_owner(path.name)
         return True
 
     # ------------------------------------------------------------------
@@ -2535,6 +3227,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                         "%s: %s (fragment file gone, rule still in kernel "
                         "until next reload)", fragment_path, err,
                     )
+                    # #1501: the kernel now holds a rule the files do not;
+                    # a later session on this boundary must reload.
+                    self._kernel_may_diverge.add(
+                        self.confinement_id_of(session_id))
                     # Still return True — the fragment file is gone, so
                     # the next add (or session teardown) reload will
                     # drop the rule.  Returning False would mislead the
@@ -2610,7 +3306,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         """
         from jaato_server.server.confinement_id import PROBE_ID, confinement_id
 
+        import time as _time
         body: Optional[str] = None
+        t0 = _time.monotonic()
         try:
             body = self._render_profile(
                 PROBE_ID, workspace_path, config_root, env_file,
@@ -2631,11 +3329,15 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             # per-session complain map it shares with real renders.
             self._complain_profiles.pop(PROBE_ID, None)
 
-        return confinement_id(
+        cid = confinement_id(
             workspace_root=workspace_path,
             config_root=config_root,
             rendered_body=body,
         )
+        # For the provisioning timing line (#1501).  Bounded: the next
+        # provision of this id pops it, and ids are per boundary.
+        self._probe_ms[cid] = _ms(t0, _time.monotonic())
+        return cid
 
     def get_profile_name(self, session_id: str) -> str:
         """Return the AppArmor profile name for a session.
@@ -3005,6 +3707,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
+            interpreter_rules=self._interpreter_rules(workspace_path, "  "),
             source_root=str(self._source_root),
             premium_rules=premium_rules,
             config_root_rules=config_root_rules,
@@ -3047,6 +3750,36 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             "/dev/shm/**    rwkl,",
         )
         return "\n".join(f"{indent}{line}" for line in lines)
+
+    def _interpreter_rules(self, workspace_path: str, indent: str) -> str:
+        """Read+map (and ``bin/* ix``) on the interpreter installation (#1511).
+
+        One block per root in ``self._interpreter_roots``
+        (:func:`interpreter_install_roots`), mirroring the venv grant:
+        ``r`` on the tree, ``mr`` on shared objects, ``ix`` on ``bin/*``
+        because ``<venv>/bin/python`` resolves into it and AppArmor judges
+        the resolved path.  A root inside *workspace_path* is skipped,
+        because the session can write there and an exec grant on it would
+        let the payload run what it wrote.  A comment line when nothing
+        applies, so the body says the feature was considered.
+        """
+        ws = Path(workspace_path).expanduser().resolve()
+        # getattr: a manager built without __init__ (tests do) has none.
+        roots = [r for r in getattr(self, "_interpreter_roots", ())
+                 if not _is_within(r, ws)]
+        if not roots:
+            return (f"{indent}# (interpreter installation covered by the "
+                    f"system abstractions or the venv)")
+        lines = [f"{indent}# v45 (#1511): the resolved interpreter installation"]
+        for root in roots:
+            lines += [
+                f'{indent}"{root}/"           r,',
+                f'{indent}"{root}/**"         r,',
+                f'{indent}"{root}/**/*.so"    mr,',
+                f'{indent}"{root}/**/*.so.*"  mr,',
+                f'{indent}"{root}/bin/*"      ix,',
+            ]
+        return "\n".join(lines)
 
     def _build_tool_hat_subprofile(
         self,
@@ -3092,6 +3825,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
     audit deny "{workspace_path}/.jaato/services/*/"           wlk,
     audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+    # v44 (#1474): permissions.json is APPLIED now, so a confined
+    # session that rewrote it would widen the policy of every later
+    # session in this workspace.  Read stays allowed: the runner reads it.
+    audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
     audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
     audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
     audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -3140,6 +3877,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {self._venv_path}/**/*.so    mr,
     {self._venv_path}/**/*.so.*  mr,
     {self._venv_path}/bin/*      ix,
+{self._interpreter_rules(workspace_path, "    ")}
     {self._source_root}/         r,
     {self._source_root}/**       r,
     {premium_rules}
@@ -3180,6 +3918,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
+    # v45 (#1511), mirrors base: the pty master pexpect opens.
+    /dev/ptmx            rw,
 
     # ---- procfs credential + memory hardening (mirrors base, #712) ----
     # Sub-profiles do NOT inherit base rules, so the deny block has to
@@ -3210,6 +3950,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     deny capability sys_admin,
     deny capability net_admin,
     deny capability sys_ptrace,
+    capability setpcap,
 
     # ---- profile transitions (mirrors base, needed to exit hat) ----
     # ``owner /proc/*/...`` form matches the kernel's resolved path
@@ -3346,6 +4087,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
     audit deny "{workspace_path}/.jaato/services/*/"           wlk,
     audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+    # v44 (#1474), mirrors base: every model-driven subprocess runs here,
+    # and a policy file it rewrote would decide later sessions.
+    audit deny "{workspace_path}/.jaato/permissions.json"      wlk,
     audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
     audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
     audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
@@ -3377,6 +4121,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # the references plugin's contributed grant, which lands here too.
     audit deny "{workspace_path}/.jaato/references-claims/" wlk,
     audit deny "{workspace_path}/.jaato/references-claims/**" wlk,
+    # Session records and per-session state (v46, #1529) -- //child
+    # ONLY among the runner bodies.  A revive reads them back; no
+    # model-driven subprocess has a reason to write them, and the
+    # runner's in-process writes (base / tool_hat) are unaffected.
+    audit deny "{workspace_path}/.jaato/sessions/" wlk,
+    audit deny "{workspace_path}/.jaato/sessions/**" wlk,
 
     # ---- tool_hat-style read-denies (mirrors tool_hat) ----
     # Same information-isolation as the in-process tool_hat: a
@@ -3398,6 +4148,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {self._venv_path}/**/*.so    mr,
     {self._venv_path}/**/*.so.*  mr,
     {self._venv_path}/bin/*      ix,
+{self._interpreter_rules(workspace_path, "    ")}
     {self._source_root}/         r,
     {self._source_root}/**       r,
     {premium_rules}
@@ -3450,6 +4201,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # v42: the stdlib's mimetypes.init() opens it; without it every
     # mimetypes.guess_type() in a confined process raises EACCES.
     /etc/mime.types      r,
+    # v45 (#1511): read-only data a model-driven subprocess needs.
+    # Debian's ensurepip installs pip from these wheels, so without
+    # them ``python3 -m venv`` fails; ``git init`` / ``clone`` copy
+    # the templates into the new repository.  No exec.
+    /usr/share/python-wheels/         r,
+    /usr/share/python-wheels/**       r,
+    /usr/share/git-core/templates/    r,
+    /usr/share/git-core/templates/**  r,
     /proc/self/**        r,
     # v41: two reads the broad /proc/self/** line never grants (AppArmor
     # matches /proc/<pid>/, not /proc/self/): CPU count and rlimits.

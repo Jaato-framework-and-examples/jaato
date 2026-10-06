@@ -56,6 +56,7 @@ from jaato_server.shared import (
     active_cert_bundle,
 )
 from jaato_server.shared.dynamic_instructions import DynamicInstructionsError
+from jaato_server.shared.plugins.permission.policy_layers import enforcer_init_config
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from jaato_server.shared.instruction_budget import effective_input_limit
 from jaato_server.shared.instruction_token_cache import InstructionTokenCache
@@ -938,6 +939,13 @@ class JaatoServer:
         # nobody, so session creation carried on and discovered the dead
         # runner at whichever ``session.*`` verb happened to come first.
         self._runner_bootstrap_error: Optional[str] = None
+        # #1503: the seccomp posture the runner reported in its
+        # ``session.bootstrap`` answer, ``None`` until one did (or with no
+        # runner at all).  See :meth:`note_seccomp_posture`.
+        self.seccomp_posture: Optional[Dict[str, Any]] = None
+        # #1543: the capability-drop posture, beside it.  See
+        # :meth:`note_capability_posture`.
+        self.capability_posture: Optional[Dict[str, Any]] = None
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -1823,6 +1831,10 @@ class JaatoServer:
             if jdtls_state_root:
                 try:
                     os.makedirs(jdtls_state_root, exist_ok=True)
+                    # A sibling of the workspace, used by its runner's
+                    # jdtls: it belongs to the workspace's owner.
+                    from jaato_server.shared.workspace_ownership import inherit_owner
+                    inherit_owner(jdtls_state_root, self._workspace_path)
                     # Sanity probe: confirm the dir is writable.
                     # Catches apparmor-grant misconfigurations at
                     # bootstrap rather than at first diagnostic poll
@@ -3421,22 +3433,19 @@ class JaatoServer:
 
                         with _s3.sub("permission_init"):
                             self.permission_plugin = PermissionPlugin()
-                            permission_init_config: Dict[str, Any] = {
-                                "channel_type": "queue",
-                                "channel_config": {"use_colors": False},
-                                "workspace_path": self._workspace_path,
-                                "policy": {
-                                    "defaultPolicy": "ask",
-                                    "whitelist": {"tools": [], "patterns": []},
-                                    "blacklist": {"tools": [], "patterns": []},
-                                },
-                            }
-                            if self._profile and self._profile.plugin_configs:
-                                profile_perm_config = (
-                                    self._profile.plugin_configs.get("permission")
-                                )
-                                if profile_perm_config:
-                                    permission_init_config.update(profile_perm_config)
+                            # One helper for both enforcer builders; the
+                            # policy is layered by ``initialize`` over the
+                            # permissions.json files (#1474).
+                            profile_perm_config = (
+                                (self._profile.plugin_configs or {}).get("permission")
+                                if self._profile else None
+                            )
+                            permission_init_config = enforcer_init_config(
+                                profile_perm_config,
+                                workspace_path=self._workspace_path,
+                                config_root=self._config_root,
+                                session_id=self._session_id,
+                            )
                             self.permission_plugin.initialize(permission_init_config)
                 except Exception as e:
                     _plugins_error = e
@@ -8099,6 +8108,31 @@ class JaatoServer:
                 when the bootstrap acknowledged.
         """
         self._runner_bootstrap_error = error or None
+
+    def note_seccomp_posture(self, posture: Any) -> None:
+        """Record the seccomp posture the runner reported (#1503).
+
+        Called from ``runner_spawn.dispatch_bootstrap_envelope`` with the
+        ``seccomp`` key of the runner's bootstrap answer: ``{posture, ...}``
+        where ``posture`` is ``filter`` / ``off`` / ``absent`` /
+        ``unconfined``.  Saved on the session record beside
+        ``sandbox_mode`` and shown by the diagnostics verb.  Anything that is
+        not a dict (an older runner sends nothing) records ``None``.
+        """
+        self.seccomp_posture = dict(posture) if isinstance(posture, dict) else None
+
+    def note_capability_posture(self, posture: Any) -> None:
+        """Record the capability-drop posture the runner reported (#1543).
+
+        The ``capabilities`` key of the runner's bootstrap answer:
+        ``{posture, kept?, reason?}`` where ``posture`` is ``dropped`` /
+        ``partial`` / ``inherit`` / ``absent`` / ``unconfined``.  The
+        diagnostics probe reads the same posture live from the runner
+        (``probe["capabilities"]``).  Anything that is
+        not a dict (an older runner sends nothing) records ``None``.
+        """
+        self.capability_posture = (
+            dict(posture) if isinstance(posture, dict) else None)
 
     @property
     def runner_bootstrap_error(self) -> Optional[str]:

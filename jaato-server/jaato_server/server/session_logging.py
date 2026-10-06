@@ -134,6 +134,40 @@ class SessionContextFilter(logging.Filter):
         return True
 
 
+def _create_owned(log_dir: Path, log_file: Path, workspace: str) -> None:
+    """Create the client log owned by the workspace owner, before the handler (#1528).
+
+    Under a runner-uid policy that drops,
+    :func:`server.runner_user.workspace_file_owner` names the workspace's
+    owner; the directory components this creates and the (empty) file are
+    handed to that account before ``FileHandler`` opens it for append, so
+    the log is theirs from its first byte.  A log a previous daemon left
+    root-owned is handed over too (only when the daemon owns it).  With no
+    owner this is the plain ``mkdir -p`` it replaced, and the handler
+    creates the file as before.
+    """
+    from jaato_server.server.runner_user import workspace_file_owner
+    from jaato_server.shared.workspace_ownership import (
+        fchown_to, hand_to, make_dirs_owned,
+    )
+
+    owner = workspace_file_owner(workspace)
+    make_dirs_owned(str(log_dir), owner)
+    if owner is None:
+        return
+    try:
+        fd = os.open(
+            str(log_file),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    except FileExistsError:
+        hand_to(str(log_file), owner)
+        return
+    try:
+        fchown_to(fd, owner)
+    finally:
+        os.close(fd)
+
+
 class SessionRoutingHandler(logging.Handler):
     """Logging handler that routes logs to per-session files.
 
@@ -230,9 +264,8 @@ class SessionRoutingHandler(logging.Handler):
         if key not in self._handlers:
             try:
                 log_dir = self._get_log_dir(workspace, session_env)
-                log_dir.mkdir(parents=True, exist_ok=True)
-
                 log_file = log_dir / f"session_{session_id}_client_{client_id}.log"
+                _create_owned(log_dir, log_file, workspace)
                 handler = logging.FileHandler(log_file, encoding='utf-8')
                 handler.setFormatter(self._formatter)
                 handler.setLevel(self.level)

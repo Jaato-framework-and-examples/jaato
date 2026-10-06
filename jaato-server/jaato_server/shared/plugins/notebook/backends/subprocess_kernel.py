@@ -45,9 +45,13 @@ from ...workspace_home import resolve_home_path, apply_home_to_env
 from ...jaato_tools_path import append_path_entry, jaato_tools_dir
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
+from jaato_server.shared.lsm_label import (
+    BACKEND_SELINUX, selinux_cell_boundary, selinux_session_boundary,
+)
 from ..kernel_sandbox import (
     BOUNDARY_APPARMOR,
     BOUNDARY_AUDIT,
+    BOUNDARY_SELINUX,
     BOUNDARY_NONE,
     BOUNDARY_OPT_OUT,
     UNCONTAINED_OPT_IN_ENV,
@@ -247,33 +251,61 @@ class _Kernel:
 _KERNEL_MODULE = "jaato_server.shared.plugins.notebook.kernel_main"
 
 
-def _kernel_argv(kernel_python: str, import_dirs: List[str]) -> List[str]:
+# Where the kernel's bootstrap puts the runner's import dirs (#1457): right
+# after the last ``sys.path`` entry inside the tool-venv (its own
+# site-packages and the ``jaato-pip`` bridge), so they come before the system
+# and user site entries ``--system-site-packages`` adds, and after what the
+# model installed into the venv.  An interpreter with no entry inside its
+# prefix appends.  Computed in the kernel, from its own ``sys.prefix``,
+# rather than from any distro's directory names.
+_INSERT_AFTER_VENV = (
+    "p = os.path.join(os.path.realpath(sys.prefix), ''); "
+    "i = max([n + 1 for n, e in enumerate(sys.path) "
+    "if os.path.join(os.path.realpath(e or os.curdir), '').startswith(p)] "
+    "or [len(sys.path)]); "
+)
+
+
+def _kernel_argv(kernel_python: str, import_dirs: List[str],
+                 user_site_is_workspaces: bool = True) -> List[str]:
     """The command that starts the kernel, before its own arguments.
 
     With no ``import_dirs`` (the runner's own interpreter, which already
     imports jaato) this is ``python -m kernel_main``.
 
-    Under a workspace venv it is a ``-c`` bootstrap that appends
-    ``import_dirs`` to ``sys.path`` and then runs the same module.  A venv
+    Under a workspace venv it is a ``-c`` bootstrap that inserts
+    ``import_dirs`` into ``sys.path`` and then runs the same module.  A venv
     interpreter cannot import jaato by itself: that was deliberately taken
     away from every tool-venv interpreter, because it made the daemon's
     installed ``jaato_server`` shadow the checkout a session was editing
     (#1322).  The kernel is the one process that needs it.
 
     The dirs travel in argv, not ``PYTHONPATH``, so a process a cell starts
-    (``!python -m pytest``) inherits nothing from them.  Appended, not
-    prepended, so a package the model installs into the venv still wins
-    inside the kernel.
+    (``!python -m pytest``) inherits nothing from them.  They go right after
+    the tool-venv's own entries (``_INSERT_AFTER_VENV``): a package the model
+    installs into the venv still wins inside the kernel, and the OS copies of
+    jaato's dependencies that ``--system-site-packages`` brings in (Debian's
+    ``/usr/lib/python3/dist-packages``, an old ``typing_extensions``) do not
+    (#1457).  Appending put those first and the kernel died on import.
+
+    A venv kernel whose user site is NOT the workspace's
+    (*user_site_is_workspaces* false: no workspace HOME applies, so ``~`` is
+    the daemon account's, a root daemon's ``/root``) gets ``-s`` and ignores
+    the user site.  ``-s`` is a flag of this process only, so a process a
+    cell starts is not affected.  The runner's own interpreter (no
+    ``import_dirs``) reads what the runner reads, user site included.
     """
     if not import_dirs:
         return [kernel_python, "-m", _KERNEL_MODULE]
+    flags = [] if user_site_is_workspaces else ["-s"]
     bootstrap = (
-        "import runpy, sys; "
-        f"sys.path.extend({list(import_dirs)!r}); "
+        "import os, runpy, sys; "
+        + _INSERT_AFTER_VENV
+        + f"sys.path[i:i] = {list(import_dirs)!r}; "
         f"runpy.run_module({_KERNEL_MODULE!r}, run_name='__main__', "
         "alter_sys=True)"
     )
-    return [kernel_python, "-c", bootstrap]
+    return [kernel_python, *flags, "-c", bootstrap]
 
 
 class SubprocessKernelBackend(NotebookBackend):
@@ -374,6 +406,31 @@ class SubprocessKernelBackend(NotebookBackend):
 
         return _preexec
 
+    def _selinux_kernel_args(self) -> List[str]:
+        """The kernel argv that claims the SELinux tier, or ``[]`` (#1519).
+
+        Non-empty only when the runner's bootstrap recorded an SELinux
+        boundary the daemon attested as enforcing AND the child transition
+        is wired, so the kernel is exec'd into that boundary's
+        ``jaato_child_t`` context.  Without the transition the kernel would
+        inherit ``jaato_runner_t``, which is not a cell boundary.  The kernel
+        re-checks its own context against the label it is given and refuses
+        the tier on any mismatch; this is only the pre-spawn expectation.
+
+        The facts travel in argv, set here from the envelope, never in the
+        environment: a model can write the workspace ``.env``.
+        """
+        boundary = selinux_session_boundary()
+        if (boundary is None or not boundary.enforcing_attested
+                or self._apparmor_child_transition is None
+                or not selinux_cell_boundary(
+                    raw=boundary.child_label, backend=BACKEND_SELINUX,
+                    enforcing_attested=True,
+                    host_enforcing=lambda: None)):
+            return []
+        return ["--selinux-child-label", boundary.child_label,
+                "--selinux-enforcing-attested"]
+
     def _sandbox_allow_block(self) -> Optional[Dict[str, List[str]]]:
         """The ``allow`` block to attach to an ``execute`` frame, or ``None``.
 
@@ -461,6 +518,8 @@ class SubprocessKernelBackend(NotebookBackend):
         if profile and (self._apparmor_child_transition is not None
                         or not profile_can_leave_itself(profile)):
             return BOUNDARY_APPARMOR
+        if self._selinux_kernel_args():
+            return BOUNDARY_SELINUX
         if self._allow_uncontained:
             return BOUNDARY_OPT_OUT
         if not (get_workspace_root() or self._workspace_root):
@@ -493,6 +552,11 @@ class SubprocessKernelBackend(NotebookBackend):
                     "is started in the //child sub-profile)")
             return True, (
                 f"AppArmor-enforced profile {profile} (inherited by the kernel)")
+        if kind == BOUNDARY_SELINUX:
+            child = self._selinux_kernel_args()[1]
+            return True, (
+                f"SELinux-enforced domain {child} (the kernel is exec'd into "
+                "jaato_child_t)")
         if kind == BOUNDARY_OPT_OUT:
             return True, "operator opt-out (uncontained)"
         if kind == BOUNDARY_NONE:
@@ -878,8 +942,10 @@ class SubprocessKernelBackend(NotebookBackend):
             containment_args += ["--allow-write", str(venv_path)]
         if self._allow_uncontained:
             containment_args.append("--uncontained")
+        containment_args += self._selinux_kernel_args()
         proc = _popen_or_close(
-            [*_kernel_argv(kernel_python, import_dirs),
+            [*_kernel_argv(kernel_python, import_dirs,
+                           user_site_is_workspaces=bool(home_path)),
              "--workspace-root", workspace,
              "--read-fd", str(r2k_r), "--write-fd", str(k2r_w),
              *containment_args],

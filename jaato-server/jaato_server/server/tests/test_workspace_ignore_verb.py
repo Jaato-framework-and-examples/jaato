@@ -176,6 +176,8 @@ class TestWSAdapterWorkspace:
     def _adapter(self, declared=None, selected_path=None):
         from jaato_server.server.websocket import WSEventSinkAdapter
         ws = MagicMock()
+        # A connection of no application: served by the daemon's manager.
+        ws._workspace_manager_for.side_effect = lambda _cid: ws._workspace_manager
         if selected_path is None:
             ws._workspace_manager.get_selected_workspace.return_value = None
         else:

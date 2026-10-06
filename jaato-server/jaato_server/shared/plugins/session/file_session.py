@@ -9,11 +9,12 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand, CommandParameter, CommandCompletion, PromptEnrichmentResult
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from jaato_server.shared.session_id import validate_session_id
+from jaato_server.shared.workspace_ownership import fchown_to, make_dirs_owned
 from . import listing_cache
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .listing_cache import SessionListingCache
@@ -192,6 +193,8 @@ class FileSessionPlugin:
         self,
         state: SessionState,
         storage_dir: Optional[Path] = None,
+        owner: Optional[Tuple[int, int]] = None,
+        seal: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> None:
         """Save session state to a JSON file atomically.
 
@@ -204,25 +207,53 @@ class FileSessionPlugin:
             state: The complete session state to persist.
             storage_dir: Override storage directory. When None, uses the
                 directory set during initialize().
+            owner: ``(uid, gid)`` the record is created as (#1528).  The
+                temp file is ``fchown``-ed before anything is written to it,
+                so the ``os.replace`` installs a file that was never the
+                daemon's; directories this call creates get the same owner.
+                Without it every save replaced the workspace owner's record
+                with a root-owned one.  ``None`` writes as the calling
+                process, byte-identical to before.  Mode is unchanged
+                (``0666 & ~umask``, 0644 by default): what a record holds
+                is the conversation the workspace's own runner already
+                reads, and its owner is now that account.
+            seal: Called on the serialized record just before it is
+                written; returns the dict to write (#1529).  The daemon
+                passes :func:`server.record_seal.seal` bound to its key, so
+                a revive can tell its own record from one a session edited.
+                ``None`` (a runner-side ``save`` tool call, any caller that
+                holds no key) writes the record unsealed, which a revive
+                reads as untrusted -- the narrower reading.
         """
         # Update with current description if we have one
         if self._session_description and not state.description:
             state.description = self._session_description
 
         target_dir = storage_dir or self._storage_path
-        target_dir.mkdir(parents=True, exist_ok=True)
+        make_dirs_owned(str(target_dir), owner)
         # Fail-closed: never build a path from an unsafe session id (a traversal
         # id would write outside the sessions directory).
         validate_session_id(state.session_id)
         file_path = target_dir / f"{state.session_id}.json"
         data = serialize_session_state(state)
+        if seal is not None:
+            data = seal(data)
 
         # Atomic write: tmp file → fsync → rename → fsync directory.
         # The tmp file lives in the same directory as the target so the
         # rename is atomic on POSIX (same filesystem).
         tmp_path = target_dir / f"{state.session_id}.json.tmp"
         try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
+            # O_TRUNC keeps an existing tmp file's inode (a crashed save's
+            # leftover), so the fchown below also re-owns that one.
+            fd = os.open(
+                str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+            try:
+                fchown_to(fd, owner)
+            except BaseException:
+                os.close(fd)
+                raise
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
                 f.flush()
                 try:
@@ -257,6 +288,7 @@ class FileSessionPlugin:
         self,
         session_id: str,
         storage_dir: Optional[Path] = None,
+        verify: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> SessionState:
         """Load session state from a JSON file.
 
@@ -264,6 +296,10 @@ class FileSessionPlugin:
             session_id: The session ID to load.
             storage_dir: Override storage directory. When None, uses the
                 directory set during initialize().
+            verify: Asked with the PARSED record before it is
+                deserialized; its answer is stored on
+                ``SessionState.record_verified`` (#1529).  ``None`` leaves
+                that field ``None`` ("nobody asked").
 
         Returns:
             The loaded SessionState.
@@ -285,6 +321,8 @@ class FileSessionPlugin:
             data = json.load(f)
 
         state = deserialize_session_state(data)
+        if verify is not None:
+            state.record_verified = bool(verify(data))
 
         # Update internal state
         self._current_session_id = state.session_id

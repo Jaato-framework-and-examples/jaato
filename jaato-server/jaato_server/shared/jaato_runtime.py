@@ -469,7 +469,8 @@ class JaatoRuntime:
                  config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None,
                  app_identity: Optional[AppIdentity] = None,
-                 telemetry_config: Optional[Dict[str, Any]] = None):
+                 telemetry_config: Optional[Dict[str, Any]] = None,
+                 read_config_tiers: bool = True):
         """Initialize JaatoRuntime.
 
         Args:
@@ -509,8 +510,18 @@ class JaatoRuntime:
                 from the environment alone, which made every key a profile
                 wrote (``redact_content`` above all) silently inert.  See
                 ``shared/plugins/telemetry/__init__.py`` for the precedence.
+            read_config_tiers: ``False`` when the daemon resolved the
+                workspace and user config tiers for this session because
+                its boundary denies them (an isolated sub-runner,
+                ``SessionInitEnvelope.config_resolved_by_daemon``). The
+                base-instructions loader then reads neither tier, only
+                the premium package's, instead of probing directories
+                the kernel refuses (the SELinux phase 3 kernel run: a
+                refused ``stat`` of ``.jaato/instructions`` crashed the
+                sub-runner's bootstrap).
         """
         self._provider_name: str = provider_name
+        self._read_config_tiers: bool = read_config_tiers
         self._workspace_path: Optional[Path] = workspace_path
         self._config_root: Optional[str] = config_root
         self._provider_config: Optional[ProviderConfig] = None
@@ -631,7 +642,8 @@ class JaatoRuntime:
         from jaato_server.shared.repo_guidance import repo_guidance_pointer
         try:
             root = self._workspace_path or Path.cwd()
-            dirs = [Path(root) / ".jaato" / "instructions"]
+            dirs = ([Path(root) / ".jaato" / "instructions"]
+                    if self._read_config_tiers else [])
             if self._config_root:
                 dirs.append(
                     Path(self._config_root).expanduser().resolve() / "instructions"
@@ -684,6 +696,12 @@ class JaatoRuntime:
             premium_parts = self._load_instruction_files(Path(premium_dir))
             all_parts.extend(premium_parts)
 
+        if not self._read_config_tiers:
+            # The daemon resolved the workspace and user tiers for this
+            # session; its boundary denies them, so they are not read.
+            self._base_system_instructions = "\n\n".join(all_parts) or None
+            return
+
         # 2. Workspace or user instructions (layered on top of premium).
         #    The workspace tier honors ``config_root`` when set so the
         #    daemon can load instructions from a path the agent's
@@ -711,6 +729,12 @@ class JaatoRuntime:
             self._base_system_instructions = "\n\n".join(all_parts)
             return
 
+        self._load_legacy_system_instructions(base)
+
+    def _load_legacy_system_instructions(self, base: Path) -> None:
+        """The legacy single-file ``system_instructions.md``, workspace then
+        user tier, read only when no instructions folder yielded content.
+        """
         # Fallback: legacy single-file path.  Honors config_root for
         # the workspace tier so an out-of-tree project layout still
         # resolves to its single-file instructions when the user

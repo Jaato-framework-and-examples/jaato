@@ -172,9 +172,38 @@ def load_gc_from_file(
     """
     import json
     import logging
-    from pathlib import Path
 
     logger = logging.getLogger(__name__)
+    config_path = find_gc_file(file_path, workspace_root, config_root)
+    if config_path is None:
+        return None
+    try:
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid JSON in GC config file %s: %s", config_path, e)
+        return None
+    except Exception as e:
+        logger.warning("Error reading GC config file %s: %s", config_path, e)
+        return None
+    return load_gc_from_data(data, agent_name=agent_name, source=str(config_path))
+
+
+def find_gc_file(
+    file_path: Optional[str] = None,
+    workspace_root: Optional[str] = None,
+    config_root: Optional[str] = None,
+    home: Optional[str] = None,
+) -> Optional["Path"]:
+    """The ``gc.json`` :func:`load_gc_from_file` would read, or ``None``.
+
+    The search order is :func:`load_gc_from_file`'s.  The daemon calls this
+    for a session whose boundary denies these paths (an isolated
+    sub-runner) and ships the contents on its envelope.  ``home`` is the
+    home of the user the runner runs as, when that is not the caller's
+    (a runner dropped to another uid, #1168); ``None`` is the caller's own.
+    """
+    from pathlib import Path
 
     candidates: list[Path] = []
     if file_path is not None:
@@ -189,16 +218,28 @@ def load_gc_from_file(
             candidates.append(Path(workspace_root) / ".jaato" / "gc.json")
         else:
             candidates.append(Path(".jaato") / "gc.json")
-        candidates.append(Path.home() / ".jaato" / "gc.json")
+        candidates.append(Path(home or Path.home()) / ".jaato" / "gc.json")
+    return next((p for p in candidates if p.exists()), None)
 
-    config_path = next((p for p in candidates if p.exists()), None)
-    if config_path is None:
-        return None
 
+def load_gc_from_data(
+    data: Dict,
+    agent_name: Optional[str] = None,
+    source: str = "gc.json",
+) -> Optional[tuple["GCPlugin", "GCConfig"]]:
+    """Build the GC plugin and config from a parsed ``gc.json``.
+
+    The half of :func:`load_gc_from_file` after the read, for a caller
+    that holds the data rather than the file (an isolated sub-runner,
+    handed the contents on its envelope).
+
+    Returns:
+        ``(GCPlugin, GCConfig)``, or ``None`` when the plugin cannot load.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
     try:
-        with open(config_path, 'r') as f:
-            data = json.load(f)
-
         gc_type = data.get('type', 'truncate')
         # Map gc type names (e.g., "truncate" -> "gc_truncate")
         gc_plugin_name = gc_type if gc_type.startswith('gc_') else f'gc_{gc_type}'
@@ -230,17 +271,14 @@ def load_gc_from_file(
             **_media_settings(data),
         )
 
-        logger.info("Loaded GC config from %s: type=%s", config_path, gc_type)
+        logger.info("Loaded GC config from %s: type=%s", source, gc_type)
         return gc_plugin, gc_config
 
-    except json.JSONDecodeError as e:
-        logger.warning("Invalid JSON in GC config file %s: %s", config_path, e)
-        return None
     except ValueError as e:
-        logger.warning("Failed to load GC plugin from %s: %s", config_path, e)
+        logger.warning("Failed to load GC plugin from %s: %s", source, e)
         return None
     except Exception as e:
-        logger.warning("Error reading GC config file %s: %s", config_path, e)
+        logger.warning("Error reading GC config file %s: %s", source, e)
         return None
 
 
@@ -345,6 +383,8 @@ __all__ = [
     "discover_gc_plugins",
     "load_gc_plugin",
     "load_gc_from_file",
+    "find_gc_file",
+    "load_gc_from_data",
     "get_gc_apparmor_rules",
     "GC_PLUGIN_ENTRY_POINT",
     # Utilities

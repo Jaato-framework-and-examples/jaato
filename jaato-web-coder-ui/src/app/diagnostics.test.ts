@@ -116,6 +116,22 @@ describe("the check", () => {
     expect(diag.grantsSummary(d.apparmorGrants!)).toBe("exec: scoped — 1 fragment (declared by builder)");
   });
 
+  it("the seccomp posture is stored and said in words (#1503)", async () => {
+    getDiagnostics.mockResolvedValue({
+      ok: true, confinement_id: "jaato-ws-mine-abc", sandbox_mode: "apparmor", protocol_version: "1.36",
+      server_version: "1.3.0", probe: null,
+      seccomp: { posture: "absent", reason: "libseccomp not found", required: true, spawns_refused: true },
+    });
+    await diag.refreshDiagnostics();
+    const d = useJaato.getState().diagnostics;
+    expect(d.seccomp?.posture).toBe("absent");
+    expect(diag.seccompLine(d.seccomp)).toBe(
+      "absent: no syscall filter (libseccomp not found) — every subprocess refused");
+    expect(diag.seccompLine({ posture: "filter", allowed_families: ["ptrace"] })).toBe(
+      "filter installed in every subprocess, allowed back: ptrace");
+    expect(diag.seccompLine(null)).toBe("(not reported)");
+  });
+
   it("a daemon before 1.26 sends no grants, and the store holds none", async () => {
     getDiagnostics.mockResolvedValue({
       ok: true, confinement_id: "jaato-ws-mine-abc", sandbox_mode: "apparmor", protocol_version: "1.25",

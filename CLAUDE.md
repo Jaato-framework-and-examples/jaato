@@ -70,7 +70,7 @@ The framework uses a server-first architecture where the server runs as a daemon
   - `--ipc-trust-peer-paths`: opt out of that check (also `JAATO_IPC_TRUST_PEER_PATHS=1`). Announced at WARNING the first time it takes effect.
   - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth. **Prefer `--ws-token-file`, or neither flag.** A token passed as `--ws-token TOKEN` sits in the daemon's `argv` and is therefore served by `/proc/<daemon_pid>/cmdline` to anything on the host that can read it. AppArmor template v30 denies that read from inside a confined session (#712), but the exposure to everything else on the box is a property of the flag, not of the profile.
   - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
-  - `--ws-app-credentials PATH`: opt into per-user **connect tickets** (#1074). A JSON object mapping an application id to that application's long-lived credential, mode 0600 enforced. Each entry authorises one WS connection to call `ticket.bind` / `ticket.revoke` and **nothing else** — it cannot open a session. Omit the flag and WS auth is byte-identical to what it has always been. See [Identity at Connect](#identity-at-connect-1074).
+  - `--ws-app-credentials PATH`: opt into per-user **connect tickets** (#1074). A JSON object mapping an application id to `{credential, account, workspace_root}`, mode 0600 enforced; the last two place that application's workspaces (#1496, see [An Application's Workspaces Belong to Its Account](#an-applications-workspaces-belong-to-its-account-1496)). Each entry authorises one WS connection to call `ticket.bind` / `ticket.revoke` and **nothing else** — it cannot open a session. Omit the flag and WS auth is byte-identical to what it has always been. See [Identity at Connect](#identity-at-connect-1074).
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
 
@@ -945,15 +945,19 @@ markup and drew as raw tags. Guard: `ToolBlockView.test.tsx`.
 
 A session woken from disk — `session.wake`, a reattach, anything reaching
 `SessionManager._load_session` — comes back with **what it persisted**, not
-with what the files on disk say today (issue #787):
+with what the files on disk say today (issue #787), **when the record
+carries the daemon's seal** (#1529). A record the daemon cannot
+authenticate is narrowed instead; the last column says how (see
+[A Record the Session Could Rewrite](#a-record-the-session-could-rewrite-1529)):
 
-| What | Persisted as | Restored via |
-|------|--------------|--------------|
-| the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` |
-| the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
-| the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
-| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` |
-| the runner that ran it (#812, record 2.10+) | `SessionState.runner_identity` | restored onto `Session.runner_identity` as **`stale=True`** — the pid named is from a previous process lifetime, so it is evidence, never a handle |
+| What | Persisted as | Restored via (sealed record) | Unsealed record |
+|------|--------------|------------------------------|-----------------|
+| the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` | re-resolved from disk by `profile_name`; refused if it no longer resolves |
+| the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` | restored (lower impact; re-rendering would re-run prefetch scripts) |
+| the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` | dropped |
+| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` | from the daemon's index (`membership`), else none |
+| the runner that ran it (#812, record 2.10+) | `SessionState.runner_identity` | restored onto `Session.runner_identity` as **`stale=True`** — the pid named is from a previous process lifetime, so it is evidence, never a handle | same |
+| the confinement mode | `SessionState.sandbox_mode` | evidence only: a kernel claim ARMS the revive's opt-in, anything else leaves the fresh opt-in to decide | confinement is armed |
 
 Record version 2.8+. Restoring the render means a revive does **not** re-run
 the persona's `{{!py:...}}` prefetch scripts — which is what made a session
@@ -1720,7 +1724,7 @@ message whose parts change is recounted.
 
 **Calibration.** Once per response (`_accumulate_turn_tokens`), the
 provider's prompt size, `prompt_tokens + cache_read + cache_creation`, is
-compared with the budget total (`InstructionBudget.calibrate`). A usage
+compared with the estimate of that same request (`InstructionBudget.calibrate`). A usage
 with `reported=False` (#688) or a zero prompt is not a measurement.
 
 | Ratio reported / estimate | Effect |
@@ -1729,6 +1733,18 @@ with `reported=False` (#688) or a zero prompt is not a measurement.
 | above 1.15 | `calibration_factor` = the ratio; `effective_total_tokens()` = estimate × factor decides the threshold (`utilization_percent`, `available_tokens`, `get_context_usage`) |
 | below 0.85 | the estimate (already the larger) decides |
 | either side of the margin | one WARNING per session naming both figures |
+
+**Both figures describe one request (#1514).** The estimate compared is
+the one `JaatoSession._note_send_estimate` takes from the list
+`_history_for_provider` hands to `provider.complete()` (the non-history
+sources plus each wire message), never the budget's total when the answer
+arrives. On the tool-results path the budget is refreshed before the
+results are appended, so the old comparison read a 228k-token result as a
+2.38x estimation error and GC fired at ~45%. A snapshot measures one
+response; with none pending, or for an unreported usage, the factor is
+kept. Each comparison logs `BUDGET_CALIBRATION` at INFO with both figures.
+Guard: `jaato_server/shared/tests/test_calibration_measures_one_request_1514.py`,
+four reversions.
 
 The estimate is SCALED rather than replaced by the reported figure, so a
 GC pass lowers it at once; the reported figure describes the request before
@@ -2056,6 +2072,44 @@ five reversions. It drives a real `PluginRegistry` with the real `lsp` and
 `introspection` plugins, and the lsp background thread switched off so no
 server is spawned.
 
+### A Tool the Profile Scoped Out Does Not Exist (#1513, #1491)
+
+`references(preload, tools:[proposeReference])` took the other references
+tools off the INITIAL wire schema and nothing else: `list_tools` listed
+them, `get_tool_schemas` returned their schemas, and the executor ran them.
+`listReferences` is in `HOUSEKEEPING_TOOLS`, so `auto_allow_housekeeping`
+approved it, and a 228k-token result overflowed a session whose author had
+removed the tool to prevent exactly that. The references plugin's hints
+(#1491) meanwhile told such sessions to call `selectReferences`, checking
+only the instance-wide `exclude_tools`.
+
+**One per-session predicate, four points.** `JaatoSession.tool_in_surface(name)`
+is the session's answer to "does this tool exist for me"; `tool_scope_refusal`
+is the sentence naming the scope that excludes one.
+
+| Point | Where |
+|---|---|
+| the wire | `_apply_tool_scopes` (and `activate_discovered_tools`) ask the predicate |
+| discovery | `tool_visibility.filter_visible_tool_schemas` drops out-of-scope tools first, for the session passed or the ContextVar's; `introspection` passes the CALLING session (`_scope_session`). `get_tool_schemas` names such a tool under `not_available` with the scope, not `not_found` |
+| execution | `ToolExecutor.set_tool_surface` (bound in `configure()`); `check_permission_only` refuses an out-of-scope call FIRST, so no whitelist, evaluator or housekeeping rule can re-admit it. `(False, {error, _permission: {method: "tool_scope"}})`, traced `[TOOL_RUNNER] scope: ... verdict=OUT_OF_SCOPE`. Covers the `<tool>-stream` route too (#797) |
+| hints | `tool_visibility.tool_in_session_surface` for plugins; `ReferencesPlugin._tool_available` gates enrichment passes 1, 2 and 2b and the system-instruction mentions of `selectReferences` / `listReferences` |
+
+Per session, never per instance: the registry and plugin instances are
+shared with sibling subagents (#944, #957), the scopes are not. A tool whose
+plugin the profile did not scope, including every core tool
+(`list_tools`, `signal_completion`, `askPermission`), is in the surface.
+Prompt enrichment now sets the session ContextVar before asking the
+enrichers, so a shared enricher answers for the session it is serving.
+
+`exclude_tools` keeps working (instance-wide, documented in
+`docs/jaato_knowledge_management.md`) and stays undeclared in the config
+schema: #910's guard uses it as its example of a read-but-undeclared knob.
+Not taken on here: #1468 (instructions for dropped tools in general).
+
+Guard: `jaato_server/shared/tests/test_a_scoped_out_tool_does_not_exist_1513.py`,
+seven reversions, on a real registry with the real `references`,
+`introspection` and `permission` plugins and two sessions sharing it.
+
 ### A Repository's Own Guidance, Pointed At (#1347)
 
 A TUI user working in their own checkout has an `AGENTS.md` or
@@ -2157,8 +2211,9 @@ The floor and the ceiling now count different things:
 
 | Knob | Counts | Means |
 |------|--------|-------|
-| `JAATO_RUNNER_POOL_SIZE` (`target_size`, default 2) | **unreserved** idle slots — those with no cascade affinity | how many warm slots ANY arriving session may take.  What replenishment tops up. |
-| `JAATO_RUNNER_POOL_MAX_SIZE` (`max_size`, default `2 x target_size`) | **all** idle slots, reservations included | the memory ceiling.  A slot is 129–187 MB, so one reservation per live cascade cannot accumulate unbounded. |
+| `JAATO_RUNNER_POOL_SIZE` (`target_size`, default 2) | **virgin** idle slots — no cascade affinity AND never served (#1507) | how many warm slots ANY arriving session may take.  What replenishment tops up. |
+| (on top of the floor) | **served** unaffined idle slots, per posture (profile, uid, SELinux boundary) | warm capacity for the one posture each can still serve (#1100); spent before a virgin when a session of that posture arrives |
+| `JAATO_RUNNER_POOL_MAX_SIZE` (`max_size`, default `2 x target_size`) | **all** idle slots, reservations and served slots included | the memory ceiling.  A slot is 129–187 MB, so one reservation per live cascade cannot accumulate unbounded. |
 
 Reservations sit ON TOP of the floor rather than consuming it, which is what
 lets a second tenant's arrival grow the pool instead of starving behind the
@@ -2171,6 +2226,25 @@ still RUNS — it falls through to an unreserved slot and pays a cold plugin
 bootstrap. Warm state for one tenant is negotiable; capacity for every tenant is
 not.
 
+**A served slot is a reservation keyed on the boundary (#1507).** Since
+#1100 a slot that has served fits only its own posture, so counting it
+toward the floor let a daemon mixing unconfined IPC sessions and confined
+WS sessions read "full" on slots the second posture could not take: every
+such arrival cold-spawned (21/21 in the bench). The floor now counts
+virgin slots only (`virgin_idle_count`). An unaffined acquire takes a
+served slot of its own posture before a virgin, and records when each
+posture was last asked for. At the ceiling, with the floor short, the
+replenish loop spends the served slot of the least recently demanded
+posture (then the one idle longest) to fork a virgin; reservations are
+never spent there. A returning served slot displaces only a served
+resident whose posture was asked for less recently than its own, never a
+virgin or a reservation. Telemetry: `pool_posture_miss_total` (a miss
+that skipped served slots of another posture; should stay near zero once
+warm), `pool_served_slot_evicted_total`, and the gauges
+`pool_idle_virgin`, `pool_idle_reserved` and
+`pool_idle_served:<profile|unconfined>/uid=<uid|daemon>`. Guard:
+`server/tests/test_pool_posture_capacity_1507.py`, seven reversions.
+
 Nothing here depends on a tenant declaring "cascade finished" — there is no such
 call, and the crash case is when a pinned slot hurts most. The 300 s
 cascade-idle sweep remains the backstop. Two counters are the sizing signal:
@@ -2180,6 +2254,58 @@ and `max_size` refused) — nonzero on a multi-tenant daemon means raise
 `JAATO_RUNNER_POOL_MAX_SIZE`.
 
 **Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible — but **not** because the slot re-confines itself per session; see the next section for what actually makes that true.
+
+### What the Template Imports Before It Forks
+
+The template warmed only plugin discovery, which walks the plugin
+packages' `__init__.py` files. What `session.bootstrap` actually spends
+its time importing is reached from elsewhere: the session stack
+(`JaatoRuntime` → `JaatoSession` → `retry_utils` → `anthropic` and its
+pydantic models), `mcp` from the MCP plugin's thread, and about twenty
+lazily imported helpers. All of it was imported after the fork, so each
+slot paid for it in time and held its own private copy, because a module
+imported after `fork()` is not shared copy-on-write with the template.
+
+`server/runner/template_preload.py` builds the list from two sources
+and imports it in the template after discovery:
+
+| Source | Holds |
+|---|---|
+| `CORE_MODULES` | what the framework imports for every session (the session stack, the runner's bootstrap helpers); no plugin owns these |
+| `PLUGIN_PRELOAD` in a plugin's or model provider's package `__init__.py` | what that package imports lazily, beside the import it describes. A literal tuple of module names, read from source for a package not yet imported, so no provider is imported to find out. Declared today by `mcp`, `notebook`, `references`, `subagent`, and the `openai`, `openrouter` and `google_genai` providers |
+
+A declaration from outside the built-in package is honoured only when its
+distribution is listed in `JAATO_PLUGIN_ALLOW_PRELOAD` (checked before
+the declaration is read); otherwise it is logged as ignored. A malformed
+or non-literal declaration is ignored with a log line. Then
+`gc.freeze()` runs so a slot's first collection does not copy every
+inherited page. Measured (echo provider, unconfined, 4 CPUs):
+
+| | before | after |
+|---|---|---|
+| private memory of a slot serving a session | 114 MB | 25.5 MB |
+| `session.new`, one session, warm slot | ~2.0 s | ~0.45 s |
+| `session.new`, three at once | ~3.9 s | ~1.4 s |
+| in-process `bootstrap_session` | 1.96 s | 0.07 s |
+
+| Rule | Why |
+|---|---|
+| **an entry reads nothing session-scoped at import** | the template has the daemon's environment; a value captured at import would reach every slot (#1171's shape). The jaato entries were audited by recording `os.environ` / `getenv` / home / tempdir / cwd reads during the import: none. Third-party ones read only their own diagnostic knobs (`ANTHROPIC_LOG`, `OPENAI_LOG`, `OTEL_*`, `WEBSOCKETS_*`, locale), and `openai` reads three Azure variables into defaults for its global client, which no provider uses |
+| **best effort, never fatal** | an entry that is not installed is skipped at DEBUG; one that raises is skipped at WARNING; a missing dependency of an installed entry counts as a failure, not as "not installed". A failure costs only the import the session then does itself |
+| **one thread** | the template forks; the report's thread count is logged at ERROR when it is not one |
+
+Stated cost: a session's `.env` can no longer change those third-party
+import-time knobs; the daemon's environment decides them. The template
+grows by the shared imports once.
+
+Guard: `jaato_server/server/tests/test_template_preload_covers_bootstrap.py`,
+five reversions. It runs, in a fresh interpreter, discovery, the plan
+and the preload, then a real `bootstrap_session`, and fails naming any
+jaato module or new third-party package the bootstrap still imports, so
+a module that becomes a bootstrap import is declared by its owner (or in
+`CORE_MODULES`) rather than moving back into every slot. It also checks
+the out-of-tree gate, malformed declarations, and that every in-tree
+declaration is a literal.
 
 ### Resizing the Pool Without a Restart (protocol 1.35)
 
@@ -2200,7 +2326,7 @@ All three reach `server/pool_admin.py::PoolAdmin.answer`, so they share one rule
 |---|---|
 | **only the daemon's own uid or root**, read from the transport's `SO_PEERCRED` peer, never from the request | the pool is host-scoped (memory, every session); those accounts could already restart the daemon with another env. No peer (WS, Windows) is `not_authorized`, never permission |
 | **growing wakes the loop** (`_replenish_wake`; every pause goes through `PoolManager._pause`) | otherwise a full pool sleeps a whole interval before the first fork |
-| **shrinking drops idle slots only**: unreserved above the floor first (newest first), then the stalest reservations while over the ceiling | an acquired slot is not in `_idle_slots` and finishes its session; a reservation is one cascade's warm state |
+| **shrinking drops idle slots only**: virgin slots above the floor first (newest first; at 0 every unaffined slot), then, while over the ceiling, the stalest reservations, then served slots of the least recently demanded posture | an acquired slot is not in `_idle_slots` and finishes its session; a reservation is one cascade's warm state |
 | **dropped slots are queued on `_pending_teardown`**, and the replenish thread is started for them even at target 0 (`_start_replenish_thread`, which skips the startup gate) | `_teardown_slot` blocks on the daemon loop; a shrink to 0 on a daemon booted with a disabled pool would otherwise never be reaped |
 | **a derived ceiling follows the floor, a chosen one is kept** (clamped up) | the same reading as startup |
 | **`--restart` keeps it**: `pool_size` / `pool_max_size` in the restart config (`None` max = derived), passed back to `JaatoDaemon` and outranking the env vars; `PoolStatusEvent.persisted` says when that write failed | a resize the next restart dropped would be a silent revert |
@@ -2533,6 +2659,121 @@ a deployment that believes it runs confined throughout. The admission gate
 is still the right place for the fix, because it protects against ANY
 unconfined session sharing a daemon; whether the first runner should wait
 for provisioning is its own change.
+
+### A Profile Reloaded That the Kernel Already Had (#1501)
+
+`provision_profile` rendered, rewrote and `sudo apparmor_parser -r`-ed the
+boundary profile for every confined session, even when #1033 had given it
+a name the kernel already had loaded with byte-identical rules. Measured
+on the reporting host: +1.26 s per session cold, +1.70 s on a pool slot.
+
+**A reload is skipped only on positive evidence** (`_loaded_profile_matches`):
+
+| Condition | Why |
+|---|---|
+| the boundary's refs dir is empty | reference grants are spliced in by an `include if exists` the render cannot see |
+| no failed reload left the kernel ahead of the files (`_kernel_may_diverge`) | a reload that failed after a fragment was REMOVED keeps the old rule loaded |
+| the file on disk is byte-identical to the render | kept although the name embeds a digest |
+| the kernel lists the exact name, in the mode the render asks for | #1014: the mode recorded (`loaded_mode`) is the one the kernel reported. A complain render is another body and so another name anyway |
+
+`/sys/kernel/security/apparmor/profiles` is read first, the
+`policy/profiles/<name>.<n>/{name,mode}` tree second; neither readable
+LOADS (#1253 / #1299). The grant record (#1326) is refreshed from the same
+render on a skip.
+
+**An unheld boundary stays loaded for a grace** (`JAATO_APPARMOR_PROFILE_GRACE_SECONDS`,
+host-scoped, default 60, `0` = unload at once as before). Only boundary-derived
+ids get one; a per-session name can never be claimed again. A provision of the
+same boundary claims it; the #812 lifetime watchdog (`_sweep_idle_apparmor_profiles`,
+both the IPC and the WS manager), every provision and release, and daemon stop
+(`SessionManager.shutdown`, `JaatoWSServer.stop`) unload what is due. Two rules:
+
+- **A boundary carrying session-added reference grants unloads at once**, refs
+  dir and all, so the next session starts with exactly what its render gives.
+- **Held is not idle.** The sweep re-checks live sessions and
+  `AppArmorManager.slot_in_use` (wired to `PoolManager.profile_in_use`); a held
+  boundary's idle entry is dropped and its next release starts a new grace.
+
+Every provision logs `AppArmor provision timings session=… reload=ran|skipped
+id= render= check= write= parser= total=` (`id` is the probe render in
+`confinement_id_for_boundary`). Locally, with the parser stubbed, everything
+but the parser is about 1-3 ms.
+
+Found while reading: the only unload sites were slot death, the WS workspace
+reaper and the cascade transition, so on the cold path the per-session cost was
+the reload, not an unload. A skipped reload also does not pick up a changed
+system abstraction (`abstractions/base`) until the profile is next loaded.
+
+Guard: `jaato_server/server/tests/test_apparmor_profile_reuse_1501.py`, nine
+reversions. No kernel: the parser and securityfs are stubbed.
+
+### A Boundary No IPC Session Ever Released (#1506)
+
+#1501 gave a boundary profile a refcount and an unload grace, and only
+`_teardown_profile_impl` starts the grace. Nothing on the IPC path called
+it: `_do_session_unload` had no AppArmor release, and the only daemon
+callers were the cascade slot transition, the dead-slot reaper and the WS
+workspace reaper. So an IPC session's profile stayed loaded after its last
+session, after daemon stop, and on disk (148 `jaato-ws-*` files on one
+VPS). With grace 0 the next session still logged `reload=skipped`.
+
+**One release, on every end.** `SessionManager._release_apparmor_boundary`
+calls `teardown_profile(session_id)` on the manager (IPC or WS) that
+provisioned the session (`AppArmorManager.holds_session`), after
+`server.shutdown()`:
+
+| Path | Releases through |
+|---|---|
+| unload, which the #812 orphan stop, `session.stop` and the #1106 grace expiry all reach | `_do_session_unload` |
+| `session.delete` | `delete_session` |
+| a cascade-exhausted refusal | the refusal branch |
+| daemon stop | `shutdown()`, after `_stop_apparmor_grace` |
+
+**A release decrements; it never unloads outright.** Another live session
+on the boundary keeps it (as before), and now so does an idle pool slot
+wearing it (`_slot_holds`, read at release time). Before, grace 0 unloaded
+without asking the pool, which would have stripped the profile off a slot
+returned to the pool. Slot ownership stays with the pool: the slot's death
+releases through `_reap_apparmor_profile_for_dead_slot`, which now refuses
+while a session of either manager holds the boundary and releases on the
+manager that provisioned it.
+
+**Daemon stop unloads what it held.** `AppArmorManager.stop_grace` sets the
+grace to 0 before sessions are released, so the session releases and the
+pool's slot reaps after them unload at once; `JaatoDaemon` then unloads any
+boundary still idle.
+
+**Startup reconcile.** Before the pool forks, the daemon runs
+`reclaim_orphaned_profiles` on a manager of its own. Which files are its to
+reclaim is decided in `server/apparmor_reclaim.py`:
+
+| File | Verdict |
+|---|---|
+| ledgered to another live daemon (`pid:starttime` from `/proc/<pid>/stat`) | kept |
+| ledgered to this daemon | kept (live state) |
+| not ledgered, owned by another uid | kept |
+| worn by any task (`/proc/*/task/*/attr/current`, `//child` counts) or held by this daemon's slots | kept |
+| ledgered to a dead owner, or not ledgered and ours, unworn | unloaded and removed (sub-profiles and refs dirs too) |
+
+The ledger is `~/.jaato/apparmor-owned.json`, `flock`ed, written before the
+profile file so a concurrent reconcile never sees one of ours unledgered.
+One INFO line names what was reclaimed.
+
+Stated limits:
+
+- **A pre-#1506 file is judged by uid alone.** An older daemon of the same
+  account still running when a new one starts can lose an idle profile it
+  holds no task in; its next provision reloads it.
+- **A session refused at `initialize_or_refuse` releases nothing** (its
+  runner is not shut down either); the next startup reconcile reclaims it.
+- **Kernel profiles with no file are not reclaimed** (`apparmor_parser -R`
+  is given the file).
+- **Not verified on an enforcing kernel.** The parser and securityfs are
+  stubbed; `TestOnAnEnforcingKernel` (root + enforcing AppArmor) runs the
+  issue's checks for real and is skipped here.
+
+Guard: `jaato_server/server/tests/test_apparmor_ipc_release_1506.py`, nine
+reversions. One-off cleanup of an existing host is the next daemon start.
 
 ### A Tmpdir Two Modules Named Differently (#1171)
 
@@ -2968,6 +3209,140 @@ here was run against an enforcing kernel. Guard:
 `jaato_server/shared/tests/test_a_refused_command_names_its_cause_1348.py`,
 ten reversions.
 
+### A Boundary on What a Payload Reaches, Not Only What It Touches (#1503)
+
+The LSM a confined session wears (AppArmor `//child`, SELinux
+`jaato_child_t`) decides what a tool subprocess may TOUCH. It does not
+decide which kernel entry points the payload may REACH: `bpf`, `keyctl`,
+`userfaultfd`, `io_uring_setup`, `unshare(CLONE_NEWUSER)` were all callable
+from inside the boundary, and a kernel bug reachable before the LSM hook is
+reachable from there. Every model-driven subprocess (`cli`,
+`interactive_shell`, the notebook kernel) now runs under a seccomp-bpf
+deny-list.
+
+| Piece | Where |
+|---|---|
+| the deny-list, by family (`kernel`, `mount`, `namespaces`, `bpf`, `perf`, `userfaultfd`, `io_uring`, `keyring`, `fanotify`, `ptrace`, `handles`, `personality`) | `shared/seccomp_filter.py::FAMILIES` |
+| compiled once per session IN THE DAEMON through libseccomp (ctypes, loaded by soname `libseccomp.so.2`, never `find_library`), exported as raw BPF and shipped on `SessionInitEnvelope.seccomp_program` with its architecture (#1508) | `runner_spawn.seccomp_program_of`, `compile_for_envelope` |
+| the runner checks the architecture and the program's shape and keeps the bytes; it never loads libseccomp or creates a memfd | `load_shipped` |
+| the forked child makes two calls, `PR_SET_NO_NEW_PRIVS` and `seccomp(SECCOMP_SET_MODE_FILTER)` (raw `syscall()`, number shipped by the daemon) | `CompiledFilter.install` |
+| composed into the `//child` callable the three plugins already receive: LSM transition, then the filter; the plugins append the cgroup attach | `compose_child_preexec`, `server/runner/session.py::_child_preexec` (used by the #1357 pre-arm and step 4) |
+| posture `filter` / `off` / `absent` / `unconfined`, recorded in the runner, returned in the `session.bootstrap` answer, stored on `JaatoServer.seccomp_posture` and the session record (`SessionState.seccomp`, additive) | `plan_for_session`, `runner_spawn._note_seccomp_posture`, `session_manager._seccomp_for_record` |
+| shown | `get_environment(aspect="runtime")` (`seccomp`, with the denied families), `DiagnosticsResultEvent.seccomp` (cached) and `probe["seccomp"]` (live), `session.list` rows |
+
+| Rule | Why |
+|---|---|
+| denied calls answer `EPERM`; `clone3` answers `ENOSYS`; `clone` / `unshare` are denied only with a `CLONE_NEW*` flag; `personality` only for a non-default persona | a tool fails with a readable error; libc falls back from `clone3` to `clone`, whose flags seccomp can read |
+| a foreign-architecture syscall (i386 `int 0x80`, x32) kills the process (`KILL_PROCESS` bad-arch action) | the syscall-number bypass; `EPERM` would leave a 32-bit binary failing every call in a loop |
+| `io_uring_*` answers `EPERM` | the answer the 6.6+ `io_uring_disabled` sysctl and Docker's profile give; measured: node 22 with `UV_USE_IO_URING=1` probes it and falls back |
+| never installed in the runner | the filter cannot be removed; the forked child is single-threaded, so no `TSYNC` (#1023's per-task lesson) |
+| a session with no kernel boundary gets no filter, and says so (`unconfined`) | one is not invented |
+| no filter buildable or loadable (libseccomp missing on the daemon host, kernel without seccomp, no program on the envelope, a program for another architecture or malformed): WARNING and `absent`, or, when `JAATO_REQUIRE_CONFINEMENT` / `JAATO_REQUIRE_APPARMOR` is set, every spawn refused | "LSM yes, seccomp no" is never silent |
+| the daemon log says it: WARNING for `absent` / `off`, ERROR when every spawn will be refused, each naming the session (#1510) | the runner's own WARNING is in the runner log, which is not read first |
+| a refused or failed spawn is a FAILED tool call: every `cli` / `interactive_shell` / `notebook` executor goes through `runner_forwarding.failures_explicit`, so an `{"error": ...}` dict is `(False, payload)`, and an opaque `Exception occurred in preexec_fn.` gains `refused_by` naming the seccomp refusal (#1510) | `out of pty devices` and refused spawns were `success: true`; #1053's rule |
+
+Configured in `runtime_limits`, delivered on the v7 envelope so pool slots
+and cold spawn get the same thing:
+
+```yaml
+runtime_limits:
+  seccomp: default          # default | off (off is announced at WARNING)
+  seccomp_allow: [ptrace]   # families allowed back for a debugging stage
+```
+
+Both are most-restrictive-wins across `inherits:`: `default` beats `off`,
+and the allow-back list is the intersection of the declared ones.
+`explain runtime` names the enforcer `kernel (seccomp)` and lists the
+families; `validate` reports `seccomp_unknown_family` (error: the family
+stays denied) and `seccomp_disabled` (warn; error under `risk_class:
+high`).
+
+Must-checks: `//child` exec rules are all `ix`, which NO_NEW_PRIVS allows (a
+guard fails on a `Px`/`Cx`/`Ux` rule; a user fragment adding one would be
+refused under NNP). SELinux needs `allow jaato_runner_t
+jaato_child_t:process2 { nnp_transition nosuid_transition };` in
+`jaato.te`, asserted by the `selinux-policy` job. A setuid binary
+(`sudo`, `ping` with file caps) gains nothing in a subprocess.
+
+**Why the daemon compiles (#1508).** Compiling in the runner meant
+exporting through a memfd, which is `tmpfs_t` under SELinux and which
+`jaato_runner_t` may not write, so every SELinux session was `absent`; and
+`find_library` execs `ldconfig`, which both LSMs refuse a confined runner.
+The daemon is unconfined and reads the same `runtime_limits` block it puts
+on the envelope, so it compiles per session and ships the bytes. No SELinux
+policy was widened. The `selinux-policy` job's `nnp_transition` rule is now
+reachable on a kernel (the filter is installed after the `//child`
+transition), and is in the PR's re-verify checklist.
+
+Stated limits: an isolated sub-runner's subprocesses get no filter (no
+`//child` transition to compose with; recorded `absent` with that reason).
+The `-stream` variant of `notebook_execute` reports a stream that started,
+whatever its first chunk says.
+A seccomp `EPERM` is not distinguishable from another `EPERM` in a
+command's output, so the #1348 denial hint does not name it; the runtime
+aspect lists the denied families instead. Cost: ~5 ms to compile once per
+session, in the daemon; ~0.1-0.5 ms per spawn for the attach (the kernel converts and JITs
+the 108-instruction program), inside spawn noise. Not verified on an
+enforcing AppArmor or SELinux kernel.
+
+Guards: `jaato_server/shared/tests/test_seccomp_child_filter_1503.py`, ten
+reversions, installing the real filter in real children; a child must show
+`NoNewPrivs: 1` and one more `Seccomp_filters` than its parent, because
+`Seccomp: 2` alone is already true beneath a host-wide filter (WSL2's PID 1),
+which one case simulates (#1510).
+`test_seccomp_compiled_by_the_daemon_1508.py` (six reversions: the runner
+installs with libseccomp, the memfd and `find_library` all made to fail; a
+foreign-arch or malformed program is `absent` or refused) and
+`test_seccomp_refusals_are_loud_1510.py` (seven: the daemon-log levels, and
+refused spawns and `out of pty devices` as failures).
+
+### A Payload That Kept Every Capability (#1543)
+
+Under a root daemon a confined payload (`//child`, `jaato_child_t`) kept
+the full capability bounding set, and a root `exec` recomputes permitted as
+that set, so a `cli` command started with every capability permitted and
+effective. The LSM denied their use (dmesg showed `syslog`, `sys_time`,
+`setuid` refused from `//child`), so the policy was the only layer. Every
+model-driven subprocess now drops them in its forked child
+(`shared/capability_drop.py`), composed around the LSM transition and before
+the #1503 filter:
+
+| Step | When | Needs |
+|---|---|---|
+| `PR_CAPBSET_DROP` for every capability not kept | before the transition | `CAP_SETPCAP`: AppArmor template **v47** grants `capability setpcap,` in base and `tool_hat` (never `//child`); SELinux module **1.10.0** grants `jaato_runner_t self:capability setpcap` |
+| `PR_CAP_AMBIENT_CLEAR_ALL`, `capset(P = E = kept, I = 0)` | after it | nothing on AppArmor; SELinux `jaato_runner_t self:process setcap` |
+| `PR_SET_NO_NEW_PRIVS` | after it | nothing; set here too, so `seccomp: off` cannot let a root `exec` regain the bounding set |
+
+```yaml
+runtime_limits:
+  capabilities: none            # default; or [net_bind_service]; or inherit
+```
+
+`inherit` opts out (WARNING; `validate`: `capabilities_inherited`, an error
+under `risk_class: high`); an unknown name is not kept (`capability_unknown`,
+error). Inheritance is most-restrictive-wins: `none` beats a list beats
+`inherit`, and lists intersect.
+
+The runner learns what the calls achieve by running them once at plan time
+in a forked probe child, and records the posture: `dropped`, `partial`
+(bounding set kept because `CAP_SETPCAP` was refused: a non-root runner, or
+a host whose loaded policy predates this change; the process sets are still
+empty and NNP set, so an `exec` gains nothing), `inherit`, `absent` (nothing
+took effect), `unconfined`. It rides the `session.bootstrap` answer
+(`JaatoServer.capability_posture`, logged in the daemon log at INFO, or
+WARNING for anything but `dropped`), `get_environment(aspect="runtime")`
+(`capabilities`) and the diagnostics probe (`probe["capabilities"]`).
+Nothing refuses a spawn: the LSM is still the boundary. Not persisted in the
+session record. An isolated sub-runner's subprocesses drop nothing (no
+`//child` transition; recorded `absent`). The non-root runner (the issue's
+second half) is tracked separately.
+
+Guard: `jaato_server/shared/tests/test_capabilities_dropped_in_child_1543.py`,
+six reversions; its kernel case asserts all five sets are zero as root and
+the `partial` posture otherwise. The SELinux rules are in
+`selinux/tests/test_policy_rules.py` (the `selinux-policy` CI job). Not
+verified on an enforcing AppArmor or SELinux kernel.
+
 ### Three Things a Fresh Workspace Told the Model Wrongly (#1357, #1358, #1359)
 
 Found by an assessment run in a new web-coder workspace (MiniMax-M3). Each
@@ -3182,11 +3557,9 @@ Stated limits:
 - **On an unconfined runner the snapshot sits in the host `/tmp`** under
   the session's name. The next install on the same pool slot removes it;
   nothing removes it after a cold-spawned runner exits.
-- **A `permissions.json` policy still does not govern a daemon session.**
-  Both the daemon and the runner build the plugin with an inline default
-  `policy`, and an inline policy replaces the file's. The file is read
-  (now without crashing); its rules do not take effect. Older than this
-  change, and not changed by it.
+- **A `permissions.json` policy did not govern a daemon session** when this
+  shipped: an inline default `policy` replaced the file's. Fixed by #1474
+  (see [A Policy File Read and Thrown Away](#a-policy-file-read-and-thrown-away-1474)).
 
 Guard: `jaato_server/shared/tests/test_user_tier_ships_on_the_envelope_1465.py`,
 five reversions (the loader reading the real file, the credential check,
@@ -4579,6 +4952,25 @@ Loaded It](#a-catalog-written-after-the-session-loaded-it-1145)).
 Guard: `server/tests/test_a_claim_is_promoted_into_a_bundle.py`, five
 reversions (the numpy-backed reconcile tests skip without numpy).
 
+**A bundle may have no index, and a driver can create one (#1478,
+protocol 1.36).** `references bundle create <name>` with no embedding
+provider (or `--no-index`) creates an UNINDEXED bundle: `bundle.json`
+only, `indexed: False` in the listing, tag lookup and selection as on the
+root, and a promotion into it reports `reconcile: none`.
+`ReferenceBundleCreateRequest{name}` -> `ReferenceBundleCreateResultEvent`
+(or the typed `reference.bundle.create <name>`) does the same daemon-side,
+with no session: session-less on IPC like the other curation requests, the
+`may_curate` owner gate, one id token as the name (no root alias, no
+traversal), any existing entry by that name answered `collision` with
+nothing changed, and the workspace's `bundles` on every answer
+(`reference_curation.create_bundle`). `IPCClient.create_reference_bundle`
+/ `createReferenceBundle`, refused below `MIN_REFERENCE_BUNDLE_PROTOCOL`.
+The index is a separate step: `references bundle index <name>` from a
+session with an embedding provider writes `embedding_config.json` and
+reconciles; there is no daemon-side index verb yet. Guard:
+`server/tests/test_a_driver_creates_the_bundle_it_promotes_into_1478.py`,
+five reversions.
+
 Guards: `server/tests/test_a_person_promotes_a_reference_claim.py` (eight
 reversions), `server/tests/test_a_curator_lists_reference_claims.py`
 (five) and `shared/tests/test_a_proposal_names_who_approved_it.py`
@@ -4598,6 +4990,40 @@ uncorrelated refusal was discarded and the call waited out its timeout
 (180 s for promote). Guard:
 `server/tests/test_reference_curation_without_a_session_1475.py`, three
 reversions, over a real `JaatoIPCServer` and `IPCClient`.
+
+**A Claim That Revises (#1437).** Promotion refuses an id already in the
+catalog (`collision`), so a claim could only ADD a reference. A **revision
+claim** is the route for a new version: `proposeReference` with
+`revises: <id>` (the `id` may be omitted) records the full new entry and
+`revises: {id, file, digest}`, the sha256 of the catalog file's bytes when
+the claim was written. `reference.promote` on it replaces that file in
+place (`reference_curation._promote_revision`).
+
+| Rule | Why |
+|---|---|
+| **what may change**: name, description, tags, the document (`path` / inline `content`), and `links` when given (`[]` removes them, absent keeps them) | `claims.build_revision`, the revision twin of `build_proposed_reference`, re-run at promotion; containment, the inline cap and the stamped origin apply as to any proposal |
+| **what may not**: the id, `origin`, `mode`, any other key | a rename is a new reference plus `supersedes` (refused by name); an `origin` argument is refused; `is_claim` rejects a claim file whose entry id differs from the id it revises; the promoted file keeps every key but the document's from the current file |
+| **only a workspace catalog reference**, `local` or `inline`, in exactly one file | `claims.revision_target` reads the catalog the way the loader does (root + sub-bundles, no links); a user-tier or `references.json` source is in no file this workspace's curator writes; two files is `ambiguous` |
+| **stale changes nothing** | promotion re-reads the file and compares its digest; any change since the claim (another revision promoted first, an edited edge, a hand edit, a vanished reference) is `stale`. Of two revisions, the first promoted wins |
+| **a record of who revised it** | `revisions[]` gains `{claim_id, at, curated_by, generated_by?, created_by?, witnessed_by?, rendered_from?}` -- the promotion origin's fields without `kind`, `curated_by` the daemon's own stamp |
+| **written where it lives; its index reconciled** | the outcome's `bundle` is the reference's own (another `bundle` is `invalid_request`), and `reconcile_destination` runs as for a new entry, since the embedding text may have changed; an unindexed bundle is `none` |
+| **the owner gate** | promotion's `may_curate` |
+| **a plain proposal of a catalog id points at `revises`** | the refusal names the revision call first and invites no other id, and carries `revises: <id>` for a driver to re-call with; told "propose a different id", a writer in a kbwiki cascade invented `-r2` ids and spent its budget, and the hand workaround (delete, rewrite, re-promote) left inbound links dangling meanwhile |
+
+The curator's view: a revision row in `ReferenceClaimsEvent` adds
+`revises`, `revises_file`, `current` (the reference's fields now, path
+workspace-relative), `links_replaced` and `stale` / `stale_reason`, decided
+at listing time; `ReferenceCurationResultEvent.revised` says the file was
+replaced. The web Proposals rail draws a revision as a field-by-field diff
+(inline content as a line diff), with no bundle selector, and a stale one
+marked with its reason and Promote disabled. `listReferences` shows a
+proposed revision with `revises` and `stale`. Additive fields and a new
+`stale` / `ambiguous` category on an existing verb: no protocol bump (an
+older daemon answers a revision `collision`). Running sessions see the
+replaced file through the #1145 refresh, which now also stamps each
+reference file (below). Guards:
+`server/tests/test_a_claim_revises_a_reference_1437.py` (eight reversions)
+and `shared/tests/test_an_agent_proposes_a_revision_1437.py` (five).
 
 ### Typed Links Between References (wikiLLM Seam 3)
 
@@ -4712,6 +5138,7 @@ watched path, and a reload runs only when one moved
 |---|---|
 | each bundle directory, each tier root, `<ws>/.jaato/references` | creating, deleting or renaming a file moves its directory's mtime, and every framework writer (`write_contained`, `reconcile`, `merge`) replaces a file by rename, so an edit is a rename; a new sub-bundle is a new directory in a tier root |
 | each `references.json` candidate, individually | the workspace root's own mtime moves with every file created there |
+| each `*.json` file directly in those directories, individually (#1437) | an in-place edit (an editor saving over the file, any writer that does not rename) moves no directory mtime; the file's own mtime and size move |
 
 | Rule | Why |
 |---|---|
@@ -4722,15 +5149,43 @@ watched path, and a reload runs only when one moved
 | **opt-out** | `plugin_configs.references.refresh_catalog: false` keeps the load-once snapshot |
 
 No daemon push: every read path checks, so no write can be missed by a
-session that did not hear about it. Stated limit: an in-place edit by
-another tool (an editor saving over the file without a rename) moves no
-directory mtime and is seen only when something else in that directory
-changes, or on `references reload`. The refresh reads only paths the plugin
-already reads, so its AppArmor contribution is unchanged.
+session that did not hear about it. A file written within 2 s of a check
+reloads at each check until it settles (the `UNSETTLED` rule, now per
+file). The refresh reads only paths the plugin already reads, so its
+AppArmor contribution is unchanged.
 
 Guard:
 `shared/tests/test_a_promoted_reference_reaches_running_sessions_1145.py`,
 five reversions.
+
+### The Embedder Loads When It Can Be Used (#1482)
+
+`ReferencesPlugin.initialize` loaded the embedding provider whenever the
+workspace had any bundle. Since #1478 drivers create UNINDEXED bundles, so
+every later session paid the model load (`all-MiniLM-L6-v2`: ~13 s of
+imports, 30+ hub HEAD requests, a copy per runner) with nothing to match
+against, even under `tags_only`. Bootstraps went from ~10 s to ~30 s, two
+were refused at the 35 s deadline, and a 12 GB host OOM-killed a cascade.
+
+**The provider loads at bootstrap only when `lookup_strategy` is `hybrid`
+or `semantic_only` AND a loaded bundle (root included) has a vector
+index.** Otherwise it is deferred, and `_ensure_embedding_provider` is the
+one door every consumer goes through: `compute_embedding`, `embed_texts`
+(the daemon's promotion reconcile and its no-texts probe), `bundle
+create` / `index` / `reconcile` / `merge` / `unpack`, the entry handler's
+reconcile, and the #1145 catalog refresh when an index appears
+mid-session. Ranking and the veto run only where a matcher is attached,
+which needs a loaded provider. Memory does not share the provider.
+
+| Rule | Why |
+|---|---|
+| one discovery and one load, under `_embedding_lock` | tool calls run in parallel |
+| a failed load warns once and is not retried | callers degrade to tag lookup, as with no provider |
+| a cached model loads offline first (`embedding_load.py`): `local_files_only=True` when `load_model` takes it, and `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` for the call; online only when that fails | the provider is out of tree; this is how the framework asks it |
+| one INFO line at bootstrap: `embedding provider eager|deferred (strategy=…, indexed_bundles=n/m)` | the next incident can read the decision |
+
+Guard: `jaato_server/shared/tests/test_embedder_loads_only_when_usable_1482.py`,
+five reversions, with a counting fake provider.
 
 ### Pages Only From Catalog Templates
 
@@ -4987,6 +5442,16 @@ five reversions. Import footprints are measured in a fresh interpreter. The
 snapshot must equal the live projection, and `new` must write the same
 `.env` and set-profile text for every provider from either source.
 
+**The `jaato_server.server` package is lazy too (#1549).** Its `__init__`
+imported `JaatoServer` and `SessionManager` eagerly, so reading a constant
+from any submodule (`runner_user`, `pool_admin`, which `explain runner-user`
+and `explain pool` read) loaded ~120 `jaato_server` modules, the daemon core
+included. The re-exports (those two, `RuntimeSessionInfo` and the events)
+now resolve through a module `__getattr__` on first access; `import
+jaato_server.server.pool_admin` loads 3 modules. Guard:
+`jaato_server/shared/tests/test_server_package_is_lazy_1549.py`, one
+reversion.
+
 ### `jaato-scaffold` Ships With the SDK (#1267, tier 1)
 
 The move step 1 prepared. `jaato-scaffold` is now jaato-sdk's console
@@ -5025,7 +5490,9 @@ shell's rules:
 
 **The refusal.** In an SDK-only environment each of the four answers exit 2
 with *"install jaato-server in this environment (pip install
-jaato-server), or ..."*, never an `ImportError`. `explain` first asks a
+jaato-server), or ..."*, never an `ImportError`. `explain` first answers
+from the snapshot shipped with the SDK (see [`explain` From a
+Snapshot](#explain-from-a-snapshot-1267)), then asks a
 running daemon (the protocol 1.18 path, unchanged: `--connect`, or a daemon
 listening on the default socket); `releases` points at `jaato-doctor`, whose
 release check needs only the SDK; `validate` asks a daemon too since tier 3
@@ -5200,6 +5667,48 @@ the `jaato-sdk` integration skill.
 Guard: `jaato_server/server/tests/test_scaffold_validate_verb_1267.py`, five
 reversions.
 
+### `explain` From a Snapshot (#1267)
+
+Tier 1 shipped `authoring_snapshot.json` so an SDK-only `new` could
+author; `explain` was left answering only through a daemon, although nearly
+every topic is a deterministic render of the installed code. jaato-server
+now renders them ahead of time into
+`jaato-sdk/jaato_sdk/scaffold/explain_snapshot.json`, and the SDK shell
+answers from it before any daemon is asked (`--connect` skips it).
+
+| Piece | Where |
+|---|---|
+| the generator: `render_topic` (the one dispatch) for the overview, every `simple` topic, every `filter` topic unfiltered, the bare `optional_named` forms, and every name of every `named` topic | `shared/scaffold/explain_snapshot.py` (`--write` / `--check`) |
+| what is rendered, read from the topic table: `ExplainScope.live_only` (why a topic cannot be snapshotted) and `ExplainScope.names` (a named topic's `{canonical: [spellings]}`) | `introspection_verbs._SCOPES` |
+| the reader: stdlib only, an alias map so `provider zhipuai-openai` finds `zhipuai_openai` as the live lookup does, and a byline naming the snapshot's jaato-server version | `jaato_sdk/scaffold/explain_snapshot.py`, `cli._explain_from_snapshot` |
+
+Not in it, so still jaato-server or a daemon: `live_only` topics
+(`releases` asks PyPI, `integrations` reads `$HOME`, `runner-user` names this
+install's paths), workspace-reading topics and the named forms of `profile` /
+`oversight` / `audit`, a filtered `env` / `events`, contributed topics and
+sections (premium), and the `dependencies` facet. The refusal now says which
+of these applied.
+
+**It mirrors jaato-server alone.** Generation runs in a subprocess with an
+empty `$HOME` and working directory and no `JAATO_*` variables
+(`prompt_library` lists `~/.claude/skills` while describing itself), and
+refuses, naming the cause, when a plugin or `explain` topic comes from
+another distribution, when an in-tree plugin did not load (an extra such as
+`[interactive]` missing), or when a rendering contains a path of the
+generating machine (such a topic belongs under `live_only`). Verified
+identical across `[dev,interactive]` and every extra.
+
+`.githooks/pre-commit` regenerates it when non-test source under
+`jaato-server/jaato_server/` or `jaato-sdk/jaato_sdk/` (the event catalog and
+archetypes are SDK code), or `jaato-server/pyproject.toml`, is staged; about
+10 s. It is ~1.2 MB because `--json` needs each topic's data beside its
+text. Guard:
+`jaato_server/shared/tests/test_explain_snapshot_mirrors_the_server.py`, six
+reversions; its drift case fails naming the regenerate command.
+
+Not done here: `validate` has no snapshot route. Its checks are code over a
+caller's workspace, which a rendered answer cannot replace.
+
 ### An Integration Declares Its Own Paths, and Its Own Harness
 
 `jaato-scaffold integration <name>` installs the `jaato-sdk` skill where
@@ -5296,6 +5805,7 @@ by `PluginRegistry._gate_entry_point`:
 | **A security-critical subset is never shadowable** | `permission`, `cli`, `file_edit`, `mcp`, `sandbox_manager`, `interactive_shell` — refused even with the opt-in below. |
 | **Operator opt-in** | `JAATO_PLUGIN_ALLOW_SHADOW=<name>[,<name>]` lets a distribution replace a non-critical built-in. The substitution is announced at WARNING, never silent. |
 | **Optional distribution allowlist** | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST=<dist>[,<dist>]` narrows which distributions may contribute plugins at all, so a transitive dependency nobody chose stops participating. Names compare under PEP 503 normalisation. |
+| **Preload declarations need an opt-in** | `JAATO_PLUGIN_ALLOW_PRELOAD=<dist>[,<dist>]` lets an out-of-tree distribution's `PLUGIN_PRELOAD` be imported by the pool template. Unset, such a declaration is ignored and logged: preloading runs its import-time code in the template, whose environment is the daemon's. See [What the Template Imports Before It Forks](#what-the-template-imports-before-it-forks). |
 | **Collisions are named, not skipped** | First writer still wins, but the loser is logged at WARNING with both providers named — including the directory scan skipping a built-in because something else holds its name. Re-discovery by the same module stays quiet. |
 
 **Provenance.**  The registry records a `PluginOrigin` for every plugin it
@@ -7274,10 +7784,14 @@ plugin discovery and so the answer cannot be derived twice.
 | attribution | `SO_PEERCRED` → `PeerCredentials`, rendered by `get_client_user`. `Session.created_by`, the ledger's `response` / `permission-check` `user_id` and the telemetry `user.id` populate on IPC for the first time — everything above `EventSink` is transport-agnostic, so #859's plumbing lights up with no further change |
 | entitlement | `unreachable_client_paths` refuses a `workspace_path` / `config_root` / `env_file` / trace path the connecting account could not reach, at `_handle_set_workspace` and `_reject_unentitled_client_paths` (beside #742's relative-path guard, and all-or-nothing for the same reason: a half-applied handshake is its own silent-wrong-directory bug) |
 
-**The reachability rule, and why each half is what it is.** An existing path
-needs `r-x` — deliberately NOT `w`, because an org-wide `config_root` of
+**The reachability rule, and why each half is what it is.** An existing
+directory needs `r-x` — deliberately NOT `w`, because an org-wide `config_root` of
 shared profiles under `/opt`, readable by everyone and writable by none of
-them, is a legitimate and desirable shape in exactly this deployment. A path
+them, is a legitimate and desirable shape in exactly this deployment. An
+existing file needs only what the daemon will do with it, stated per field by
+the caller: `r` for `env_file`, `w` for the two trace-log paths (until #1464
+every leaf needed `r-x`, so an ordinary `.env` was refused and the peer's whole
+client config dropped). The decision uses the resolved target. A path
 that does not exist needs `-wx` on the nearest existing ancestor, since the
 daemon provisions workspaces and refusing every not-yet-created directory
 would refuse the normal case. Every ancestor needs `--x`, which is what makes
@@ -7553,13 +8067,79 @@ Stated costs and limits:
   `nobody` was run here (unconfined): the runner served RPC as uid 65534
   and its log and `.jaato/logs` were owned by it.
 
+**A pool slot must be dumpable again (#1499).** A credential change
+clears the process's dumpable flag (it becomes `fs.suid_dumpable`, 2 on
+Ubuntu) and the kernel then owns `/proc/<pid>/` as root, so every
+`owner /proc/*/...` rule in the profile stopped matching: the bootstrap
+read-back of `attr/current`, `verify_thread_confinement`'s per-task scan,
+the `//child` transition write by `cli` / `interactive_shell` / notebook
+children, and `limits`. Every session on a dropped slot was refused with
+`RunnerBootstrapFailed`. A cold spawn was never affected: `execve` resets
+the flag for a process whose uid equals its euid. Step 1b3 now calls
+`privilege_drop.ensure_dumpable` after `drop_to` (after `setresuid` and
+the `setuid(0)` proof) and before 1c confines; it reads
+`PR_GET_DUMPABLE` back and refuses the bootstrap (`privilege_drop`) if it
+is not 1. Not called on the cold-spawn path. The `owner` qualifiers stay.
+Cost, the same a cold-spawned runner already has: a dumpable runner may be
+traced by another process of its uid and may write a core dump. Every
+runner body carries `deny ptrace` and `deny capability sys_ptrace`
+(AppArmor mediates both tracer and tracee, and Yama applies on top); no
+`RLIMIT_CORE` is set for runners, which is a possible follow-up. Guard:
+`TestDumpableAfterInProcessDrop` in `test_runner_privilege_drop_1168.py`,
+three reversions.
+
+**A dropped runner's profile is a stack (#1509).** With
+`kernel.apparmor_restrict_unprivileged_unconfined = 1` (the Ubuntu
+default) the kernel converts an unprivileged, unconfined task's
+`change_profile` into a stack, so the runner reads
+`<P>//&unconfined (enforce)`, and the verify refused it. A stack is the
+intersection of its members and `unconfined` restricts nothing, so
+`shared/apparmor_label.py` (the one parser) reports such a label as `<P>`,
+in either order and for `<P>//child//&unconfined`; the kernel leaves
+`unconfined` out of the printed mode, so the mode is `<P>`'s own. Every
+reader (the bootstrap verify, the idempotent path, #1023's thread scan,
+`sandbox_mode`, `require_confinement`, the notebook's
+`cell_boundary_profile`) goes through it. Any other stack (`<P>//&<Q>`) is
+reported as its whole name, is never `enforced`, is divergence in the
+thread scan, and is refused; the refusal names stacking. The drop-first
+order is kept: transitioning first would need `capability setuid, setgid`.
+The #1348 denial hint reads no label (it keys on the installed `//child`
+transition), so it needs no change. Guard:
+`test_a_stack_with_unconfined_is_the_profile_1509.py`, five reversions.
+
 Chowning after write stays rejected: it cannot be made complete (it misses
 the intermediate directories, every file a subprocess writes, and anything
 an out-of-tree plugin writes), which is #735's shape.
 
-Daemon-tier artifacts stay root-owned under every policy, deliberately:
-session records, `~/.jaato/session_workspace_index.json` and the daemon log
-are written by the daemon process and are not the agent's output.
+**A file the daemon writes INSIDE a workspace is the workspace owner's
+(#1528).** This section used to say session records stay root-owned under
+every policy. That was wrong for the files that live in the user's
+workspace: the record is rewritten with a temp file plus `os.replace`, so
+every save installed a new root-owned record, undid any `chown -R`, and left
+files the owner (and their runner) could not rewrite or remove. Now, when
+the policy is not `daemon`, those writers create their file owned by the
+workspace owner from the start, with no root-owned window:
+
+| Writer | How |
+|---|---|
+| `.jaato/sessions/<id>.json` (`FileSessionPlugin.save`) | the temp file is `fchown`-ed before it is written, so `os.replace` installs a file that was never root's; directories the save creates get the same owner |
+| subagent and TODO state under `.jaato/sessions/<id>/` | `atomic_write_text(..., owner=)`, same rule |
+| `.jaato/logs/session_<id>_client_<c>.log` (`session_logging._create_owned`) | created empty and `fchown`-ed before `FileHandler` opens it for append; a log a previous daemon left is handed over |
+
+`runner_user.workspace_file_owner(ws)` is the one decision: `None` under the
+`daemon` policy (byte-identical to before), and otherwise
+`workspace_ownership.tree_owner(ws)` (nothing for a non-root daemon or a
+root-owned workspace). Under `peer` it is the workspace's owner, the
+#1496 rule, not the peer. Modes are unchanged (record and logs `0644`).
+Files OUTSIDE any workspace stay the daemon's:
+`~/.jaato/session_workspace_index.json`, the daemon log,
+`~/.jaato/apparmor-cache`. Still root-owned and tracked separately: the
+session inbox (`.jaato/sessions/<id>.inbox/`, `session_inbox.py`, #1530). A
+session can rewrite its own record; since #1529 a revive no longer trusts
+one the daemon did not seal (see
+[A Record the Session Could Rewrite](#a-record-the-session-could-rewrite-1529)). Guard:
+`jaato_server/server/tests/test_daemon_workspace_files_owned_1528.py`, six
+reversions, real `chown` to `nobody` as root and an inode ledger otherwise.
 
 Guard: `jaato_server/server/tests/test_a_root_daemon_says_so_1168.py`, six reversions. The
 uid is substituted in **both** directions — patched to 0 for the warning
@@ -7584,6 +8164,55 @@ caveat and the log line to verify. It reads `runner_user.py`
 `runner_import_paths`) rather than restating it. Guard:
 `jaato_server/shared/tests/test_explain_runner_user_1168.py`, three
 reversions.
+
+### An Application's Workspaces Belong to Its Account (#1496)
+
+A WS connection has no OS principal, so `--runner-uid-policy peer` keeps
+the daemon's uid for it, and `workspace-owner` read `root` for every
+workspace a root daemon created. One daemon root also cannot serve two
+applications that each need their workspaces under their own account.
+
+Each entry of `--ws-app-credentials` now declares where its application's
+workspaces live:
+
+```json
+{"jaato-web-coder": {"credential": "<43 chars>",
+                     "account": "webcoder",
+                     "workspace_root": "/home/webcoder/workspaces"}}
+```
+
+| Piece | Where |
+|---|---|
+| the entry: exactly these three keys; the account must exist, the root must exist, be a directory owned by the account and searchable by it; a non-root daemon may name only its own account; two applications' roots may not be equal or nested | `ws_tickets._validated_entries`, `_app_workspace`, `_refuse_shared_roots` (`AppCredentialStore.workspace(app_id)`) |
+| one `WorkspaceManager` and `WorkspaceProvisioner` per application, its registry at `~/.jaato/workspaces-<app_id>.json` (daemon-side: the rows carry the `owner` that decides visibility); a root overlapping the daemon's own refuses startup | `JaatoWSServer._init_app_workspaces` |
+| a connection whose `app_id` has a root is served from it by every workspace verb, staging, inspect, clone, delete and provisioning; any other connection keeps the daemon's root | `_workspace_manager_for`, `_provisioner_for` |
+| "is this a daemon-managed workspace" (AppArmor/cgroup gates, workspace HOME #1225, venv #1274, private `/tmp` #1381) is asked per workspace | `JaatoWSServer.managed_root_for`, `SessionManager.set_managed_root_resolver` |
+
+**What the daemon writes in a workspace takes the owner of its tree**
+(`shared/workspace_ownership.py`): only a root daemon hands anything over,
+only into a tree not owned by root, only paths the daemon itself owns
+(never one another account owns), with `lchown` and without following a
+link. Writers that hand over: `workspace.create` and the provisioner, the
+`.env` writes, `contained_write` (staging, `workspace.app_write`'s files,
+promotion), `workspace.app_write`, `workspace.ignore`, the reference
+catalog after a promotion, the `.jdtls-state` sibling, workspace HOME and
+private `/tmp` directories, the SELinux authored-dir pre-creation, artifact
+copies, replay snapshots, credential files a daemon-side `<provider>-auth`
+command leaves in `.jaato/`. `git clone` runs AS the workspace owner
+(`workspace_clone._clone_identity`), so its checkout is never root's.
+Under a runner-uid policy that drops, the session record, its state files
+and the per-client session logs are created owned by the workspace owner
+too (#1528, see [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-and-nothing-said-so-1168));
+the inbox is still root's.
+
+No compatibility path: a bare-string entry is refused. Connections without
+an application (the shared token, IPC) keep the daemon's own root, and a
+root-owned workspace behaves exactly as before. Existing workspaces under
+the daemon's root are not moved; moving them is an operator step.
+
+Guard: `jaato_server/server/tests/test_an_applications_workspaces_belong_to_its_account_1496.py`,
+eleven reversions. Ownership is exercised through a view of `os` as a root
+daemon sees it (the suite does not run as root).
 
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
@@ -9216,11 +9845,178 @@ Still open: the other `TRAIT_SESSION_PERSISTENT` plugins (`reliability`,
 `service_connector`) are saved and restored through the daemon registry
 the same way, and the `a` / `t` / `i` re-emit gap above.
 
+Since #1529 the snapshot is restored as written only from a record the
+daemon sealed. From any other record only the narrowing half is restored
+(`session_blacklist` and a `deny` default); an `always` cannot be checked
+against anything on disk, so it is dropped.
+
 Guard: `jaato_server/server/tests/test_permission_decisions_survive_a_revive_1412.py`,
 five reversions. It drives a real `RunnerRPCClient` over a socketpair to a
 real `RunnerRPC`, with the enforcer built by the bootstrap's own function:
 decide through the command path on runner A, save, revive on runner B, and
 B enforces both decisions and announces `allow`.
+
+### A Record the Session Could Rewrite (#1529)
+
+A session record is `<ws>/.jaato/sessions/<id>.json`, inside the workspace
+and so inside what a session's own code can write: the workspace-wide
+`rwkl` grant (template v13) covered it in `//child` (`python -c`, a
+script, a notebook cell), and under a dropping `--runner-uid-policy` it is
+the runner account's own file (#1528). A revive rebuilt the session from
+it, and took from it the fields that decide the revived boundary. Read
+from the tree, and checked against it:
+
+| Record field | What a revive did with it |
+|---|---|
+| `sandbox_mode` | `apparmor=sandbox_mode_is_kernel(...)` on the restore envelope: `null` revived an IPC session with no kernel boundary |
+| `profile_snapshot.apparmor_fragments` / `_source` | exec scoping of `//child` |
+| `profile_snapshot.runtime_limits` | the seccomp filter (`seccomp: off`, `seccomp_allow`), pids, memory, cpu, the lifetime bounds |
+| `profile_snapshot.plugin_configs.permission` | the enforcer's profile layer (#1474): `defaultPolicy: allow` |
+| `profile_snapshot.plugins` / other `plugin_configs` | which tools exist; `notebook.allow_uncontained_exec`, `cli.extra_paths`, `interactive_shell.require_confinement` |
+| `profile_snapshot.env` | resolved daemon-side at spawn, `pass://` / `vault://` included, and shipped to the runner |
+| `profile_snapshot.scrub_secret_env` | `none` |
+| `metadata.plugin_states.permission` | `always` rules for any tool (#1412) |
+| `workspace_path`, `config_root` | where the runner runs and is confined; where profiles are searched |
+| `created_by`, `cascade_driver_id`, `sibling_name` | attribution and the courier group a session joins |
+| `rendered_instructions` | the prompt (lower impact: the agent already controls its context) |
+
+**Threat model.** On an unconfined host whose runner shares the daemon's
+uid, the agent can already edit the profile files and `~/.jaato`; nothing
+here adds a boundary there. What this closes is a **confined runner**
+(AppArmor, SELinux, or a dropped uid) widening the next lifetime of its own
+session.
+
+**Layer 1: the daemon seals what it writes, and narrows what it did not.**
+
+| Piece | Where |
+|---|---|
+| the seal: HMAC-SHA256 over the canonical JSON of the whole record minus `record_seal`, under `~/.jaato/session-record.key` (32 bytes, `0600`, created with `O_EXCL`, in the DAEMON's home) | `server/record_seal.py` |
+| every daemon save is sealed (`FileSessionPlugin.save(seal=)`), every load is checked (`load(verify=)` → `SessionState.record_verified`, not persisted) | `SessionManager._write_record`, `_read_record` |
+| an unverified record is rewritten in place to its fail-safe form before the revive reads it; one WARNING names every field changed, by key only | `server/record_distrust.py`, `SessionManager._apply_record_trust` |
+| the confinement opt-in a revive passes: `True` for an unsealed record or a sealed kernel claim, else `None` (the fresh opt-in decides) | `revive_arms_confinement` |
+| the `sandbox_mode` the revived `Session` records: what provisioning produced now, else the record's value as evidence | `revived_sandbox_mode` |
+
+What an unsealed record still gives a revive, and what it does not:
+
+| Re-derived | Narrowed | Dropped | Still taken from the record |
+|---|---|---|---|
+| the profile (from disk by `profile_name`, so plugins, plugin configs, fragments, `runtime_limits`, `scrub_secret_env`, `env` URIs are the files'); the workspace (where the record was read, else the index); `config_root` (client, else `<ws>/.jaato`); membership (the index) | permission state (deny rules and a `deny` default only); `model_override_env` (`MODEL_NAME` / `JAATO_PROVIDER` only); confinement (armed) | `agent_params`; other plugins' states; `metadata.subagents` | history and its bookkeeping, `rendered_instructions`, `budget_control` (when the disk profile declares none) and `budget_usage` |
+
+Why each: the conversation and the prompt are the agent's own context; the
+budget has no daemon-owned copy, and an edited ceiling can only be raised
+to "none", which is what dropping it would give.
+
+Rules the implementation holds to:
+
+- **A MAC over the whole record, not a list of fields.** The
+  security-relevant surface of a profile is not a closed list (plugins,
+  every plugin's knobs, MCP servers), and a per-field merge is the list
+  that drifts when a knob is added. This departs from the issue's
+  suggested most-restrictive-wins merge for that reason.
+- **Fail safe, or refuse.** An inline `profile_spec` has nothing on disk to
+  re-derive from, and a named profile that no longer resolves would fall
+  back to an env-only session with the default plugin set: both REFUSE the
+  revive (`ErrorEvent(error_type="SessionRecordUntrusted")`).
+- **No laundering.** A session revived from an unsealed record is resealed
+  only once the daemon decided its boundary itself (provisioning ran, the
+  workspace is under the WS root, or there is no workspace). A clientless
+  revive provisions nothing, so its saves stay unsealed
+  (`Session.record_trusted`) and the next revive narrows again.
+- **`sandbox_mode` never disarms.** A sealed `null` means the daemon chose
+  unconfined, so the fresh opt-in decides; a sealed kernel claim arms; an
+  unsealed record arms whatever it says.
+
+**Layer 2: the kernel.** Template **v46** write-denies
+`<ws>/.jaato/sessions/` and everything under it in `//child`, and
+`<ws>/.jaato/sessions/*.json` in the isolated sub-runner. Base and
+`tool_hat` keep the grant: the runner writes per-session state there
+(`sessions/<id>/plans`, a `save` tool call), and a record the runner
+writes is unsealed and narrowed. `gitignore.CONFINED_STATE` names
+`sessions/`. No SELinux change: `.jaato/sessions/` keeps the workspace
+type, and layer 1 is the fix there (#1540).
+
+Stated costs:
+
+- **Every record written before this change is unsealed, once.** Its
+  first revive takes the profile from disk (not the #787 snapshot), drops
+  `always` rules, `agent_params`, other plugins' states and restored
+  subagents, and arms confinement: an IPC session that ran unconfined on
+  an AppArmor or SELinux host comes back confined. A pre-change inline
+  session cannot be revived. No record version bump: an older daemon
+  ignores `record_seal`.
+- **The key is per daemon home.** A lost key, or a workspace moved to
+  another daemon, makes every record unsealed. A key not owned by the
+  daemon or unreadable is logged at ERROR and every save is unsealed; a
+  group/other-readable key is tightened to `0600`.
+- **A no-profile `session.new --model` override is kept**; one applied to
+  a profile lives in the snapshot and is lost with it on an unsealed revive.
+
+Not covered, tracked separately: per-session state files beside the record
+(`sessions/<id>/subagents/*.json`, read by a SEALED revive and carrying
+subagent profiles; `sessions/<id>/plans/_state.json`) and the inbox
+(`<id>.inbox/`, #1530) are not sealed (#1539); layer 2 covers them for `//child`
+only. Nothing here was run against an enforcing kernel.
+
+Guard: `jaato_server/server/tests/test_a_revive_does_not_trust_the_record_1529.py`,
+six reversions. It writes records to disk and drives the real
+`_load_session_impl` with the real `FileSessionPlugin`, stubbing only
+server construction; the kernel half checks the rendered profiles with the
+#1348 rule matcher.
+
+### A Policy File Read and Thrown Away (#1474)
+
+`PermissionPlugin.initialize` loaded `permissions.json` and then let an
+inline `policy` key replace it, and both enforcer builders always passed one:
+a hard-coded `defaultPolicy: ask` dict, written out in
+`build_session_permission_plugin` and again in `JaatoServer.initialize`. So
+the file never decided anything in a daemon session, while
+`docs/jaato_permission_system.md` called it the STATIC layer. Reproduced on a
+live daemon (echo provider): a workspace file saying `deny` and no profile
+block produced a `PermissionRequestedEvent`.
+
+`shared/plugins/permission/policy_layers.py::resolve_effective_policy` is now
+the one place the policy is assembled, called by `initialize` (so by both
+builders) and by `set_scoped_policy` (#957):
+
+| # | Layer (lowest first) | |
+|---|---|---|
+| 1 | framework | `FRAMEWORK_DEFAULT_POLICY`: `ask`, empty lists. The only copy of that dict |
+| 2 | user | `~/.jaato/permissions.json` (on a runner, the #1465 snapshot) |
+| 3 | workspace | `<config_root>/permissions.json`, else `<ws>/.jaato/permissions.json`; `config_path` / `PERMISSION_CONFIG_PATH` names it |
+| 4 | profile | `plugin_configs.permission.policy`; a #957 subagent's own block for that subagent, still over the files |
+
+| Key | Rule |
+|---|---|
+| `defaultPolicy` | the highest layer that sets it; a file omitting it sets nothing |
+| `whitelist` / `blacklist` (`tools`, `patterns`, `arguments`) | UNION across layers; a profile adds, never replaces |
+| blacklist vs whitelist | blacklist wins (unchanged), so a deny in any layer survives a higher allow |
+| any other key (`sanitization`, `cwd`) | the highest layer that sets it replaces it whole |
+
+Both builders build their init config with `enforcer_init_config`, which
+carries no policy. Each session logs one INFO line with the effective
+`defaultPolicy` and the layer that decided it (`EffectivePolicy.describe`).
+
+**Upgrade consequence: a host whose `permissions.json` says `defaultPolicy:
+allow` starts auto-approving** every tool no list names. A file-sourced
+`allow` logs a WARNING per session naming the file, and `validate` reports
+`permission_file_allow` (warn) for the user and project files. Two smaller
+changes follow from the same rule: a #957 subagent block or an embedded
+`plugin_configs.permission` that names no `defaultPolicy` now gets the files'
+or the framework's (`ask`) instead of `PermissionPolicy.from_config`'s
+`deny`; and an invalid file fails permission initialisation as it always
+did on these paths.
+
+**Who can write it.** Template **v44** write-denies
+`<ws>/.jaato/permissions.json` in base, `tool_hat`, `//child` and the
+isolated sub-runner; `AUTHORED` marks it `confined=True`; the file tools and
+`cli` already refuse `.jaato/` paths. On an unconfined host the file is
+writable by the session like any config file, so a session there can widen
+the policy of later sessions. `explain plugin permission` prints the layers
+and rules from the module's own tables.
+
+Guard: `jaato_server/shared/tests/test_permissions_file_decides_a_session_1474.py`,
+nine reversions, through the real `build_session_permission_plugin`. Not
+verified on an enforcing kernel.
 
 ### A Memory Store Nobody Could See From the Browser (#1232)
 
@@ -10137,6 +10933,31 @@ confined deployment that chose `backend: local` without the opt-in now has its
 cells refused. Guard:
 `jaato_server/shared/tests/test_notebook_kernel_runs_in_child_1323.py`.
 
+**The same rule under SELinux (#1519).** A kernel exec'd into `jaato_child_t`
+(the composed child `preexec_fn` already carried `setexeccon` to it) got the
+audit tier, because `establish_containment` asked only AppArmor, so `import
+numpy` failed in a cell on every SELinux session. `BOUNDARY_SELINUX` is the
+kernel tier for it, and needs positive evidence: the kernel's own context
+(`lsm_label.selinux_cell_boundary`) is `jaato_child_t` and the exact context
+the runner exec'd it into (the active LSM need not be readable: inside
+`jaato_child_t` securityfs and selinuxfs are `security_t`, so
+`active_lsm_backend()` reads `none` there, and only a positive AppArmor answer
+refuses); `jaato_runner_t` does not count (a kernel found
+there missed the transition). Enforcement cannot be asked from inside the
+domain (neither jaato domain may read `/sys/fs/selinux` or compute an access
+vector), so the daemon attests it when it provisions the boundary (host
+enforcing, neither domain permissive, `ConfinementHandle.enforcing_attested`),
+and it travels on the envelope descriptor (`"enforcing"`, absent from an older
+daemon = not attested), the runner's recorded `SELinuxSessionBoundary` and the
+kernel's argv, never its environment. A host switch the kernel CAN read as `0`
+refuses the tier whatever was attested. `lsm_label` imports `ctypes` lazily,
+because the kernel imports it before its hook: a preloaded `ctypes` would hand
+an audit-tier cell `ctypes.pythonapi`. The tier shows in the notice, the
+diagnostics' `notebook_boundary_kind` and `get_environment(aspect="runtime")`
+(`notebook.boundary`). Guard:
+`jaato_server/shared/tests/test_notebook_kernel_selinux_tier_1519.py`, twelve
+reversions.
+
 #### The audit tier cannot import `ctypes`, and so cannot import numpy (#1011)
 
 The row above says `ctypes.dlopen` of anything **outside the interpreter
@@ -10169,9 +10990,9 @@ read/write with no library load at all — the `_POLICY`-rebinding limit the
 module docstring already names. Under the audit tier you genuinely cannot have
 both `import ctypes` and this boundary.
 
-**The AppArmor tier has no such restriction**, because `establish_containment`
-installs no hook at all when `/proc/self/attr/current` reports an enforced
-profile — there, `import ctypes` and numpy work normally. Neither does a
+**The AppArmor and SELinux tiers have no such restriction**, because
+`establish_containment` installs no hook at all when the kernel is in an
+enforced `//child` profile or `jaato_child_t` domain (#1323, #1519) — there, `import ctypes` and numpy work normally. Neither does a
 **subprocess**: a spawned child is bounded by the OS and nothing else, so the
 same import runs through `cli` or `!python`, which is also why `!pip install X`
 works. Those are the remedies, and they are all *other surfaces* — which is the
@@ -10401,6 +11222,27 @@ Guard: `jaato_server/shared/tests/test_a_tool_runs_once_1338.py`, three
 reversions. Every test passes a real `CancelToken`, and one drives the real
 cli plugin and counts the lines its command appends to a file.
 
+### A Backup Name Longer Than the Path Component Limit (#1485)
+
+`file_edit` backs a file up before every edit, into
+`<config_root>/sessions/<id>/backups/`. The backup was named after the
+resolved ABSOLUTE path flattened into one component plus
+`_<timestamp>.bak`, so a file whose path was over ~224 bytes got a name
+over ext4's 255-byte component limit, the write raised `ENAMETOOLONG`, and
+`updateFile` failed before editing anything. Whether a session hit it
+depended on where the workspace was checked out.
+
+| Piece | Where |
+|---|---|
+| the name: `{readable tail}~{sha256(resolved path)[:12]}_{timestamp}.bak`, at most `BACKUP_NAME_BUDGET` (200) UTF-8 bytes, collision counter included | `BackupManager._backup_stem` / `_backup_filename` in `file_edit/backup.py` |
+| the tail: workspace-relative where the file is inside the workspace, absolute otherwise, truncated from the FRONT at a character boundary | `_readable_tail`, `_truncate_tail_utf8` |
+| lookup by path: recompute the stem and compare whole stems, never re-flatten. The legacy flattened prefix is also accepted, so backups written before the change are still listed, undone and pruned | `_get_backups_for_file` |
+| `listBackups` with no path: the original path comes from the metadata file; a new-format name without metadata shows `.../<tail>` | `_describe_backup_name` |
+
+The digest, not the tail, identifies the file. Guard:
+`jaato_server/shared/tests/test_a_backup_name_fits_any_path_1485.py`, five
+reversions.
+
 ### Coreutils a Confined Session Could Not Run (#1342)
 
 On an Ubuntu 26.04 host, every confined session's `cli` failed `ls`, `head`,
@@ -10430,6 +11272,46 @@ not `/usr/bin/ls`.
 Guard: `jaato_server/shared/tests/test_coreutils_run_confined_1342.py`, two
 reversions. Where `apparmor_parser` is installed it also compiles the
 rendered profile. Not verified on an enforcing kernel.
+
+### Four Rules the 2026-10-04 Kernel Run Was Missing (#1511)
+
+An enforcing Ubuntu kernel (7.0.0-31) refused four things the template
+had no rule for. Template **v45**:
+
+| Refused | Grant | Bodies |
+|---|---|---|
+| `shell_spawn` got no pty: `/dev/ptmx` `wr` denied to `runner-rpc-work` | `/dev/ptmx rw` (`/dev/pts/*` was already there) | base, `tool_hat`; pexpect opens the master in-process before its child execs, so `//child` and the isolated sub-runner get nothing |
+| `python3 -m venv` (Debian's `ensurepip` reads `/usr/share/python-wheels/`) | read | `//child`, scoped or not |
+| `git init` / `clone` warned on `/usr/share/git-core/templates/` | read | `//child`, scoped or not |
+| a daemon on a uv-managed Python started no confined session (stdlib unreadable) | read, `mr` on `*.so`, `bin/* ix` on the RESOLVED interpreter installation | every body, isolated sub-runner included |
+
+The interpreter root is derived at render time from the running
+interpreter (`sys.base_prefix`, `sys.base_exec_prefix`, resolved), as
+`{venv_path}` comes from `sys.prefix`: `interpreter_install_roots` in
+`server/apparmor.py`. Nothing is hardcoded for uv, so pyenv and conda get
+the same answer. `bin/* ix` mirrors the venv grant because
+`<venv>/bin/python` resolves there and AppArmor judges the resolved path.
+Dropped: `/`, `/usr`, `/usr/local` (the abstractions already cover them),
+a root inside the venv, and a root inside the daemon's workspace root or
+the session's workspace, since an exec grant there would be on a
+model-writable directory.
+
+The fifth AppArmor bullet (`ldconfig` / `collect2` exec denials from
+`ctypes.util.find_library`) was the runner compiling its seccomp filter,
+moved to the daemon by #1508. The one runner-side `find_library` left on
+a path that can run confined, `privilege_drop._prctl`, now uses
+`CDLL(None)`. The SELinux bullets are #1520 and #1522.
+
+Not a gap, and now documented in `docs/apparmor-setup.md` and the SELinux
+design (§8): neither LSM lets a session execute a binary it wrote into
+its workspace. Probes and tools go on the host `PATH`; the managed tool
+venv, `.home/.local/bin` and the web coder's toolchains grant are the
+sanctioned exceptions, on a managed workspace only.
+
+Not verified on an enforcing kernel: the rules are checked as rendered
+text through the #1348 matcher, and compiled where `apparmor_parser` is
+installed. Guard: `jaato_server/shared/tests/test_kernel_run_gaps_1511.py`,
+six reversions.
 
 ### A Save That Waited on Its Own Loop (#1355)
 
@@ -10504,6 +11386,29 @@ Stated limits:
   shape #631 found). The client guard still refuses them loudly.
 - Not addressed: #693 (SIGTERM skips `SessionManager`) and #1061 (the
   shutdown triple captured without a lock).
+
+### A Save That Erased a Mark It Never Saw (#1542)
+
+After #1506 a rerun logged `Not saving session <id>: its runner was already
+released` for 3 of 4 sessions, and their last turns were not persisted. The
+unload already saved before `server.shutdown()` and the boundary release; it
+skipped the save because `is_dirty` read `False`. A tool call start spawns an
+async save that reads history mid-turn; the turn then ends and marks the
+session dirty (and its `done` schedules the unload); the async save finished
+and wrote `is_dirty = False`, erasing marks it never saw. The unload found a
+clean session, released the runner, and a second queued async save logged the
+warning.
+
+| Piece | Where |
+|---|---|
+| every `is_dirty = True` bumps `Session.dirty_generation` (`__setattr__`, so no call site can opt out) | `session_manager.py`, `Session` |
+| a save reads the generation before the history and clears the flag only if it is unchanged, atomically (`clear_dirty_if_unchanged`) | `_save_session` |
+| a save after the release of a CLEAN session is superseded and skipped at DEBUG; the WARNING now means a change no save captured | `_history_for_save` |
+
+The unload order is unchanged: save, runner release, boundary release. Not
+verified on an enforcing kernel (the issue's N-sequential-sessions check).
+Guard: `jaato_server/server/tests/test_the_last_turn_is_saved_before_release_1542.py`,
+four reversions.
 
 ### A Lock Held Across the Loop (#1452)
 
@@ -11076,6 +11981,22 @@ when the runner is itself a venv, and an existing venv has it switched off in
 in-process, because the kernel imports it. Guard:
 `jaato_server/shared/tests/test_tool_venv_does_not_shadow_the_checkout_1322.py`.
 
+**The kernel's dirs go after the venv's own, before the OS's (#1457).** A
+venv runner's tool-venv keeps `--system-site-packages`, so OS packages stay
+available to the model, and on Debian/Ubuntu that brings
+`/usr/lib/python3/dist-packages` and the user site, with OS copies of jaato's
+dependencies. The bootstrap used to append the runner's dirs, so an old
+`typing_extensions` won and the kernel died before its first cell. It now
+inserts them right after the last `sys.path` entry inside the kernel's own
+`sys.prefix` (the venv's site-packages and `jaato-pip`): what the model
+installed into the venv still wins, the OS copies do not. A venv kernel with
+no workspace HOME also runs `-s`, so it ignores the daemon account's
+`~/.local`; with one, the user site is the workspace's and stays.
+`runner_site_dirs` names the runner's user site only when the runner reads
+it. A cell's child processes and `cli` still see the system and user site as
+before. Guard: `jaato_server/shared/tests/test_kernel_imports_the_runner_first_1457.py`,
+four reversions.
+
 **The managed venv (#1274) is the #1225 rule applied to `workspace_venv`.**
 Every workspace the web client creates is profile-less (a bare `.env`), so no
 `plugin_configs` channel reached it. Without a venv, `pip install` ran the
@@ -11165,6 +12086,37 @@ core.hooksPath=/dev/null`); `check-ignore` reads the repository's own
 
 Guard: `jaato_server/server/test_files_panel_agrees_with_git.py`, one
 reversion, plus a case that a repo-configured program is not run.
+
+### A Baseline Walk Four Creates Waited On (#1553)
+
+Four concurrent `session.new` against warm slots: every runner ready in
+3-5 s, three confirmations past the caller's 60 s. Each session's runner
+went quiet after `get_auth_info` (the end of `initialize()`) and resumed
+with `get_history` (the first save) ~45 s later, all four together.
+Between the two, `_create_session_impl` starts the workspace monitor,
+whose `start()` walks the whole tree for its baseline before the session
+is confirmed. Since the oracle above, that walk paid per FILE: a pathlib
+`relative_to` per checkout, a rescan of the workspace root for every path
+outside a checkout, the parser's own `relative_to` + `stat` + ancestors,
+and one git round trip read one byte per Python call. Pure Python on one
+GIL, and every blocking git read waited out the switch interval to get it
+back, so four walks took ~6x one each and finished together. Measured on
+a 12k-file workspace: 3.0 s alone, 18.2 s with four at once; now 0.2 s
+and 1.5 s.
+
+| Piece | Where |
+|---|---|
+| one walk for `_seed_baseline` and `reconcile`: the parser asked with the relative path the walk already has (`GitignoreParser.is_ignored_relative`, ancestors already judged; `is_ignored` fallback for an older SDK), git asked about a directory's listing in one exchange | `WorkspaceMonitor._walk_unignored` |
+| `is_ignored_many`: 128 paths per write, their records read before the next chunk, so git's stdout pipe never fills while stdin is being written | `GitIgnoreOracle`, `_CheckIgnore` |
+| records read in chunks, not a byte per call; checkout lookup by string prefix | same |
+| a path outside every checkout stats only its own top-level child's `.git`, never rescans the root | `GitIgnoreOracle._new_checkout_for` |
+| `SESSION_NEW_PHASE ... phase=workspace_monitor_started`, and the monitor's start line names the walk's ms | `session_new_timing`, `WorkspaceMonitor.start` |
+
+Verdicts are unchanged (a guard compares the walk against `_is_ignored`
+per path). Not changed: the walk is still on the create path, and N
+sessions in one workspace still walk it N times. Guard:
+`server/tests/test_a_concurrent_create_does_not_walk_for_a_minute_1553.py`,
+four reversions.
 
 ### Any File, Hidden or Not (protocol 1.32)
 
@@ -12642,6 +13594,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` | Comma-separated distribution names allowed to contribute plugins through the `jaato.*` entry-point groups. Unset (the default) means every installed distribution participates. When set, an entry point from any other distribution is refused **before** `ep.load()` — so its module is never imported — with a WARNING naming it. The built-in package is always honoured and never needs listing. See [Entry-point plugin trust](#entry-point-plugin-trust). |
 | `JAATO_REVIVE_PROFILE` | Where a REVIVED session's profile comes from: `persisted` (default — the resolved recipe the session froze at creation) or `disk` (re-resolve `profile_name` against the profile files as they stand now). Set `disk` to interrogate a finished session under a different contract, where a `JAATO_PROFILE_SET` switch must actually take effect. |
 | `JAATO_REVIVE_PERSONA` | Where a REVIVED session's system instruction comes from: `persisted` (default — the exact prompt rendered at session-prep, prefetch output included) or `disk` (re-render from the agent markdown, **re-running** the persona's `{{!py:...}}` prefetch scripts against the session's original `agent_params`). The default is what makes a prefetch run once as documented; `disk` may execute side effects. |
+| `JAATO_PLUGIN_ALLOW_PRELOAD` | Comma-separated distribution names whose plugins' and providers' `PLUGIN_PRELOAD` declarations the pool template imports before it forks. Unset (the default) means none: built-in declarations are always honoured, an out-of-tree one is ignored with an INFO line. Opt in only for a distribution whose listed modules read no session-scoped state (environment, home, tempdir, cwd) at import time. See [What the Template Imports Before It Forks](#what-the-template-imports-before-it-forks). |
 | `JAATO_PLUGIN_ALLOW_SHADOW` | Comma-separated built-in plugin names an out-of-tree distribution IS allowed to replace. Built-in names are reserved by default; a foreign entry point claiming one is refused. Names in the never-shadowable set (`permission`, `cli`, `file_edit`, `mcp`, `sandbox_manager`, `interactive_shell`) are refused even when listed here. An honoured shadow still logs a WARNING naming the distribution that won. |
 
 ### Rate Limiting
@@ -13123,6 +14076,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `jaato_server/shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
 - [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `budget_control`, which is the retry budget since #1068 removed the `max_turns` field that used to claim the role), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
+- [Jaato vs. Pi Durable](docs/design/compare-jaato-pi-durable.md) - What Earendil's durable agent harness (per-step checkpoints, crash resume, per-tool `replay` semantics, conversation forks, hot extension updates) has that jaato lacks: nothing worth adopting. Crash recovery is the interrupted-turn record plus `_recover_interrupted_turn`; continuing after a crash is a cascade driver's `session.wake`; forking is `create_headless_session(initial_history=, initial_session_state=)`; residency and isolation are ahead. Records why the `replay` trait and hot plugin swapping were considered and rejected.
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
@@ -13136,6 +14090,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Per-User GitHub Credentials](docs/design/per-user-github-credentials.md) - Proposed (#1225–#1228): how a multi-user web deployment on a root daemon gives each session its WUI user's GitHub token. The BFF holds the grant (GitHub App, refresh token encrypted per OIDC `sub`) and binds an account per workspace; the workspace `.env` carries only a reference (`GH_TOKEN=app://github`), which the daemon resolves at every spawn by asking the owning application over its bind channel, so cascade, wake and revived sessions get it too and nothing resolved is persisted. Includes the per-workspace `.home/` for model-driven subprocesses.
 - [GitHub Workspace Guidance](docs/design/github-workspace-guidance.md) - Proposed (#1240, docs-only, application-scoped): how the web coder ships the "use `gh` safely in a shared workspace" rule-set into every workspace it binds a GitHub account to, as application-managed files (no daemon change). The BFF writes `.jaato/instructions/40-github.md` at bind time beside the `.env`/`.gitconfig` it already seeds, so cascade/wake/revive sessions get the rules as they get the token; the UI refreshes on session start. Recommends BFF-as-primary-writer, one gitconfig source of commit identity, a force-push permission blacklist (enforced) plus prose (judgement), helper+prose worktree cleanup, and a generic managed-file mechanism GitLab can later reuse.
 - [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Built except phase 0 (verification on a confined host) and phase 5 (a shared cache); application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The web coder's `web_coder_toolchains` plugin installs it with mise into `<ws>/.home` from inside the session's runner (the BFF holds only the policy, which the page stages as `.jaato/toolchain-offer.json`), where binaries already run under confinement (#1273/#1274, template v38). Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
-- [SELinux Backend](docs/design/selinux-backend.md) - A confinement backend for hosts whose LSM is SELinux (RHEL, Fedora, Rocky), behind the `ConfinementBackend` seam (`server/confinement/`). The policy module is `jaato-server/selinux/` (installed once; checked rule by rule, each with its reversion, by the `selinux-policy` CI job in a Fedora container). `JAATO_CONFINEMENT=selinux` (or `auto` on an SELinux host) makes the daemon label each workspace at its own MCS level, cold-spawn the runner into `jaato_runner_t` by exec transition (never a pool slot), and move model-driven subprocesses into `jaato_child_t`; the handle travels explicitly as `confinement=` through spawn and envelope, while AppArmor still rides `profile_name`. Phase 2b is implemented and not yet run on a kernel; the handoffs (`selinux-phase2a-handoff.md`, `selinux-phase2b-handoff.md`) and `jaato-server/selinux/tools/` are the kernel runs. The feature map states what does not translate (path fragments, exec scoping, in-process `/proc/self/environ` denial, the isolated sub-runner until phase 3).
+- [SELinux Backend](docs/design/selinux-backend.md) - A confinement backend for hosts whose LSM is SELinux (RHEL, Fedora, Rocky), behind the `ConfinementBackend` seam (`server/confinement/`). The policy module is `jaato-server/selinux/` (installed once; checked rule by rule, each with its reversion, by the `selinux-policy` CI job in a Fedora container). `JAATO_CONFINEMENT=selinux` (or `auto` on an SELinux host) makes the daemon label each workspace at its own MCS level, start the runner in `jaato_runner_t` (a cold spawn by exec transition, or, since phase 4, a pool slot the template forks for the session, which calls `setcon` while it has one thread and is then reused per boundary and uid), confine an isolated sub-runner in `jaato_isolated_t` / `jaato_isolated_ro_t` (phase 3), and move model-driven subprocesses into `jaato_child_t`; the handle travels explicitly as `confinement=` through spawn and envelope, while AppArmor still rides `profile_name`. Phases 2b, 3 and 4 are verified on a kernel. The handoffs (`selinux-phase*-handoff.md`) and `jaato-server/selinux/tools/` are the kernel runs. The feature map states what does not translate (path fragments, exec scoping, in-process `/proc/self/environ` denial). Every read of a jaato file type carries `map` too (module 1.8.0, #1520: `git` mmaps `.git/config`, and Fedora's `domain_can_mmap_files` is off by default), while a user's own checkout still grants no `execute`, so a `PROT_EXEC` mapping or a binary the session wrote there stays refused. Module 1.9.0 grants `jaato_child_t` `execmem` behind the `jaato_child_execmem` boolean (default on) so JIT runtimes (`node`) run (#1521), and provisioning refuses a workspace whose ancestor the jaato domains cannot `search` (a `mktemp -d` parent in `/tmp`), naming it, instead of a bootstrap `EACCES` on a file inside it (#1522). Module 1.10.0 grants `jaato_runner_t` `capability setpcap` and `process setcap`, so a model-driven subprocess drops its capabilities in its forked child before the exec into `jaato_child_t`, which still holds none (#1543).
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

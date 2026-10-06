@@ -191,15 +191,22 @@ def _run_template_mode() -> None:
         )
     discover_ms = (__import__("time").perf_counter() - t0) * 1000
     log.info(
-        "runner template ready: %d plugins discovered in %.1fms — "
-        "pool slots will fork from this process and inherit warm "
-        "imports.  Note: discover() walks __init__.py files; some "
-        "plugins defer heavy imports to initialize() which only fires "
-        "post-bootstrap.  PR 2 measures actual savings will be confirmed "
-        "when PR 4 routes sessions through the pool.",
+        "runner template ready: %d plugins discovered in %.1fms",
         len(discovered),
         discover_ms,
     )
+
+    # discover() walks the plugin packages' __init__.py files; what
+    # session.bootstrap spends its time importing (the session stack,
+    # anthropic, what plugins and providers import lazily) is reached from
+    # elsewhere.  Import it here so slots inherit it shared rather than
+    # importing it privately per session: the framework's own list plus
+    # each package's PLUGIN_PRELOAD.  Best effort: never fatal.  See
+    # template_preload.py.
+    from jaato_server.server.runner import template_preload
+    preload_plan = template_preload.plan(registry)
+    template_preload.log_report(
+        template_preload.preload(preload_plan.modules), preload_plan)
 
     # Sit idle on fd 3 waiting for the daemon's shutdown signal.
     # PR 3 will extend this loop to dispatch FORK_SLOT requests.
@@ -303,14 +310,8 @@ def _template_control_loop(control_sock: "socket.socket", log) -> None:
                     pass
             return
 
-        if cmd == "FORK_SLOT":
-            if received_fd is None:
-                log.error(
-                    "runner template: FORK_SLOT command arrived without "
-                    "SCM_RIGHTS FD; dropping"
-                )
-                continue
-            _handle_fork_slot(control_sock, received_fd, log)
+        if cmd == "FORK_SLOT" or cmd.startswith("FORK_SLOT "):
+            _dispatch_fork_slot(control_sock, cmd, received_fd, log)
             continue
 
         # Unknown command — log + drop any attached FD.
@@ -322,8 +323,54 @@ def _template_control_loop(control_sock: "socket.socket", log) -> None:
                 pass
 
 
+def _dispatch_fork_slot(
+    control_sock: "socket.socket", cmd: str, received_fd: Optional[int], log,
+) -> None:
+    """One ``FORK_SLOT [<json>]`` command: fork, or refuse it."""
+    if received_fd is None:
+        log.error(
+            "runner template: FORK_SLOT command arrived without "
+            "SCM_RIGHTS FD; dropping"
+        )
+        return
+    entry = _fork_slot_entry(cmd)
+    if entry is _MALFORMED:
+        log.error("runner template: malformed FORK_SLOT boundary %r; "
+                  "dropping", cmd)
+        os.close(received_fd)
+        control_sock.sendall(b"FORK_FAILED\n")
+        return
+    _handle_fork_slot(control_sock, received_fd, log, entry)
+
+
+#: :func:`_fork_slot_entry`'s answer for a boundary it cannot parse.
+_MALFORMED = object()
+
+
+def _fork_slot_entry(cmd: str) -> Any:
+    """The boundary a ``FORK_SLOT <json>`` asks the child to enter.
+
+    ``None`` for a bare ``FORK_SLOT`` (a virgin slot, as before phase 4);
+    :data:`_MALFORMED` for a payload that is not a JSON object naming a
+    ``context`` and a ``log_path``, which is refused rather than forked
+    unconfined or holding the daemon's log.
+    """
+    import json
+
+    payload = cmd[len("FORK_SLOT"):].strip()
+    if not payload:
+        return None
+    try:
+        entry = json.loads(payload)
+    except ValueError:
+        return _MALFORMED
+    if not isinstance(entry, dict) or not entry.get("context") or not entry.get("log_path"):
+        return _MALFORMED
+    return entry
+
+
 def _handle_fork_slot(
-    control_sock: "socket.socket", slot_fd: int, log,
+    control_sock: "socket.socket", slot_fd: int, log, entry: Any = None,
 ) -> None:
     """Handle a FORK_SLOT command (template side).
 
@@ -341,6 +388,10 @@ def _handle_fork_slot(
       cleanly — the daemon sees the slot's slot-socket closure +
       the SIGCHLD signal as the slot's lifecycle terminating.
     """
+    # Imported here, in the template: an import in the child after fork()
+    # could wait on an import lock another template thread held.
+    from jaato_server.server.runner_spawner import enter_slot_boundary_in_child
+
     try:
         child_pid = os.fork()
     except OSError as exc:
@@ -378,6 +429,11 @@ def _handle_fork_slot(
                 "daemon process group — jdtls subtree may leak on "
                 "teardown (#284).", exc,
             )
+        # Phase 4 (selinux-backend.md §7.2): a slot forked INTO a boundary
+        # enters it now, while it has one thread; SELinux refuses setcon
+        # in a threaded process.  Exits the child on failure.
+        if entry is not None:
+            enter_slot_boundary_in_child(entry)
         _run_slot_mode(slot_fd, log)
         # _run_slot_mode calls sys.exit; this return is a safety net.
         os._exit(0)

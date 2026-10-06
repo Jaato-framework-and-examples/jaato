@@ -601,8 +601,8 @@ class TestScanProfilesDirLogProvenance:
             with caplog.at_level(
                 "INFO", logger="jaato_server.shared.plugins.subagent.config",
             ):
-                _scan_profiles_dir(Path(d_a), profiles, errors)
-                _scan_profiles_dir(Path(d_b), profiles, errors)
+                _scan_profiles_dir(Path(d_a), profiles, errors, {})
+                _scan_profiles_dir(Path(d_b), profiles, errors, {})
 
             info_lines = [
                 r.message for r in caplog.records
@@ -650,8 +650,8 @@ class TestScanProfilesDirLogProvenance:
             with caplog.at_level(
                 "INFO", logger="jaato_server.shared.plugins.subagent.config",
             ):
-                _scan_profiles_dir(Path(d_a), profiles, errors)
-                _scan_profiles_dir(Path(d_b), profiles, errors)
+                _scan_profiles_dir(Path(d_a), profiles, errors, {})
+                _scan_profiles_dir(Path(d_b), profiles, errors, {})
 
             for record in caplog.records:
                 if record.levelname != "INFO" or "Discovered" not in record.message:

@@ -595,6 +595,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'workspace_path': state.workspace_path,
         'config_root': state.config_root,
         'sandbox_mode': state.sandbox_mode,
+        'seccomp': state.seccomp,  # #1503, additive
         'agent_name': state.agent_name,
         # 2.9+ (#859).  Fixed key list, like every field above: the
         # dataclass field alone never reaches disk.
@@ -665,6 +666,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         workspace_path=data.get('workspace_path'),
         config_root=data.get('config_root'),
         sandbox_mode=data.get('sandbox_mode'),
+        seccomp=data.get('seccomp'),  # None on records predating #1503
         agent_name=data.get('agent_name'),
         created_by=data.get('created_by'),  # None on pre-2.9 records
         budget_state=data.get('budget_state'),

@@ -33,11 +33,16 @@ from jaato_sdk.events import (
 # fail collection of these focused tests.
 @pytest.fixture
 def ws_server(tmp_path):
+    from jaato_server.server.ws_tickets import AppCredentialStore
     from jaato_server.server.websocket import JaatoWSServer
 
     server = JaatoWSServer.__new__(JaatoWSServer)
     # Minimal state the handler actually touches.
     server._clients = {}
+    # No per-application workspace roots configured.
+    server._app_managers = {}
+    server._app_provisioners = {}
+    server._app_credentials = AppCredentialStore({})
     server._lock = asyncio.Lock()
     server._client_provisioned = {}
     server._workspace_manager = None

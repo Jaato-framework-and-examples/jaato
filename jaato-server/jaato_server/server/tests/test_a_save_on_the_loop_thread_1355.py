@@ -97,6 +97,17 @@ REVERSIONS = [
                 "history on the loop thread again",
         test="test_no_async_def_calls_a_runner_blocking_entry_point",
     ),
+    Reversion(
+        target="jaato-server/jaato_server/server/runner_rpc_handlers/spawn_isolated_runner.py",
+        find="""            return await asyncio.to_thread(
+                self._session_manager._spawn_isolated_runner,
+""",
+        replace="""            return self._session_manager._spawn_isolated_runner(
+""",
+        because="the isolated spawn waits on the loop it runs on, so every "
+                "isolated subagent times out at rpc.start() (phase 3 run)",
+        test="test_no_async_def_calls_a_runner_blocking_entry_point",
+    ),
 ]
 
 
@@ -300,7 +311,7 @@ _BLOCKING_ENTRY_POINTS = {
     "_session_rows", "execute_command", "history_page", "get_history",
     "get_available_commands", "_on_command_list_request", "save_session",
     "save_all", "stop_session", "emit_current_state",
-    "_build_session_info_event",
+    "_build_session_info_event", "_spawn_isolated_runner",
 }
 #: Names too common to judge alone: flagged only on these receivers.
 _RECEIVER_SCOPED = {

@@ -3264,6 +3264,12 @@ class JaatoSession:
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
+        # The profile's ``plugin(tools:[...])`` scopes bind execution too
+        # (#1513): an out-of-scope call is refused before the permission
+        # gate, so no whitelist or housekeeping rule can re-admit it.
+        self._executor.set_tool_surface(
+            self.tool_in_surface, self.tool_scope_refusal
+        )
 
         # Get tool schemas and executors from runtime
         self._tools = self._runtime.get_tool_schemas(plugins, preloaded_plugins=self._preloaded_plugins)
@@ -4159,7 +4165,9 @@ class JaatoSession:
                 f"plugin={plugin_name!r}; treating as visible"
             )
 
-        return filter_visible_tool_schemas(registry, scoped, on_error=_on_error)
+        return filter_visible_tool_schemas(
+            registry, scoped, on_error=_on_error, session=self
+        )
 
     def _apply_tool_scopes(
         self, schemas: List['ToolSchema']
@@ -4189,21 +4197,71 @@ class JaatoSession:
             return schemas
         kept: List['ToolSchema'] = []
         for schema in schemas:
-            plugin = registry.get_plugin_for_tool(schema.name)
-            plugin_name = plugin.name if plugin is not None else None
-            allow = (
-                self._tool_scopes.get(plugin_name)
-                if plugin_name is not None
-                else None
-            )
-            if allow is not None and schema.name not in allow:
+            if not self.tool_in_surface(schema.name):
                 self._trace(
                     f"tool_scope: dropping {schema.name!r} "
-                    f"(plugin {plugin_name!r} allow-list={allow})"
+                    f"({self.tool_scope_refusal(schema.name)})"
                 )
                 continue
             kept.append(schema)
         return kept
+
+    def _tool_scope_of(self, tool_name: str) -> Optional[Tuple[str, List[str]]]:
+        """``(plugin_name, allow_list)`` when ``tool_name``'s plugin is
+        scoped by this session's profile, else ``None``.
+
+        A tool with no owning plugin (``signal_completion``,
+        ``askPermission``, core infra) or whose plugin the profile did not
+        scope has no scope.  Never consults another session's scopes.
+        """
+        if not self._tool_scopes:
+            return None
+        registry = getattr(self._runtime, 'registry', None)
+        if registry is None:
+            return None
+        try:
+            plugin = registry.get_plugin_for_tool(tool_name)
+        except Exception:
+            return None
+        if plugin is None:
+            return None
+        allow = self._tool_scopes.get(plugin.name)
+        if allow is None:
+            return None
+        return plugin.name, list(allow)
+
+    def tool_in_surface(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` exists for THIS session under its
+        profile's ``plugin(tools:[...])`` scopes (#1513).
+
+        The ONE predicate behind the four places a scope must hold: the
+        initial wire schema (:meth:`_apply_tool_scopes`), discovery
+        (``filter_visible_tool_schemas``, read by ``list_tools`` /
+        ``get_tool_schemas``), execution (``ToolExecutor`` refuses an
+        out-of-scope call before the permission gate) and plugin hints
+        (``references``' enrichment, #1491).  Per session: the registry
+        and its plugin instances are shared with sibling subagents, the
+        scopes are not.  A tool whose plugin the profile did not scope —
+        including every core / always-initialized tool not named in a
+        scope — is in the surface.
+        """
+        scope = self._tool_scope_of(tool_name)
+        return scope is None or tool_name in scope[1]
+
+    def tool_scope_refusal(self, tool_name: str) -> str:
+        """The sentence naming the scope that excludes ``tool_name``.
+
+        Used by the executor's refusal and the traces, so they say the
+        same thing.  Empty when the tool is in the surface.
+        """
+        scope = self._tool_scope_of(tool_name)
+        if scope is None or tool_name in scope[1]:
+            return ""
+        plugin_name, allow = scope
+        return (
+            f"`{tool_name}` is not available in this session: the profile "
+            f"scopes plugin `{plugin_name}` to [{', '.join(allow)}]"
+        )
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -4916,17 +4974,12 @@ class JaatoSession:
             # a scoped-out tool must not be activatable even if the model
             # discovers it via introspection.  One granularity finer than
             # the plugin filter above.
-            if self._tool_scopes:
-                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
-                if plugin is not None:
-                    allow = self._tool_scopes.get(plugin.name)
-                    if allow is not None and tool_name not in allow:
-                        self._trace(
-                            f"activate_discovered_tools: skipping "
-                            f"'{tool_name}' (outside plugin "
-                            f"'{plugin.name}' allow-list={allow})"
-                        )
-                        continue
+            if not self.tool_in_surface(tool_name):
+                self._trace(
+                    f"activate_discovered_tools: skipping '{tool_name}' "
+                    f"({self.tool_scope_refusal(tool_name)})"
+                )
+                continue
 
             schema = schema_map[tool_name]
             if self._tools is None:
@@ -6011,6 +6064,10 @@ NOTES
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
+            # Enrichers on the shared registry answer for "the current
+            # session" (references' hints ask whether selectReferences is in
+            # its surface, #1491), so name this one before asking them.
+            set_current_session(self)
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
             resolved = resolved_mentions(result.metadata)
@@ -9527,7 +9584,54 @@ NOTES
         """
         gated = self._gate_history_for_active_modalities(
             self._history.messages)
-        return repair_history(gated, trace_fn=self._trace)
+        wire = repair_history(gated, trace_fn=self._trace)
+        self._note_send_estimate(wire)
+        return wire
+
+    def _note_send_estimate(self, wire: List['Message']) -> None:
+        """Snapshot the budget's estimate of the request being built (#1514).
+
+        The calibration of #1440 compares the provider's prompt size for a
+        request with the budget's estimate, and the two must describe the
+        SAME request.  The budget's conversation entry is refreshed at
+        points that do not coincide with the send: on the tool-results
+        path it is refreshed before the results are appended, so a 228k
+        tool result rode on a request whose estimate (161k) never saw it,
+        and the factor came out 2.38x.  So the estimate is taken here, from
+        the very list handed to ``provider.complete()``: the budget's
+        non-conversation sources (system, plugins, tool schemas -- what the
+        request carries beside the history) plus every wire message sized
+        by :meth:`_message_budget_tokens`, the rule the conversation entry
+        itself uses.  Stored messages use its cache; a per-request copy
+        (a gated or repaired message) is counted directly, so the cache
+        keeps describing the stored message.
+
+        Never raises: an estimate that cannot be taken leaves no snapshot,
+        and the response it would have measured changes nothing.
+        """
+        budget = getattr(self, '_instruction_budget', None)
+        if budget is None:
+            return
+        try:
+            include_thought = self._wire_replays_reasoning()
+            conv_entry = budget.get_entry(InstructionSource.CONVERSATION)
+            conv_tracked = conv_entry.total_tokens() if conv_entry else 0
+            others = budget.total_tokens() - conv_tracked
+            stored = {id(m) for m in self._history.messages}
+            conversation = 0
+            for msg in wire:
+                if id(msg) in stored:
+                    conversation += self._message_budget_tokens(
+                        msg, include_thought)
+                else:
+                    conversation += sum(
+                        self._count_tokens(t) for t in message_wire_texts(
+                            msg, include_thought=include_thought))
+                    conversation += message_media_tokens(msg)
+            budget.note_sent_estimate(others + conversation)
+        except Exception:  # noqa: BLE001 - sizing must not fail a send
+            logger.debug("send estimate snapshot failed", exc_info=True)
+            budget.discard_sent_estimate()
 
     def _gate_history_for_active_modalities(
         self, messages: List['Message']
@@ -11485,6 +11589,15 @@ NOTES
         #688) is not a measurement and is skipped, as is a reported prompt
         of zero, which no real request has.
 
+        The figure is compared with the estimate :meth:`_note_send_estimate`
+        took of the SAME request when it was built (#1514), never with the
+        budget's total now: content appended since is not estimation
+        error.  With no snapshot pending, or for an unreported usage, the
+        factor is left as it was.  Each comparison is logged at INFO
+        (``BUDGET_CALIBRATION``) with the snapshot, the figure and the
+        factor, so a factor can always be traced to the request it came
+        from.
+
         :meth:`InstructionBudget.calibrate` records the figure and, beyond
         its margin, makes the GC threshold judge the LARGER of the two.
         A difference beyond the margin in either direction is logged at
@@ -11498,7 +11611,12 @@ NOTES
         # getattr: sessions built with ``__new__`` (duck-typed tests of
         # the accumulator) never ran ``__init__``.
         budget = getattr(self, '_instruction_budget', None)
-        if budget is None or not getattr(usage, 'reported', True):
+        if budget is None:
+            return
+        if not getattr(usage, 'reported', True):
+            # The request is answered; its snapshot must not be paired
+            # with a later response's figure (#1514).
+            budget.discard_sent_estimate()
             return
         try:
             reported = (
@@ -11506,20 +11624,34 @@ NOTES
                 + int(usage.cache_read_tokens or 0)
                 + int(usage.cache_creation_tokens or 0)
             )
-            estimate = budget.total_tokens()
+            estimate = budget.sent_estimate_tokens
             ratio = budget.calibrate(reported)
         except Exception:  # noqa: BLE001 - reporting must not fail a turn
             logger.debug("budget calibration failed", exc_info=True)
             return
-        if ratio is None or getattr(self, '_budget_drift_warned', False):
+        if ratio is None:
+            logger.debug(
+                "BUDGET_CALIBRATION[%s] skipped: sent_estimate=%s provider=%d "
+                "factor=%.3f kept (#1514)",
+                self._agent_id, estimate, reported, budget.calibration_factor,
+            )
+            return
+        # Attributable: which request's estimate met which figure (#1514).
+        logger.info(
+            "BUDGET_CALIBRATION[%s] sent_estimate=%d provider=%d ratio=%.3f "
+            "factor=%.3f",
+            self._agent_id, estimate, reported, ratio,
+            budget.calibration_factor,
+        )
+        if getattr(self, '_budget_drift_warned', False):
             return
         if abs(ratio - 1.0) <= budget.CALIBRATION_MARGIN:
             return
         self._budget_drift_warned = True
         logger.warning(
             "[session:%s] instruction budget estimate %d tokens differs from "
-            "the provider's reported prompt %d tokens (%.0f%%); the GC "
-            "threshold uses the larger figure (#1440)",
+            "the provider's reported prompt %d tokens for the same request "
+            "(%.0f%%); the GC threshold uses the larger figure (#1440)",
             self._agent_id, estimate, reported, (ratio - 1.0) * 100,
         )
 
@@ -13570,6 +13702,7 @@ NOTES
             if self._instruction_budget is not None:
                 self._instruction_budget.calibration_factor = 1.0
                 self._instruction_budget.provider_prompt_tokens = None
+                self._instruction_budget.discard_sent_estimate()
             # On true fresh reset, clear pinned references and remove their
             # content from the system instruction.  GC resets (history provided)
             # preserve pinned references — they stay in the system instruction.

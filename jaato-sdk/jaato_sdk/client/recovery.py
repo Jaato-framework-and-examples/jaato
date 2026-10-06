@@ -902,6 +902,11 @@ class IPCRecoveryClient:
         return await self._memory_client("list_reference_catalog").list_reference_catalog(
             timeout=timeout)
 
+    async def create_reference_bundle(self, name: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.create_reference_bundle`."""
+        return await self._memory_client("create_reference_bundle").create_reference_bundle(
+            name, timeout=timeout)
+
     async def update_reference_links(
         self, reference_id: str, links, *, timeout: float = 10.0,
     ):

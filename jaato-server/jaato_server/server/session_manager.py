@@ -72,6 +72,8 @@ from .memory_verbs import MEMORY_REQUEST_TYPES
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_identity import RunnerIdentity, identity_from_server
+from .runner_user import workspace_file_owner
+from jaato_server.shared.workspace_ownership import make_dirs_owned
 from .session_lifetime import (
     DEFAULT_SWEEP_INTERVAL_SECONDS,
     LifetimeVerdict,
@@ -151,6 +153,7 @@ from jaato_sdk.events import (
     describe_event_type_problems,
 )
 from .workspace_monitor import WorkspaceMonitor
+from jaato_server.shared.workspace_ownership import inherit_owner_tree
 
 
 logger = logging.getLogger(__name__)
@@ -604,6 +607,38 @@ class RuntimeSessionInfo:
     end_reason: Optional[str] = None
 
 
+def _seccomp_for_record(session: Any) -> Optional[Dict[str, Any]]:
+    """The seccomp posture a session record should carry (#1503).
+
+    The running server's value (the runner's own report at bootstrap)
+    wins; otherwise the value restored from the record is kept, so a save
+    made while no runner is attached does not erase it.
+    """
+    live = getattr(getattr(session, "server", None), "seccomp_posture", None)
+    if isinstance(live, dict):
+        return dict(live)
+    restored = getattr(session, "seccomp", None)
+    return dict(restored) if isinstance(restored, dict) else None
+
+
+def _boundary_columns(session: Any) -> Dict[str, Any]:
+    """The confinement columns of one ``session.info`` listing row.
+
+    ``sandbox_mode`` (what the LSM boundary is) and, since #1503,
+    ``seccomp`` (the posture of the syscall filter), each present only
+    when known.
+    """
+    if session is None:
+        return {}
+    out: Dict[str, Any] = {}
+    if session.sandbox_mode:
+        out["sandbox_mode"] = session.sandbox_mode
+    seccomp = _seccomp_for_record(session)
+    if seccomp:
+        out["seccomp"] = seccomp.get("posture")
+    return out
+
+
 def session_picker_fields(info: Any) -> Dict[str, Any]:
     """The session-picker keys every client-facing session row carries.
 
@@ -637,7 +672,11 @@ class Session:
     last_activity: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
-    is_dirty: bool = False  # True if has unsaved changes
+    #: True when the session has changes no save has captured.  Every write
+    #: of ``True`` also bumps :attr:`dirty_generation` (see ``__setattr__``),
+    #: which is what lets ``_save_session`` clear the flag only when nothing
+    #: marked the session dirty AFTER the history it wrote was read (#1542).
+    is_dirty: bool = False
     #: Correlation id of the ``session.new`` that created this session, so an
     #: event answering that create can be matched to it by the CLIENT.
     #:
@@ -697,6 +736,11 @@ class Session:
     #: boundary") rather than by equality — those are different questions and
     #: the string used to be able to answer only the first.
     sandbox_mode: Optional[str] = None
+    #: The seccomp posture of the session's subprocesses (#1503), restored
+    #: from the record; the running server's ``seccomp_posture`` (reported
+    #: by the runner at bootstrap) supersedes it.  See
+    #: :func:`_seccomp_for_record`.
+    seccomp: Optional[Dict[str, Any]] = None
     # The UNRESOLVED inline-profile spec (dict), for sessions created from
     # an inline profile rather than a named one.  Carried so _save_session
     # can persist it (SessionState.profile_spec) → disk-restore reconstructs
@@ -735,6 +779,14 @@ class Session:
     #: rule #1355 applies to history.  ``None`` = nothing decided (or never
     #: learned).
     permission_state: Optional[Dict[str, Any]] = None
+    #: Whether this session's saves are SEALED (#1529, ``server.record_seal``).
+    #: ``True`` for every session the daemon created, and for one revived
+    #: from a sealed record.  ``False`` for one revived from an unsealed
+    #: record whose boundary the revive did not re-decide (a clientless
+    #: wake): sealing it would turn an edited ``sandbox_mode`` into a value
+    #: the next revive trusts, so it stays unsealed and the next revive
+    #: narrows it again.  Never persisted.
+    record_trusted: bool = True
     # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
     # ID stamped at session creation.  Consumed by
     # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
@@ -789,6 +841,49 @@ class Session:
     # save (record 2.10), and restored from disk as a STALE record naming the
     # process of a previous daemon.  ``None`` for a session with no runner.
     runner_identity: Optional['RunnerIdentity'] = None
+    #: How many times ``is_dirty`` has been set to ``True`` (#1542).  Written
+    #: only by ``__setattr__``; ``_save_session`` reads it before fetching
+    #: history and again before clearing the flag.
+    dirty_generation: int = field(default=0, repr=False, compare=False)
+    #: Makes a dirty mark and :meth:`clear_dirty_if_unchanged` atomic with
+    #: respect to each other.
+    _dirty_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
+
+    def clear_dirty_if_unchanged(self, generation: int) -> bool:
+        """Clear ``is_dirty`` only if no mark arrived since *generation*.
+
+        Called by ``_save_session`` with the generation it read before
+        fetching the history it wrote.  Returns whether it cleared.
+        """
+        with self._dirty_lock:
+            if self.dirty_generation != generation:
+                return False
+            object.__setattr__(self, "is_dirty", False)
+            return True
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Count every dirty mark, so a save cannot clear one it did not see.
+
+        The flag is set from about fifteen places, several of them on the
+        event path while an async save is already reading history (a tool
+        call start spawns one).  A save that read history BEFORE a later mark
+        and then wrote ``is_dirty = False`` erased that mark: the unload saw a
+        clean session, skipped its final save and released the runner, and
+        the turn was never persisted (#1542).  Counting here rather than at
+        each call site means a new call site cannot opt out.
+        """
+        lock = self.__dict__.get("_dirty_lock") if name == "is_dirty" else None
+        if lock is None:
+            # Construction (the lock does not exist yet) or another field.
+            object.__setattr__(self, name, value)
+            return
+        with lock:
+            if value:
+                object.__setattr__(
+                    self, "dirty_generation", self.dirty_generation + 1)
+            object.__setattr__(self, name, value)
 
 
 @dataclass
@@ -830,6 +925,12 @@ class SubRunnerHandle:
             Empty when no cgroup was created (no runtime_limits or
             cgroups unavailable).
         created_at: Timestamp for diagnostics + leak detection.
+        confinement: The SELinux :class:`ConfinementHandle` the sub-runner
+            was spawned into (``sub_apparmor_profile`` is then empty), or
+            ``None`` under AppArmor.  Nothing to tear down: labels persist
+            with the workspace.
+        runner_user: The parent runner's :class:`RunnerUser` (#1168), which
+            the sub-runner runs as too, or ``None`` = the daemon's uid.
     """
     parent_session_id: str
     subagent_id: str
@@ -841,6 +942,8 @@ class SubRunnerHandle:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
+    confinement: Optional[Any] = None
+    runner_user: Optional[Any] = None
 
 
 @dataclass
@@ -1119,6 +1222,98 @@ _DELIVERY_FAILURE_REASON = {
 }
 
 
+def _isolated_gc(profile: Any, workspace_path: str, runner_user: Any = None) -> tuple:
+    """``(gc, gc_file)`` for an isolated sub-runner's envelope.
+
+    ``gc`` is the profile's whole ``gc:`` block (``to_dict``, as the main
+    envelope sends it since #1133; this builder used to read a ``config``
+    attribute ``GCProfileConfig`` does not have, so only ``type`` crossed).
+    Without one, ``gc_file`` is the ``gc.json`` the main runner would read,
+    found and read here because the sub-runner's boundary denies it.  The
+    user tier is ``runner_user``'s home when the sub-runner drops to one,
+    as its parent did; the daemon's own home otherwise.
+    """
+    gc_obj = getattr(profile, "gc", None)
+    if gc_obj is not None:
+        return gc_obj.to_dict(), None
+    from jaato_server.shared.plugins.gc import find_gc_file
+
+    home = runner_user.home if runner_user is not None else None
+    path = find_gc_file(workspace_root=workspace_path, home=home)
+    if path is None:
+        return None, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("isolated subagent: %s not used: %s", path, exc)
+        return None, None
+    logger.info("isolated subagent: shipping GC config from %s", path)
+    return None, data
+
+
+def _runner_user_wire(runner_user: Any) -> Optional[Dict[str, Any]]:
+    """A :class:`RunnerUser` in its envelope form, or ``None``."""
+    return runner_user.to_dict() if runner_user is not None else None
+
+
+def _hand_over_isolated_paths(
+    runner_user: Any, isolated_session_id: str, workspace_path: str,
+    log_path: Optional[str], sub_apparmor_profile: str, confinement: Any,
+) -> None:
+    """Hand the sub-runner's daemon-made paths to its user (#1168).
+
+    The same set the main spawn hands over (``runner_owned_paths``): its
+    session tmpdir, ``.jaato/sessions/<id>``, ``.jaato/logs`` and its log.
+    A ``None`` user is a no-op, as there.
+    """
+    from jaato_server.server.confinement_id import session_tmpdir
+    from jaato_server.server.runner_spawn import _confinement_id_of
+    from jaato_server.server.runner_user import (
+        prepare_runner_owned_paths, runner_owned_paths,
+    )
+
+    dirs, files = runner_owned_paths(
+        session_id=isolated_session_id, workspace_path=workspace_path,
+        session_tmp=session_tmpdir(
+            isolated_session_id,
+            _confinement_id_of(sub_apparmor_profile, confinement)),
+        private_tmp=None, workspace_home=None, log_path=log_path)
+    prepare_runner_owned_paths(runner_user, dirs, files)
+
+
+def _rollback_note(cgroup_path: str, sub_profile_name: str) -> str:
+    """What an isolated-spawn failure released, named rather than assumed.
+
+    Under SELinux there is no sub-profile, and a host without cgroups gets
+    no sub-cgroup, so a fixed "sub-cgroup + sub-AppArmor profile rolled
+    back" described resources that were never made.
+    """
+    released = [what for what, held in (
+        ("sub-cgroup", cgroup_path),
+        (f"sub-AppArmor profile {sub_profile_name!r}", sub_profile_name),
+    ) if held]
+    if not released:
+        return "Nothing was provisioned that needed rolling back."
+    return "Rolled back: " + ", ".join(released) + "."
+
+
+def _isolated_descriptor(
+    confinement: Optional[Any], sub_apparmor_profile: str,
+) -> Optional[Dict[str, str]]:
+    """``SessionInitEnvelope.confinement`` for an isolated sub-runner.
+
+    The SELinux handle's descriptor when the sub-runner was provisioned an
+    isolated domain, else the AppArmor sub-profile's.  One writer of the
+    shape the runner's ``lsm_confine.resolve`` reads.
+    """
+    from jaato_server.server.confinement.apparmor import envelope_descriptor
+    from jaato_server.server.confinement.base import selinux_descriptor
+
+    if confinement is not None:
+        return selinux_descriptor(confinement)
+    return envelope_descriptor(sub_apparmor_profile)
+
+
 def _isolated_limits(
     effective: Optional[RuntimeLimits],
     profile: Any,
@@ -1357,6 +1552,64 @@ def _apply_model_override(
     if provider:
         extra["JAATO_PROVIDER"] = provider
     return profile, inline_spec, {**(env_overrides or {}), **extra}, extra
+
+
+@dataclass(frozen=True)
+class RecordTrust:
+    """What a revive may take from the record it read (#1529).
+
+    ``trusted`` is ``True`` only for a record sealed under this daemon's key
+    (:mod:`server.record_seal`).  ``require_disk_profile`` is set for an
+    unsealed record that names a profile: it is revived under that profile
+    as the files say now, or not at all.
+    """
+
+    trusted: bool
+    require_disk_profile: bool = False
+
+
+def revive_arms_confinement(state: Any, trusted: bool) -> Optional[bool]:
+    """The ``apparmor`` opt-in a revive passes to provisioning (#1529).
+
+    ``True`` when the record is unsealed (an edited ``sandbox_mode: null``
+    must not disarm a boundary) or when a sealed record says the daemon
+    armed kernel confinement before.  ``None`` otherwise: no override, so
+    the revive resolves the opt-in a fresh session does (the attaching
+    client's, then the profile's).  Never ``False``, which would override a
+    client that opts in.
+    """
+    if not trusted:
+        return True
+    return True if sandbox_mode_is_kernel(getattr(state, "sandbox_mode", None)) else None
+
+
+def revived_sandbox_mode(
+    state: Any, trusted: bool, provisioned: Optional[str],
+) -> Optional[str]:
+    """The ``sandbox_mode`` a revived ``Session`` records (#1529).
+
+    What provisioning produced now, when it ran.  Otherwise (a clientless
+    revive provisions nothing) the record's value as evidence: as written
+    for a sealed record, and for an unsealed one only a kernel claim, the
+    value that arms the next revive rather than disarming it.
+    """
+    if provisioned is not None:
+        return provisioned
+    recorded = getattr(state, "sandbox_mode", None)
+    if trusted or sandbox_mode_is_kernel(recorded):
+        return recorded
+    return None
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """Whether callable *fn* takes keyword *name* (or ``**kwargs``)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _model_override_metadata(session: Any) -> Dict[str, Any]:
@@ -1811,13 +2064,15 @@ class SessionManager:
         # run (server 0.6.49+).
         self._pre_initialize_hooks: List[Callable] = []
 
-        # #1280: the WS server's provisioning root (``workspace_root``),
-        # handed over by ``JaatoWSServer.set_command_router`` via
-        # :meth:`set_managed_workspace_root`.  ``None`` on an IPC-only
-        # daemon.  Read through :meth:`_managed_workspace_root`, which
-        # threads it into the spawn path so the #1225 workspace HOME and
-        # #1274 workspace venv defaults apply to daemon-managed workspaces.
-        self._managed_workspace_root: Optional[str] = None
+        # #1280: which WS provisioning root (the daemon's own, or an
+        # application's) a workspace lies under, handed over by
+        # ``JaatoWSServer.set_command_router`` via
+        # :meth:`set_managed_root_resolver`.  ``None`` on an IPC-only
+        # daemon.  Read through :meth:`_managed_workspace_root_for_spawn`,
+        # which threads the answer into the spawn path so the #1225
+        # workspace HOME and #1274 workspace venv defaults apply to
+        # daemon-managed workspaces.
+        self._managed_root_resolver: Optional[Callable[[str], Optional[str]]] = None
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
@@ -2260,7 +2515,7 @@ class SessionManager:
             # #1280: grant the #1225 / #1274 managed defaults (workspace venv
             # ``bin`` and home ``.local/bin`` exec) on the path a WUI
             # ``session.new`` takes, as the WS pre-init hook does.
-            managed_workspace_root=self._managed_workspace_root_for_spawn(),
+            managed_workspace_root=self._managed_workspace_root_for_spawn(workspace_path),
         )
 
         # Spawn requires a workspace (cwd target).  Sessions without
@@ -2319,7 +2574,7 @@ class SessionManager:
                 # user's own checkout unless the profile opts in.
                 private_tmp_dir=resolve_session_private_tmp(
                     server, workspace_path,
-                    self._managed_workspace_root_for_spawn()),
+                    self._managed_workspace_root_for_spawn(workspace_path)),
             )
             confinement_required = self._kernel_confinement_available()
 
@@ -2476,66 +2731,56 @@ class SessionManager:
             )
 
     def _workspace_under_ws_root(self, workspace_path: str) -> bool:
-        """Return True iff *workspace_path* is under a running WS
-        server's ``_workspace_root``.
+        """Return True iff *workspace_path* is under one of a running WS
+        server's managed roots (its own or an application's).
 
         Used by ``_provision_ipc_apparmor_and_spawn_runner`` to
         skip its work for sessions the WS hook owns — preventing
         double-provision + double-spawn.
         """
-        ws_server = getattr(self, "_ws_server_ref", None)
-        if ws_server is None:
-            return False
-        ws_root = getattr(ws_server, "_workspace_root", None)
-        if not ws_root:
-            return False
         try:
-            ws_root_real = os.path.realpath(ws_root)
-            sess_real = os.path.realpath(workspace_path)
-            return (
-                sess_real == ws_root_real
-                or sess_real.startswith(ws_root_real + os.sep)
-            )
+            return self._managed_workspace_root_for_spawn(workspace_path) is not None
         except OSError:
             return False
 
-    def set_managed_workspace_root(self, root: Optional[str]) -> None:
-        """#1280: record the WS server's provisioning root.
+    def set_managed_root_resolver(
+        self, resolver: Optional[Callable[[str], Optional[str]]],
+    ) -> None:
+        """#1280: record how to find a workspace's WS provisioning root.
 
         Called by ``JaatoWSServer.set_command_router`` (the seam that also
         registers the WS pre-init hook, so any deployment that has that hook
-        has this value).  It is what makes a workspace "daemon-managed" for
-        the #1225 workspace HOME and #1274 workspace venv defaults.
+        has this resolver).  *resolver* maps a workspace path to the managed
+        root it lies under -- the daemon's own, or an application's -- or
+        ``None``.  That is what makes a workspace "daemon-managed" for the
+        #1225 workspace HOME and #1274 workspace venv defaults.
 
         Not threaded through :meth:`set_apparmor_dependencies` because the
         daemon calls that BEFORE it constructs the WS server, so the
         ``ws_server`` it hands over is ``None`` on every WS daemon.
 
         Args:
-            root: The WS server's ``workspace_root``.  ``None`` (standalone
-                or IPC-only) leaves both defaults off, as before.
+            resolver: ``JaatoWSServer.managed_root_for``.  ``None``
+                (standalone or IPC-only) leaves both defaults off.
         """
-        self._managed_workspace_root = root or None
+        self._managed_root_resolver = resolver
 
-    def _managed_workspace_root_for_spawn(self) -> Optional[str]:
-        """#1280: the provisioning root to thread into a runner spawn.
+    def _managed_workspace_root_for_spawn(self, workspace_path: Optional[str]) -> Optional[str]:
+        """#1280: the managed root *workspace_path* lies under, for a runner spawn.
 
-        The value set by :meth:`set_managed_workspace_root`, else the
-        ``_workspace_root`` of the WS server reference from
-        :meth:`set_apparmor_dependencies` (same root, second route), else
-        ``None``.
-
-        Returned unconditionally when known: whether a given session's
-        workspace is under it is decided downstream by
-        ``workspace_home._is_daemon_managed``, so an IPC or user-CWD
-        workspace outside the root still resolves to "not managed" and its
-        envelope is unchanged.
+        Asked of the resolver set by :meth:`set_managed_root_resolver`, else
+        of the WS server reference from :meth:`set_apparmor_dependencies`
+        (same answer, second route), else ``None``.  ``None`` for a
+        workspace under no managed root (an IPC or user-CWD workspace), so
+        its envelope is unchanged.
         """
-        explicit = getattr(self, "_managed_workspace_root", None)
-        if explicit:
-            return explicit
-        ws_server = getattr(self, "_ws_server_ref", None)
-        return getattr(ws_server, "_workspace_root", None) or None
+        if not workspace_path:
+            return None
+        resolver = getattr(self, "_managed_root_resolver", None)
+        if resolver is None:
+            ws_server = getattr(self, "_ws_server_ref", None)
+            resolver = getattr(ws_server, "managed_root_for", None)
+        return resolver(workspace_path) if resolver is not None else None
 
     def set_selinux_backend(self, backend: Any) -> None:
         """The daemon selected SELinux (``select_backend``); provision with it.
@@ -2582,7 +2827,7 @@ class SessionManager:
             workspace_path=workspace_path, config_root=config_root,
             env_file=env_file, private_tmp_dir=private_tmp_dir,
             managed=_is_daemon_managed(
-                workspace_path, self._managed_workspace_root_for_spawn()),
+                workspace_path, self._managed_workspace_root_for_spawn(workspace_path)),
         ))
         if handle is None:
             self._notify_apparmor(
@@ -2681,6 +2926,10 @@ class SessionManager:
                 workspace_root=workspace_path,
                 loop=daemon_loop,
             )
+            # #1501: an idle-grace profile a live pool slot still wears is
+            # held, not idle.  Read the pool at call time: it is wired
+            # after this manager may be built.
+            self._apparmor_manager.slot_in_use = self._apparmor_slot_in_use
 
         apparmor = self._apparmor_manager
         if not apparmor.is_available():
@@ -2822,26 +3071,134 @@ class SessionManager:
                 prior_session_id, current_session_id, exc,
             )
 
+    def _apparmor_slot_in_use(self, profile_name: str) -> bool:
+        """Is an idle pool slot confined to *profile_name*? (#1501)
+
+        The ``AppArmorManager.slot_in_use`` predicate.  A checked-out slot
+        always has a session, which the manager sees on its own.
+        """
+        pool = getattr(self, "_pool_manager_ref", None)
+        return bool(pool is not None and pool.profile_in_use(profile_name))
+
+    def _apparmor_managers(self) -> List[Any]:
+        """Every AppArmor manager this daemon built: its own and the WS one.
+
+        Each is wired with :meth:`_apparmor_slot_in_use` on the way out, so
+        the WS manager's sweep consults the pool too.
+        """
+        found: List[Any] = []
+        for mgr in (getattr(self, "_apparmor_manager", None),
+                    getattr(getattr(self, "_ws_server_ref", None), "_apparmor", None)):
+            if mgr is None or mgr in found or not hasattr(mgr, "sweep_idle_profiles"):
+                continue
+            if getattr(mgr, "slot_in_use", None) is None:
+                mgr.slot_in_use = self._apparmor_slot_in_use
+            found.append(mgr)
+        return found
+
+    def _sweep_idle_apparmor_profiles(self) -> None:
+        """Unload boundary profiles whose idle grace has passed (#1501)."""
+        for mgr in self._apparmor_managers():
+            mgr.sweep_idle_profiles()
+
+    def _unload_idle_apparmor_profiles(self) -> None:
+        """Daemon stop: unload every idle boundary profile now (#1501)."""
+        for mgr in self._apparmor_managers():
+            try:
+                mgr.unload_idle_profiles()
+            except Exception:  # noqa: BLE001 — shutdown carries on
+                logger.warning("unloading idle AppArmor profiles failed",
+                               exc_info=True)
+
+    def _release_apparmor_boundary(self, session_id: str) -> None:
+        """Release *session_id*'s claim on its AppArmor boundary (#1506).
+
+        The ONE session-end release, called by every path that ends a
+        confined session AFTER ``server.shutdown()`` (so a pooled slot is
+        already back in the pool, wearing the profile, and a cold runner
+        is already gone): unload (:meth:`_do_session_unload` — which the
+        #812 orphan stop, ``session.stop`` and the #1106 grace expiry all
+        reach), :meth:`delete_session`, the cascade refusal, and daemon
+        stop (:meth:`shutdown`).  Before #1506 none of the IPC paths
+        released, so #1501's grace never started and profiles accumulated.
+
+        Goes through ``AppArmorManager.teardown_profile``, whose refcount
+        and grace decide what leaves the kernel: another live session on
+        the boundary keeps it loaded, and so does an idle pool slot
+        wearing it — slot ownership stays with the pool, whose reaper
+        (:meth:`_reap_apparmor_profile_for_dead_slot`) releases it when
+        the last such slot dies.  Asked of every manager this daemon
+        built, and acted on only by the one that provisioned the session.
+        Best effort: a failure is logged, never raised into a teardown.
+        """
+        for mgr in self._apparmor_managers():
+            holds = getattr(mgr, "holds_session", None)
+            try:
+                if holds is None or not holds(session_id):
+                    continue
+                mgr.teardown_profile(session_id)
+            except Exception:  # noqa: BLE001 — a release never blocks a teardown
+                logger.warning(
+                    "AppArmor: releasing the boundary of session %s failed",
+                    session_id, exc_info=True)
+
+    def _stop_apparmor_grace(self) -> None:
+        """Daemon stop: releases from here on unload at once (#1506)."""
+        for mgr in self._apparmor_managers():
+            stop = getattr(mgr, "stop_grace", None)
+            if stop is not None:
+                stop()
+
+    def reconcile_apparmor_profiles(self) -> List[str]:
+        """Daemon start: reclaim orphaned ``jaato-ws-*`` profiles (#1506).
+
+        Uses a manager of its own rather than building the IPC one, which
+        is created lazily from the first session's workspace.  What it may
+        touch is decided by ``AppArmorManager.reclaim_orphaned_profiles``
+        (an owner ledger, the file's uid, every task's label, and this
+        daemon's own slots).  Returns the reclaimed profile names; no-op
+        (``[]``) where AppArmor is unavailable.
+        """
+        from jaato_server.server.apparmor import AppArmorManager
+        try:
+            mgr = AppArmorManager(
+                workspace_root=str(pathlib.Path.home()),
+                loop=getattr(self, "_daemon_loop", None),
+            )
+            mgr.slot_in_use = self._apparmor_slot_in_use
+            return mgr.reclaim_orphaned_profiles()
+        except Exception:  # noqa: BLE001 — the reconcile never blocks a start
+            logger.warning("AppArmor startup reconcile failed", exc_info=True)
+            return []
+
     def _reap_apparmor_profile_for_dead_slot(self, profile_name: str) -> None:
         """``PoolManager.profile_reaper`` — the last wearer has died.
 
         Unloads *profile_name* unless a live session still claims it;
         that second guard lives in ``AppArmorManager.teardown_profile``,
         which is also where the checked-out (non-idle) slots are covered,
-        since such a slot always has a session.
+        since such a slot always has a session.  With two managers (IPC
+        and WS, #1506) a session of EITHER keeps it, and the release is
+        made on the manager that provisioned the boundary, so its grace
+        applies.
 
         Silently does nothing when no AppArmor manager was ever built —
         the pool runs on hosts with no AppArmor at all, and a reaper that
         insisted on one would log noise on every slot teardown.
         """
-        apparmor = getattr(self, "_apparmor_manager", None)
-        if apparmor is None or not apparmor.is_available():
-            return
         prefix = "jaato-ws-"
         if not profile_name.startswith(prefix):
             return
-        apparmor.teardown_profile_by_confinement_id(
-            profile_name[len(prefix):])
+        cid = profile_name[len(prefix):]
+        managers = [m for m in self._apparmor_managers() if m.is_available()]
+        if not managers:
+            return
+        if any(cid in getattr(m, "_confinement_ids", {}).values()
+               for m in managers):
+            return
+        owner = next((m for m in managers
+                      if cid in getattr(m, "_boundary_ids", ())), managers[0])
+        owner.teardown_profile_by_confinement_id(cid)
 
     def _spawn_session_runner_unconditional(
         self,
@@ -2993,7 +3350,7 @@ class SessionManager:
             # and #1274 workspace venv defaults into the envelope.  Both
             # decide per workspace (``_is_daemon_managed``), so an IPC or
             # user-CWD workspace outside the root is unchanged.
-            managed_workspace_root = self._managed_workspace_root_for_spawn()
+            managed_workspace_root = self._managed_workspace_root_for_spawn(workspace_path)
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -3289,75 +3646,22 @@ class SessionManager:
         # name, it can derive it from this session id.
         isolated_session_id = f"{parent_session_id}__sub_{subagent_id}"
 
-        # ── Stage: sub_profile (next stage — §4.3.4) ───────────
-        # Stop here.  Refusing to spawn until §4.3.4 provisions a
-        # sub-AppArmor profile is intentional: the alternative
-        # would be ``profile_name=""`` (unconfined sub-runner),
-        # which weakens security relative to the §4.3 default-
-        # share path callers can use today.  Monotonic security
-        # gradient through the sub-track.
-        # ── Stage: sub_profile — provision sub-AppArmor profile ──
-        # Phase 4 §4.3.4: ask the daemon's AppArmorManager to write
-        # + load a sub-profile named ``jaato-ws-{parent}//{subagent}``.
-        # Standalone-with-prefix-name (not a true hat) per Audit 6.
-        # When AppArmor isn't available (host doesn't support it, or
-        # AppArmorManager isn't wired into this SessionManager
-        # instance), we treat the sub-profile as absent and return
-        # ``stage=sub_profile`` — the isolated-runner spawn requires
-        # kernel confinement.
-        apparmor_manager = self._resolve_apparmor_manager()
-        if apparmor_manager is None or not apparmor_manager.is_available():
-            return {
-                "ok": False,
-                "error": (
-                    f"sub-AppArmor profile cannot be provisioned: "
-                    f"AppArmorManager unavailable on this host.  "
-                    f"Isolated-runner spawn requires kernel-level "
-                    f"confinement.  Profile reconstruction succeeded "
-                    f"(name={profile.name!r}, model={profile.model!r}).  "
-                    f"Would-be isolated session: {isolated_session_id!r}.  "
-                    f"Workaround: set agent_params.isolated=false (or "
-                    f"omit) to use the default-share path (subagent "
-                    f"runs in the parent's runner) — works end-to-end "
-                    f"today.  See docs/design/phase4_implementation_audits.md."
-                ),
-                "stage": "sub_profile",
-                "isolated_session_id": isolated_session_id,
-                "profile_name": profile.name,
-            }
-
-        ok, sub_profile_or_err = apparmor_manager.provision_sub_profile(
-            parent_session_id=parent_session_id,
-            subagent_id=subagent_id,
-            workspace_path=workspace_path,
-            tightenings=sub_profile_tightenings,
-        )
-        if not ok:
-            logger.warning(
-                "_spawn_isolated_runner: sub-profile provision failed "
-                "for parent=%s subagent=%s: %s",
-                parent_session_id, subagent_id, sub_profile_or_err,
-            )
-            return {
-                "ok": False,
-                "error": (
-                    f"sub-AppArmor profile provision failed: "
-                    f"{sub_profile_or_err}.  Profile reconstruction "
-                    f"succeeded (name={profile.name!r}).  Would-be "
-                    f"isolated session: {isolated_session_id!r}.  "
-                    f"Workaround: omit agent_params.isolated."
-                ),
-                "stage": "sub_profile",
-                "isolated_session_id": isolated_session_id,
-                "profile_name": profile.name,
-            }
-
-        sub_profile_name = sub_profile_or_err
-        logger.info(
-            "_spawn_isolated_runner: sub-profile provisioned for "
-            "parent=%s subagent=%s (sub_profile=%s)",
-            parent_session_id, subagent_id, sub_profile_name,
-        )
+        # ── Stage: sub_profile — the sub-runner's kernel boundary ──
+        # AppArmor: a sub-profile (§4.3.4).  SELinux: an isolated domain
+        # at the parent's level (selinux-backend.md §5.3).  No boundary,
+        # no spawn: the alternative is an unconfined sub-runner, weaker
+        # than the default-share path callers can use today.
+        refusal, sub_profile_name, isolated_confinement = (
+            self._provision_isolated_boundary(
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                isolated_session_id=isolated_session_id,
+                workspace_path=workspace_path,
+                tightenings=sub_profile_tightenings,
+                profile=profile,
+            ))
+        if refusal is not None:
+            return refusal
 
         # ── Stage: sub_cgroup — provision sub-cgroup ───────────
         # Phase 4 §4.3.5: when cgroups available + profile declares
@@ -3399,18 +3703,13 @@ class SessionManager:
                 # change the §4.3.5 return shape.  Idempotent
                 # re-load via provision_sub_profile would succeed
                 # anyway, so a stuck-loaded profile is not blocking.
-                try:
-                    apparmor_manager.teardown_sub_profile(
-                        parent_session_id=parent_session_id,
-                        subagent_id=subagent_id,
-                    )
-                except Exception:  # noqa: BLE001 — best-effort
-                    logger.exception(
-                        "_spawn_isolated_runner: sub-AppArmor "
-                        "rollback failed after sub-cgroup provision "
-                        "failure for parent=%s subagent=%s",
-                        parent_session_id, subagent_id,
-                    )
+                self._rollback_isolated_resources(
+                    parent_session_id=parent_session_id,
+                    subagent_id=subagent_id,
+                    isolated_session_id=isolated_session_id,
+                    cgroup_path="",
+                    sub_profile_name=sub_profile_name,
+                )
                 logger.warning(
                     "_spawn_isolated_runner: sub-cgroup provision "
                     "failed for parent=%s subagent=%s "
@@ -3421,8 +3720,8 @@ class SessionManager:
                     "ok": False,
                     "error": (
                         f"sub-cgroup provision failed for isolated "
-                        f"session {isolated_session_id!r}.  Sub-AppArmor "
-                        f"profile {sub_profile_name!r} rolled back.  "
+                        f"session {isolated_session_id!r}.  "
+                        f"{_rollback_note('', sub_profile_name)}  "
                         f"Workaround: omit agent_params.isolated to "
                         f"use default-share path."
                     ),
@@ -3488,8 +3787,10 @@ class SessionManager:
                 sub_apparmor_profile=sub_profile_name,
                 cgroup_path=cgroup_path,
                 profile=profile,
+                confinement=isolated_confinement,
                 effective_runtime_limits=effective_runtime_limits,
                 agent_params=agent_params,
+                runner_user=self._parent_runner_user(parent_session_id),
             )
         except Exception as spawn_exc:  # noqa: BLE001 — boundary
             logger.warning(
@@ -3505,13 +3806,14 @@ class SessionManager:
                 subagent_id=subagent_id,
                 isolated_session_id=isolated_session_id,
                 cgroup_path=cgroup_path,
+                sub_profile_name=sub_profile_name,
             )
             return {
                 "ok": False,
                 "error": (
                     f"sub-runner subprocess spawn failed: "
                     f"{type(spawn_exc).__name__}: {spawn_exc}.  "
-                    f"Sub-cgroup + sub-AppArmor profile rolled back.  "
+                    f"{_rollback_note(cgroup_path, sub_profile_name)}  "
                     f"Workaround: omit agent_params.isolated to use "
                     f"default-share path."
                 ),
@@ -3547,6 +3849,8 @@ class SessionManager:
             isolated_session_id=isolated_session_id,
             workspace_path=workspace_path,
             sub_apparmor_profile=sub_profile_name,
+            confinement=sub_handle.confinement,
+            runner_user=sub_handle.runner_user,
             agent_params=agent_params,
             # #859: a subagent acts for the user who owns its parent.
             created_by=self._creator_of(parent_session_id),
@@ -3601,6 +3905,153 @@ class SessionManager:
             "sub_session_id": isolated_session_id,
         }
 
+    def _provision_isolated_boundary(
+        self, *, parent_session_id: str, subagent_id: str,
+        isolated_session_id: str, workspace_path: str,
+        tightenings: Optional[Dict[str, Any]], profile: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], str, Optional[Any]]:
+        """The isolated sub-runner's kernel boundary, by the selected backend.
+
+        Returns ``(refusal, sub_profile_name, selinux_handle)``: a refusal
+        dict (``stage=sub_profile``) when no boundary could be provisioned,
+        else the AppArmor sub-profile name (``""`` under SELinux) and the
+        SELinux handle (``None`` under AppArmor).
+        """
+        backend = getattr(self, "_selinux_backend", None)
+        if backend is not None:
+            refusal, handle = self._provision_isolated_selinux(
+                backend, isolated_session_id=isolated_session_id,
+                workspace_path=workspace_path, tightenings=tightenings or {},
+                profile=profile,
+            )
+            return refusal, "", handle
+        refusal, name = self._provision_isolated_apparmor(
+            parent_session_id=parent_session_id, subagent_id=subagent_id,
+            isolated_session_id=isolated_session_id,
+            workspace_path=workspace_path, tightenings=tightenings,
+            profile=profile,
+        )
+        return refusal, name, None
+
+    def _provision_isolated_selinux(
+        self, backend: Any, *, isolated_session_id: str, workspace_path: str,
+        tightenings: Dict[str, Any], profile: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
+        """An isolated domain at the parent's level (selinux-backend.md §5.3).
+
+        ``isolated_workspace_subpath`` is refused by name: SELinux cannot
+        scope a domain to part of a tree its level reaches, and running the
+        sub-runner wider than the supervisor asked would be the opposite of
+        the tightening.  ``isolated_read_only_workspace`` picks the
+        read-only domain.
+        """
+        from jaato_server.server.confinement import Boundary
+        from jaato_server.shared.plugins.workspace_home import _is_daemon_managed
+
+        def refuse(why: str) -> Dict[str, Any]:
+            return {
+                "ok": False,
+                "error": (
+                    f"{why}  Profile reconstruction succeeded "
+                    f"(name={profile.name!r}).  Would-be isolated session: "
+                    f"{isolated_session_id!r}."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }
+
+        if tightenings.get("isolated_workspace_subpath"):
+            return refuse(
+                "isolated_workspace_subpath cannot be enforced under SELinux "
+                "(a domain cannot be scoped to a subtree of its workspace; "
+                "selinux-backend.md §5.3).  Refusing rather than running the "
+                "sub-runner over the whole workspace.  Drop the tightening, "
+                "or use agent_params.isolated_read_only_workspace."), None
+        handle = backend.provision_isolated(
+            isolated_session_id,
+            Boundary(
+                workspace_path=workspace_path,
+                managed=_is_daemon_managed(
+                    workspace_path, self._managed_workspace_root_for_spawn(workspace_path)),
+            ),
+            read_only=bool(tightenings.get("isolated_read_only_workspace")),
+        )
+        if handle is None:
+            return refuse(
+                "the SELinux isolated domain could not be provisioned (see "
+                "the daemon log).  Isolated-runner spawn requires kernel-"
+                "level confinement."), None
+        logger.info(
+            "_spawn_isolated_runner: SELinux boundary for %s: %s",
+            isolated_session_id, handle.label,
+        )
+        return None, handle
+
+    def _provision_isolated_apparmor(
+        self, *, parent_session_id: str, subagent_id: str,
+        isolated_session_id: str, workspace_path: str,
+        tightenings: Optional[Dict[str, Any]], profile: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Phase 4 §4.3.4: write and load a sub-profile
+        ``jaato-ws-{parent}//{subagent}`` (standalone, prefix-named per
+        Audit 6).  With no usable AppArmorManager the spawn is refused:
+        it requires kernel confinement.
+        """
+        apparmor_manager = self._resolve_apparmor_manager()
+        if apparmor_manager is None or not apparmor_manager.is_available():
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile cannot be provisioned: "
+                    f"AppArmorManager unavailable on this host.  "
+                    f"Isolated-runner spawn requires kernel-level "
+                    f"confinement.  Profile reconstruction succeeded "
+                    f"(name={profile.name!r}, model={profile.model!r}).  "
+                    f"Would-be isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: set agent_params.isolated=false (or "
+                    f"omit) to use the default-share path (subagent "
+                    f"runs in the parent's runner) — works end-to-end "
+                    f"today.  See docs/design/phase4_implementation_audits.md."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }, ""
+
+        ok, sub_profile_or_err = apparmor_manager.provision_sub_profile(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            workspace_path=workspace_path,
+            tightenings=tightenings,
+        )
+        if not ok:
+            logger.warning(
+                "_spawn_isolated_runner: sub-profile provision failed "
+                "for parent=%s subagent=%s: %s",
+                parent_session_id, subagent_id, sub_profile_or_err,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile provision failed: "
+                    f"{sub_profile_or_err}.  Profile reconstruction "
+                    f"succeeded (name={profile.name!r}).  Would-be "
+                    f"isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: omit agent_params.isolated."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }, ""
+
+        logger.info(
+            "_spawn_isolated_runner: sub-profile provisioned for "
+            "parent=%s subagent=%s (sub_profile=%s)",
+            parent_session_id, subagent_id, sub_profile_or_err,
+        )
+        return None, sub_profile_or_err
+
     def _do_spawn_isolated_runner(
         self,
         *,
@@ -3613,9 +4064,15 @@ class SessionManager:
         profile: Any,  # SubagentProfile
         effective_runtime_limits: RuntimeLimits,
         agent_params: Optional[Dict[str, Any]],
+        confinement: Optional[Any] = None,
+        runner_user: Optional[Any] = None,
     ) -> SubRunnerHandle:
         """Spawn the sub-runner subprocess + initialize its RPC
         channel (Phase 4 §4.3.6a).
+
+        ``runner_user`` is the parent runner's (#1168): the sub-runner runs
+        as that account, and the paths the daemon creates for it are handed
+        over first.  ``None`` keeps the daemon's uid, as for the parent.
 
         Mirrors ``runner_spawn.spawn_session_runner`` but for the
         isolated-subagent path: the daemon doesn't have a full
@@ -3644,6 +4101,14 @@ class SessionManager:
             log_path = os.path.join(
                 log_dir, f"runner-{isolated_session_id}.log",
             )
+            if confinement is not None:
+                # SELinux: the read-only domain may append to a log only
+                # of its own type; a failure refuses the spawn, as a
+                # session tmpdir that cannot be labelled does.
+                self._selinux_backend.prepare_runner_log(confinement, log_path)
+        _hand_over_isolated_paths(
+            runner_user, isolated_session_id, workspace_path, log_path,
+            sub_apparmor_profile, confinement)
 
         # Cgroup attach: when §4.3.5 provisioned a sub-cgroup, build
         # the preexec_fn that migrates the forked child in.  When no
@@ -3673,6 +4138,8 @@ class SessionManager:
             tool_timeout_seconds=effective_runtime_limits.tool_timeout_seconds,
             disable_confine=False,  # Always confined for §4.3.6.
             cgroup_attach=cgroup_attach,
+            confinement=confinement,
+            runner_user=runner_user,
         )
 
         rpc = RunnerRPCClient(
@@ -3691,7 +4158,25 @@ class SessionManager:
             spawned=spawned,
             sub_apparmor_profile=sub_apparmor_profile,
             cgroup_path=cgroup_path,
+            confinement=confinement,
+            runner_user=runner_user,
         )
+
+    def _parent_runner_user(self, parent_session_id: str) -> Optional[Any]:
+        """The parent session's runner user (#1168), or ``None``.
+
+        An isolated sub-runner runs as its parent's runner.  Re-resolving
+        the policy for it would answer wrongly under ``peer`` (a sub-runner
+        has no IPC peer), and the phase 3 kernel run showed the omission: a
+        parent dropped to the workspace owner spawned a ROOT sub-runner that
+        could not write that owner's workspace without ``dac_override``.
+        """
+        from jaato_server.server.runner_spawn import stashed_runner_user
+
+        with self._lock:
+            session = self._sessions.get(parent_session_id)
+        server = getattr(session, "server", None)
+        return stashed_runner_user(server) if server is not None else None
 
     def _creator_of(self, session_id: str) -> Optional[str]:
         """The authenticated user a loaded session was created for, or
@@ -3733,10 +4218,16 @@ class SessionManager:
         sub_apparmor_profile: str,
         agent_params: Optional[Dict[str, Any]],
         created_by: Optional[str] = None,
+        confinement: Optional[Any] = None,
         effective_runtime_limits: Optional[RuntimeLimits] = None,
+        runner_user: Optional[Any] = None,
     ) -> Any:
         """Build a :class:`SessionInitEnvelope` for an isolated
         subagent's runner-side bootstrap (Phase 4 §4.3.6c).
+
+        ``runner_user`` is the parent runner's (#1168): carried as the
+        envelope's ``runner_user`` and used to pick whose ``~/.jaato`` the
+        user-tier snapshot is read from, as the main envelope does.
 
         ``created_by`` is the parent session's authenticated user; it is
         ferried so the isolated runner's telemetry and ledger name the
@@ -3804,13 +4295,7 @@ class SessionManager:
             plugin_specs.append(entry)
 
         system_instructions = getattr(profile, "system_instructions", None)
-        gc_dict = None
-        gc_obj = getattr(profile, "gc", None)
-        if gc_obj is not None:
-            gc_type = getattr(gc_obj, "type", None)
-            gc_config = getattr(gc_obj, "config", None) or {}
-            if gc_type:
-                gc_dict = {"type": gc_type, **dict(gc_config)}
+        gc_dict, gc_file = _isolated_gc(profile, workspace_path, runner_user)
         env_overrides = dict(getattr(profile, "env", {}) or {})
 
         if not provider_name:
@@ -3860,7 +4345,6 @@ class SessionManager:
         # conditional because this builder sits on its complexity
         # baseline.
         from jaato_server.shared.plugins.subagent.config import _runtime_limits_to_dict
-        from jaato_server.server.confinement.apparmor import envelope_descriptor
         from jaato_server.server.runner_spawn import user_tier_snapshot
         _iso_limits = _isolated_limits(effective_runtime_limits, profile)
         _iso_width = getattr(_iso_limits, "max_parallel_tools", None)
@@ -3883,6 +4367,12 @@ class SessionManager:
             system_instructions=system_instructions,
             agent_id="main",
             gc=gc_dict,
+            # The boundary denies the workspace and user config tiers, so
+            # the daemon resolves them and the sub-runner never probes
+            # them (SELinux phase 3 kernel run: a refused stat crashed its
+            # bootstrap, and gc.json was unreachable).
+            config_resolved_by_daemon=True,
+            gc_file=gc_file,
             agent_params=dict(agent_params or {}),
             config_root=None,  # Isolated subagent doesn't inherit.
             env_overrides=env_overrides,
@@ -3900,10 +4390,12 @@ class SessionManager:
             created_by=created_by,
             # v8: the one writer of the descriptor, so the sub-runner's
             # ``lsm_confine.resolve`` reads the shape the main runner does.
-            confinement=envelope_descriptor(sub_apparmor_profile),
-            # #1465: an isolated sub-runner runs as the daemon's uid, so
-            # it reads the daemon's own user tier.
-            user_tier_files=user_tier_snapshot(None),
+            confinement=_isolated_descriptor(confinement, sub_apparmor_profile),
+            # #1168: the sub-runner runs as its parent's runner user, so it
+            # carries that user and that user's tier (#1465), like the
+            # main envelope; ``None`` = the daemon's uid and user tier.
+            runner_user=_runner_user_wire(runner_user),
+            user_tier_files=user_tier_snapshot(runner_user),
         )
 
     def _dispatch_isolated_session_bootstrap(
@@ -4280,9 +4772,14 @@ class SessionManager:
         subagent_id: str,
         isolated_session_id: str,
         cgroup_path: str,
+        sub_profile_name: str,
     ) -> None:
         """Tear down sub-cgroup + sub-AppArmor on §4.3.6a spawn
         failure (Phase 4 §4.3.6a).
+
+        *sub_profile_name* empty means no sub-profile was loaded (an
+        SELinux sub-runner, whose labels need no teardown), so AppArmor
+        is not touched.
 
         Best-effort: each teardown wrapped in try/except.  Rollback
         failures log but don't propagate — the helper's return
@@ -4302,6 +4799,8 @@ class SessionManager:
                 )
 
         # AppArmor next.
+        if not sub_profile_name:
+            return
         try:
             apparmor_manager = self._resolve_apparmor_manager()
             if apparmor_manager is not None:
@@ -4514,8 +5013,8 @@ class SessionManager:
            client).
         5. Build the :class:`Session` record with ``sandbox_mode``
            resolved per the priority chain:
-           a. ``envelope.sandbox_mode`` — disk-restore's pre-known
-              value (the saved Session record's mode).
+           a. ``envelope.sandbox_mode`` — a caller's pre-resolved
+              value (disk-restore passes ``None`` since #1529).
            b. Return value of
               :meth:`_provision_ipc_apparmor_and_spawn_runner`
               (§3.13's inline call) — apparmor opt-in result for
@@ -4654,8 +5153,9 @@ class SessionManager:
         5. ``server.initialize()`` — return ``(None, None)`` on
            failure.
         6. Resolve sandbox_mode: ``envelope.sandbox_mode`` wins
-           (disk-restore's pre-known value); else IPC method
-           result; else None.
+           when a caller pre-resolved one; else IPC method result;
+           else None.  Disk-restore passes ``None`` since #1529, so
+           the revived Session records what provisioning produced.
 
         Returns:
             ``(JaatoServer, sandbox_mode)`` on success;
@@ -4830,8 +5330,9 @@ class SessionManager:
             )
 
         # Resolve sandbox_mode.  Priority:
-        # 1. ``envelope.sandbox_mode`` — authoritative pre-resolved
-        #    value (disk-restore's saved mode).
+        # 1. ``envelope.sandbox_mode`` — a caller's pre-resolved value
+        #    (disk-restore passes None since #1529: the record's mode is
+        #    evidence, never a decision).
         # 2. Result of inline IPC apparmor provisioning.
         # 3. None — no opt-in / non-confined.
         planned_sandbox = envelope.sandbox_mode
@@ -6086,6 +6587,13 @@ class SessionManager:
                     "session-inbox sweep raised — the next pass re-derives "
                     "its state",
                 )
+            try:
+                self._sweep_idle_apparmor_profiles()
+            except Exception:  # noqa: BLE001 — same rule, separate pass
+                logger.exception(
+                    "AppArmor idle-profile sweep raised — the next pass "
+                    "re-derives its state",
+                )
 
     def _sweep_app_secret_expiry(self, now: Optional[float] = None) -> None:
         """Reload sessions whose resolved ``app://`` secret is near expiry (#1226 §6.3).
@@ -7277,6 +7785,22 @@ class SessionManager:
         "provider_trace_log",
     )
 
+    #: What the daemon does with each client-config path on the peer's
+    #: behalf, which decides what the peer must hold on an existing FILE
+    #: there (#1464).  ``working_dir`` / ``config_root`` are trees and get
+    #: ``r-x`` as directories whatever this says; ``env_file`` is read; the
+    #: two trace paths are appended to.  Keyed per field, never derived from
+    #: the name, and every field in :attr:`_CLIENT_CONFIG_PATH_FIELDS` must
+    #: be here (a missing one is a ``KeyError`` on the handshake, not a
+    #: silent default).
+    _CLIENT_CONFIG_PATH_ACCESS = {
+        "working_dir": "read",
+        "config_root": "read",
+        "env_file": "read",
+        "trace_log_path": "write",
+        "provider_trace_log": "write",
+    }
+
     def _reject_relative_client_paths(
         self, client_id: str, event: 'ClientConfigRequest',
     ) -> bool:
@@ -7381,7 +7905,11 @@ class SessionManager:
 
         violations = unreachable_client_paths(
             [
-                (field, getattr(event, field, None) or "")
+                (
+                    field,
+                    getattr(event, field, None) or "",
+                    self._CLIENT_CONFIG_PATH_ACCESS[field],
+                )
                 for field in self._CLIENT_CONFIG_PATH_FIELDS
             ],
             peer,
@@ -10251,6 +10779,7 @@ class SessionManager:
                             "server.shutdown after cascade refusal raised",
                             exc_info=True,
                         )
+                    self._release_apparmor_boundary(session_id)
                     return ""
 
         # Caller-supplied USAGE, pre-charged onto the fresh session via the
@@ -10353,9 +10882,13 @@ class SessionManager:
         # call get_session() to modify session attributes (e.g. sandbox_mode).
         self._run_session_hooks(server, session_id)
 
-        # Start workspace file monitor
+        # Start workspace file monitor.  Its baseline walk is on this
+        # path, before the confirmation, so it gets a phase of its own:
+        # it was where four concurrent creates spent ~45 s (#1553).
         if workspace_path:
             self._start_workspace_monitor(session_id, workspace_path)
+            session_new_timing.mark(
+                "workspace_monitor_started", session_id=session_id)
 
         # Save initial state to disk
         self._save_session(session)
@@ -12429,7 +12962,7 @@ class SessionManager:
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
 
         try:
-            state = self._session_plugin.load(session_id, storage_dir=storage_dir)
+            state = self._read_record(session_id, storage_dir)
             logger.debug(f"_load_session: loaded state for {session_id}")
         except FileNotFoundError:
             logger.debug(f"_load_session: session {session_id} not found on disk")
@@ -12458,23 +12991,15 @@ class SessionManager:
         else:
             init_callback = lambda e: self._emit_to_session(session_id, e)
 
-        # Determine which env_file to use for this session:
-        # 1. If client_id is provided, use client's env_file from their config
-        # 2. If session has workspace_path, try workspace/.env
-        # Sessions are workspace-bound: the workspace determines the .env file,
-        # which in turn determines the provider.
-        session_env_file = None
-        if client_id:
-            client_config = self._client_config.get(client_id, {})
-            if client_config.get('env_file'):
-                session_env_file = client_config['env_file']
-                logger.debug(f"_load_session: using client's env_file: {session_env_file}")
-        if not session_env_file and state.workspace_path:
-            import os
-            workspace_env = os.path.join(state.workspace_path, '.env')
-            if os.path.exists(workspace_env):
-                session_env_file = workspace_env
-                logger.debug(f"_load_session: using workspace env_file: {session_env_file}")
+        # #1529: a record the daemon did not seal is narrowed to what the
+        # daemon can vouch for BEFORE anything below reads it.  ``None`` is
+        # a refusal, already logged and announced.
+        trust = self._apply_record_trust(
+            state, session_id, workspace_path, init_callback)
+        if trust is None:
+            return None
+
+        session_env_file = self._revive_env_file(client_id, state.workspace_path)
 
         # Resolve the SubagentProfile from ``state.profile_name``
         # (persisted post-2.3) so disk-restore re-binds the full
@@ -12513,6 +13038,9 @@ class SessionManager:
             config_root=restore_config_root,
             env_file=session_env_file,
         )
+        if not self._revive_profile_acceptable(
+                trust, restored_profile, state, init_callback):
+            return None
 
         self._attach_budget_ceiling(
             getattr(state, "budget_control", None), restored_profile,
@@ -12558,23 +13086,18 @@ class SessionManager:
             # #859: the creator recorded on the session record (2.9+), so
             # a revived runner session is attributed to the same user.
             created_by=getattr(state, "created_by", None),
-            sandbox_mode=getattr(state, "sandbox_mode", None),
-            # Drive confinement from the SAVED sandbox_mode (precedence-1
-            # apparmor_override in _provision) rather than re-running the
-            # client-driven opt-in — preserves the "use saved sandbox_mode,
-            # don't re-run the opt-in" intent now that a real client_id is
-            # threaded above.  env_file stays a saved-driven override; config_root
-            # is resolved saved→client→<workspace>/.jaato (restore_config_root
-            # above) so a pre-persistence None can't hang the runner.
-            # #1014: ANY kernel mode re-arms confinement on revive, from
-            # either LSM (``apparmor`` is the opt-in flag's historical
-            # name; it means "this session wants a kernel boundary", and
-            # the daemon's selected backend provides it).  The mode is
+            # #1529: the record's ``sandbox_mode`` never decides the revived
+            # boundary and is not handed on as "already decided": the
+            # Session below records what provisioning produced NOW.
+            sandbox_mode=None,
+            # #1529: arm kernel confinement when the SEALED record says the
+            # daemon armed it before, or when the record is not sealed at
+            # all (an edited ``null`` must not disarm it).  Otherwise
+            # ``None``: the same opt-in a fresh session resolves (the
+            # attaching client's, then the profile's).  #1014: the mode is
             # re-decided at provisioning time, so a session that ran
             # complain or permissive does not inherit that posture.
-            apparmor=sandbox_mode_is_kernel(
-                getattr(state, "sandbox_mode", None)
-            ),
+            apparmor=revive_arms_confinement(state, trust.trusted),
             profile=restored_profile,
             # Re-apply the profile's ``suppress_base_instructions`` on restore.
             # Unlike plugins / plugin_configs / system_instructions / gc (which
@@ -12836,7 +13359,16 @@ class SessionManager:
             # exactly what a post-mortem of a finished session wants.
             runner_identity=RunnerIdentity.from_dict(
                 getattr(state, "runner_identity", None), stale=True),
-            sandbox_mode=getattr(state, "sandbox_mode", None),
+            # #1529: what was provisioned now; the record's value only as
+            # evidence where nothing was (see ``revived_sandbox_mode``).
+            sandbox_mode=revived_sandbox_mode(
+                state, trust.trusted, _restore_sandbox),
+            # #1529: an unsealed record is resealed only once its boundary
+            # has been re-decided; until then its saves stay unsealed.
+            record_trusted=self._revive_reseals(
+                trust.trusted, state.workspace_path, _restore_sandbox),
+            # #1503: kept until the new runner reports its own posture.
+            seccomp=getattr(state, "seccomp", None),
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
             inline_profile_spec=getattr(state, "profile_spec", None),
@@ -13205,6 +13737,10 @@ class SessionManager:
         -- would otherwise fetch nothing and write ``[]`` over the record
         the pre-release save wrote correctly.  A server that never had a
         runner still saves ``[]``, as before.
+
+        The WARNING is reserved for a post-release save of a session that is
+        still DIRTY: that is a change no save captured, i.e. lost.  A clean
+        session's late save is superseded and skipped at DEBUG (#1542).
         """
         server = session.server
         if not server:
@@ -13212,6 +13748,14 @@ class SessionManager:
         if getattr(server, "_runner_rpc", None) is not None:
             return server._runner_rpc.session_get_history_threadsafe()
         if getattr(server, "_runner_released", False):
+            if not session.is_dirty:
+                # Superseded: the save before the release (the unload's
+                # final one) captured everything, and this one -- an async
+                # save queued behind it -- has nothing left to write.
+                logger.debug(
+                    "Skipping save of session %s: runner released and "
+                    "nothing changed since the last save", session.session_id)
+                return None
             logger.warning(
                 "Not saving session %s: its runner was already released, so "
                 "its history cannot be read; keeping the record on disk.",
@@ -13407,6 +13951,9 @@ class SessionManager:
                 # ``session.get_history`` RPC instead of the daemon-side
                 # JaatoClient indirection.  Captures in-progress turns
                 # (the agent state cache only updates at turn end).
+                # Read BEFORE the history: a mark made after this point is
+                # one the history below may not contain (#1542).
+                generation = session.dirty_generation
                 history = self._history_for_save(session)
                 if history is None:
                     return False
@@ -13437,6 +13984,11 @@ class SessionManager:
                     )
                 else:
                     storage_dir = pathlib.Path(self._session_config.storage_path)
+                # #1528: under a runner-uid policy that drops, the record and
+                # the state files beside it are the workspace owner's, created
+                # owned by them.  ``None`` (the default policy, or no
+                # workspace) writes as the daemon, exactly as before.
+                record_owner = workspace_file_owner(session.workspace_path)
 
                 # Get subagent state if subagent plugin is available
                 subagent_metadata = {}
@@ -13453,12 +14005,14 @@ class SessionManager:
                                 subagent_plugin,
                                 subagent_registry.get('agents', []),
                                 storage_dir=storage_dir,
+                                owner=record_owner,
                             )
 
                 # Save TODO plugin state
                 session_dir = storage_dir / session.session_id
                 if session.server:
-                    self._save_todo_state(session.server, session_dir)
+                    self._save_todo_state(
+                        session.server, session_dir, owner=record_owner)
 
                 # Generic plugin state persistence: iterate all exposed plugins
                 # and collect state from any that implement get_persistence_state().
@@ -13632,6 +14186,8 @@ class SessionManager:
                     # the SAME AppArmor mode on runner re-spawn (else the revive read
                     # of state.sandbox_mode was always None → unconfined revive).
                     sandbox_mode=session.sandbox_mode,
+                    # #1503: the seccomp half of the boundary, beside it.
+                    seccomp=_seccomp_for_record(session),
                     agent_name=agent_name,
                     metadata=subagent_metadata,
                     budget_state=budget_state,
@@ -13644,8 +14200,14 @@ class SessionManager:
                     end_reason=session.end_reason,
                 )
 
-                self._session_plugin.save(state, storage_dir=storage_dir)
-                session.is_dirty = False
+                self._write_record(
+                    state, storage_dir, record_owner,
+                    seal=session.record_trusted)
+                # Clear only what this save captured.  A mark made while it
+                # ran (a turn ending under an async save started at a tool
+                # call) stays set, so the next save -- the unload's final
+                # one in particular -- is not skipped (#1542).
+                session.clear_dirty_if_unchanged(generation)
 
                 logger.debug(f"Saved session: {session.session_id}")
                 return True
@@ -13683,6 +14245,11 @@ class SessionManager:
            ``JAATO_REVIVE_PROFILE=disk`` opt-in, which interrogation needs
            because a ``JAATO_PROFILE_SET`` switch is resolved inside
            ``discover_profiles`` and a frozen profile would make it inert.
+
+        Since #1529 this only sees a snapshot from a record the daemon
+        SEALED: ``_apply_record_trust`` drops it from any other, so an
+        unsealed record resolves through (3), and the caller refuses the
+        revive when (3) finds nothing.
 
         A snapshot that fails to rebuild falls through to (3) rather than
         failing the load: the worst case is the pre-#787 behaviour, and a
@@ -13974,12 +14541,191 @@ class SessionManager:
         })
         logger.debug(f"Configured TODO storage at: {plans_dir}")
 
-    def _save_todo_state(self, server: JaatoServer, session_dir: pathlib.Path) -> None:
+    def _write_record(
+        self,
+        state: Any,
+        storage_dir: pathlib.Path,
+        owner: Optional[Tuple[int, int]],
+        seal: bool = True,
+    ) -> None:
+        """Hand *state* to the session plugin, as *owner* when one is set (#1528).
+
+        ``owner`` is passed only when set, so a session plugin that predates
+        the keyword (any implementation other than ``FileSessionPlugin``) is
+        called exactly as before under the default policy.
+
+        ``seal`` (#1529): when true and the daemon holds a record key, the
+        record is sealed (:mod:`server.record_seal`) so a revive can tell it
+        from one a session edited.  ``False`` for a session restored from an
+        unsealed record whose boundary has not been re-decided yet
+        (``Session.record_trusted``).  Passed only to a plugin whose
+        ``save`` takes the keyword.
+        """
+        kwargs: Dict[str, Any] = {"storage_dir": storage_dir}
+        if owner is not None:
+            kwargs["owner"] = owner
+        sealer = self._record_sealer() if seal else None
+        if sealer is not None and _accepts_kwarg(self._session_plugin.save, "seal"):
+            kwargs["seal"] = sealer
+        self._session_plugin.save(state, **kwargs)
+
+    def _record_sealer(self) -> Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]:
+        """``record_seal.seal`` bound to the daemon's key, or ``None`` (#1529)."""
+        from jaato_server.server import record_seal
+        key = record_seal.load_key()
+        if key is None:
+            return None
+        return lambda data: record_seal.seal(data, key)
+
+    def _read_record(self, session_id: str, storage_dir: Optional[pathlib.Path]) -> Any:
+        """Load a record, asking whether it carries the daemon's seal (#1529).
+
+        ``state.record_verified`` is ``True`` only for a record sealed under
+        this daemon's key.  A session plugin whose ``load`` takes no
+        ``verify`` keyword leaves it ``None``, which the revive reads as
+        unverified: an implementation that cannot say is not trusted.
+        """
+        if not _accepts_kwarg(self._session_plugin.load, "verify"):
+            return self._session_plugin.load(session_id, storage_dir=storage_dir)
+        from jaato_server.server import record_seal
+        key = record_seal.load_key()
+        return self._session_plugin.load(
+            session_id, storage_dir=storage_dir,
+            verify=lambda data: record_seal.verify(data, key))
+
+    def _apply_record_trust(
+        self,
+        state: Any,
+        session_id: str,
+        workspace_path: Optional[str],
+        announce: Callable[[Any], None],
+    ) -> Optional["RecordTrust"]:
+        """Decide what a revive may take from *state*; ``None`` refuses it.
+
+        A sealed record (``record_verified is True``) is used as written.
+        Any other is rewritten by :func:`server.record_distrust.distrust_record`
+        to what the daemon can vouch for: the workspace it was read from (or
+        the daemon's index), the index's membership facts, no snapshot (the
+        profile comes from disk), narrowed permission rules.  One WARNING
+        names every field changed, by key only.  An inline-profile record
+        cannot be re-derived and is refused, announced on *announce* as an
+        ``ErrorEvent`` so an attaching client sees why.
+        """
+        if getattr(state, "record_verified", None) is True:
+            return RecordTrust(trusted=True)
+        from jaato_server.server.record_distrust import distrust_record
+        index = self._session_workspace_index
+        outcome = distrust_record(
+            state,
+            loaded_from=workspace_path,
+            indexed_workspace=None if workspace_path else index.resolve(session_id),
+            membership=index.membership(session_id),
+        )
+        logger.warning(
+            "session %s: its record carries no valid daemon seal (written "
+            "before #1529, edited, or written by another process); reviving "
+            "from what the daemon can vouch for.  Changed: %s",
+            session_id, "; ".join(outcome.changes) or "nothing")
+        if outcome.refusal:
+            self._refuse_untrusted_revive(session_id, outcome.refusal, announce)
+            return None
+        return RecordTrust(
+            trusted=False, require_disk_profile=outcome.require_disk_profile)
+
+    @staticmethod
+    def _refuse_untrusted_revive(
+        session_id: str, reason: str, announce: Callable[[Any], None],
+    ) -> None:
+        """Log and announce a refused revive of an unsealed record (#1529)."""
+        message = (f"session {session_id} cannot be revived: its record is not "
+                   f"sealed by this daemon and {reason}")
+        logger.error("_load_session: %s", message)
+        try:
+            announce(ErrorEvent(
+                error=message, error_type="SessionRecordUntrusted",
+                recoverable=False))
+        except Exception:  # noqa: BLE001 -- the refusal stands either way
+            logger.debug("could not announce the refusal", exc_info=True)
+
+    def _revive_profile_acceptable(
+        self,
+        trust: "RecordTrust",
+        profile: Optional[Any],
+        state: Any,
+        announce: Callable[[Any], None],
+    ) -> bool:
+        """Refuse an unsealed record whose named profile no longer resolves.
+
+        Falling back to an env-only session would give it the default
+        plugin set, which may be wider than the profile it ran under
+        (#1529).  A sealed record keeps the pre-existing behaviour.
+        """
+        if not trust.require_disk_profile or profile is not None:
+            return True
+        self._refuse_untrusted_revive(
+            state.session_id,
+            f"its profile {state.profile_name!r} does not resolve from disk",
+            announce)
+        return False
+
+    def _revive_env_file(
+        self, client_id: Optional[str], workspace_path: Optional[str],
+    ) -> Optional[str]:
+        """The ``.env`` a revived session reads.
+
+        1. the attaching client's ``env_file`` (its ``ClientConfigRequest``);
+        2. else ``<workspace>/.env`` when it exists.
+
+        Sessions are workspace-bound: the workspace determines the ``.env``,
+        which in turn determines the provider.  Lifted out of
+        ``_load_session_impl`` unchanged.
+        """
+        if client_id:
+            env_file = self._client_config.get(client_id, {}).get('env_file')
+            if env_file:
+                logger.debug(f"_load_session: using client's env_file: {env_file}")
+                return env_file
+        if workspace_path:
+            workspace_env = os.path.join(workspace_path, '.env')
+            if os.path.exists(workspace_env):
+                logger.debug(f"_load_session: using workspace env_file: {workspace_env}")
+                return workspace_env
+        return None
+
+    def _revive_reseals(
+        self,
+        trusted: bool,
+        workspace_path: Optional[str],
+        provisioned: Optional[str],
+    ) -> bool:
+        """Whether a revived session's saves are sealed again (#1529).
+
+        A sealed record stays sealed.  An unsealed one is resealed once the
+        daemon has decided its boundary itself: a provisioning result, a
+        workspace under the WS root (the WS hook confines from the root, not
+        the record), or no workspace at all (no runner to confine).  A
+        clientless revive provisions nothing, and sealing it would launder an
+        edited ``sandbox_mode: null`` into a record the next revive trusts;
+        so its saves stay unsealed and the next revive narrows again.
+        """
+        if trusted or provisioned is not None or not workspace_path:
+            return True
+        return self._workspace_under_ws_root(workspace_path)
+
+    def _save_todo_state(
+        self,
+        server: JaatoServer,
+        session_dir: pathlib.Path,
+        owner: Optional[Tuple[int, int]] = None,
+    ) -> None:
         """Save TODO plugin state (agent-plan mapping, blocked steps).
 
         Args:
             server: The JaatoServer instance.
             session_dir: The session's storage directory.
+            owner: ``(uid, gid)`` the state file (and any directory this
+                creates) is written as, from
+                :func:`server.runner_user.workspace_file_owner` (#1528).
         """
         todo_plugin = self._get_todo_plugin(server)
         if not todo_plugin or not hasattr(todo_plugin, 'get_persistence_state'):
@@ -13994,7 +14740,7 @@ class SessionManager:
         state_path = (session_dir / "plans" / "_state.json").resolve()
         try:
             from jaato_server.shared.atomic_write import atomic_write_json
-            atomic_write_json(state_path, state)
+            atomic_write_json(state_path, state, owner=owner)
             logger.debug(f"Saved TODO state: {state_path}")
         except Exception as e:
             logger.error(f"Failed to save TODO state: {e}")
@@ -14029,8 +14775,12 @@ class SessionManager:
         subagent_plugin: Any,
         agents: List[Dict[str, Any]],
         storage_dir: Optional[pathlib.Path] = None,
+        owner: Optional[Tuple[int, int]] = None,
     ) -> None:
         """Save per-agent state files for subagents.
+
+        ``owner`` is the record's (#1528): the ``subagents/`` directory and
+        each state file are created as that account when it is set.
 
         Args:
             session_id: The parent session ID.
@@ -14041,7 +14791,7 @@ class SessionManager:
         # Create subagents directory
         base = storage_dir or pathlib.Path(self._session_config.storage_path)
         subagents_dir = base / session_id / "subagents"
-        subagents_dir.mkdir(parents=True, exist_ok=True)
+        make_dirs_owned(str(subagents_dir), owner)
 
         for agent_info in agents:
             agent_id = agent_info.get('agent_id')
@@ -14059,7 +14809,7 @@ class SessionManager:
             agent_file = subagents_dir / f"{agent_id}.json"
             try:
                 from jaato_server.shared.atomic_write import atomic_write_json
-                atomic_write_json(agent_file, full_state)
+                atomic_write_json(agent_file, full_state, owner=owner)
                 logger.debug(f"Saved subagent state: {agent_file}")
             except Exception as e:
                 logger.error(f"Failed to save subagent {agent_id}: {e}")
@@ -14251,7 +15001,11 @@ class SessionManager:
 
         # Save before unloading.  Now running on a real thread so
         # session_get_history_threadsafe + budget snapshot RPCs work
-        # without deadlocking.
+        # without deadlocking.  THE ORDER IS THE POINT (#1542): save, then
+        # ``server.shutdown()`` releases the runner, then the AppArmor
+        # boundary is released.  A save after the release cannot read the
+        # history.  ``is_dirty`` is trustworthy here because a save clears
+        # only the marks it captured (``Session.clear_dirty_if_unchanged``).
         if session.is_dirty:
             self._save_session(session)
 
@@ -14293,6 +15047,8 @@ class SessionManager:
                 "Unload: server.shutdown raised for session %s — "
                 "removing from sessions anyway", session_id,
             )
+        # After the shutdown: its slot is back in the pool by now (#1506).
+        self._release_apparmor_boundary(session_id)
         with self._lock:
             self._sessions.pop(session_id, None)
             # The grace clock belongs to a LOADED session; drop it with the
@@ -14656,6 +15412,7 @@ class SessionManager:
         # already popped above, so nothing else can reach it.
         if session is not None:
             session.server.shutdown()
+        self._release_apparmor_boundary(session_id)
 
         # Stop the session's egress proxy if one was started (Phase 5 §5.11).
         # Idempotent + guarded — a no-op for sessions without an allowlist.
@@ -15096,9 +15853,7 @@ class SessionManager:
                 "workspace_path": s.workspace_path or "",
                 **session_picker_fields(s),
             }
-            sess = session_lookup.get(s.session_id)
-            if sess and sess.sandbox_mode:
-                entry["sandbox_mode"] = sess.sandbox_mode
+            entry.update(_boundary_columns(session_lookup.get(s.session_id)))
             sessions_data.append(entry)
 
         # Get tools list from the session's server
@@ -15295,6 +16050,12 @@ class SessionManager:
                 shutil.rmtree(dest_dir, ignore_errors=True)
             raise
 
+        # The replay area sits in the requester's workspace and its runner
+        # reads (and cleans) it, so it belongs to that workspace's owner.
+        inherit_owner_tree(
+            os.path.join(requester_workspace, ".jaato", "replay"),
+            requester_workspace,
+        )
         logger.info(
             "Snapshot workspace '%s' → '%s' (commit=%s)",
             workspace, dest_dir, source_commit,
@@ -16634,9 +17395,13 @@ class SessionManager:
             # the loop waits for the lock.
             closing = list(self._sessions.values())
 
+        # #1506: nothing released on the way out may enter a grace that no
+        # watchdog will ever expire; pool slots reaped after this unload too.
+        self._stop_apparmor_grace()
         for session in closing:
             self._save_session(session)
             session.server.shutdown()
+            self._release_apparmor_boundary(session.session_id)
 
         with self._lock:
             self._sessions.clear()
@@ -16653,6 +17418,10 @@ class SessionManager:
             _egress_wireup.shutdown_all()
         except Exception:  # pragma: no cover - defensive
             logger.warning("egress proxy shutdown_all failed", exc_info=True)
+
+        # #1501: a boundary kept loaded for its grace does not outlive the
+        # daemon.  Held profiles (a live slot) are left to the pool reaper.
+        self._unload_idle_apparmor_profiles()
 
         self._session_plugin.shutdown()
         logger.info("SessionManager shutdown complete")

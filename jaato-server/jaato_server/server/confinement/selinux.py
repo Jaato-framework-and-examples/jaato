@@ -32,9 +32,11 @@ import ctypes
 import logging
 import os
 import platform
+import re
+import stat
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_server.server.confinement import selinux_labels
 from jaato_server.server.confinement.base import Boundary, ConfinementHandle
@@ -52,17 +54,50 @@ from jaato_server.shared.lsm_label import (
 
 logger = logging.getLogger(__name__)
 
-#: The policy module version this build needs (design §4).
-REQUIRED_POLICY_VERSION = 1
+#: The policy module version this build needs (design §4).  v2: the
+#: isolated domains and the agent-config and prompts types (phase 3).
+#: v3: the sub-runner log type.  v4: the daemon's domains may
+#: dyntransition into the runner, how a pool slot enters it (phase 4).
+REQUIRED_POLICY_VERSION = 4
 
 #: The type ``jaato.fc`` gives ``~/.jaato`` itself (search only).
 USER_DIR_TYPE = "jaato_user_dir_t"
+
+#: The user tier ``jaato.fc`` labels, as (type, the regex under
+#: ``<home>/\.jaato``, ``semanage -f`` file type or ``""`` for all).  Kept
+#: in step with ``jaato.fc`` (a test compares them); the doctor renders these
+#: as ``semanage fcontext`` rules for a ``HOME`` the module's own patterns do
+#: not cover (``/root`` and ``HOME_DIR`` only).
+USER_TIER_FCONTEXTS: Tuple[Tuple[str, str, str], ...] = (
+    (USER_DIR_TYPE, "", "d"),
+    ("jaato_user_config_t", "/(agents|profiles|references|services)(/.*)?", ""),
+    ("jaato_user_config_t", "/gc\\.json", "f"),
+    ("jaato_user_config_t", "/memories\\.jsonl", "f"),
+    ("jaato_user_data_t", "/(memories|prompts|skills)(/.*)?", ""),
+)
+
+
+def user_tier_fcontext_commands(user_dir: str) -> List[str]:
+    """The commands that label *user_dir* (a ``~/.jaato``) where
+    ``jaato.fc`` has no rule for it, ending with the ``restorecon``."""
+    base = re.escape(os.path.normpath(user_dir))
+    rules = [f"semanage fcontext -a {f'-f {ftype} ' if ftype else ''}"
+             f"-t {kind} '{base}{tail}'"
+             for kind, tail, ftype in USER_TIER_FCONTEXTS]
+    return rules + [f"restorecon -Rv {user_dir}"]
 
 #: jaato's runner domain, as a context the kernel can validate.
 RUNNER_PROBE_CONTEXT = "system_u:system_r:jaato_runner_t:s0"
 
 RUNNER_DOMAIN = "jaato_runner_t"
 CHILD_DOMAIN = "jaato_child_t"
+
+#: An isolated subagent's sub-runner, and its read-only variant (design
+#: §5.3).  Flat, as the AppArmor sub-profile is: no child domain, so a
+#: subprocess would stay in the same domain (and the policy grants it
+#: nothing to exec).
+ISOLATED_DOMAIN = "jaato_isolated_t"
+ISOLATED_RO_DOMAIN = "jaato_isolated_ro_t"
 
 SELINUX_MOUNT = "/sys/fs/selinux"
 
@@ -147,6 +182,20 @@ class _Kernel:
         ) != 0:
             return None
         return bool(avd.allowed & bit)
+
+    def default_context(self, path: str, mode: int) -> Optional[str]:
+        """``matchpathcon``: the label ``restorecon`` would give *path*.
+
+        ``None`` when the file-context database could not be asked or has
+        no entry for it.
+        """
+        fn = self._lib.matchpathcon
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_char_p)]
+        fn.restype = ctypes.c_int
+        out = ctypes.c_char_p()
+        if fn(path.encode("utf-8"), mode, ctypes.byref(out)) < 0 or not out.value:
+            return None
+        return out.value.decode("utf-8", "replace")
 
     def set_file_context(self, path: str, context: str) -> None:
         """``lsetfilecon``: label *path* itself, never a symlink's target."""
@@ -238,8 +287,12 @@ class SELinuxBackend:
         Returns:
             ``mode`` (enforcing / permissive), ``runner_domain`` (whether
             the policy has made ``jaato_runner_t`` permissive), the
-            interpreter and its label, and ``~/.jaato`` and its label
-            (``None`` where one could not be read).
+            interpreter and its label, ``~/.jaato`` and its label
+            (``None`` where one could not be read), the label
+            ``restorecon`` would give it (``user_dir_default_label``,
+            ``None`` when unknown), and ``policy_version``:
+            the module version readiness found the marker for, since a host
+            reaching this method has passed that check.
         """
         kernel = self._kernel_factory()
         enforcing = self.host_readiness().enforcing
@@ -256,6 +309,10 @@ class SELinuxBackend:
             "user_dir_label": (
                 kernel.link_context(user_dir)
                 if kernel and os.path.lexists(user_dir) else None),
+            "user_dir_default_label": (
+                kernel.default_context(user_dir, stat.S_IFDIR)
+                if kernel and os.path.lexists(user_dir) else None),
+            "policy_version": str(REQUIRED_POLICY_VERSION),
         }
 
     def _level_table(self) -> LevelTable:
@@ -263,20 +320,26 @@ class SELinuxBackend:
             self._levels = LevelTable()
         return self._levels
 
-    def confinement_id_for_boundary(self, boundary: Boundary) -> str:
+    def confinement_id_for_boundary(
+        self, boundary: Boundary, domain: str = RUNNER_DOMAIN,
+    ) -> str:
         """Slug plus a digest of what the runner may do (design §5.2).
 
         Nothing is rendered under SELinux, so the digest covers the inputs
-        that change the boundary: policy version, level, managed, private
-        ``/tmp``.  Allocates the workspace's level on first use.
+        that change the boundary: policy version, domain, level, managed,
+        private ``/tmp``.  The domain is part of it because an isolated
+        sub-runner shares its parent's level and is still a different
+        boundary.  Allocates the workspace's level on first use.
         """
         workspace = os.path.realpath(boundary.workspace_path)
         level = self._level_table().level_for(workspace)
+        domain_part = "" if domain == RUNNER_DOMAIN else f" domain={domain}"
         return _confinement_id(
             workspace_root=workspace, config_root=boundary.config_root,
             rendered_body=(
                 f"selinux policy=v{REQUIRED_POLICY_VERSION} level={level} "
                 f"managed={boundary.managed} private_tmp={boundary.private_tmp_dir or ''}"
+                f"{domain_part}"
             ),
         )
 
@@ -289,6 +352,27 @@ class SELinuxBackend:
         label that would not apply, an unreadable own context.  A caller
         that required confinement then refuses the session.
         """
+        return self._provision(session_id, boundary, RUNNER_DOMAIN, CHILD_DOMAIN)
+
+    def provision_isolated(
+        self, session_id: str, boundary: Boundary, *, read_only: bool,
+    ) -> Optional[ConfinementHandle]:
+        """An isolated subagent's sub-runner, at its parent's level (§5.3).
+
+        The sub-runner works in its parent's workspace, so it runs at that
+        workspace's level; what isolates it is the domain.  Flat: the child
+        label is its own label.  *read_only* is the
+        ``isolated_read_only_workspace`` tightening.  The
+        ``isolated_workspace_subpath`` tightening has no SELinux form and
+        is refused by the caller before this is reached.
+        """
+        domain = ISOLATED_RO_DOMAIN if read_only else ISOLATED_DOMAIN
+        return self._provision(session_id, boundary, domain, domain)
+
+    def _provision(
+        self, session_id: str, boundary: Boundary, domain: str, child_domain: str,
+    ) -> Optional[ConfinementHandle]:
+        """The steps both entry points share; *domain* names the boundary."""
         if not self.is_available():
             logger.error("SELinux provision for %s: backend unavailable (%s)",
                          session_id, self.unavailable_reason)
@@ -302,6 +386,12 @@ class SELinuxBackend:
         try:
             selinux_labels.check_root(workspace)
             level = self._level_table().level_for(workspace)
+            label = f"{own.user}:{own.role}:{domain}:{level}"
+            child_label = f"{own.user}:{own.role}:{child_domain}:{level}"
+            blocked = _unsearchable_ancestor(
+                kernel, workspace, (label, child_label))
+            if blocked is not None:
+                raise ValueError(blocked)
             plan = selinux_labels.Plan(
                 workspace=workspace, level=level, managed=boundary.managed,
                 private_tmp_dir=(os.path.realpath(boundary.private_tmp_dir)
@@ -312,15 +402,15 @@ class SELinuxBackend:
             logger.error("SELinux provision for %s at %s failed: %s",
                          session_id, workspace, exc)
             return None
-        label = f"{own.user}:{own.role}:{RUNNER_DOMAIN}:{level}"
         permissive = self._domain_permissive(label)
         handle = ConfinementHandle(
             backend=BACKEND_SELINUX,
             label=label,
-            confinement_id=self.confinement_id_for_boundary(boundary),
-            child_label=f"{own.user}:{own.role}:{CHILD_DOMAIN}:{level}",
-            grants=_grants(plan, label),
+            confinement_id=self.confinement_id_for_boundary(boundary, domain),
+            child_label=child_label,
+            grants=_grants(plan, label, domain, child_domain),
             complain=(permissive is True or self.host_readiness().enforcing is False),
+            enforcing_attested=self._attest_enforcing(label, child_label, permissive),
         )
         # The session tmpdir, before the spawn: the runner has no add_name
         # in /tmp and no write on user_tmp_t, so a directory it did not get
@@ -334,6 +424,22 @@ class SELinuxBackend:
                          "labelled: %s", session_id, exc)
             return None
         return handle
+
+    def _attest_enforcing(
+        self, label: str, child_label: str, permissive: Optional[bool],
+    ) -> bool:
+        """Positive evidence the kernel enforces both domains (#1519).
+
+        The host switch read now (not the cached readiness), and neither the
+        runner's domain nor the child's permissive.  The child domain is
+        asked separately: ``semanage permissive -a jaato_child_t`` leaves the
+        runner enforcing.  Any half unread is ``False``.
+        """
+        if self._host_enforcing() is not True or permissive is not False:
+            return False
+        if child_label == label:
+            return True
+        return self._domain_permissive(child_label) is False
 
     def _ensure_labelled(self, kernel: "_Kernel", plan: "selinux_labels.Plan") -> None:
         """Walk and label unless the stamp and the root's label say done."""
@@ -372,17 +478,82 @@ class SELinuxBackend:
         for entry in (parent, path):
             kernel.set_file_context(entry, target)
 
+    def prepare_runner_log(self, handle: ConfinementHandle, path: str) -> None:
+        """Create an isolated sub-runner's log as ``jaato_runner_log_t``.
+
+        The read-only isolated domain may write nothing in the workspace,
+        its log included, unless the log carries a type of its own that
+        it may append to (phase 3 kernel run: no log at all). Created here,
+        before the spawn, with the mode the spawner would use; the
+        spawner's ``O_CREAT`` then finds it.
+        """
+        kernel = self._kernel_factory()
+        ctx = parse_selinux_context(handle.label)
+        if kernel is None or ctx is None:
+            raise OSError(f"cannot label {path}: no libselinux or bad label {handle.label!r}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+        kernel.set_file_context(path, selinux_labels.file_context(
+            selinux_labels.RUNNER_LOG_TYPE, ctx.level))
+
     def release(self, handle: ConfinementHandle) -> None:
         """Nothing to unload: labels persist with the workspace (design §6)."""
         return None
 
 
-def _grants(plan: "selinux_labels.Plan", label: str) -> Dict[str, Any]:
+def _unsearchable_ancestor(
+    kernel: _Kernel, workspace: str, labels: Tuple[str, ...],
+) -> Optional[str]:
+    """Why a runner could not reach *workspace*, or ``None`` when it can.
+
+    The daemon labels the workspace tree, never its ancestors, and a runner
+    must ``search`` every one of them to reach its own workspace.  A
+    workspace under a ``mktemp -d`` directory in ``/tmp`` (``user_tmp_t``)
+    is the common case: without this check the session is labelled, the
+    runner starts, and its bootstrap dies on an ``EACCES`` for
+    ``.jaato/permissions.json`` that names nothing about the cause.
+
+    Asks the policy (``security_compute_av``) for each ancestor and each of
+    *labels*.  Only a definite refusal counts (#1014's rule, inverted for a
+    refusal): an ancestor whose label could not be read, or a question the
+    policy could not answer, is not reported, and the kernel decides.
+
+    Returns:
+        A sentence naming the ancestor, its context and the domain that
+        cannot search it, with the remedies; ``None`` when every ancestor
+        is searchable or nothing could be determined.
+    """
+    path = os.path.dirname(workspace)
+    while True:
+        target = kernel.file_context(path)
+        if target is not None:
+            for label in labels:
+                if kernel.allowed(label, target, "dir", "search") is False:
+                    domain = parse_selinux_context(label)
+                    name = domain.type if domain else label
+                    kind = parse_selinux_context(target)
+                    return (
+                        f"{name} may not search the workspace's ancestor "
+                        f"{path} ({kind.type if kind else target}), so the "
+                        "runner could not reach its own workspace; move the "
+                        "workspace under a directory the jaato domains may "
+                        "traverse (not a mktemp -d directory in /tmp), or "
+                        "give that directory a searchable type with "
+                        "`semanage fcontext -a -t <type> ...` and "
+                        "`restorecon`")
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def _grants(plan: "selinux_labels.Plan", label: str,
+            domain: str, child_domain: str) -> Dict[str, Any]:
     """The diagnostics record (#1326), SELinux-shaped (design §8)."""
     return {
         "backend": BACKEND_SELINUX,
-        "domain": RUNNER_DOMAIN,
-        "child_domain": CHILD_DOMAIN,
+        "domain": domain,
+        "child_domain": child_domain,
         "level": plan.level,
         "label": label,
         "labelled_roots": [plan.workspace],
@@ -429,6 +600,11 @@ def _transition_problem(kernel: _Kernel, interpreter: str) -> Optional[str]:
         )
     if kernel.allowed(own, target, "process", "transition") is not True:
         return f"this process ({own}) may not transition into {RUNNER_DOMAIN}"
+    if kernel.allowed(own, target, "process", "dyntransition") is not True:
+        return (
+            f"this process ({own}) may not dyntransition into {RUNNER_DOMAIN}, "
+            "so a pool slot could not enter it (selinux-backend.md §7.2)"
+        )
     exe = kernel.file_context(interpreter)
     if exe is None:
         return f"the interpreter's label could not be read ({interpreter})"

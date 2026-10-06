@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from jaato_server.shared.plugins.model_provider.base import KNOB_LAYERS
 # The wire-type predicate lives with the contract it enforces, so this
@@ -755,6 +755,8 @@ def validate_profile(
 
     # --- secret env scrub (#863) -----------------------------------------
     _check_secret_scrub(profile, add)
+    _check_seccomp(profile, add)
+    _check_capabilities(profile, add)
 
     # --- gc strategy -----------------------------------------------------
     gc = getattr(profile, "gc", None)
@@ -856,6 +858,8 @@ HIGH_RISK_ESCALATED_CODES = frozenset({
     "budget_control_absent",
     "budget_limits_without_abort",
     "secret_scrub_disabled",
+    "seccomp_disabled",
+    "capabilities_inherited",
     "missing_description",
     "permission_rule_without_plugin",
     "unknown_tool",
@@ -1991,6 +1995,67 @@ def _check_secret_scrub(profile, add):
                 where=where)
 
 
+def _check_seccomp(profile: Any, add: Callable[..., None]) -> None:
+    """``runtime_limits.seccomp`` / ``seccomp_allow`` (#1503).
+
+    An unknown family name in ``seccomp_allow`` is an ERROR: the runner
+    ignores it, so the family the author meant to allow back stays denied
+    and the stage fails at its first such syscall with an ``EPERM`` nothing
+    explains.  ``seccomp: off`` is a WARNING, the posture
+    ``secret_scrub_disabled`` takes: a legitimate choice, announced.
+    """
+    from jaato_server.shared.seccomp_filter import FAMILIES, unknown_families
+    limits = getattr(profile, "runtime_limits", None)
+    if limits is None:
+        return
+    for name in unknown_families(getattr(limits, "seccomp_allow", None)):
+        add("error", "seccomp_unknown_family",
+            f"runtime_limits.seccomp_allow names {name!r}, which is not a "
+            f"seccomp family ({', '.join(FAMILIES)}) — it is ignored and "
+            "nothing is allowed back for it",
+            where="runtime_limits.seccomp_allow")
+    if getattr(limits, "seccomp", None) == "off":
+        add("warn", "seccomp_disabled",
+            "runtime_limits.seccomp is 'off': model-driven subprocesses reach "
+            "the whole syscall table (bpf, io_uring, unshare, keyctl, ...) "
+            "behind the LSM boundary alone.  Allow back only the family a "
+            "stage needs with seccomp_allow instead.",
+            where="runtime_limits.seccomp")
+
+
+def _check_capabilities(profile: Any, add: Callable[..., None]) -> None:
+    """``runtime_limits.capabilities`` (#1543).
+
+    An unknown name is an ERROR for the reason an unknown seccomp family is:
+    the runner does not keep it, so the capability the author meant to keep
+    is dropped and the stage fails at its first use with an ``EPERM``
+    nothing explains.  ``inherit`` is a WARNING: the payload keeps the
+    runner's capability sets behind the LSM alone.
+    """
+    from jaato_server.shared.capability_drop import (
+        CAPABILITIES, MODE_INHERIT, unknown_capabilities)
+    limits = getattr(profile, "runtime_limits", None)
+    value = getattr(limits, "capabilities", None) if limits is not None else None
+    if value is None:
+        return
+    if value == MODE_INHERIT:
+        add("warn", "capabilities_inherited",
+            "runtime_limits.capabilities is 'inherit': model-driven "
+            "subprocesses keep the runner's capability sets (the full set "
+            "under a root daemon), behind the LSM boundary alone.  Keep "
+            "only what a stage needs with a list instead.",
+            where="runtime_limits.capabilities")
+        return
+    if isinstance(value, str):
+        return
+    for name in unknown_capabilities(value):
+        add("error", "capability_unknown",
+            f"runtime_limits.capabilities names {name!r}, which is not a "
+            f"Linux capability (e.g. {', '.join(list(CAPABILITIES)[:4])}, "
+            "...) — it is not kept",
+            where="runtime_limits.capabilities")
+
+
 # A declared type token → the predicate a value must satisfy.  Two
 # vocabularies reach here and both are the plugin author's own: JSON Schema
 # (``integer`` / ``boolean`` / ``array`` / ``object``) from a raw-dict
@@ -2593,7 +2658,7 @@ def validate_profile_file(file_path: str) -> List[Diagnostic]:
     # Build via the framework scanner so the profile object matches runtime.
     scanned: Dict[str, SubagentProfile] = {}
     scan_errors: Dict[str, str] = {}
-    _scan_profiles_dir(fp.parent, scanned, scan_errors)
+    _scan_profiles_dir(fp.parent, scanned, scan_errors, {})
     resolved, resolve_errors = resolve_profiles(scanned)
 
     out: List[Diagnostic] = []
@@ -3152,6 +3217,7 @@ def validate_workspace(
     _check_memory_curation(result.profiles, out)
     _check_regulatory_declared(result.profiles, out)
     _check_reference_links(config_root, out)
+    _check_permission_files(ws, config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"
     out.extend(contributed_findings(
@@ -3241,6 +3307,37 @@ def _check_reference_links(config_root: str, out) -> None:
                     "in this workspace or ~/.jaato/references has.", where=where))
         sources.append(SimpleNamespace(id=data["id"], links=parse_links(data.get("links"))))
     out.extend(_supersedes_findings(LinkIndex(sources)))
+
+
+def _check_permission_files(ws: Path, config_root: str, out) -> None:
+    """``permission_file_allow``: a ``permissions.json`` sets ``allow``.
+
+    Since #1474 the file is a policy LAYER (``policy_layers``): the user
+    tier (``~/.jaato/permissions.json``) and the project file each set
+    ``defaultPolicy`` unless a higher layer does.  Before #1474 the file was
+    read and thrown away on every daemon session, so a host whose file says
+    ``allow`` starts auto-approving every tool no list names on upgrade.
+    The session logs that at WARNING; this says it before any session runs.
+
+    ``warn``: ``allow`` is a legitimate choice for a trusted single-user
+    host.  A profile's own ``defaultPolicy`` outranks the file, so the
+    message says which profiles would still ask.  Reads the files through
+    the same discovery the enforcer uses, so the two cannot name different
+    files.
+    """
+    from jaato_server.shared.plugins.permission.policy_layers import (
+        file_layers_setting_allow)
+    for path in file_layers_setting_allow(str(ws), config_root):
+        out.append(Diagnostic(
+            "warn", "permission_file_allow",
+            f"{path} sets `defaultPolicy: allow`.  Since #1474 permissions.json "
+            "is APPLIED: every session in this workspace whose profile does not "
+            "set its own `plugin_configs.permission.policy.defaultPolicy` "
+            "auto-approves every tool no blacklist names, without a prompt.  "
+            "Set it to `ask` or `deny` (or remove the key) to keep prompting; "
+            "`explain plugin permission` gives the precedence.",
+            profile=None, where=path,
+        ))
 
 
 def _check_regulatory_declared(profiles, out) -> None:

@@ -13,6 +13,9 @@ them; it derives none of them a second time:
 | profile, exec scope, exec roots | the session's ``//child`` grant record, via :mod:`jaato_server.shared.confinement_grants` (#1348) |
 | subprocess ``PATH``, ``HOME``, ``XDG_*``, tool-venv | ``CLIToolPlugin._build_subprocess_env()`` on the session's own ``cli`` instance |
 | bound toolchains | ``<workspace>/.jaato/environment.json`` (#1344), when present |
+| ``seccomp`` | the posture the runner recorded at bootstrap, via :mod:`jaato_server.shared.seccomp_filter` (#1503) |
+| ``capabilities`` | the capability-drop posture the runner recorded at bootstrap, via :mod:`jaato_server.shared.capability_drop` (#1543) |
+| ``notebook.boundary`` | the active notebook backend's ``boundary_kind()`` (#1012, #1519): ``apparmor``, ``selinux``, ``audit``, ``opt-out`` or ``none`` |
 | ``notebook.imports_daemon_jaato`` | :mod:`jaato_server.shared.jaato_self_shadowing` (#1413), only when the workspace holds jaato's own source |
 
 The ``PATH`` is the one ``cli`` builds for its next command, not a
@@ -210,6 +213,54 @@ def private_tmp_report() -> Dict[str, Any]:
     }
 
 
+def seccomp_report() -> Dict[str, Any]:
+    """The seccomp posture of this session's subprocesses (#1503).
+
+    Read from what the bootstrap recorded in this process, so it reports
+    the filter the next ``cli`` command actually gets.  ``filter`` lists
+    the families still denied; any other posture says why there is none.
+    """
+    from jaato_server.shared import seccomp_filter
+    posture = seccomp_filter.current_posture()
+    if posture is None:
+        return {"posture": "unknown",
+                "note": "no session bootstrap has recorded a posture here"}
+    report = dict(posture)
+    if report.get("posture") == seccomp_filter.POSTURE_FILTER:
+        allowed = set(report.get("allowed_families") or ())
+        report["denied_families"] = [
+            name for name in seccomp_filter.FAMILIES if name not in allowed]
+        report["note"] = (
+            "these syscall families answer EPERM in cli / interactive_shell "
+            "/ notebook subprocesses; retrying or routing around it will not "
+            "help")
+    return report
+
+
+def capabilities_report() -> Dict[str, Any]:
+    """The capability sets of this session's subprocesses (#1543).
+
+    Read from what the bootstrap recorded in this process.  ``dropped``
+    says a ``cli`` command starts with only the kept capabilities (none by
+    default), so a command needing one fails with ``EPERM`` whatever the
+    LSM would allow.
+    """
+    from jaato_server.shared import capability_drop
+    posture = capability_drop.current_posture()
+    if posture is None:
+        return {"posture": "unknown",
+                "note": "no session bootstrap has recorded a posture here"}
+    report = dict(posture)
+    if report.get("posture") == capability_drop.POSTURE_DROPPED:
+        report["note"] = (
+            "cli / interactive_shell / notebook subprocesses hold no "
+            "capabilities beyond those listed under 'kept' (bounding, "
+            "permitted, effective, inheritable and ambient sets); an "
+            "operation needing one fails with EPERM, so retrying will not "
+            "help")
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Bound toolchains
 # ---------------------------------------------------------------------------
@@ -268,6 +319,36 @@ def notebook_shadowing_report(
     }
 
 
+def notebook_boundary_kind(registry: Any) -> Optional[str]:
+    """The active notebook backend's execution boundary, or ``None``.
+
+    ``backend.boundary_kind()`` on whichever backend is active: the same
+    fact ``NotebookPlugin`` renders into the system prompt, so this aspect,
+    the diagnostics verb and the prompt cannot disagree.  ``None`` when the
+    notebook plugin is not loaded or the backend claims no tier.
+    """
+    try:
+        notebook = registry.get_plugin("notebook") if registry else None
+        if notebook is None:
+            return None
+        backend = notebook._backends.get(notebook._active_backend_name)
+        if backend is None:
+            return None
+        kind = backend.boundary_kind()
+        return str(kind) if kind else None
+    except Exception:  # noqa: BLE001 -- a report must not raise
+        return None
+
+
+def notebook_boundary_report(registry: Any) -> Optional[Dict[str, Any]]:
+    """``{"boundary": kind, "boundary_notice": [...]}``, or ``None``."""
+    kind = notebook_boundary_kind(registry)
+    if kind is None:
+        return None
+    from jaato_server.shared.plugins.notebook.kernel_sandbox import boundary_notice
+    return {"boundary": kind, "boundary_notice": list(boundary_notice(kind))}
+
+
 # ---------------------------------------------------------------------------
 # The aspect
 # ---------------------------------------------------------------------------
@@ -307,11 +388,16 @@ def runtime_report(
         report["subprocess"] = subprocess_report(cli)
         workspace = workspace or getattr(cli, "_workspace_root", None)
     report["private_tmp"] = private_tmp_report()
+    report["seccomp"] = seccomp_report()
+    report["capabilities"] = capabilities_report()
     report["toolchains"] = toolchains_report(workspace)
     venv = (report["subprocess"].get("tool_venv") or {}).get("path")
     shadow = notebook_shadowing_report(workspace, [venv])
     if shadow:
         report["notebook"] = shadow
+    boundary = notebook_boundary_report(registry)
+    if boundary:
+        report.setdefault("notebook", {}).update(boundary)
     return report
 
 
@@ -353,9 +439,18 @@ def runtime_summary(report: Dict[str, Any]) -> Dict[str, str]:
     lines = {"confinement": _confinement_line(report["confinement"])}
     lines.update(_subprocess_lines(report["subprocess"]))
     lines["private_tmp"] = _private_tmp_line(report.get("private_tmp") or {})
+    seccomp = report.get("seccomp") or {}
+    lines["seccomp"] = seccomp.get("posture", "unknown") + (
+        f" ({seccomp['reason']})" if seccomp.get("reason") else "")
+    caps = report.get("capabilities") or {}
+    lines["capabilities"] = caps.get("posture", "unknown") + (
+        f" (kept: {', '.join(caps['kept'])})" if caps.get("kept") else "")
     chains = report["toolchains"]
     lines["toolchains"] = chains["status"]
-    if "notebook" in report:
-        lines["notebook"] = report["notebook"]["note"]
+    notebook = report.get("notebook") or {}
+    if "boundary" in notebook:
+        lines["notebook_boundary"] = notebook["boundary"]
+    if "note" in notebook:
+        lines["notebook"] = notebook["note"]
     lines["detail"] = "get_environment(aspect='runtime') for the full report"
     return lines

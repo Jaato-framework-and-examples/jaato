@@ -518,6 +518,38 @@ class SessionInitEnvelope:
     # daemon, and the runner reads disk as it always did, so no
     # schema_version bump.  Never carries credentials.
     user_tier_files: Optional[Dict[str, str]] = None
+    # SELinux phase 3: True when the daemon resolved this session's
+    # workspace and user config tiers, because its boundary denies them
+    # (an isolated sub-runner).  The runner then reads neither tier: no
+    # base instructions from ``.jaato/instructions`` or the user tier,
+    # and GC only from ``gc`` / ``gc_file``.  ``False`` = any other
+    # session, or an older daemon: the runner reads disk as before, so
+    # no schema_version bump.
+    config_resolved_by_daemon: bool = False
+    # The ``gc.json`` the daemon found for such a session (workspace,
+    # then user tier, ``load_gc_from_file``'s order) when the profile
+    # declares no ``gc:``; ``None`` = none found.
+    gc_file: Optional[Dict[str, Any]] = None
+    # This session's runner log (``<ws>/.jaato/logs/runner-<id>.log``).  A
+    # cold-spawned runner's child already opened it onto fds 1 and 2 before
+    # exec; a pool slot inherited the template's, the daemon's own log,
+    # which a confined slot may not write (SELinux phase 4 kernel run).
+    # Every bootstrap points fds 1 and 2 here.  ``None`` = no workspace, or
+    # an older daemon: the fds stay as they are, so no schema_version bump.
+    runner_log_path: Optional[str] = None
+    # #1508: the seccomp-bpf filter for this session's model-driven
+    # subprocesses, COMPILED BY THE DAEMON
+    # (``shared.seccomp_filter.compile_for_envelope``): the raw BPF in
+    # base64, the architecture it was compiled for, the ``seccomp`` syscall
+    # number, and the families allowed back.  ``{"unavailable": reason}``
+    # when the daemon host could not build one.  The runner only installs
+    # the bytes (``load_shipped``), because a confined runner may neither
+    # load libseccomp (``find_library`` execs ``ldconfig``) nor write the
+    # memfd it exports through (SELinux ``tmpfs_t``).  ``None`` = no
+    # boundary, ``seccomp: off``, or an older daemon; with a boundary the
+    # runner then records ``absent`` (or refuses spawns when confinement is
+    # required).  Additive, same-build daemon+runner: no schema_version bump.
+    seccomp_program: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -610,6 +642,12 @@ class SessionInitEnvelope:
                 None if self.user_tier_files is None
                 else dict(self.user_tier_files)
             ),
+            "config_resolved_by_daemon": self.config_resolved_by_daemon,
+            "gc_file": dict(self.gc_file) if self.gc_file else None,
+            "runner_log_path": self.runner_log_path,
+            "seccomp_program": (
+                dict(self.seccomp_program) if self.seccomp_program else None
+            ),
         }
 
     @classmethod
@@ -696,6 +734,10 @@ class SessionInitEnvelope:
             confinement=d.get("confinement"),
             runner_user=_optional_dict(d.get("runner_user")),
             user_tier_files=_text_map(d.get("user_tier_files")),
+            config_resolved_by_daemon=bool(d.get("config_resolved_by_daemon", False)),
+            gc_file=_optional_dict(d.get("gc_file")),
+            runner_log_path=_optional_str(d.get("runner_log_path")),
+            seccomp_program=_optional_dict(d.get("seccomp_program")),
         )
 
 

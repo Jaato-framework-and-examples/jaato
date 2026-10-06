@@ -23,6 +23,17 @@ Authentication (API key, Bearer token):
   created at https://platform.openai.com/api-keys.
 """
 
+#: Modules this package imports lazily (its SDK, at the session's first provider creation).
+#: The pool template imports them before it forks, so a session's
+#: slot inherits them shared instead of importing them privately.
+#: A literal tuple of strings, read without importing the package;
+#: nothing listed may read session-scoped state at import time.
+#: See jaato_server/server/runner/template_preload.py.
+PLUGIN_PRELOAD = (
+    "openai",
+    "jaato_server.shared.plugins.model_provider.openai",
+)
+
 from .provider import OpenAIProvider, create_provider
 
 __all__ = ["OpenAIProvider", "create_provider"]

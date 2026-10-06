@@ -22,9 +22,9 @@ import pytest
 from jaato_server.shared.scaffold import explain
 
 
-def _ws(tmp_path, profile_body="name: coder\ndescription: d\n", instr=None,
-        persona=None):
-    pdir = tmp_path / ".jaato" / "profiles" / "set1"
+def _ws(tmp_path, profile_body="name: coder\ndescription: d\nplugins: []\n",
+        instr=None, persona=None):
+    pdir = tmp_path / ".jaato" / "profiles"
     pdir.mkdir(parents=True)
     (pdir / "coder.yaml").write_text(profile_body, encoding="utf-8")
     if instr is not None:
@@ -44,8 +44,14 @@ def _no_premium_or_home(monkeypatch, tmp_path):
 
     Without this the numbers under test would include whatever this machine
     happens to have — the tests-that-read-the-developer's-machine family, in
-    a test whose entire subject is a byte count.
+    a test whose entire subject is a byte count.  The profile is resolved
+    through ``discover_profiles`` (#1548), so the user and premium profile
+    tiers and an ambient ``JAATO_PROFILE_SET`` are isolated too.
     """
+    from jaato_server.shared.plugins.subagent import config as _cfg
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
+    monkeypatch.delenv("JAATO_PROFILE_SET", raising=False)
+    monkeypatch.setattr(_cfg, "_discover_premium_profiles", lambda: {})
     monkeypatch.setattr(explain, "_instruction_search_order",
                         lambda ws: [("workspace", ws / ".jaato" / "instructions"),
                                     ("user", tmp_path / "nonexistent-home")])
@@ -72,7 +78,7 @@ def test_the_persona_is_counted_but_named_separately(tmp_path):
 def test_a_suppressing_profile_reports_zero_inherited(tmp_path):
     """The knob's whole point — and the report must reflect it."""
     ws = _ws(tmp_path,
-             profile_body="name: coder\ndescription: d\n"
+             profile_body="name: coder\ndescription: d\nplugins: []\n"
                           "suppress_base_instructions: {disk: true}\n",
              instr="x" * 40_000)
     data, text = explain.profile_cost("coder", str(ws))
@@ -84,7 +90,7 @@ def test_a_suppressing_profile_reports_zero_inherited(tmp_path):
 def test_a_suppressing_profile_is_not_nagged(tmp_path):
     """Advice a reader has already taken trains them to skim the rest."""
     ws = _ws(tmp_path,
-             profile_body="name: coder\ndescription: d\n"
+             profile_body="name: coder\ndescription: d\nplugins: []\n"
                           "suppress_base_instructions: {disk: true}\n",
              instr="x" * 40_000)
     _data, text = explain.profile_cost("coder", str(ws))

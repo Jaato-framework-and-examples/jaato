@@ -66,6 +66,7 @@ from .bundle import (
     VALID_BUNDLE_TIERS,
     ReferenceBundle,
     write_bundle_manifest,
+    new_index_config,
     detect_drift,
     discover_bundles,
     find_bundle,
@@ -94,16 +95,22 @@ from .reconcile import ReconcileResult, ReconcileStatus, reconcile_bundle
 from . import catalog_watch
 from .claims import (
     CLAIMS_DIRNAME,
-    build_proposed_reference,
+    REVISES_KEY,
+    build_claim_entry,
     claim_tags,
+    is_revision,
     forward_links,
     listing_entry,
     load_claims,
     new_claim,
     pending_claim_ids,
     rendered_from,
+    revision_record,
+    revision_staleness,
+    revision_target,
     write_claim,
 )
+from .embedding_load import load_model_offline_first
 from .embedding_types import (
     EmbeddingProviderProtocol,
     SemanticMatcherProtocol,
@@ -124,6 +131,7 @@ from jaato_sdk.plugins.base import (
 from jaato_server.shared.path_utils import normalize_for_comparison
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.session_context import get_current_session, session_plugin_setting
+from jaato_server.shared.tool_visibility import tool_in_session_surface
 from jaato_server.shared.trace import trace as _trace_write
 
 
@@ -328,6 +336,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # (no bundles in the workspace), ``_execute_compute_embedding``
         # uses this to lazy-load the provider on first call.
         self._cached_init_config: Optional[Dict[str, Any]] = None
+        # One load of the embedding model per plugin, whoever asks first
+        # (#1482): tool calls run in parallel, and each load costs seconds
+        # and hundreds of MB.  ``_embedding_load_failed`` stops a failed
+        # load being retried (and warned about) on every call.
+        self._embedding_lock = threading.Lock()
+        self._embedding_load_failed = False
         # Retained for back-compat with tests that directly inspect the
         # plugin state; points at the root bundle's matcher when present.
         # New code should iterate self._bundles instead.
@@ -559,10 +573,13 @@ class ReferencesPlugin(RunnerForwardingMixin):
         and the strategy uses one; with ``tags_only`` there is nothing to
         attach.
         """
-        if (
-            self._embedding_provider is not None
-            and self._lookup_strategy in ("hybrid", "semantic_only")
-        ):
+        if self._lookup_strategy not in ("hybrid", "semantic_only"):
+            return
+        # An index may have appeared since bootstrap (#1145): load the
+        # deferred provider then, and only then (#1482).
+        if self._embedding_provider is None and self._indexed_bundle_count():
+            self._ensure_embedding_provider()
+        if self._embedding_provider is not None:
             self._init_bundle_matchers(self._matcher_config)
 
     def _catalog_watch_paths(self, workspace: Optional[str] = None) -> List[str]:
@@ -571,9 +588,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
         The directory ``load_config`` auto-discovers from, the tier roots
         and every bundle directory the last discovery walked (a new
         sub-bundle is a new directory in a root, so the root covers it),
-        and each ``references.json`` the loader could pick. Directory
-        stamps catch a created, deleted or replaced reference file; see
-        ``catalog_watch`` for what they do not catch.
+        every ``*.json`` file directly in those directories, and each
+        ``references.json`` the loader could pick. Directory stamps catch
+        a created, deleted or replaced reference file; the file stamps an
+        in-place edit (#1437).
         """
         workspace = workspace or self._workspace_path or self._project_root
         paths: Set[str] = set(self._catalog_roots)
@@ -585,6 +603,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             refs_dir = Path(workspace) / refs_dir
         if refs_dir.is_absolute():
             paths.add(str(refs_dir))
+        # Each reference file too: an in-place edit (a hand edit, a
+        # revision written over the file) moves no directory mtime (#1437).
+        paths.update(catalog_watch.json_files(
+            [p for p in paths if os.path.isdir(p)]))
         paths.update(config_path_candidates(self._config_path, workspace))
         return sorted(paths)
 
@@ -1634,12 +1656,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
             else:
                 self._project_root = str(base_path_obj)
 
-        # Try to load from file first (master catalog).  load_config skips any
-        # HOME tier it can't reach (missing, or a confined session correctly
-        # denied ~/.jaato/references / ~/.config/jaato — see config_loader's
-        # OSError handling), so it won't raise here under confinement; the
-        # workspace-tier catalog is loaded by set_workspace_path() ->
-        # _reload_catalog().
+        # Try to load from file first (master catalog).  load_config skips a
+        # denied ~/.jaato/references (discover_references) and reads
+        # ~/.config/jaato from the daemon's user-tier snapshot on a runner,
+        # so it won't raise here under confinement; the workspace-tier
+        # catalog is loaded by set_workspace_path() -> _reload_catalog().
         config_path = config.get("config_path")
         self._config_path = config_path
         self._begin_catalog_load(inline_base_path)
@@ -1848,22 +1869,21 @@ class ReferencesPlugin(RunnerForwardingMixin):
         from .entry_handler import ReferencesEntryHandler
         _bundle_registry.register(ReferencesEntryHandler(self))
 
-        # Initialize the embedding provider only when bundles exist.
-        # Workspaces without bundles cannot run semantic matching (no
-        # sidecar to match against); the premium SentenceTransformer
-        # module load is deferred to first ``compute_embedding`` call —
-        # see ``_execute_compute_embedding``.  Saves the cold-runner
-        # bootstrap cost on profiles that don't use references for
-        # semantic queries (e.g. body-wired prefetch workflows).
-        if self._bundles:
+        # Load the embedding provider at bootstrap only when it can be
+        # USED (#1482): a semantic strategy AND at least one bundle with a
+        # vector index to match against.  An unindexed bundle (#1478) or
+        # ``tags_only`` has nothing to match, and the model load (~13 s of
+        # imports, hundreds of MB per runner) pushed bootstraps past their
+        # deadline.  Otherwise the load is deferred to the first caller
+        # that needs it -- see ``_ensure_embedding_provider``.
+        self._cached_init_config = config
+        self._embedding_load_failed = False
+        if self._embedder_needed_at_bootstrap():
             self._init_embedding_provider(config)
+            decision = "eager"
         else:
-            self._cached_init_config = config
-            self._trace(
-                "initialize: skipping embedding provider "
-                "(no bundles in workspace; will lazy-init on first "
-                "compute_embedding call)"
-            )
+            decision = "deferred"
+        self._log_embedder_decision(decision)
 
         # Reconcile drift (new/edited/removed references) against each
         # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
@@ -1882,6 +1902,63 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 f"initialize: semantic matching not configured "
                 f"(strategy={self._lookup_strategy}, bundles={len(self._bundles)})"
             )
+
+    def _indexed_bundle_count(self) -> int:
+        """How many loaded bundles (root included) carry a vector index."""
+        return sum(1 for b in self._bundles if b.has_index)
+
+    def _embedder_needed_at_bootstrap(self) -> bool:
+        """Whether a session could use the embedder before anyone asks (#1482)."""
+        return (self._lookup_strategy in ("hybrid", "semantic_only")
+                and self._indexed_bundle_count() > 0)
+
+    def _log_embedder_decision(self, decision: str) -> None:
+        """One line naming whether the embedder loaded at bootstrap, and why."""
+        line = (f"references: embedding provider {decision} at bootstrap "
+                f"(strategy={self._lookup_strategy}, indexed_bundles="
+                f"{self._indexed_bundle_count()}/{len(self._bundles)})")
+        logger.info(line)
+        self._trace(line)
+
+    def _provider_for(self, bundle: ReferenceBundle) -> Optional[EmbeddingProviderProtocol]:
+        """The provider a write into ``bundle`` needs: loaded only for an indexed one."""
+        if bundle.has_index:
+            return self._ensure_embedding_provider()
+        return self._embedding_provider
+
+    def _ensure_embedding_provider(self) -> Optional[EmbeddingProviderProtocol]:
+        """The embedding provider with its model loaded, or ``None``.
+
+        The one door every consumer that needs vectors goes through
+        (#1482): ``initialize()`` defers the load unless an indexed bundle
+        and a semantic strategy make it useful at bootstrap.  Thread-safe
+        -- concurrent first callers trigger ONE discovery and ONE model
+        load -- and the model is loaded offline first when it is already
+        cached (:func:`load_model_offline_first`).  A load that fails is
+        warned about once and not retried; callers degrade to tag lookup
+        as they do with no provider.
+        """
+        provider = self._embedding_provider
+        if provider is not None and provider.available:
+            return provider
+        with self._embedding_lock:
+            if self._embedding_load_failed:
+                return None
+            if self._embedding_provider is None and self._cached_init_config is not None:
+                self._init_embedding_provider(self._cached_init_config)
+            provider = self._embedding_provider
+            if provider is None:
+                return None
+            if not provider.available and not load_model_offline_first(
+                    provider, self._trace):
+                self._embedding_load_failed = True
+                self._embedding_provider = None
+                logger.warning(
+                    "references: embedding model '%s' failed to load; "
+                    "similarity matching is off for this session (tag lookup "
+                    "continues)", getattr(provider, "model_name", "?"))
+                return None
+            return provider
 
     def _init_embedding_provider(self, config: Dict[str, Any]) -> None:
         """Initialize the embedding provider via entry point discovery.
@@ -2085,7 +2162,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return
 
         if not self._embedding_provider.available:
-            self._embedding_provider.load_model()
+            load_model_offline_first(self._embedding_provider, self._trace)
 
         if not self._embedding_provider.available:
             self._trace(
@@ -2508,8 +2585,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "(this session, its model, its user) is recorded for you; "
                     "you do not supply it. Write the document to a workspace "
                     "file first and pass its 'path', or pass short 'content' "
-                    "inline. Use store_memory instead for a fact or event "
-                    "rather than a document."
+                    "inline. To correct a reference already in the catalog "
+                    "(an out-of-date runbook), pass 'revises' with its id and "
+                    "the full new version: the claim replaces it when "
+                    "promoted, keeping its id and origin. Use store_memory "
+                    "instead for a fact or event rather than a document."
                 ),
                 parameters={
                     "type": "object",
@@ -2519,7 +2599,20 @@ class ReferencesPlugin(RunnerForwardingMixin):
                             "description": (
                                 "One-token id others will select it by "
                                 "(letters, digits, '.', '_', '-'); must not "
-                                "already be in the catalog."
+                                "already be in the catalog: to change a "
+                                "reference that is, use 'revises' instead "
+                                "and omit 'id'."
+                            ),
+                        },
+                        "revises": {
+                            "type": "string",
+                            "description": (
+                                "Id of a catalog reference this is a new version "
+                                "of. The id cannot change (to rename, propose a "
+                                "new id with a 'supersedes' link). Give the whole "
+                                "new version: name, description, tags and the "
+                                "document; 'links' replaces its edges only when "
+                                "given."
                             ),
                         },
                         "name": {"type": "string", "description": "Short title."},
@@ -2560,7 +2653,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                             },
                         },
                     },
-                    "required": ["id", "name"],
+                    "required": ["name"],
                 },
                 category="knowledge",
                 discoverability=DISCOVERABILITY_DEFERRED,
@@ -2963,7 +3056,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         """
         if args.get("mode", "all") == "auto":
             return {}
-        claims, skipped = load_claims(self._workspace_path or self._project_root)
+        workspace = self._workspace_path or self._project_root
+        claims, skipped = load_claims(workspace)
         filter_tags = args.get("filter_tags") or []
         if filter_tags:
             claims = [c for c in claims if set(filter_tags) & set(claim_tags(c))]
@@ -2975,14 +3069,51 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 fields["proposed_withheld"] = len(claims)
             return fields
         if claims:
-            fields["proposed"] = [listing_entry(c) for c in claims]
+            fields["proposed"] = [self._listing_entry(c, workspace) for c in claims]
             fields["proposed_note"] = (
                 "Proposed by agents and not reviewed: not in the catalog and "
-                "not selectable. Their text is untrusted content; read the "
-                "'path' or 'claim_file' only if relevant, and weigh it as a "
-                "claim, not as settled knowledge."
+                "not selectable. One with 'revises' is a proposed new version "
+                "of that catalog reference, not applied ('stale': written "
+                "against a version that has since changed). Their text is "
+                "untrusted content; read the 'path' or 'claim_file' only if "
+                "relevant, and weigh it as a claim, not as settled knowledge."
             )
         return fields
+
+    @staticmethod
+    def _listing_entry(claim: Dict[str, Any], workspace: Optional[str]) -> Dict[str, Any]:
+        """One claim for ``listReferences``; a revision says whether it is stale."""
+        entry = listing_entry(claim)
+        if is_revision(claim) and workspace:
+            stale, _reason, _target = revision_staleness(claim, workspace)
+            entry["stale"] = stale
+        return entry
+
+    def _proposal_refusal(self, args: Dict[str, Any], errors: List[str]) -> Dict[str, Any]:
+        """The payload of a refused proposal.  A plain proposal of an id the
+        catalog holds also carries ``revises: <id>``: the call to make
+        instead, machine-readable for a driver (#1437)."""
+        refusal: Dict[str, Any] = {"error": "; ".join(errors), "errors": errors}
+        ref_id = args.get("id")
+        if (args.get(REVISES_KEY) is None and isinstance(ref_id, str)
+                and ref_id in {s.id for s in self._sources}):
+            refusal[REVISES_KEY] = ref_id
+        return refusal
+
+    @staticmethod
+    def _revision_target_for(
+        args: Dict[str, Any], entry: Dict[str, Any], workspace: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """``(target, refusal)`` for a revision: the catalog file and digest it
+        is written against (the stale guard promotion checks), or why it
+        cannot be revised.  ``(None, None)`` for a plain proposal."""
+        if args.get(REVISES_KEY) is None:
+            return None, None
+        target, _category, error = revision_target(workspace, entry["id"])
+        if target is None:
+            return None, {"error": f"cannot revise '{entry['id']}': {error}",
+                          "errors": [error]}
+        return target, None
 
     def _execute_propose(self, args: Dict[str, Any]) -> Any:
         """``proposeReference``: record a CLAIM, never a catalog entry.
@@ -3006,12 +3137,15 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "with a template_id from listAvailableTemplates) and pass "
                 "its 'path'."
             )}
-        entry, errors = build_proposed_reference(
+        entry, errors = build_claim_entry(
             args, workspace=workspace,
             catalog_ids=[s.id for s in self._sources],
         )
         if entry is None:
-            return False, {"error": "; ".join(errors), "errors": errors}
+            return False, self._proposal_refusal(args, errors)
+        target, refusal = self._revision_target_for(args, entry, workspace)
+        if refusal is not None:
+            return False, refusal
         pending_claims, _skipped = load_claims(workspace)
         forward = forward_links(entry.get("links"), [s.id for s in self._sources],
                                 pending_claim_ids(pending_claims))
@@ -3021,8 +3155,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             session = None  # no session in context: provenance unknown
         claim = new_claim(entry, session, rendered_from(
             entry, workspace, self._template_render_lookup()))
+        if target is not None:
+            claim[REVISES_KEY] = revision_record(target)
         try:
-            target = write_claim(workspace, claim)
+            claim_path = write_claim(workspace, claim)
         except OSError as exc:
             return False, {"error": f"Could not write the claim: {exc}"}
         self._trace(f"proposeReference: id={entry['id']} claim={claim['claim_id']}")
@@ -3031,7 +3167,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "status": claim["status"],
             "claim_id": claim["claim_id"],
             "id": entry["id"],
-            "claim_file": os.path.relpath(target, workspace),
+            "claim_file": os.path.relpath(claim_path, workspace),
             "witnessed": bool(claim["origin"].get("witnessed_by")),
             "message": (
                 "Proposed, not yet in the catalog. Other agents see it in "
@@ -3039,6 +3175,15 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "it into the catalog (reference.promote) or dismisses it."
             ),
         }
+        if target is not None:
+            result[REVISES_KEY] = entry["id"]
+            result["message"] = (
+                f"Proposed a revision of '{entry['id']}', not yet applied. The "
+                "workspace owner promotes it (the catalog entry is replaced in "
+                "place, keeping its origin) or dismisses it. If the reference "
+                "changes before then, this revision is stale and cannot be "
+                "promoted."
+            )
         if forward:
             result["forward_links"] = forward
             result["forward_links_note"] = _FORWARD_LINKS_NOTE
@@ -3178,11 +3323,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "error": f"texts must be a list of at most "
                              f"{self.EMBED_TEXTS_MAX_COUNT} strings of at most "
                              f"{self.EMBED_TEXTS_MAX_CHARS} characters"}
-        if not self._embedding_provider and self._cached_init_config is not None:
-            self._init_embedding_provider(self._cached_init_config)
-        provider = self._embedding_provider
-        if provider is not None and not provider.available:
-            provider.load_model()
+        provider = self._ensure_embedding_provider()
         if provider is None or not provider.available:
             return {"ok": False, "category": "no_provider",
                     "error": "no embedding provider is available in this session"}
@@ -3221,10 +3362,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # the load now — the user may be generating embeddings for a
         # first bundle.  ``_init_embedding_provider`` is idempotent
         # (early return when provider already set).
-        if not self._embedding_provider and self._cached_init_config is not None:
-            self._init_embedding_provider(self._cached_init_config)
-
-        if not self._embedding_provider:
+        if self._ensure_embedding_provider() is None:
             return {
                 "error": (
                     "No embedding provider available. Install a package that "
@@ -3342,6 +3480,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             eject <ref-id>                          Remove a ref from its bundle
             remove <ref-id>                         Delete a ref entirely
             reconcile [<ref>] [--scope ...]         Sync sidecars
+            index <bundle-ref>                      Add an index to an unindexed bundle
             merge <src> [--into <tgt>] [flags]      Merge bundles
             pack <bundle-ref> [--to <archive>]      Build distributable archive
             unpack <archive> [...]                  Install an archive
@@ -3366,6 +3505,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return self._cmd_bundle_remove(target)
         elif subcommand == "reconcile":
             return self._cmd_bundle_reconcile(target)
+        elif subcommand == "index":
+            return self._cmd_bundle_index(target)
         elif subcommand == "merge":
             return self._cmd_bundle_merge(target)
         elif subcommand == "pack":
@@ -3378,7 +3519,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return {
                 "error": (
                     f"Unknown subcommand: {subcommand}. Use: list, create, "
-                    f"delete, add, eject, remove, reconcile, merge, pack, "
+                    f"delete, add, eject, remove, reconcile, index, merge, pack, "
                     f"unpack, help"
                 )
             }
@@ -3477,84 +3618,95 @@ class ReferencesPlugin(RunnerForwardingMixin):
             }
         return None
 
-    def _cmd_bundle_create(self, raw_args: str) -> Dict[str, Any]:
-        """Execute 'bundle create <name> [--scope workspace|user]'.
+    _BUNDLE_CREATE_USAGE = (
+        "Usage: references bundle create <name> [--scope workspace|user] [--no-index]"
+    )
 
-        Creates an empty bundle directory with a fresh
-        ``embedding_config.json``. The bundle's embedding model and
-        dimensions are inherited from the active embedding provider so
-        that future references added to the bundle are vector-compatible
-        out of the box. With no provider available, the command refuses
-        — a sidecar can't be written without one.
+    @staticmethod
+    def _parse_bundle_create_args(
+        raw_args: str,
+    ) -> "Tuple[Optional[str], str, bool, Optional[str]]":
+        """``(name, scope, no_index, error)`` from a ``bundle create`` tail.
 
-        ``<name>`` is the directory name on disk. The reserved value
-        ``"root"`` (or empty string) creates the tier-root bundle by
-        writing the manifest at the tier root itself.
+        ``error`` is set (and the rest meaningless) on any malformed tail.
         """
         import shlex
 
         try:
             tokens = shlex.split(raw_args or "")
         except ValueError as e:
-            return {"error": f"Failed to parse arguments: {e}"}
-
+            return None, "", False, f"Failed to parse arguments: {e}"
         name: Optional[str] = None
         scope: str = BUNDLE_TIER_WORKSPACE
+        no_index = False
         i = 0
         while i < len(tokens):
             tok = tokens[i]
+            value: Optional[str] = None
             if tok == "--scope":
                 if i + 1 >= len(tokens):
-                    return {"error": "--scope requires a value: workspace or user"}
-                value = tokens[i + 1]
-                if value not in VALID_BUNDLE_TIERS:
-                    return {
-                        "error": (
-                            f"Unknown scope {value!r}. Use 'workspace' or 'user'."
-                        )
-                    }
-                scope = value
-                i += 2
+                    return None, "", False, "--scope requires a value: workspace or user"
+                value, i = tokens[i + 1], i + 2
+            elif tok.startswith("--scope="):
+                value, i = tok.split("=", 1)[1], i + 1
+            elif tok == "--no-index":
+                no_index, i = True, i + 1
                 continue
-            if tok.startswith("--scope="):
-                value = tok.split("=", 1)[1]
-                if value not in VALID_BUNDLE_TIERS:
-                    return {
-                        "error": (
-                            f"Unknown scope {value!r}. Use 'workspace' or 'user'."
-                        )
-                    }
-                scope = value
-                i += 1
+            elif name is not None:
+                return None, "", False, ReferencesPlugin._BUNDLE_CREATE_USAGE
+            else:
+                name, i = tok, i + 1
                 continue
-            if name is not None:
-                return {
-                    "error": "Usage: references bundle create <name> [--scope workspace|user]"
-                }
-            name = tok
-            i += 1
-
+            if value not in VALID_BUNDLE_TIERS:
+                return None, "", False, f"Unknown scope {value!r}. Use 'workspace' or 'user'."
+            scope = value
         if name is None:
-            return {
-                "error": "Usage: references bundle create <name> [--scope workspace|user]"
-            }
-
-        # Normalize the root-bundle alias; everything else stays as-is.
+            return None, "", False, ReferencesPlugin._BUNDLE_CREATE_USAGE
         if name in ("root", "(root)"):
             name = ROOT_BUNDLE_NAME
+        return name, scope, no_index, None
+
+    def _provider_index_config(self) -> "Tuple[Optional[Dict[str, Any]], Optional[str]]":
+        """``(index_config, error)`` from the active embedding provider.
+
+        ``(None, None)`` when there is no provider: the bundle is created
+        unindexed (#1478).  An error only when a provider exists and
+        cannot say what it embeds with.
+        """
+        # Loads the deferred provider (#1482) so .dimensions is accurate.
+        if self._ensure_embedding_provider() is None:
+            return None, None
+        dimensions = getattr(self._embedding_provider, "dimensions", None)
+        if not isinstance(dimensions, int) or dimensions <= 0:
+            return None, ("embedding provider did not report a valid dimension; "
+                          "cannot write a bundle index without it")
+        return new_index_config(self._embedding_provider.model_name, dimensions), None
+
+    def _cmd_bundle_create(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle create <name> [--scope workspace|user] [--no-index]'.
+
+        Creates an empty bundle directory marked by ``bundle.json``.  When
+        an embedding provider is active (and ``--no-index`` is not given)
+        it also writes a fresh ``embedding_config.json`` inherited from the
+        provider, so references added later are vector-compatible.  With
+        no provider the bundle is created UNINDEXED (#1478): no
+        ``embedding_config.json``, ``has_index`` false, tag lookup and
+        selection as on the root.  ``bundle index <name>`` adds the index
+        later from a session that has a provider.
+
+        ``<name>`` is the directory name on disk. The reserved value
+        ``"root"`` (or empty string) creates the tier-root bundle by
+        writing the manifest at the tier root itself.
+        """
+        name, scope, no_index, error = self._parse_bundle_create_args(raw_args)
+        if error is not None:
+            return {"error": error}
 
         # Refuse if a bundle with this name already exists in the chosen
         # tier. A workspace bundle that shadows a user bundle of the
-        # same name still counts as "exists" — discovery returns the
-        # workspace one, and overwriting it is what ``--overwrite`` (on
-        # unpack) and ``delete --force`` (here) are for.
+        # same name still counts as "exists".
         existing = next(
-            (
-                b for b in self._bundles
-                if b.name == name and b.tier == scope
-            ),
-            None,
-        )
+            (b for b in self._bundles if b.name == name and b.tier == scope), None)
         if existing is not None:
             return {
                 "error": (
@@ -3564,26 +3716,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 )
             }
 
-        if self._embedding_provider is None:
-            return {
-                "error": (
-                    "bundle create requires an embedding provider — none "
-                    "is configured. Install sentence-transformers or "
-                    "configure an embedding provider before creating a bundle."
-                )
-            }
-        # Ensure the provider has loaded its model so .dimensions is accurate.
-        if not self._embedding_provider.available:
-            self._embedding_provider.load_model()
-        model_name = self._embedding_provider.model_name
-        dimensions = getattr(self._embedding_provider, "dimensions", None)
-        if not isinstance(dimensions, int) or dimensions <= 0:
-            return {
-                "error": (
-                    "embedding provider did not report a valid dimension; "
-                    "cannot write a bundle manifest without it"
-                )
-            }
+        index_config, error = (None, None) if no_index else self._provider_index_config()
+        if error is not None:
+            return {"error": error}
 
         tier_root = self._tier_root(scope)
         if tier_root is None:
@@ -3599,59 +3734,81 @@ class ReferencesPlugin(RunnerForwardingMixin):
         occupied = self._refuse_occupied_bundle_dir(bundle_dir)
         if occupied is not None:
             return occupied
-        index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
-        sidecar_name = "references.embeddings.npy"
-        index_path.write_text(
-            json.dumps({
-                "embedding_model": model_name,
-                "embedding_dimensions": int(dimensions),
-                "embedding_sidecar": sidecar_name,
-                "rows": [],
-            }, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        if index_config is not None:
+            (bundle_dir / EMBEDDING_CONFIG_FILENAME).write_text(
+                json.dumps(index_config, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
         # The marker, written last: an index descriptor declares nothing
         # about who owns the directory (#1130), so without this the
         # bundle this command just built would not be discovered at all.
-        write_bundle_manifest(
-            bundle_dir,
-            name=name,
-            description="references bundle",
-        )
+        write_bundle_manifest(bundle_dir, name=name, description="references bundle")
 
         # Re-discover so the new bundle is visible to subsequent ops.
         self._discover_and_load_bundles()
-
         new_bundle = next(
-            (
-                b for b in self._bundles
-                if b.name == name and b.tier == scope
-            ),
-            None,
-        )
-        qualified = (
-            new_bundle.qualified_ref if new_bundle is not None
-            else f"{scope}:{name or '(root)'}"
-        )
-        self._trace(
-            f"bundle create: {qualified} at {bundle_dir} "
-            f"model={model_name} dim={dimensions}"
-        )
-
+            (b for b in self._bundles if b.name == name and b.tier == scope), None)
+        qualified = (new_bundle.qualified_ref if new_bundle is not None
+                     else f"{scope}:{name or '(root)'}")
+        model = index_config["embedding_model"] if index_config else ""
+        dims = index_config["embedding_dimensions"] if index_config else 0
+        self._trace(f"bundle create: {qualified} at {bundle_dir} "
+                    f"indexed={bool(index_config)} model={model or '-'} dim={dims}")
+        index_line = (f"  model: {model} (dim={dims})" if index_config else
+                      "  index: none (add one with 'references bundle index "
+                      f"{name or 'root'}' from a session with an embedding provider)")
         return {
             "status": "ok",
             "bundle": qualified,
             "directory": str(bundle_dir),
-            "embedding_model": model_name,
-            "embedding_dimensions": int(dimensions),
+            "indexed": bool(index_config),
+            "embedding_model": model,
+            "embedding_dimensions": dims,
             "help_lines": HelpLines(lines=[
                 ("CREATE", "bold"),
                 ("", ""),
                 (f"  bundle: {qualified}", ""),
                 (f"  directory: {bundle_dir}", ""),
-                (f"  model: {model_name} (dim={dimensions})", ""),
+                (index_line, ""),
             ]),
         }
+
+    def _cmd_bundle_index(self, target: str) -> Dict[str, Any]:
+        """Execute 'bundle index <bundle-ref>': give an unindexed bundle an index.
+
+        Writes ``embedding_config.json`` from the active embedding
+        provider, then reconciles the bundle so its existing references get
+        rows (#1478).  Refuses without a provider, for an unknown bundle,
+        and for one that already has an index (``bundle reconcile`` keeps
+        that one current).
+        """
+        ref_token = (target or "").strip()
+        if not ref_token or len(ref_token.split()) != 1:
+            return {"error": "Usage: references bundle index <bundle-ref>"}
+        try:
+            hit = find_bundle(self._bundles, parse_bundle_ref(ref_token),
+                              default_scope=BUNDLE_TIER_WORKSPACE)
+        except (ValueError, AmbiguousBundleRefError) as e:
+            return {"error": str(e)}
+        if hit is None:
+            return {"error": f"Unknown bundle '{ref_token}'. Known bundles: "
+                             f"{[b.qualified_ref for b in self._bundles] or '(none)'}"}
+        if hit.has_index:
+            return {"error": f"bundle '{hit.qualified_ref}' already has an index "
+                             f"({hit.embedding_model}); use 'bundle reconcile'"}
+        if self._ensure_embedding_provider() is None:
+            return {"error": "bundle index requires an embedding provider -- none is "
+                             "configured in this session"}
+        index_config, error = self._provider_index_config()
+        if error is not None:
+            return {"error": error}
+        (hit.directory / EMBEDDING_CONFIG_FILENAME).write_text(
+            json.dumps(index_config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        self._discover_and_load_bundles()
+        self._trace(f"bundle index: {hit.qualified_ref} model={index_config['embedding_model']}")
+        return self._cmd_bundle_reconcile(hit.qualified_ref)
 
     def _cmd_bundle_delete(self, raw_args: str) -> Dict[str, Any]:
         """Execute 'bundle delete <bundle-ref> [--force]'.
@@ -4084,6 +4241,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         reconciled_summaries: List[str] = []
         if self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
             for bundle in (source_bundle, target_bundle):
                 if bundle is None:
                     continue
@@ -4203,9 +4361,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             ("        Show loaded bundles. Tier column distinguishes workspace", "dim"),
             ("        bundles (./jaato/references) from user bundles (~/.jaato/references).", "dim"),
             ("", ""),
-            ("    create <name> [--scope workspace|user]", "dim"),
-            ("        Create an empty bundle with a fresh manifest. Embedding", "dim"),
-            ("        model and dimensions come from the active provider.", "dim"),
+            ("    create <name> [--scope workspace|user] [--no-index]", "dim"),
+            ("        Create an empty bundle. With an embedding provider it gets", "dim"),
+            ("        a vector index from that provider; without one (or with", "dim"),
+            ("        --no-index) it is created unindexed.", "dim"),
             ("", ""),
             ("    delete <bundle-ref> [--force]", "dim"),
             ("        Remove a bundle directory. Refuses if the bundle has any", "dim"),
@@ -4227,6 +4386,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             ("        Bring a bundle's sidecar in sync with the catalog: embed", "dim"),
             ("        newly dropped refs, refresh stale ones, drop orphans.", "dim"),
             ("        With no argument, reconciles every workspace-tier bundle.", "dim"),
+            ("", ""),
+            ("    index <bundle-ref>", "dim"),
+            ("        Give an unindexed bundle a vector index from the active", "dim"),
+            ("        embedding provider, then reconcile it.", "dim"),
             ("", ""),
             ("    merge <source-ref> [--into <target-ref>] [flags]", "dim"),
             ("        Merge a knowledge bundle into another. Cross-tier merges", "dim"),
@@ -4380,6 +4543,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "message": "No bundles to reconcile (no embedding_config.json discovered).",
             }
 
+        self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
         results: List[ReconcileResult] = []
         for bundle in candidates:
             results.append(
@@ -4581,7 +4745,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             source_bundle=source_bundle,
             source_sources=source_sources,
             target_sources=target_sources,
-            provider=self._embedding_provider,
+            provider=self._provider_for(target_bundle),
             options=options,
         )
 
@@ -4957,6 +5121,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._discover_and_load_bundles()
         reconciled = False
         if do_reconcile and self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
             new_bundle = next(
                 (
                     b for b in self._bundles
@@ -5407,7 +5572,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 and s.id not in self._selected_source_ids
             ]
             # If selectReferences is excluded or no selectable sources, nothing to show
-            if not selectable or "selectReferences" in self._exclude_tools:
+            if not selectable or not self._tool_available("selectReferences"):
                 self._trace("get_system_instructions: no sources to inject")
                 return None
 
@@ -5416,7 +5581,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "",
                 "Additional reference sources are available for this session.",
             ]
-            if "listReferences" not in self._exclude_tools:
+            if self._tool_available("listReferences"):
                 parts.append("Use `listReferences` to see available sources, their tags, and resolved paths.")
             parts.extend([
                 "Use `selectReferences` with specific IDs or tags to select sources and",
@@ -5456,7 +5621,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         # Mention remaining selectable sources (not pre-selected) if any
         # Only show if selectReferences tool is available
-        if "selectReferences" not in self._exclude_tools:
+        if self._tool_available("selectReferences"):
             selectable = [
                 s for s in self._sources
                 if s.mode == InjectionMode.SELECTABLE
@@ -5633,6 +5798,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             CommandCompletion("eject", "Remove a reference from its bundle"),
             CommandCompletion("remove", "Delete a reference entirely"),
             CommandCompletion("reconcile", "Reconcile bundle sidecars"),
+            CommandCompletion("index", "Add a vector index to an unindexed bundle"),
             CommandCompletion("merge", "Merge a bundle into another"),
             CommandCompletion("pack", "Pack a bundle into a distributable archive"),
             CommandCompletion("unpack", "Unpack an archive into a tier"),
@@ -6220,6 +6386,41 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 return True
         return False
 
+    def _tool_available(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` (one of this plugin's tools) can be called
+        by the CALLING session — the predicate every hint and instruction
+        that names one of them asks before naming it (#1491).
+
+        False when the instance-wide ``exclude_tools`` withholds it, or when
+        the calling session's profile scopes this plugin to a list that
+        leaves it out (``references(tools:[...])``, asked through
+        ``JaatoSession.tool_in_surface``, #1513).  Per session: the plugin
+        instance is shared with sibling subagents whose scopes differ.
+        """
+        if tool_name in self._exclude_tools:
+            return False
+        return tool_in_session_surface(tool_name)
+
+    def _hintable_mentions(
+        self, matches: List[str], source_ids: Set[str], source_type: str
+    ) -> List[str]:
+        """The ``@id`` mentions pass 1 expands: known ids, and none at all
+        when ``selectReferences`` is not in the calling session's surface.
+
+        Passes 1, 2 and 2b point the session at references it is expected
+        to SELECT, so each runs only when the session can call
+        ``selectReferences``: its profile's ``references(tools:[...])``
+        scope, not only the instance-wide ``exclude_tools`` (#1491).
+        """
+        mentioned_ids = [m for m in matches if m in source_ids]
+        if mentioned_ids and not self._tool_available("selectReferences"):
+            self._trace(
+                f"enrich [{source_type}]: selectReferences not in this "
+                f"session's surface; skipping reference hints"
+            )
+            return []
+        return mentioned_ids
+
     def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
         """Common enrichment logic for prompts and tool results.
 
@@ -6254,7 +6455,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         source_ids = {s.id for s in self._sources}
         at_reference_pattern = re.compile(r'@([\w-]+)')
         matches = at_reference_pattern.findall(content)
-        mentioned_ids = [m for m in matches if m in source_ids]
+        mentioned_ids = self._hintable_mentions(matches, source_ids, source_type)
 
         if mentioned_ids:
             self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
@@ -6300,7 +6501,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # --- Pass 2: tag-based reference ID hints ---
         # Only consider unselected selectable sources (not AUTO, not already selected)
         # and only if selectReferences is available
-        if "selectReferences" not in self._exclude_tools:
+        if self._tool_available("selectReferences"):
             unselected = [
                 s for s in self._sources
                 if s.mode == InjectionMode.SELECTABLE
@@ -6421,7 +6622,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if (
             self._semantic_available()
             and self._lookup_strategy in ("hybrid", "semantic_only")
-            and "selectReferences" not in self._exclude_tools
+            and self._tool_available("selectReferences")
         ):
             # IDs already surfaced by earlier passes — no need to re-hint
             already_surfaced: set = set(mentioned_ids)

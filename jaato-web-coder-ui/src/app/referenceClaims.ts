@@ -25,7 +25,7 @@
 import { EventTypeValue, MIN_REFERENCE_CURATION_PROTOCOL, isProtocolCompatible, type JaatoClient, type JaatoEvent } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
 import { getClient, isConnected } from "@/sdk/connection";
-import type { ReferenceBundleOption, ReferenceClaimRow, ReferenceClaimsState } from "@/store/types";
+import type { ReferenceBundleOption, ReferenceClaimLink, ReferenceClaimRow, ReferenceClaimsState } from "@/store/types";
 import { scheduleReferenceCatalogRefresh } from "@/app/referenceCatalog";
 
 /** The tool whose success means a claim was written. */
@@ -36,6 +36,75 @@ export const REFRESH_DEBOUNCE_MS = 150;
 
 type Patch = Partial<ReferenceClaimsState> | ((r: ReferenceClaimsState) => Partial<ReferenceClaimsState>);
 const patch = (p: Patch) => useJaato.getState().patchReferenceClaims(p);
+
+/** One line of a {@link lineDiff}: kept (`" "`), removed (`"-"`) or added (`"+"`). */
+export interface DiffLine { op: " " | "-" | "+"; text: string }
+
+/**
+ * A line diff of ``before`` -> ``after`` (longest common subsequence), for
+ * a revision's inline content.  Plain and quadratic: a claim's inline
+ * content is capped at 32 KiB, so a few hundred lines at most.
+ */
+export function lineDiff(before: string, after: string): DiffLine[] {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const n = a.length, m = b.length, w = m + 1;
+  // lcs[i * w + j]: the longest common subsequence of a[i..] and b[j..].
+  const lcs = new Array<number>((n + 1) * w).fill(0);
+  const at = (i: number, j: number): number => lcs[i * w + j] ?? 0;
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i * w + j] = a[i] === b[j] ? at(i + 1, j + 1) + 1 : Math.max(at(i + 1, j), at(i, j + 1));
+    }
+  }
+  const out: DiffLine[] = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    const x = a[i] ?? "", y = b[j] ?? "";
+    if (x === y) { out.push({ op: " ", text: x }); i++; j++; }
+    else if (at(i + 1, j) >= at(i, j + 1)) { out.push({ op: "-", text: x }); i++; }
+    else { out.push({ op: "+", text: y }); j++; }
+  }
+  for (; i < n; i++) out.push({ op: "-", text: a[i] ?? "" });
+  for (; j < m; j++) out.push({ op: "+", text: b[j] ?? "" });
+  return out;
+}
+
+/** One field a revision changes: its label and the value before and after, as text. */
+export interface FieldChange { field: string; before: string; after: string; lines?: DiffLine[] }
+
+function documentText(r: { type?: string; path?: string; content?: string }): string {
+  return r.type === "inline" ? (r.content ?? "") : (r.path ? `file: ${r.path}` : "");
+}
+
+function linksText(links: ReferenceClaimLink[] | undefined): string {
+  return (links ?? []).map(describeClaimLink).join("\n");
+}
+
+/**
+ * What a REVISION claim changes against the catalog entry as it is now
+ * (``row.current``), field by field, unchanged fields left out.  Inline
+ * content on both sides carries a line diff.  Links are compared only when
+ * the revision sets them (``links_replaced``); otherwise it keeps them.
+ * ``[]`` for a row that is not a revision, or whose current entry the
+ * daemon could not read (the reference is gone; the row is stale).
+ */
+export function revisionChanges(row: ReferenceClaimRow): FieldChange[] {
+  const cur = row.current;
+  if (!row.revises || !cur) return [];
+  const out: FieldChange[] = [];
+  const push = (field: string, before: string, after: string, lines?: DiffLine[]) => {
+    if (before !== after) out.push(lines ? { field, before, after, lines } : { field, before, after });
+  };
+  push("name", cur.name ?? "", row.name);
+  push("description", cur.description ?? "", row.description);
+  push("tags", (cur.tags ?? []).map((t) => `#${t}`).join(" "), row.tags.map((t) => `#${t}`).join(" "));
+  const before = documentText(cur), after = documentText(row);
+  const bothInline = cur.type === "inline" && row.type === "inline";
+  push(bothInline ? "content" : "document", before, after, bothInline ? lineDiff(before, after) : undefined);
+  if (row.links_replaced) push("links", linksText(cur.links), linksText(row.links));
+  return out;
+}
 
 /** Whether a daemon speaking ``protocol`` serves the reference-claim verbs. */
 export function servesReferenceClaims(protocol: string | null | undefined): boolean {
@@ -48,6 +117,8 @@ export function refusalText(category: string | undefined, error: string | undefi
     case "not_owner": return "Only the owner of this workspace can promote or dismiss proposals.";
     case "not_found": return "That proposal no longer exists -- the list has been refreshed.";
     case "collision": return "A reference with that id is already in the catalog.";
+    case "stale": return `The reference changed since this revision was written, so it was not applied: ${error || "ask for a revision of the current version."}`;
+    case "ambiguous": return `The revised reference is defined twice in the catalog: ${error || "remove the duplicate first."}`;
     case "unknown_bundle": return `There is no such bundle: ${error || "the list has been refreshed."}`;
     case "invalid_claim": return `The proposal cannot be promoted: ${error || "it is not valid any more."}`;
     case "unsafe_path": return `Refused: ${error || "a path leaves the workspace."}`;
@@ -211,7 +282,7 @@ async function curate(
   action: "promote" | "dismiss",
   run: (client: JaatoClient) => Promise<{
     ok?: boolean; category?: string; error?: string; reference_id?: string;
-    bundle?: string; reconcile?: string; reconcile_detail?: string;
+    bundle?: string; reconcile?: string; reconcile_detail?: string; revised?: boolean;
   }>,
 ): Promise<boolean> {
   patch((r) => ({ busy: { ...r.busy, [claimId]: action }, notice: null }));
@@ -221,7 +292,10 @@ async function curate(
     ok = answer.ok !== false;
     const caveat = action === "promote" ? reconcileCaveat(answer.reconcile, answer.reconcile_detail) : null;
     const done = action === "promote"
-      ? `Promoted into ${promotionTarget(answer.bundle)} as ${answer.reference_id || "a reference"}.${caveat ? ` ${caveat}` : ""}`
+      ? (answer.revised
+        ? `Revised ${answer.reference_id || "the reference"} in place in ${promotionTarget(answer.bundle)}.`
+        : `Promoted into ${promotionTarget(answer.bundle)} as ${answer.reference_id || "a reference"}.`)
+        + (caveat ? ` ${caveat}` : "")
       : "Dismissed.";
     patch({ notice: ok ? { text: done, warning: !!caveat } : { text: refusalText(answer.category, answer.error), error: true } });
   } catch (err) {

@@ -34,9 +34,13 @@ def _make_plugin_with_registry(runner_rpc_client=None):
     runtime = MagicMock()
     runtime.registry = registry
     plugin._runtime = runtime
-    # Parent session with session_id for confused-deputy echo.
-    parent = MagicMock()
-    parent._session_id = "sess-A"
+    # Parent session with its daemon id for confused-deputy echo.  A
+    # real JaatoSession, so the attribute read is one the session has:
+    # a MagicMock answers any name, which is how this fake once set
+    # ``_session_id`` and passed while every real spawn sent "".
+    from jaato_server.shared.jaato_session import JaatoSession
+    parent = JaatoSession.__new__(JaatoSession)
+    parent.set_daemon_session_id("sess-A")
     plugin._parent_session = parent
     return plugin
 

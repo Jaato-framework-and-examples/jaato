@@ -57,6 +57,7 @@ import pytest
 
 from jaato_server.server.command_router import CommandRouter
 from jaato_server.server.websocket import JaatoWSServer
+from jaato_server.server.ws_tickets import AppCredentialStore
 from jaato_server.shared.tests.reversion import Reversion
 
 _WS = "jaato-server/jaato_server/server/websocket.py"
@@ -93,8 +94,8 @@ REVERSIONS = [
         # is this client in", reading a map the router never consults.
         find="""        adapter = self._event_sink_adapter
         declared = adapter.get_client_workspace(client_id) if adapter else None
-        if not declared and self._workspace_manager is not None:
-            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+        if not declared and self._workspace_manager_for(client_id) is not None:
+            selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
             declared = selected.path if selected else None
 
         router = getattr(self, "_command_router", None)
@@ -112,8 +113,8 @@ REVERSIONS = [
         replace="""        provisioned = self._client_provisioned.get(client_id)
         if provisioned is not None:
             current_path = provisioned.path
-        elif self._workspace_manager is not None:
-            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+        elif self._workspace_manager_for(client_id) is not None:
+            selected = self._workspace_manager_for(client_id).get_selected_workspace(client_id=client_id)
             current_path = selected.path if selected else None
         else:
             current_path = None""",
@@ -211,6 +212,11 @@ def _server(
     router._session_manager = _SessionManager(session_in)
 
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._command_router = router
     ws._event_sink_adapter = (
         _Adapter(declared, {CLIENT: SESSION} if session_in else {}) if adapter else None

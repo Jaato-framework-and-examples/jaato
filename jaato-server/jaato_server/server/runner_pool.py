@@ -126,6 +126,15 @@ class PoolSlot:
     #: fails — so this is a property the next session cannot change and is
     #: in the key for that reason.  Stamped by :meth:`SlotKey.stamp`.
     runner_uid: Optional[int] = None
+    #: The SELinux boundary (its ``confinement_id``) this slot was forked
+    #: into (phase 4, selinux-backend.md §7.2), ``None`` for a slot that
+    #: was not.  A slot enters an SELinux domain only at fork, while it
+    #: has one thread, and never leaves it: the runner domain holds no
+    #: ``dyntransition``.  So a slot carrying a boundary fits only that
+    #: boundary, and a slot carrying none never fits an SELinux session.
+    #: Kept out of ``profile_name``, whose last wearer's death unloads an
+    #: AppArmor profile of that name (:meth:`PoolManager._reap_slot_profile`).
+    selinux_boundary: Optional[str] = None
     last_session_end_ts: Optional[float] = None
     # Phase 3 cascade-sharing (server 0.6.146+): identifier of the
     # most recent session this slot served.  Set when the slot
@@ -210,6 +219,9 @@ class SlotKey:
     the uid the process runs as (#1168)     ``runner_uid`` — a dropped
                                             slot can never become root
                                             or anyone else again
+    the SELinux domain and level (phase 4)  ``selinux_boundary`` — the
+                                            domain is entered at fork
+                                            and never left
     ======================================  ==========================
 
     ``runner_uid`` (#1168 step 3): ``None`` is the daemon's own uid.  A
@@ -258,6 +270,7 @@ class SlotKey:
     workspace_root: Optional[str] = None
     profile_name: Optional[str] = None
     runner_uid: Optional[int] = None
+    selinux_boundary: Optional[str] = None
 
     @classmethod
     def build(
@@ -267,6 +280,7 @@ class SlotKey:
         workspace_root: Optional[str] = None,
         profile_name: Optional[str] = None,
         runner_uid: Optional[int] = None,
+        selinux_boundary: Optional[str] = None,
     ) -> "SlotKey":
         """Normalize the caller's values into a comparable key.
 
@@ -280,6 +294,7 @@ class SlotKey:
             workspace_root=_canonical_path(workspace_root),
             profile_name=profile_name or None,
             runner_uid=runner_uid,
+            selinux_boundary=selinux_boundary or None,
         )
 
     @classmethod
@@ -291,6 +306,7 @@ class SlotKey:
             workspace_root=_canonical_path(slot.workspace_root),
             profile_name=slot.profile_name or None,
             runner_uid=getattr(slot, "runner_uid", None),
+            selinux_boundary=getattr(slot, "selinux_boundary", None) or None,
         )
 
     def stamp(self, slot: "PoolSlot") -> None:
@@ -311,6 +327,7 @@ class SlotKey:
         slot.workspace_root = self.workspace_root
         slot.profile_name = self.profile_name
         slot.runner_uid = self.runner_uid
+        slot.selinux_boundary = self.selinux_boundary
         slot.has_served = True
 
     def accepts_unaffined(self, slot: "PoolSlot") -> bool:
@@ -373,9 +390,15 @@ class SlotKey:
         "unconfined" must not read as two boundaries.
         """
         if not slot.has_served:
-            return True
+            # A virgin slot is threaded and in the template's domain, so
+            # it can enter an AppArmor profile at bootstrap and never an
+            # SELinux domain (phase 0: setcon refused in a threaded
+            # process).  An SELinux session takes a slot forked into its
+            # boundary (:meth:`PoolManager.fork_slot_into`) or this one's.
+            return self.selinux_boundary is None
         return (
             (slot.profile_name or None) == self.profile_name
+            and (getattr(slot, "selinux_boundary", None) or None) == self.selinux_boundary
             and self.uid_fits(slot)
         )
 
@@ -390,6 +413,39 @@ class SlotKey:
         if not slot.has_served:
             return True
         return getattr(slot, "runner_uid", None) == self.runner_uid
+
+
+#: A slot's POSTURE: the part of its identity that decides which sessions
+#: a slot that has served may still be handed (#1507).  The three fields
+#: :meth:`SlotKey.accepts_unaffined` compares on a served slot, and nothing
+#: else -- workspace and config root do not gate a PURE IDLE slot.
+Posture = Tuple[Optional[str], Optional[int], Optional[str]]
+
+
+def posture_of_key(key: "SlotKey") -> Posture:
+    """The posture a session with *key* asks for (#1507)."""
+    return (key.profile_name or None, key.runner_uid,
+            key.selinux_boundary or None)
+
+
+def posture_of_slot(slot: "PoolSlot") -> Posture:
+    """The posture a SERVED slot is stuck in (#1507).
+
+    Only meaningful when ``slot.has_served``: a virgin slot has no posture,
+    it fits any session an unaffined slot can fit.
+    """
+    return ((slot.profile_name or None),
+            getattr(slot, "runner_uid", None),
+            (getattr(slot, "selinux_boundary", None) or None))
+
+
+def posture_label(posture: Posture) -> str:
+    """``<profile|unconfined>/uid=<uid|daemon>[/selinux=<id>]`` for telemetry."""
+    profile, uid, selinux = posture
+    label = f"{profile or 'unconfined'}/uid={'daemon' if uid is None else uid}"
+    if selinux:
+        label += f"/selinux={selinux}"
+    return label
 
 
 def _canonical_path(path: Optional[str]) -> Optional[str]:
@@ -516,9 +572,10 @@ class PoolManager:
     serialize via the manager's lock.
 
     Attributes:
-        target_size: Floor on UNRESERVED idle slots — those with no
-            cascade affinity, which any arriving session may take
-            (default 2).
+        target_size: Floor on VIRGIN idle slots — no cascade affinity and
+            never served, so any arriving session may take them (default
+            2).  Served unaffined slots fit one posture and sit on top of
+            the floor (#1507).
         max_size: Ceiling on TOTAL idle slots, reservations included
             (default ``2 * target_size``).  Floor and ceiling count
             different things on purpose: a cascade-affined idle slot
@@ -550,6 +607,10 @@ class PoolManager:
                 by daemon ``__main__.py`` and threaded here).  Values
                 <= 0 disable the pool (sessions fall back to cold-spawn
                 session-mode).
+
+                VIRGIN since #1507: a slot that has served fits only its
+                own posture (#1100), so it is a reservation keyed on the
+                boundary and does not count either.
 
                 UNRESERVED, not total (#898).  A cascade-affined idle
                 slot is a RESERVATION: cross-cascade reuse is forbidden
@@ -614,6 +675,12 @@ class PoolManager:
         self._replenish_thread: Optional[threading.Thread] = None
         # Phase 2 cascade-sharing idle timeout.
         self._cascade_idle_timeout = float(cascade_idle_timeout_seconds)
+        #: When each posture was last asked for by an unaffined acquire
+        #: (#1507), monotonic.  Read only to decide which SERVED slot is
+        #: the least useful to keep at the ceiling; bounded by the number
+        #: of distinct postures a deployment has, like boundary-derived
+        #: profile names (#1033).
+        self._posture_last_demand: Dict[Posture, float] = {}
 
         # Optional ``(profile_name) -> None`` hook the daemon wires so a
         # slot's AppArmor profile is unloaded when the LAST slot wearing
@@ -629,6 +696,10 @@ class PoolManager:
         self._counters: Dict[str, int] = {
             # Number of times ``acquire_slot`` returned a real handle.
             "pool_slot_acquired_total": 0,
+            # Phase 4: slots forked INTO an SELinux boundary for a session
+            # no idle slot fitted, and the requests the template refused.
+            "pool_selinux_fork_total": 0,
+            "pool_selinux_fork_failures_total": 0,
             # Number of times ``acquire_slot`` returned None (pool
             # empty when called).  Sessions in this state fall back
             # to cold-spawn — useful for sizing decisions.
@@ -710,6 +781,16 @@ class PoolManager:
             # branch does not care why the slot did not fit); this one
             # says the uid was the reason.
             "pool_uid_mismatch_skips_total": 0,
+            # #1507: an unaffined acquire that passed over SERVED slots of
+            # another posture and found nothing.  Before the virgin floor
+            # this was every second-posture arrival on a mixed daemon;
+            # now it should stay near zero once the pool has warmed.
+            # Growing means the floor is too small for the arrival rate.
+            "pool_posture_miss_total": 0,
+            # #1507: a served slot (no cascade) dropped so the floor could
+            # be refilled with a virgin one at the ceiling, or displaced by
+            # a returner of a posture asked for more recently.
+            "pool_served_slot_evicted_total": 0,
         }
         self._counters_lock = threading.Lock()
 
@@ -874,9 +955,10 @@ class PoolManager:
         A slot carrying a ``cascade_id`` is a reservation — cross-cascade
         reuse is forbidden (warm plugin state belongs to the original
         cascade), so it is capacity for one tenant and for nobody else.
-        Only PURE-IDLE slots are the pool's free capacity, and this is
-        the quantity the replenish loop compares against
-        ``target_size`` (#898).
+        Only PURE-IDLE slots are the pool's free capacity (#898).  Since
+        #1507 the replenish loop compares the narrower
+        :meth:`virgin_idle_count` against ``target_size``: a pure-idle slot
+        that has served is free capacity for its own posture only.
 
         Reading total idle there instead meant a pool holding two
         B-affined slots read "full" while ``acquire_slot(cascade=A)``
@@ -888,12 +970,58 @@ class PoolManager:
         with self._lock:
             return sum(1 for s in self._idle_slots if s.cascade_id is None)
 
+    def virgin_idle_count(self) -> int:
+        """Return the count of idle slots that have never served (#1507).
+
+        THIS is the floor ``target_size`` keeps stocked, and the reason is
+        the same as #898's one layer in.  Since #1100 a slot that has
+        served fits only a session of its own posture (AppArmor profile,
+        uid, SELinux boundary), so an unreserved but SERVED slot is
+        capacity for one posture and for nobody else -- a reservation
+        keyed on the boundary instead of the cascade.  Counting it toward
+        the floor let a daemon mixing unconfined IPC sessions and confined
+        WS sessions read "full" on slots the second posture could not
+        take, so that posture cold-spawned every time (21/21 in the
+        reporting bench).  A virgin slot fits every session an unaffined
+        slot can fit, so it is the only capacity that is capacity for all.
+
+        Served-but-unaffined slots sit on top of the floor, like
+        reservations, bounded by ``max_size``.
+        """
+        with self._lock:
+            return self._virgin_idle_count_locked()
+
+    def _virgin_idle_count_locked(self) -> int:
+        """:meth:`virgin_idle_count`, for a caller holding ``self._lock``."""
+        return sum(1 for s in self._idle_slots
+                   if s.cascade_id is None and not s.has_served)
+
+    def posture_idle_counts(self) -> Dict[str, int]:
+        """Idle slots by what they can still serve (#1507).
+
+        ``virgin`` (never served, fits any posture), ``reserved``
+        (cascade-affined), and one ``served:<posture_label>`` entry per
+        posture that has served-but-unaffined slots idle.
+        """
+        counts: Dict[str, int] = {"virgin": 0, "reserved": 0}
+        with self._lock:
+            for slot in self._idle_slots:
+                if slot.cascade_id is not None:
+                    counts["reserved"] += 1
+                elif not slot.has_served:
+                    counts["virgin"] += 1
+                else:
+                    name = "served:" + posture_label(posture_of_slot(slot))
+                    counts[name] = counts.get(name, 0) + 1
+        return counts
+
     def acquire_slot(
         self, cascade_driver_id: Optional[str] = None,
         config_root: Optional[str] = None,
         workspace_root: Optional[str] = None,
         profile_name: Optional[str] = None,
         runner_uid: Optional[int] = None,
+        selinux_boundary: Optional[str] = None,
     ) -> Optional[PoolSlot]:
         """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
 
@@ -962,6 +1090,10 @@ class PoolManager:
                 ``None`` for the daemon's own.  A served slot of another
                 uid is passed over and counted in
                 ``pool_uid_mismatch_skips_total``.
+            selinux_boundary: The SELinux boundary's ``confinement_id``
+                (phase 4), ``None`` when the session is not SELinux-
+                confined.  Only a slot forked into that boundary fits; on
+                a miss the caller forks one (:meth:`fork_slot_into`).
 
         Returns:
             A :class:`PoolSlot` carrying the requested key and a LIVE
@@ -973,6 +1105,7 @@ class PoolManager:
             workspace_root=workspace_root,
             profile_name=profile_name,
             runner_uid=runner_uid,
+            selinux_boundary=selinux_boundary,
         )
         mismatch_skips = 0
         uid_skips = 0
@@ -1006,20 +1139,25 @@ class PoolManager:
             # None.  PURE IDLE is preferred over affined-to-another-
             # cascade because cross-cascade reuse is forbidden by design
             # (warm plugin state belongs to the original cascade).
-            pure_idle_idx = None
-            for i, candidate in enumerate(self._idle_slots):
-                if candidate.cascade_id is not None:
-                    continue
-                if not key.accepts_unaffined(candidate):
-                    uid_skips += not key.uid_fits(candidate)
-                    mismatch_skips += 1
-                    continue
-                pure_idle_idx = i
-                break
+            #
+            # A SERVED slot that fits is preferred over a virgin one
+            # (#1507): it can serve only this posture, while a virgin
+            # can serve any, so spending the served one keeps the floor
+            # of virgins intact and avoids a fork.
+            self._posture_last_demand[posture_of_key(key)] = time.monotonic()
+            pure_idle_idx, mismatch_skips, uid_skips, served_skips = (
+                self._pick_unaffined_locked(key))
             if uid_skips:
                 self._incr("pool_uid_mismatch_skips_total", uid_skips)
             if pure_idle_idx is None:
                 self._incr("pool_acquire_miss_total")
+                if served_skips:
+                    # The #1507 case: warm runners were there, all of
+                    # another posture.  Wake the replenish loop so the
+                    # virgin floor is refilled now rather than after its
+                    # pause.
+                    self._incr("pool_posture_miss_total")
+                    self._replenish_wake.set()
                 if mismatch_skips:
                     self._incr(
                         "pool_profile_mismatch_skips_total", mismatch_skips)
@@ -1048,6 +1186,67 @@ class PoolManager:
                 key.profile_name or "(unconfined)",
             )
         self._incr("pool_slot_acquired_total")
+        return slot
+
+    def _pick_unaffined_locked(
+        self, key: SlotKey,
+    ) -> Tuple[Optional[int], int, int, int]:
+        """Path (2) of :meth:`acquire_slot`: which PURE IDLE slot *key* gets.
+
+        Caller holds ``self._lock``.  Returns ``(index or None,
+        mismatch_skips, uid_skips, served_skips)``.  A served slot that
+        fits is preferred over a virgin (#1507); ``served_skips`` counts
+        the served slots of ANOTHER posture passed over, which is what
+        makes a miss a posture miss.
+        """
+        virgin_idx: Optional[int] = None
+        mismatch_skips = uid_skips = served_skips = 0
+        for i, candidate in enumerate(self._idle_slots):
+            if candidate.cascade_id is not None:
+                continue
+            if not key.accepts_unaffined(candidate):
+                uid_skips += not key.uid_fits(candidate)
+                served_skips += candidate.has_served
+                mismatch_skips += 1
+                continue
+            if not candidate.has_served:
+                if virgin_idx is None:
+                    virgin_idx = i
+                continue
+            return i, mismatch_skips, uid_skips, served_skips
+        return virgin_idx, mismatch_skips, uid_skips, served_skips
+
+    def fork_slot_into(
+        self, key: SlotKey, entry: Dict[str, Any],
+    ) -> Optional[PoolSlot]:
+        """Fork a slot that enters an SELinux boundary at fork (phase 4).
+
+        For a session :meth:`acquire_slot` had no slot for: a virgin slot
+        is threaded and cannot ``setcon`` (selinux-backend.md §7.2), so
+        the template forks one for this session, and the child enters
+        *entry* (``context``, ``private_tmp``, ``runner_user``) before it
+        starts a thread.  The returned slot is checked out to the caller,
+        stamped with *key*, and returns to the pool like any other, where
+        it fits only *key*'s boundary and uid.
+
+        ``None`` when the template could not fork (dead, timed out); the
+        caller cold-spawns, as on any miss.  A child that cannot ENTER the
+        boundary exits instead (``SELINUX_ENTRY_EXIT_CODE``), which the
+        caller sees as a bootstrap that failed, not as a miss: a session
+        whose boundary cannot be entered must not run anywhere else.
+        """
+        raw = self._template_manager.request_fork_slot(entry=entry)
+        if raw is None:
+            self._incr("pool_selinux_fork_failures_total")
+            return None
+        pid, sock = raw
+        slot = PoolSlot(pid=pid, sock=sock)
+        key.stamp(slot)
+        self._incr("pool_selinux_fork_total")
+        logger.info(
+            "PoolManager: forked slot pid=%d into SELinux boundary %s "
+            "(context %s)", pid, key.selinux_boundary, entry.get("context"),
+        )
         return slot
 
     def return_slot_after_session(self, slot: PoolSlot) -> bool:
@@ -1104,6 +1303,7 @@ class PoolManager:
         slot.last_session_end_ts = time.monotonic()
         evicted: Optional[PoolSlot] = None
         stale_reservation_evicted = False
+        served_evicted = False
         with self._lock:
             if any(s is slot for s in self._idle_slots):
                 logger.error(
@@ -1136,13 +1336,12 @@ class PoolManager:
                 # resident may still be a CoW-cheap template fork.  Keeping
                 # what is already here also avoids churning the pool on
                 # every return once it is full.
-                victim_ix = (
-                    self._pick_capacity_victim()
-                    if slot.cascade_id is not None else None
-                )
+                victim_ix = self._pick_capacity_victim(slot)
                 if victim_ix is not None:
                     evicted = self._idle_slots.pop(victim_ix)
                     stale_reservation_evicted = evicted.cascade_id is not None
+                    served_evicted = (not stale_reservation_evicted
+                                      and evicted.has_served)
                     self._idle_slots.append(slot)
                 else:
                     evicted = slot
@@ -1150,6 +1349,8 @@ class PoolManager:
                 self._idle_slots.append(slot)
         if stale_reservation_evicted:
             self._incr("pool_stale_reservation_evicted_total")
+        if served_evicted:
+            self._incr("pool_served_slot_evicted_total")
 
         if evicted is not None:
             # Handed to the replenish thread rather than torn down here.
@@ -1187,14 +1388,21 @@ class PoolManager:
         )
         return pooled
 
-    def _pick_capacity_victim(self) -> Optional[int]:
-        """Choose which resident an AFFINE returning slot displaces.
+    def _pick_capacity_victim(
+        self, returner: Optional[PoolSlot] = None,
+    ) -> Optional[int]:
+        """Choose which resident a returning slot (or a shrink) drops.
 
         Caller holds ``self._lock``.  Returns an index into
         ``self._idle_slots``, or ``None`` when the returner should be
-        the one dropped.  Only consulted when the returner carries a
-        ``cascade_id``: a returner with none has no claim on the pool
-        that a resident does not also have, so it goes.
+        the one dropped.  ``returner=None`` (a shrink, no slot arriving)
+        follows the affine order below.
+
+        An UNAFFINED returner (#1507) displaces only a SERVED unaffined
+        resident whose posture was last asked for longer ago than the
+        returner's own -- warm capacity for a posture nobody is using
+        traded for warm capacity for one somebody is.  It never displaces
+        a reservation or a virgin slot; with no such resident it goes.
 
         LIVENESS OUTRANKS WARMTH (#898).  The rule used to be "an affine
         slot displaces a PURE-IDLE resident, otherwise the returner
@@ -1218,6 +1426,9 @@ class PoolManager:
            drop.  This is the original rule and its original reason: a
            pure-idle slot carries no warm state, so trading it for a
            slot that does keeps the warm path the pool exists to serve.
+           Among pure-idle residents a SERVED one goes before a virgin
+           (#1507), least recently demanded posture first: a served slot
+           fits one posture, a virgin fits all of them.
         3. **Neither** (``None``) -- the pool holds nothing at all, so
            the returner is the only candidate.
 
@@ -1228,6 +1439,15 @@ class PoolManager:
         state for one tenant is negotiable, capacity for every tenant
         is not.
         """
+        if returner is not None and returner.cascade_id is None:
+            served = self._served_unaffined_by_usefulness()
+            if not served:
+                return None
+            ix, victim = served[0]
+            if (self._posture_demand(victim)
+                    < self._posture_demand(returner)):
+                return ix
+            return None
         reservations = [
             (i, s) for i, s in enumerate(self._idle_slots)
             if s.cascade_id is not None
@@ -1241,11 +1461,35 @@ class PoolManager:
                     else float("-inf")
                 ),
             )[0]
+        served = self._served_unaffined_by_usefulness()
+        if served:
+            return served[0][0]
         return next(
             (i for i, s in enumerate(self._idle_slots)
              if s.cascade_id is None),
             None,
         )
+
+    def _posture_demand(self, slot: PoolSlot) -> float:
+        """When *slot*'s posture was last asked for; ``-inf`` if never."""
+        return self._posture_last_demand.get(
+            posture_of_slot(slot), float("-inf"))
+
+    def _served_unaffined_by_usefulness(self) -> List[Tuple[int, PoolSlot]]:
+        """Served, unaffined idle slots, least useful first (#1507).
+
+        Caller holds ``self._lock``.  Ordered by when the slot's posture
+        was last asked for (oldest first), then by how long the slot has
+        sat idle.  The head of the list is what the ceiling spends first
+        among slots that fit only one posture.
+        """
+        served = [(i, s) for i, s in enumerate(self._idle_slots)
+                  if s.cascade_id is None and s.has_served]
+        return sorted(served, key=lambda pair: (
+            self._posture_demand(pair[1]),
+            pair[1].last_session_end_ts
+            if pair[1].last_session_end_ts is not None else float("-inf"),
+        ))
 
     def _incr(self, key: str, delta: int = 1) -> None:
         """Atomic-ish bump of a telemetry counter.  Internal helper."""
@@ -1267,7 +1511,12 @@ class PoolManager:
           - ``pool_acquire_miss_total``: ``acquire_slot`` returned
             None.  Sessions fell back to cold-spawn.  If this is
             growing fast, raise ``target_size`` or check
-            ``pool_replenish_failures_total``.
+            ``pool_replenish_failures_total``.  An SELinux session's
+            miss is followed by :meth:`fork_slot_into`, not a cold
+            spawn.
+          - ``pool_selinux_fork_total`` / ``..._failures_total`` (phase
+            4): slots forked into an SELinux boundary, and the requests
+            the template could not fork.
           - ``pool_stale_reservation_evicted_total``: a cascade-affined
             idle slot was dropped at the ceiling to admit a returning
             slot of a live cascade.  Its cascade pays a cold plugin
@@ -1293,9 +1542,31 @@ class PoolManager:
             unasked, so a growing value points at an external kill
             (OOM, a signal) or a frame-level channel fault.  The
             WARNING beside each eviction names which.
+          - ``pool_posture_miss_total`` (#1507): an unaffined acquire
+            found only served slots of another posture.  Should stay
+            near zero once the pool is warm; growing means raise the
+            floor.
+          - ``pool_served_slot_evicted_total`` (#1507): a served slot
+            spent at the ceiling, for the virgin floor or for a returner
+            of a posture asked for more recently.
+
+        Gauges (#1507), read at the call rather than accumulated:
+          - ``pool_idle_virgin``: idle slots that never served — the
+            quantity ``target_size`` keeps stocked.
+          - ``pool_idle_reserved``: cascade-affined idle slots.
+          - ``pool_idle_served:<profile|unconfined>/uid=<uid|daemon>``:
+            served, unaffined idle slots per posture (an SELinux one
+            adds ``/selinux=<id>``).
         """
+        # Taken before ``_counters_lock``: the acquire path takes
+        # ``_lock`` then ``_counters_lock``, so the reverse order here
+        # would be a lock-order inversion.
+        gauges = {f"pool_idle_{name}": n
+                  for name, n in self.posture_idle_counts().items()}
         with self._counters_lock:
-            return dict(self._counters)
+            out = dict(self._counters)
+        out.update(gauges)
+        return out
 
     def shutdown_all(self) -> None:
         """Tear down the replenishment thread + every idle slot.
@@ -1370,7 +1641,8 @@ class PoolManager:
 
         Shrinking: only IDLE slots are touched -- an acquired slot is
         not in ``_idle_slots`` and finishes its session undisturbed.
-        Unreserved slots above the new floor go first; then, if the
+        Virgin slots above the new floor go first (the floor counts
+        virgins since #1507; at 0 every unaffined slot goes); then, if the
         pool is still over the new ceiling, the stalest reservations
         (the order :meth:`_pick_capacity_victim` uses).  Dropped slots
         are queued on ``_pending_teardown`` rather than torn down here,
@@ -1432,14 +1704,20 @@ class PoolManager:
     def _select_over_size_locked(self) -> List[PoolSlot]:
         """Remove and return the idle slots the current sizes do not keep.
 
-        Caller holds ``self._lock``.  First the unreserved slots above
-        ``target_size`` (newest first, so the longest-warm ones stay),
-        then -- while the pool is still above ``max_size`` -- the victims
-        :meth:`_pick_capacity_victim` names, which prefers the stalest
-        reservation.
+        Caller holds ``self._lock``.  First the virgin slots above
+        ``target_size`` (newest first, so the longest-warm ones stay) --
+        the floor counts virgins since #1507 -- then, while the pool is
+        still above ``max_size``, the victims :meth:`_pick_capacity_victim`
+        names: the stalest reservation, then the served slot of the least
+        recently demanded posture, then a virgin.
         """
         dropped: List[PoolSlot] = []
-        unreserved = [s for s in self._idle_slots if s.cascade_id is None]
+        # At target 0 the pool is disabled, so a served slot is not kept
+        # on top of a floor that no longer exists: every unaffined slot
+        # goes, as before #1507.
+        unreserved = [s for s in self._idle_slots
+                      if s.cascade_id is None
+                      and (not s.has_served or self.target_size == 0)]
         for slot in reversed(unreserved[self.target_size:]):
             self._idle_slots.remove(slot)
             dropped.append(slot)
@@ -1454,7 +1732,9 @@ class PoolManager:
         """The pool's sizing and state, for ``pool.status`` and logs.
 
         Keys: ``target_size``, ``max_size``, ``max_size_explicit``,
-        ``idle`` (all idle slots), ``unreserved``, ``reserved``,
+        ``idle`` (all idle slots), ``unreserved``, ``virgin`` (never
+        served: what the floor counts, #1507), ``served`` (unaffined but
+        served: fits one posture), ``reserved``,
         ``pending_teardown``, ``replenishing`` (the replenish thread is
         alive), ``template_alive`` and ``telemetry`` (the
         :meth:`get_telemetry` counters).
@@ -1462,6 +1742,7 @@ class PoolManager:
         with self._lock:
             idle = len(self._idle_slots)
             unreserved = sum(1 for s in self._idle_slots if s.cascade_id is None)
+            virgin = self._virgin_idle_count_locked()
             pending = len(self._pending_teardown)
             sizes = (self.target_size, self.max_size, self._max_size_explicit)
         thread = self._replenish_thread
@@ -1475,6 +1756,8 @@ class PoolManager:
             "max_size_explicit": sizes[2],
             "idle": idle,
             "unreserved": unreserved,
+            "virgin": virgin,
+            "served": unreserved - virgin,
             "reserved": idle - unreserved,
             "pending_teardown": pending,
             "replenishing": bool(thread is not None and thread.is_alive()),
@@ -1488,7 +1771,8 @@ class PoolManager:
         """Start the background thread that keeps the pool topped up.
 
         Pool PR 4: the thread watches
-        :meth:`unreserved_idle_count` against ``target_size`` and,
+        :meth:`virgin_idle_count` (#1507; :meth:`unreserved_idle_count`
+        before it) against ``target_size`` and,
         whenever the count of slots ANY tenant could take drops below
         target, asks the template for a fresh fork-slot — subject to
         the ``max_size`` ceiling on total idle slots.  This is what makes
@@ -1633,15 +1917,24 @@ class PoolManager:
                 # another, while ``acquire_slot(cascade=A)`` returned
                 # None.  Nothing to run on, and nothing in the system
                 # that would ever create one, until B released.
-                if self.unreserved_idle_count() >= self.target_size:
+                #
+                # And VIRGIN, not unreserved (#1507): a slot that has
+                # served fits only its own posture (#1100), so it is a
+                # reservation keyed on the boundary.  Counting it here let
+                # a daemon mixing unconfined and confined sessions read
+                # "full" on slots the second posture could not take.
+                if self.virgin_idle_count() >= self.target_size:
                     self._pause()
                     continue
                 # ... but reservations still occupy memory, so the
-                # total is what the ceiling bounds.  Hitting it is the
-                # signal that ``max_size`` is too small for the number
-                # of concurrent tenants: some of them are being served
-                # by cold-spawn while reservations hold the ceiling.
-                if self.idle_count() >= self.max_size:
+                # total is what the ceiling bounds.  At the ceiling a
+                # SERVED unaffined slot is spent for the virgin (liveness
+                # outranks warmth: the virgin serves every posture);
+                # reservations are not.  Hitting the ceiling with nothing
+                # to spend is the signal that ``max_size`` is too small
+                # for the number of concurrent tenants.
+                if (self.idle_count() >= self.max_size
+                        and not self._spend_served_slot_for_floor()):
                     self._incr("pool_replenish_ceiling_blocked_total")
                     self._pause()
                     continue
@@ -1660,8 +1953,8 @@ class PoolManager:
                 self._incr("pool_replenish_success_total")
                 logger.info(
                     "PoolManager replenish: forked slot pid=%d "
-                    "(unreserved=%d/%d, idle_count=%d/%d)",
-                    new_slot.pid, self.unreserved_idle_count(),
+                    "(virgin=%d/%d, idle_count=%d/%d)",
+                    new_slot.pid, self.virgin_idle_count(),
                     self.target_size, len(self._idle_slots), self.max_size,
                 )
             except Exception:  # noqa: BLE001 — boundary surface
@@ -1670,6 +1963,33 @@ class PoolManager:
                     "and continuing",
                 )
                 self._pause()
+
+    def _spend_served_slot_for_floor(self) -> bool:
+        """Drop the least useful served slot to make room for a virgin.
+
+        Called by the replenish loop when the virgin floor is short and
+        the pool is at ``max_size`` (#1507).  Picks the served, unaffined
+        slot whose posture was asked for least recently (then the one idle
+        longest) and queues it for teardown; the caller forks the virgin.
+        Reservations are never spent here -- that is #898's ceiling, and
+        ``pool_replenish_ceiling_blocked_total`` still reports it.
+
+        Returns ``True`` when a slot was queued.
+        """
+        with self._lock:
+            served = self._served_unaffined_by_usefulness()
+            if not served:
+                return False
+            victim = self._idle_slots.pop(served[0][0])
+            victim.teardown_reason = "spent-for-virgin-floor"
+            self._pending_teardown.append(victim)
+        self._incr("pool_served_slot_evicted_total")
+        logger.info(
+            "PoolManager replenish: at the ceiling with the virgin floor "
+            "short; slot pid=%d (served %s) queued for teardown to make "
+            "room", victim.pid, posture_label(posture_of_slot(victim)),
+        )
+        return True
 
     def _teardown_slot(self, slot: PoolSlot, *, reason: str) -> None:
         """Close one idle slot's transport and reap its process.

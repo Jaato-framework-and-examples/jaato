@@ -256,8 +256,14 @@ def test_ws_apparmor_pre_init_hook_accepts_client_id_kwarg() -> None:
     # Build a minimal WS server + router stub to register the hook,
     # then introspect the registered callable.
     from jaato_server.server.websocket import JaatoWSServer
+    from jaato_server.server.ws_tickets import AppCredentialStore
 
     ws = JaatoWSServer.__new__(JaatoWSServer)
+    # No per-application workspace roots configured.
+    ws._clients = {}
+    ws._app_managers = {}
+    ws._app_provisioners = {}
+    ws._app_credentials = AppCredentialStore({})
     ws._apparmor = None
     ws._cgroups = None
     ws._workspace_root = "/tmp/ws"
@@ -494,7 +500,7 @@ class _FakePoolManager:
 
     def acquire_slot(self, cascade_driver_id=None, config_root=None,
                      workspace_root=None, profile_name=None,
-                     runner_uid=None):
+                     runner_uid=None, selinux_boundary=None):
         self.acquire_calls += 1
         self.last_cascade_id = cascade_driver_id
         # #1033: the whole key, so a test can assert the spawn path

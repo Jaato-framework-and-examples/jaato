@@ -24,12 +24,18 @@ from dataclasses import dataclass
 from typing import Callable, Iterator, Optional, Tuple
 
 from jaato_sdk.scaffold.gitignore import AUTHORED
+from jaato_server.shared.workspace_ownership import inherit_owner
 
 WORKSPACE_TYPE = "jaato_workspace_t"
 MANAGED_TYPE = "jaato_managed_ws_t"
 AUTHORED_TYPE = "jaato_authored_t"
+AGENT_CONFIG_TYPE = "jaato_agent_config_t"
+PROMPTS_TYPE = "jaato_prompts_t"
 CLAIMS_TYPE = "jaato_claims_t"
 TMP_TYPE = "jaato_tmp_t"
+#: An isolated sub-runner's log file: the daemon creates and labels it,
+#: the isolated domains may only append to it (policy v3).
+RUNNER_LOG_TYPE = "jaato_runner_log_t"
 
 #: The SELinux user of files the daemon labels; restorecon uses it too.
 FILE_USER = "system_u"
@@ -37,6 +43,23 @@ FILE_USER = "system_u"
 #: ``.jaato/references-claims/``: the runner writes claims, a child may not
 #: (template v43).
 CLAIMS_DIR = "references-claims"
+
+#: ``.jaato/prompts/``: the prompt library.  Written by sessions (it is not
+#: in the confined authored set) and unreadable to an isolated sub-runner,
+#: so it needs a type of its own (phase 3).
+PROMPTS_DIR = "prompts"
+
+#: The authored entries an isolated sub-runner may not even READ: the
+#: persona and instruction layers, the scripts and both payload schemas.
+#: The AppArmor isolated sub-profile's ``audit deny ... r`` lines say the
+#: same (with ``prompts/``, which is not authored);
+#: ``test_selinux_isolated_runner_3`` checks the two agree.  The rest of the
+#: authored set (references, templates, services, plans, routing, the
+#: fragment tiers) stays readable to it, as under AppArmor.
+ISOLATED_UNREADABLE = frozenset({
+    "agents", "profiles", "scripts", "completion_schemas", "spawn_schemas",
+    "instructions", "reactors.json",
+})
 
 
 def authored_entries() -> Tuple[Tuple[str, bool], ...]:
@@ -91,10 +114,17 @@ class Plan:
         if len(parts) >= 2 and parts[0] == ".jaato":
             if parts[1] == CLAIMS_DIR:
                 return CLAIMS_TYPE
+            if parts[1] == PROMPTS_DIR:
+                return PROMPTS_TYPE
             for name, is_dir in authored_entries():
                 if parts[1] == name and (is_dir or len(parts) == 2):
-                    return AUTHORED_TYPE
+                    return authored_type(name)
         return self.base_type
+
+
+def authored_type(name: str) -> str:
+    """The type of the authored entry *name* directly under ``.jaato/``."""
+    return AGENT_CONFIG_TYPE if name in ISOLATED_UNREADABLE else AUTHORED_TYPE
 
 
 def precreate_authored_dirs(workspace: str) -> None:
@@ -104,6 +134,16 @@ def precreate_authored_dirs(workspace: str) -> None:
         if is_dir:
             os.makedirs(os.path.join(dot, name), exist_ok=True)
     os.makedirs(os.path.join(dot, CLAIMS_DIR), exist_ok=True)
+    # Pre-created for the reason the authored ones are: a runner creating it
+    # later would give it the workspace type, readable by an isolated one.
+    os.makedirs(os.path.join(dot, PROMPTS_DIR), exist_ok=True)
+    # The workspace's runner writes into these: they are its owner's.  Each
+    # one by name, never the whole of .jaato/, where the daemon's own
+    # session records live.
+    inherit_owner(dot, workspace)
+    created = [name for name, is_dir in authored_entries() if is_dir]
+    for name in [*created, CLAIMS_DIR, PROMPTS_DIR]:
+        inherit_owner(os.path.join(dot, name), workspace)
 
 
 def walk(root: str) -> Iterator[str]:

@@ -18,6 +18,7 @@ import pytest
 from jaato_server.server.confinement import Boundary, select_backend
 from jaato_server.server.confinement.apparmor import AppArmorBackend
 from jaato_server.server.confinement.selinux import (
+    REQUIRED_POLICY_VERSION,
     RUNNER_PROBE_CONTEXT,
     SELinuxBackend,
     policy_marker_context,
@@ -45,6 +46,15 @@ REVERSIONS = [
                 "domain, so without the entrypoint check a host whose "
                 "interpreter the module does not cover reads as ready "
                 "(phase 0, experiment 5.8)",
+    ),
+    Reversion(
+        target=_SELINUX,
+        find='    if kernel.allowed(own, target, "process", "dyntransition") is not True:\n',
+        replace="    if False:\n",
+        test="test_readiness_names_the_first_failing_check",
+        because="a daemon whose domain may not dyntransition into the runner "
+                "would read as ready, and every pool-served session would "
+                "then fail at fork (phase 4)",
     ),
     Reversion(
         target=_SELINUX,
@@ -147,11 +157,12 @@ class _FakeKernel:
     """A policy in which only what the fields grant is allowed."""
 
     def __init__(self, contexts=(), mls=True, own=_OWN, transition=True,
-                 entrypoint=True, exe=_EXE):
+                 entrypoint=True, exe=_EXE, dyntransition=True):
         self.contexts = set(contexts)
         self.mls = mls
         self.own = own
         self.transition = transition
+        self.dyntransition = dyntransition
         self.entrypoint = entrypoint
         self.exe = exe
 
@@ -170,6 +181,8 @@ class _FakeKernel:
     def allowed(self, source, target, tclass, perm):
         if (tclass, perm) == ("process", "transition"):
             return self.transition
+        if (tclass, perm) == ("process", "dyntransition"):
+            return self.dyntransition
         if (tclass, perm) == ("file", "entrypoint"):
             return self.entrypoint if target == self.exe else False
         return False
@@ -177,7 +190,7 @@ class _FakeKernel:
 
 # The module loaded, with the runner domain authorized for the daemon's role.
 _POLICY = (
-    RUNNER_PROBE_CONTEXT, policy_marker_context(1),
+    RUNNER_PROBE_CONTEXT, policy_marker_context(REQUIRED_POLICY_VERSION),
     "system_u:system_r:jaato_runner_t:s0",
 )
 
@@ -198,13 +211,14 @@ def _selinux(kernel=None, enforcing=True, system="Linux", mounted=True):
     (_selinux(kernel=None), "libselinux"),
     (_selinux(_FakeKernel(_POLICY), enforcing=None), "could not be read"),
     (_selinux(_FakeKernel()), "not loaded"),
-    (_selinux(_FakeKernel([RUNNER_PROBE_CONTEXT])), "older than version 1"),
+    (_selinux(_FakeKernel([RUNNER_PROBE_CONTEXT])), f"older than version {REQUIRED_POLICY_VERSION}"),
     (_selinux(_FakeKernel(_POLICY, mls=False)), "MLS/MCS"),
     (_selinux(_FakeKernel(_POLICY, own=None)), "own context"),
     (_selinux(_FakeKernel(_POLICY, own="garbage")), "could not be parsed"),
     (_selinux(_FakeKernel(_POLICY, own="unconfined_u:unconfined_r:unconfined_t:s0")),
      "unconfined_u:unconfined_r are not authorized"),
     (_selinux(_FakeKernel(_POLICY, transition=None)), "may not transition"),
+    (_selinux(_FakeKernel(_POLICY, dyntransition=False)), "may not dyntransition"),
     (_selinux(_FakeKernel(_POLICY, exe=None)), "label could not be read"),
     (_selinux(_FakeKernel(_POLICY, entrypoint=False)), "as an entrypoint"),
 ])

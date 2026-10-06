@@ -594,8 +594,25 @@ def test_no_plaintext_credential_is_retained():
 # ------------------------------------------------------- E. the file's mode
 
 def _creds_file(tmp_path: Path, mapping: dict, mode: int = 0o600) -> Path:
+    """Write a credentials file mapping each app id to its credential.
+
+    Each entry is given an account (the user running the suite) and a
+    workspace root of its own that the account owns, so the file is
+    well-formed in everything but what a test sets out to break.
+    """
+    import getpass
+
+    entries = {}
+    for app_id, credential in mapping.items():
+        root = tmp_path / f"root-{len(entries)}"
+        root.mkdir(mode=0o700)
+        entries[app_id] = {
+            "credential": credential,
+            "account": getpass.getuser(),
+            "workspace_root": str(root),
+        }
     path = tmp_path / "ws-apps.json"
-    path.write_text(json.dumps(mapping))
+    path.write_text(json.dumps(entries))
     os.chmod(path, mode)
     return path
 
@@ -605,6 +622,10 @@ def test_a_well_formed_credentials_file_loads(tmp_path):
     store = load_app_credentials(_creds_file(tmp_path, {"acme": _APP_TOKEN}))
     assert store.app_ids() == ("acme",)
     assert store.lookup(credential_digest(_APP_TOKEN)) == "acme"
+    workspace = store.workspace("acme")
+    assert workspace is not None
+    assert workspace.uid == os.getuid()
+    assert workspace.workspace_root == os.path.realpath(tmp_path / "root-0")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")

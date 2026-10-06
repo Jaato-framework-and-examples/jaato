@@ -11,9 +11,9 @@
  */
 import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { JaatoClient } from "@jaato/sdk";
@@ -44,7 +44,13 @@ describe("against the real daemon", { skip: available ? false : `no Python with 
   before(async () => {
     port = await freePort();
     const dir = mkdtempSync(join(tmpdir(), "jwcs-daemon-"));
-    writeFileSync(join(dir, "ws-apps.json"), JSON.stringify({ "jaato-web-coder": APP_CREDENTIAL }), { mode: 0o600 });
+    // The application's workspaces live in a root its account owns; a
+    // non-root daemon may only name its own account.
+    const wsRoot = join(dir, "app-workspaces");
+    mkdirSync(wsRoot, { mode: 0o700 });
+    writeFileSync(join(dir, "ws-apps.json"), JSON.stringify({
+      "jaato-web-coder": { credential: APP_CREDENTIAL, account: userInfo().username, workspace_root: wsRoot },
+    }), { mode: 0o600 });
     proc = spawn(PYTHON, ["-m", "jaato_server", "--web-socket", `127.0.0.1:${port}`, "--ws-app-credentials", join(dir, "ws-apps.json"), "--pid-file", join(dir, "daemon.pid")],
       { cwd: dir, env: { ...process.env, HOME: dir, JAATO_RUNNER_POOL_ENABLED: "false" }, stdio: ["ignore", "pipe", "pipe"] });
     proc.stderr!.on("data", (c) => { stderr += c; });

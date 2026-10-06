@@ -23,7 +23,8 @@ browser ──WebSocket ?token=<ticket>──► daemon        (direct mode: thi
 
 ```bash
 # once: generate the app credential + session secret (0600) and a config template
-jaato-web-coder-server init --dir /etc/jaato-web-coder
+jaato-web-coder-server init --dir /etc/jaato-web-coder \
+    --account webcoder --workspace-root /home/webcoder/workspaces
 #   → prints the daemon-side entry for --ws-app-credentials
 
 # edit /etc/jaato-web-coder/server.yaml, paste the Keycloak client secret into oidc.secret, then
@@ -31,7 +32,11 @@ jaato-web-coder-server serve --config /etc/jaato-web-coder/server.yaml
 ```
 
 The daemon must run with `--ws-app-credentials <file>` naming this
-application; the full host layout (systemd units, Caddy/nginx, Keycloak
+application. Its entry also names the OS account its workspaces belong to
+and the directory they are created under (owned by that account): the
+daemon creates and opens this application's workspaces there only, and a
+root daemon hands what it writes in them to that account, so
+`--runner-uid-policy workspace-owner` runs the sessions as it; the full host layout (systemd units, Caddy/nginx, Keycloak
 client registration) is in [`deploy/`](deploy/README.md).
 
 Until `@jaato/web-coder-server` is on npm, install from a checkout:

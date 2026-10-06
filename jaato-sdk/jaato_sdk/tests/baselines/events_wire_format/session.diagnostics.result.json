@@ -14,5 +14,6 @@
   "protocol_version": "",
   "server_version": "",
   "probe": null,
-  "apparmor_grants": null
+  "apparmor_grants": null,
+  "seccomp": null
 }

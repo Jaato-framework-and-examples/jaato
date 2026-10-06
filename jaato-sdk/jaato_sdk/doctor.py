@@ -529,11 +529,14 @@ def check_confinement() -> List[Check]:
 
 def _selinux_checks(name: str, facts: Dict[str, Optional[str]]) -> List[Check]:
     """The selinux row plus a WARN for each fact that weakens the boundary."""
-    from jaato_server.server.confinement.selinux import USER_DIR_TYPE
+    from jaato_server.server.confinement.selinux import (
+        USER_DIR_TYPE, user_tier_fcontext_commands,
+    )
     from jaato_server.shared.lsm_label import parse_selinux_context
 
     checks = [Check(name, PASS,
-                    f"selinux — mode {facts['mode']}, runner domain "
+                    f"selinux — policy module v{facts['policy_version']}, "
+                    f"mode {facts['mode']}, runner domain "
                     f"{facts['runner_domain']}, interpreter "
                     f"{facts['interpreter']} ({facts['interpreter_label']})")]
     if "permissive" in (facts["mode"], facts["runner_domain"]):
@@ -547,8 +550,32 @@ def _selinux_checks(name: str, facts: Dict[str, Optional[str]]) -> List[Check]:
         checks.append(Check(name, WARN,
                             f"{facts['user_dir']} is labelled "
                             f"{facts['user_dir_label']}, not {USER_DIR_TYPE}; "
-                            f"run: restorecon -Rv {facts['user_dir']}"))
+                            + _user_dir_remedy(facts, USER_DIR_TYPE,
+                                               user_tier_fcontext_commands)))
     return checks
+
+
+def _user_dir_remedy(facts: Dict[str, Optional[str]], want: str,
+                     commands: Any) -> str:
+    """How to relabel ``~/.jaato``: ``restorecon`` only when it would work.
+
+    ``restorecon`` applies the file-context database, and ``jaato.fc``
+    covers only ``/root/.jaato`` and the homes ``genhomedircon`` knows.  For
+    any other ``HOME`` (a service account under ``/srv``, a private test
+    ``HOME``) it changes nothing, so the warning could never be cleared by
+    following it.  When the database's answer (``matchpathcon``) is not
+    *want*, the ``semanage fcontext`` rules come first.
+    """
+    from jaato_server.shared.lsm_label import parse_selinux_context
+
+    user_dir = facts["user_dir"]
+    default = parse_selinux_context(facts.get("user_dir_default_label"))
+    if default is not None and default.type == want:
+        return f"run: restorecon -Rv {user_dir}"
+    lead = ("restorecon has no rule for it" if default is not None
+            else "restorecon may have no rule for it")
+    return (f"{lead} (jaato.fc covers /root/.jaato and users' homes only); "
+            "run: " + "; ".join(commands(user_dir)))
 
 
 def check_mcp_sdk() -> List[Check]:

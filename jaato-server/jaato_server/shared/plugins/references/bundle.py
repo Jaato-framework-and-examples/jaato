@@ -102,6 +102,25 @@ REFERENCE_NON_SOURCE_FILENAMES: Tuple[str, ...] = (
     EMBEDDING_CONFIG_FILENAME,
 )
 
+# The sidecar file name a newly indexed bundle records.
+DEFAULT_EMBEDDING_SIDECAR = "references.embeddings.npy"
+
+
+def new_index_config(model: str, dimensions: int) -> Dict[str, Any]:
+    """The ``embedding_config.json`` body of a freshly indexed, empty bundle.
+
+    One definition for every writer that gives a bundle its index: the
+    plugin's ``bundle create`` (with a provider) and ``bundle index``.  A
+    bundle created without one carries no such file (#1478).
+    """
+    return {
+        "embedding_model": model,
+        "embedding_dimensions": int(dimensions),
+        "embedding_sidecar": DEFAULT_EMBEDDING_SIDECAR,
+        "rows": [],
+    }
+
+
 # Valid reconcile modes declared in a bundle's embedding config.
 _VALID_RECONCILE_MODES: Set[str] = {"eager", "lazy", "off"}
 

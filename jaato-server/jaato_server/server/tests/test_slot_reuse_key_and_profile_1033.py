@@ -76,8 +76,8 @@ REVERSIONS = [
         # profile half and keeps the uid half, so only the profile is
         # ignored and only this test can notice.
         find=("            (slot.profile_name or None) == self.profile_name\n"
-              "            and self.uid_fits(slot)\n"),
-        replace="            self.uid_fits(slot)\n",
+              "            and (getattr(slot, \"selinux_boundary\", None) or None) == self.selinux_boundary\n"),
+        replace="            (getattr(slot, \"selinux_boundary\", None) or None) == self.selinux_boundary\n",
         test=("TestReuseKey::"
               "test_a_pure_idle_slot_is_not_handed_across_profiles"),
         because=("the unaffined acquire path handing out a slot that is "
@@ -397,6 +397,8 @@ class TestReuseKey:
             "profile_name",
             # #1168 step 3: a slot that dropped is that uid for life.
             "runner_uid",
+            # SELinux phase 4: a slot enters its domain at fork, for life.
+            "selinux_boundary",
         }
 
     def test_paths_are_compared_canonically(self, tmp_path) -> None:
@@ -542,14 +544,20 @@ class TestProfileLifetime:
         return mgr._profile_dir / name
 
     def test_a_boundary_another_session_holds_survives_teardown(
-        self, tmp_path, no_parser,
+        self, tmp_path, no_parser, monkeypatch,
     ) -> None:
         """Two live sessions, one boundary; one of them ends.
 
         Sharing a profile name is what makes a slot reusable, and it is
         also what makes the old per-session unload dangerous: session A
         ending must not take the kernel boundary away from session B.
+
+        Run with the #1501 idle grace off, so a release that is NOT held
+        really unloads; with the grace on, A's release would keep the
+        profile loaded whether or not B held it, and this case could not
+        tell the hold check from the grace.
         """
+        monkeypatch.setenv("JAATO_APPARMOR_PROFILE_GRACE_SECONDS", "0")
         ws = str(tmp_path / "ws")
         mgr = _manager(tmp_path, workspace=ws)
         sm = _session_manager(mgr)

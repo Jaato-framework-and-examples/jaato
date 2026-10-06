@@ -166,7 +166,8 @@ class TestBundleCreate:
         assert "error" in result
         assert "already exists" in result["error"]
 
-    def test_create_without_provider_errors(self, workspace):
+    def test_create_without_provider_makes_an_unindexed_bundle(self, workspace):
+        """No provider -> an UNINDEXED bundle, never a refusal (#1478)."""
         plugin = _make_plugin(workspace, with_provider=False)
         plugin._embedding_provider = None
 
@@ -175,8 +176,13 @@ class TestBundleCreate:
             "target": "newone",
         })
 
-        assert "error" in result
-        assert "embedding provider" in result["error"]
+        assert result.get("status") == "ok", result
+        assert result["indexed"] is False
+        directory = Path(result["directory"])
+        assert (directory / "bundle.json").is_file()
+        assert not (directory / "embedding_config.json").exists()
+        created = next(b for b in plugin._bundles if b.name == "newone")
+        assert not created.has_index
 
 
 class TestBundleDelete:

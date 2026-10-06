@@ -11,6 +11,17 @@ Usage:
     provider.connect('gemini-2.5-flash')
 """
 
+#: Modules this package imports lazily (its SDK, at the session's first provider creation).
+#: The pool template imports them before it forks, so a session's
+#: slot inherits them shared instead of importing them privately.
+#: A literal tuple of strings, read without importing the package;
+#: nothing listed may read session-scoped state at import time.
+#: See jaato_server/server/runner/template_preload.py.
+PLUGIN_PRELOAD = (
+    "google.genai",
+    "jaato_server.shared.plugins.model_provider.google_genai",
+)
+
 from .provider import GoogleGenAIProvider, create_provider
 
 __all__ = [
