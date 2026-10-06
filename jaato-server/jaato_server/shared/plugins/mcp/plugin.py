@@ -26,6 +26,7 @@ from jaato_sdk.plugins.model_provider.types import (
     wrap_untrusted_content)
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
+from ..registry import is_runner_hosted_mirror
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
@@ -406,8 +407,15 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._scrub_secret_env = list(resolve_scrub_patterns(
             config.get("scrub_secret_env"), surface=self.name,
         ))
-        self._trace("initialize: starting background thread")
-        self._ensure_thread()
+        if is_runner_hosted_mirror(config):
+            # The daemon's copy of a runner-served session (#1566): the
+            # runner's copy connects the servers; a second connection here
+            # would only duplicate every server subprocess.
+            self._trace("initialize: daemon mirror of a runner session; "
+                        "no background thread, no server connections")
+        else:
+            self._trace("initialize: starting background thread")
+            self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
 

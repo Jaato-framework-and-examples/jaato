@@ -2194,6 +2194,36 @@ class JaatoServer:
                  if isinstance(n, str) and n]
         setter(names)
 
+    def _mark_registry_runner_hosted(self) -> None:
+        """Make the daemon's registry a resource-less mirror when a runner serves the session (#1566).
+
+        On the runner-served path (the default) the session's tools run in
+        the runner, against the runner's own registry.  The daemon still
+        builds, initializes and exposes a registry of its own, because it
+        reads those instances: the AppArmor rule walk
+        (``resolve_plugin_apparmor_rules``, before :meth:`initialize`),
+        command completions and tool status (``CommandRouter``), the
+        session-independent and auth commands, ``daemon_callable`` bodies
+        (``courier``, wired by ``set_session_manager``), the subagent /
+        todo / permission / prompt-library lookups and the plugin-status
+        replay.  None of them needs a plugin's per-session PROCESS
+        resources, and without this mark every session started them
+        twice: an MCP thread that connected every ``.mcp.json`` server, an
+        LSP thread with its language servers, the interactive-shell
+        reaper, and (for a profile listing ``references`` with a
+        compatible indexed bundle) an embedding model in the daemon.
+
+        ``self._runner_rpc`` is attached before :meth:`initialize` runs
+        (``SessionManager._construct_and_initialize_server`` spawns the
+        runner first), so its presence is the fact this asks.  A session
+        with no runner (embedded, standalone WS, a spawn that fell back)
+        is unmarked and behaves exactly as before.  Best effort: a
+        registry without the setter is left alone.
+        """
+        setter = getattr(self.registry, "set_runner_hosted", None)
+        if callable(setter):
+            setter(self._runner_rpc is not None)
+
     def get_session_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get a session-specific environment variable.
 
@@ -3439,6 +3469,7 @@ class JaatoServer:
                         if agent_name:
                             self.registry.set_agent_name(agent_name)
                         self._record_session_plugins_on_registry()
+                        self._mark_registry_runner_hosted()
 
                         with _s3.sub("expose_all"):
                             self.registry.expose_all(
