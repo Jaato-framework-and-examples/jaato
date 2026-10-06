@@ -463,6 +463,11 @@ def _configure_runtime_plugins(
         registry.set_session_id(session_id)
     if envelope.agent_id:
         registry.set_agent_name(envelope.agent_id)
+    # #1563: say which plugins this session's profile enables, so a
+    # plugin initialized anyway (below) can defer expensive work.  A
+    # session with no profile (``envelope.plugins is None``) enables every
+    # exposed plugin, which is "not known" here: nothing is stamped.
+    _record_session_plugins(registry, envelope)
 
     # Step 4: expose_all — initializes each plugin.  No on_progress
     # callback runner-side.  Initializes ALL discovered runner-tier
@@ -2209,6 +2214,26 @@ def _processors_from_envelope(
     # fields and defaulted the rest, so `max_refusals` was discarded on
     # arrival even once the daemon started sending it (jaato #770).
     return completion_processors_from_wire(envelope.completion_processors)
+
+
+def _record_session_plugins(registry: Any, envelope: SessionInitEnvelope) -> None:
+    """Tell the registry which plugins this session's profile enables (#1563).
+
+    Every discovered plugin is initialized at bootstrap whatever the
+    profile lists (see the Step 4 comment in :func:`_bootstrap_session`),
+    so a plugin cannot otherwise tell a session that can reach its tools
+    from one that cannot.  ``envelope.plugins is None`` (no profile) means
+    every exposed plugin is on the wire, which is recorded as "not known"
+    so no plugin defers anything.  Best effort: a registry without the
+    setter (an older double) or a malformed entry records nothing, which
+    is the pre-#1563 behaviour.
+    """
+    setter = getattr(registry, "set_session_plugins", None)
+    specs = getattr(envelope, "plugins", None)
+    if not callable(setter) or specs is None:
+        return
+    names = [entry.get("name") for entry in specs if isinstance(entry, dict)]
+    setter([n for n in names if isinstance(n, str) and n])
 
 
 def _extract_plugin_specs(

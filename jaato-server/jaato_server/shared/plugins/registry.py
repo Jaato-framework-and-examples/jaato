@@ -56,6 +56,13 @@ from jaato_server.shared.trace import trace as _trace_write
 # :meth:`PluginRegistry._config_requires_reinit` (#951).
 _IDENTITY_ONLY_CONFIG_KEYS = frozenset({"agent_name"})
 
+# Config key stamped by :meth:`PluginRegistry._augment_plugin_config`
+# when the runner recorded the session's plugin list
+# (:meth:`PluginRegistry.set_session_plugins`): ``True`` when the profile
+# enables the plugin, ``False`` when it does not.  Absent means "not
+# known".  Read by ``references`` to defer its embedding model (#1563).
+SESSION_ENABLES_PLUGIN_KEY = "session_enables_plugin"
+
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
@@ -491,6 +498,9 @@ class PluginRegistry:
         # mid-session changes.
         self._session_id: Optional[str] = None
         self._agent_name: Optional[str] = None
+        # The plugin names the session's profile enables (#1563), or
+        # ``None`` when nobody said.  See :meth:`set_session_plugins`.
+        self._session_plugins: Optional[frozenset] = None
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
         # Bootstrap timing: plugin name -> timing data
@@ -1533,7 +1543,7 @@ class PluginRegistry:
                 # (workspace_path, config_root, session_id,
                 # agent_name) injected into config via setdefault.
                 # See :meth:`_augment_plugin_config` for the contract.
-                effective_config = self._augment_plugin_config(config)
+                effective_config = self._augment_plugin_config(config, name)
                 plugin.initialize(effective_config)
                 plugin._initialized = True
                 if effective_config:
@@ -1555,7 +1565,7 @@ class PluginRegistry:
             # Server 0.6.129+: inject framework-known values into the
             # plugin's config before initialize.  See
             # :meth:`_augment_plugin_config`.
-            effective_config = self._augment_plugin_config(config)
+            effective_config = self._augment_plugin_config(config, name)
             t0 = time.perf_counter()
             try:
                 plugin.initialize(effective_config)
@@ -1610,7 +1620,7 @@ class PluginRegistry:
                     name, exc, exc_info=True,
                 )
             # Server 0.6.129+: framework-key injection for re-init too.
-            effective_config = self._augment_plugin_config(config)
+            effective_config = self._augment_plugin_config(config, name)
             try:
                 plugin.initialize(effective_config)
             except Exception as exc:
@@ -1807,7 +1817,7 @@ class PluginRegistry:
                 # Server 0.6.129+: framework-key injection also for
                 # parallel-init path (PARALLEL_INIT plugins like MCP).
                 # See :meth:`_augment_plugin_config`.
-                cfg = self._augment_plugin_config(config.get(name))
+                cfg = self._augment_plugin_config(config.get(name), name)
                 _trace(f"Starting parallel init for plugin '{name}'")
                 futures[name] = executor.submit(plugin.initialize, cfg)
             executor.shutdown(wait=False)
@@ -2173,6 +2183,30 @@ class PluginRegistry:
         """
         self._agent_name = agent_name
 
+    def set_session_plugins(self, names: Optional[List[str]]) -> None:
+        """Record which plugins the session's profile enables (#1563).
+
+        The runner initializes every discovered plugin whether or not
+        the profile lists it (``expose_all`` is called without
+        ``requested_plugins``; see the comment at its runner call site),
+        and #950 applies a profile's ``plugin_configs`` to every plugin
+        the registry knows.  Neither is changed here.  What this adds is
+        a fact a plugin can read at ``initialize()``: once a list is set,
+        :meth:`_augment_plugin_config` stamps
+        :data:`SESSION_ENABLES_PLUGIN_KEY` (``True``/``False``) into each
+        plugin's config, so a plugin whose initialize does expensive work
+        (``references`` loading an embedding model) can defer it for a
+        session that cannot reach its tools.
+
+        ``None`` (the default, and what the daemon and in-process callers
+        leave) means "not known": no key is stamped and plugins behave as
+        before.  The value describes the session that bootstrapped the
+        registry; an in-process subagent sharing it is not reflected, so
+        a plugin must treat ``False`` as "defer", never as "refuse".
+        """
+        self._session_plugins = (
+            frozenset(names) if names is not None else None)
+
     def _config_requires_reinit(
         self, name: str, config: Dict[str, Any],
     ) -> bool:
@@ -2231,7 +2265,7 @@ class PluginRegistry:
         return False
 
     def _augment_plugin_config(
-        self, config: Optional[Dict[str, Any]],
+        self, config: Optional[Dict[str, Any]], name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Pre-populate plugin config with framework-known values.
 
@@ -2259,6 +2293,11 @@ class PluginRegistry:
         explicit ``plugin_configs.<plugin>.workspace_path`` in a
         profile YAML overrides the framework-known value.
 
+        ``name`` is the plugin the config is for.  When it is given and
+        :meth:`set_session_plugins` recorded the session's plugin list,
+        :data:`SESSION_ENABLES_PLUGIN_KEY` says whether that list names
+        the plugin (#1563).
+
         Returns the augmented config dict, or the original
         ``config`` if no framework values are set yet (preserving
         the pre-fix behavior when callers bypass the setters).
@@ -2272,6 +2311,9 @@ class PluginRegistry:
             framework_keys["session_id"] = self._session_id
         if self._agent_name is not None:
             framework_keys["agent_name"] = self._agent_name
+        if name is not None and self._session_plugins is not None:
+            framework_keys[SESSION_ENABLES_PLUGIN_KEY] = (
+                name in self._session_plugins)
 
         if not framework_keys:
             return config
