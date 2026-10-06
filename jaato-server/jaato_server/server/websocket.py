@@ -1935,6 +1935,11 @@ class JaatoWSServer:
         JaatoServer initialization is deferred until a workspace is selected
         and configured by the client.
         """
+        # Session requests run on the default executor (see
+        # daemon_executor); a no-op when the daemon already installed it.
+        from jaato_server.server.daemon_executor import install_daemon_executor
+        install_daemon_executor(asyncio.get_running_loop())
+
         # Initialize workspace manager if root is provided.
         # When running in daemon mode without workspace_root, the WS server
         # still accepts peer gossip connections and IPC-attached client events.

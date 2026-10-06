@@ -9,7 +9,6 @@ Provides tools for:
 
 import logging
 import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -116,19 +115,9 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
         ]
 
     def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [SERVICE_CONNECTOR] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        """Write a line to the application trace (off unless JAATO_TRACE_LOG is set)."""
+        from jaato_sdk.trace import trace
+        trace("SERVICE_CONNECTOR", msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the service connector plugin.

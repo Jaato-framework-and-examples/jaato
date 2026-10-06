@@ -30,8 +30,7 @@ def _trace(msg: str) -> None:
 def _get_buffer_trace_path() -> Optional[str]:
     """Get the buffer trace file path from environment variable."""
     from jaato_sdk.trace import resolve_trace_path
-    return resolve_trace_path("RICH_BUFFER_TRACE",
-                              default_filename="rich_render_trace.log")
+    return resolve_trace_path("RICH_BUFFER_TRACE")
 
 
 def _buffer_trace(msg: str) -> None:
