@@ -3446,7 +3446,7 @@
       "scope_note": "sibling of JAATO_PROVIDER_TRACE; typed together with it",
       "sources": [
        "server/session_manager.py",
-       "shared/plugins/interactive_shell/plugin.py"
+       "shared/plugins/subagent/plugin.py"
       ],
       "typed_key": "trace.session_log"
      },
