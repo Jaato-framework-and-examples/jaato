@@ -118,6 +118,7 @@ CORE_MODULES: Tuple[str, ...] = (
     "jaato_server.server.runner.lsm_confine",
     "jaato_server.server.runner.slot_plugins",
     "jaato_server.shared.ai_disclosure",
+    "jaato_server.shared.bootstrap_timing",
     "jaato_server.shared.capability_drop",
     "jaato_server.shared.completion_schema_loader",
     "jaato_server.shared.event_bus_tools",
