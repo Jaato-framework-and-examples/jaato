@@ -4185,10 +4185,17 @@ it is how leaving a speaking tier stops requesting audio. The **tier says what**
 to emit, the **profile says how**: `api_params.audio` always wins, because the
 tier stamp uses `setdefault`.
 
-Since no catalog in this tree reports output modalities, an operator assertion is
-the only source of truth — hence the `output_modalities` knob (the counterpart of
-the input `modalities` knob). Without it the floor stays text-only and the startup
-check refuses any outbound role. `ProviderCapabilities.output_media` marks an
+Output modalities resolve catalog first on `openrouter`: its listing reports
+`architecture.output_modalities` (`["text","audio"]` for the audio models), and
+for a model the listing omits the per-model `/models/{id}/endpoints` document
+does. Elsewhere, and where the catalog is silent, an operator assertion is the
+only source of truth — hence the `output_modalities` knob (the counterpart of the
+input `modalities` knob). Without either the floor stays text-only and the startup
+check refuses any outbound role. A set that is exactly `{"decisions"}` gets no
+text floor: that is a decision model (TypeSafe Jev), which writes no text, and
+`is_decisions_only(model)` is the predicate that says so (step 1 of
+[Decision Models](docs/design/decision-models.md); guard
+`test_decisions_is_an_output_modality.py`, four reversions). `ProviderCapabilities.output_media` marks an
 adapter proven to deliver media on the wire — declared today by `openrouter`
 (verified end to end: a spoken answer reaches a separate client process and
 plays) and the five `_openai_compat` inheritors that share its streaming loop.

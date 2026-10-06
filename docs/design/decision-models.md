@@ -332,7 +332,7 @@ allows on an error.
 
 ## 11. Rollout
 
-1. The modality vocabulary, the text-floor exception and catalog detection on `openrouter` (§4). Small, and testable without a key.
+1. The modality vocabulary, the text-floor exception and catalog detection on `openrouter` (§4). Small, and testable without a key. **Shipped**: `MODALITY_DECISIONS`, `normalise_output_modalities` / `is_decisions_only_set` in `model_provider/base.py`, `ModalityCapabilityMixin.is_decisions_only`, and `OpenRouterProvider.output_modalities` (listing, then the per-model endpoints document, then the knob). The listing turned out to report `output_modalities` for every model, so the audio models resolve without the knob too. Guard: `jaato_server/shared/tests/test_decisions_is_an_output_modality.py`, four reversions.
 2. The types and `decide()` on `openrouter` against `/api/alpha/decisions`, with the vendor's examples as fixtures and a stand-in server in the capability guard (§5-§6).
 3. `decision_models:` and the tier refusal (§7).
 4. The `decide` tool (§8.1).

@@ -72,6 +72,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    normalise_output_modalities,
     resolve_context_window,
     resolve_modalities,
 )
@@ -668,6 +669,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
+        # Per-model ``/models/{id}/endpoints`` documents, for models the
+        # listing omits (``typesafe/jev-1.13`` is reachable but not
+        # listed).  Keyed by model id; a failed fetch is not cached.
+        self._model_doc_cache: Dict[str, Dict[str, Any]] = {}
 
         # Thinking/reasoning configuration.  Defaults to False so
         # nothing extra goes on the wire and reasoning content is not
@@ -748,9 +753,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         ``framework_overrides.output_modalities`` is the CAPABILITY
         assertion — the counterpart of the input ``modalities`` knob, and
         the only source of truth available, because the OpenRouter catalog
-        reports ``architecture.modality`` for input but says nothing about
-        what a model can EMIT.  Without it the floor stays text-only and
-        the startup check refuses any outbound tier role.
+        when the catalog's ``architecture.output_modalities`` does not
+        answer for the model (a self-hosted gateway, a catalog gap).  The
+        catalog is read first (see :meth:`output_modalities`); without
+        either, the floor stays text-only and the startup check refuses
+        any outbound tier role.
 
         ``api_params.modalities`` / ``api_params.audio`` are the REQUEST
         fields.  They are forwarded so a profile can pin the voice; a
@@ -1485,13 +1492,88 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         self._catalog_cache = catalog
         return catalog
 
-    def _lookup_context_length(self, model: str) -> Optional[int]:
-        """Return the catalog-reported context length for ``model``."""
+    def _fetch_model_doc(self, model: str) -> Optional[Dict[str, Any]]:
+        """Fetch and cache ``GET /models/{model}/endpoints`` for one model.
+
+        The listing omits some models the API serves (``typesafe/jev-1.13``
+        is reachable but not listed), so per-model metadata for those comes
+        from this document.  Its ``data`` carries the same ``architecture``
+        block as a listing entry, and ``endpoints[].context_length`` per
+        upstream.  Returns ``None`` on any failure, which is not cached,
+        so a later call retries.
+        """
+        cache = getattr(self, "_model_doc_cache", None)
+        if cache is None:
+            cache = self._model_doc_cache = {}
+        if model in cache:
+            return cache[model]
+
+        import httpx
+
+        url = f"{self._base_url.rstrip('/')}/models/{model}/endpoints"
+        try:
+            response = httpx.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            self._trace(
+                f"[CATALOG] model doc fetch failed for {model}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+        doc = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(doc, dict):
+            self._trace(f"[CATALOG] model doc for {model} missing 'data'")
+            return None
+        cache[model] = doc
+        return doc
+
+    def _catalog_entry(self, model: str) -> Optional[Dict[str, Any]]:
+        """Return the catalog metadata for ``model``, listed or not.
+
+        The listing entry when the listing has the model, else the
+        per-model endpoints document (:meth:`_fetch_model_doc`), whose
+        ``context_length`` is taken as the largest any of its endpoints
+        reports.  ``None`` when neither answers.
+        """
         for entry in self._fetch_catalog():
             if entry.get("id") == model:
-                ctx = entry.get("context_length")
-                if isinstance(ctx, int) and ctx > 0:
-                    return ctx
+                return entry
+        doc = self._fetch_model_doc(model)
+        if doc is None:
+            return None
+        entry = dict(doc)
+        if "context_length" not in entry:
+            lengths = [
+                ep.get("context_length")
+                for ep in doc.get("endpoints") or []
+                if isinstance(ep, dict)
+            ]
+            lengths = [n for n in lengths if isinstance(n, int) and n > 0]
+            if lengths:
+                entry["context_length"] = max(lengths)
+        return entry
+
+    def _architecture_list(self, model: str, key: str) -> Optional[List[str]]:
+        """Return ``architecture[key]`` for ``model`` as a non-empty list."""
+        entry = self._catalog_entry(model)
+        if not entry:
+            return None
+        arch = entry.get("architecture")
+        if isinstance(arch, dict):
+            mods = arch.get(key)
+            if isinstance(mods, list) and mods:
+                return [str(m) for m in mods]
+        return None
+
+    def _lookup_context_length(self, model: str) -> Optional[int]:
+        """Return the catalog-reported context length for ``model``."""
+        entry = self._catalog_entry(model)
+        if entry:
+            ctx = entry.get("context_length")
+            if isinstance(ctx, int) and ctx > 0:
+                return ctx
         return None
 
     def _lookup_modalities(self, model: str) -> Optional[List[str]]:
@@ -1499,20 +1581,39 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         Reads ``architecture.input_modalities`` from
         ``GET /api/v1/models`` — present for all catalog models
-        (``["text","image"]`` for vision, ``["text"]`` for text-only).
-        Returns ``None`` when the model is absent or the field is missing
-        (self-hosted gateways, catalog gaps) so resolution falls through
-        to the manual knob.
+        (``["text","image"]`` for vision, ``["text"]`` for text-only) — or
+        from the per-model endpoints document for a model the listing
+        omits.  Returns ``None`` when the model is absent or the field is
+        missing (self-hosted gateways, catalog gaps) so resolution falls
+        through to the manual knob.
         """
-        for entry in self._fetch_catalog():
-            if entry.get("id") == model:
-                arch = entry.get("architecture")
-                if isinstance(arch, dict):
-                    mods = arch.get("input_modalities")
-                    if isinstance(mods, list) and mods:
-                        return [str(m) for m in mods]
-                return None
-        return None
+        return self._architecture_list(model, "input_modalities")
+
+    def _lookup_output_modalities(self, model: str) -> Optional[List[str]]:
+        """Return the catalog-reported OUTPUT modalities for ``model``.
+
+        ``architecture.output_modalities``: ``["text"]`` for chat models,
+        ``["text","audio"]`` for the audio models, ``["decisions"]`` for a
+        decision model.  ``None`` when the catalog does not answer.
+        """
+        return self._architecture_list(model, "output_modalities")
+
+    def output_modalities(self, model: Optional[str] = None) -> Set[str]:
+        """OUTPUT modalities ``model`` (default: the active model) can EMIT.
+
+        Catalog first (``architecture.output_modalities``, listed or from
+        the per-model endpoints document), then the
+        ``framework_overrides.output_modalities`` knob, then ``{text}``.
+        The mirror of :meth:`modalities` for input.  The text floor is
+        applied by :func:`normalise_output_modalities`, so a model the
+        catalog reports as ``["decisions"]`` stays decisions-only.
+        """
+        model = model or self._model_name
+        if model:
+            detected = self._lookup_output_modalities(model)
+            if detected:
+                return normalise_output_modalities(detected)
+        return super().output_modalities(model)
 
     def modalities(self, model: Optional[str] = None) -> Set[str]:
         """INPUT modalities ``model`` (default: the active model) accepts.

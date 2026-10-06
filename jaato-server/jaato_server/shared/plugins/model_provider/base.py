@@ -233,6 +233,44 @@ MODALITY_AUDIO = "audio"
 MODALITY_VIDEO = "video"
 MODALITY_FILE = "file"  # PDFs / documents (OpenRouter's term)
 
+# OUTPUT-only token for a decision model (TypeSafe's "System One" models):
+# it answers typed questions about a state with calibrated probabilities
+# and writes no text.  Spelled as OpenRouter's catalog spells it
+# (``architecture.output_modalities: ["decisions"]``, ``modality:
+# "text->decisions"``).  No input gate reads it, and ``modalities()``
+# (input) never returns it.  See docs/design/decision-models.md §4.
+MODALITY_DECISIONS = "decisions"
+
+
+def normalise_output_modalities(raw: Iterable[str]) -> Set[str]:
+    """Normalise an OUTPUT modality set, applying the text floor.
+
+    Every set gains ``"text"`` (a model that speaks still writes), with
+    one exception: a set whose only modality is ``"decisions"`` is
+    returned as is.  A decision model writes nothing, and adding ``text``
+    would make it look like a chat model that also decides, which is
+    exactly the confusion :func:`is_decisions_only_set` exists to rule
+    out.  An empty input is the plain text floor.
+    """
+    normalised = {str(m).strip().lower() for m in raw if m and str(m).strip()}
+    if normalised == {MODALITY_DECISIONS}:
+        return normalised
+    normalised.add(MODALITY_TEXT)
+    return normalised
+
+
+def is_decisions_only_set(output_modalities: Iterable[str]) -> bool:
+    """Whether a resolved OUTPUT set describes a decision-only model.
+
+    The one definition: the set is exactly ``{"decisions"}``.  The
+    ``complete()`` refusal and the tier check both read it (through
+    :meth:`ModalityCapabilityMixin.is_decisions_only`), so they cannot
+    disagree about which models are not chat models.
+    """
+    return {str(m).strip().lower() for m in output_modalities} == {
+        MODALITY_DECISIONS
+    }
+
 
 def _normalise_modalities(raw: Iterable[str]) -> Set[str]:
     """Lower-case, strip, drop blanks, and re-add the ``"text"`` floor.
@@ -342,15 +380,25 @@ class ModalityCapabilityMixin:
 
         A provider raises the floor either by setting
         ``_output_modalities_knob`` (the profile-level assertion, mirroring
-        the input ``modalities`` knob -- the catalogs do not report output
-        modalities, so an operator naming an audio model is the only
-        source of truth available) or by overriding this method outright.
-        ``text`` is always included: a model that speaks still writes.
+        the input ``modalities`` knob) or by overriding this method, as
+        ``openrouter`` does to read ``architecture.output_modalities``
+        from its catalog first.  ``text`` is included in every set except
+        ``{"decisions"}`` (see :func:`normalise_output_modalities`).
         """
         knob = getattr(self, "_output_modalities_knob", None)
         if knob:
-            return {str(m).strip().lower() for m in knob if m} | {MODALITY_TEXT}
+            return normalise_output_modalities(knob)
         return {MODALITY_TEXT}
+
+    def is_decisions_only(self, model: Optional[str] = None) -> bool:
+        """Whether ``model`` (or the active model) is a decision-only model.
+
+        True when its OUTPUT set is exactly ``{"decisions"}``: it answers
+        typed questions through a decision endpoint and cannot serve a
+        chat turn.  Reads :meth:`output_modalities`, so it follows whatever
+        resolution a provider applies there.
+        """
+        return is_decisions_only_set(self.output_modalities(model))
 
     def supports_output_modality(
         self, kind: str, model: Optional[str] = None
