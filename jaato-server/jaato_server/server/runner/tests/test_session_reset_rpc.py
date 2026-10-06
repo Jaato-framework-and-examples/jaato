@@ -79,7 +79,8 @@ def test_reset_happy_path() -> None:
 
     ok, result = rpc._handle_session_reset()
     assert ok is True
-    assert result == {"ok": True}
+    # The fake has no history to count (#1573 added the count).
+    assert result == {"ok": True, "messages_cleared": None}
     assert session.reset_calls == [None]
 
 
