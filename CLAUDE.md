@@ -6833,6 +6833,39 @@ without closing is bounded by the slot boundary.
 question — the cross-profile check the issue floated would now assert a
 relationship that no longer holds. Not added.
 
+### A Plugin Initialised Once Per Session (#1564)
+
+A librarian session's runner log showed its configured plugins initialised
+twice, ~0.3 s apart, and `references` loading its embedding model twice.
+The second pass was #950's loop: `JaatoSession._apply_plugin_configs` hands
+the profile's `plugin_configs` to `registry.expose_tool` after
+`bootstrap_session` had already initialised every plugin through
+`expose_all` with the same blocks. `expose_tool` rebuilt when the raw block
+differed from the stored config, and it always did: the stored one had been
+augmented (`workspace_path`, `config_root`, `session_id`, `agent_name`) and,
+on the runner, merged over runner defaults. So each configured plugin was
+shut down and re-initialised, and its second life ran without those
+defaults (`references` lost `channel_type: queue`).
+
+`PluginRegistry._config_requires_reinit` now also answers "no" when the
+config is already in force (`_config_already_in_force`): the incoming block
+is augmented the way an `initialize()` would see it, and every non-identity
+value must already hold in the stored config. Extra stored keys (runner
+defaults) are not a reason to rebuild. What still re-initialises: a value
+that differs, including a framework value such as a changed
+`workspace_path` (#950's subagent case). A child's own `agent_name` beside
+an unchanged block relabels in place (#951), and `permission` is still
+stashed for the scoped policy (#957).
+
+Not addressed here, and seen in the same log: the `subagent` plugin
+re-discovers profiles when `set_config_root` is broadcast after
+`expose_all` (cheap, by design), and the runner's registry initialises its
+own unread `permission` copy beside the Step 8 enforcer.
+
+Guard: `jaato_server/shared/tests/test_a_plugin_initialises_once_1564.py`,
+three reversions, through the real `_configure_runtime_plugins` and a real
+`JaatoSession.configure` with counting stand-in plugins.
+
 ### A Plan the Profile Names, Not the Model (#1195)
 
 A session can start with its plan already in place instead of asking the

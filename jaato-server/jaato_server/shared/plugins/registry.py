@@ -1512,8 +1512,10 @@ class PluginRegistry:
         re-initialized when the config actually reconfigures it; a
         config that only names a different agent relabels it in place
         instead, because the instance is shared with the caller's parent
-        and siblings.  :meth:`_config_requires_reinit` is that decision,
-        and documents what the rebuild used to destroy (#951).
+        and siblings (#951), and a config whose every value the plugin
+        already runs under is a no-op (#1564).
+        :meth:`_config_requires_reinit` is that decision, and documents
+        what the rebuild used to destroy.
 
         If a model_name is set and the plugin has model_requirements that
         don't match, the plugin is skipped with a warning.
@@ -2244,6 +2246,24 @@ class PluginRegistry:
         contract — a profile's ``plugin_configs`` reach the plugin it
         names — is unchanged.
 
+        A config the plugin is ALREADY running under is not a
+        reconfiguration either (#1564): when every operator key it
+        carries, after the same framework-key augmentation the stored
+        config received, already holds that value in the stored config,
+        re-initializing would add nothing and could only remove keys.
+        That is the normal shape on the runner path: ``bootstrap_session``
+        initializes every plugin through ``expose_all`` with the
+        profile's block merged over runner defaults (``channel_type:
+        queue`` and the like) and augmented with ``workspace_path`` /
+        ``config_root`` / ``session_id`` / ``agent_name``, and then
+        ``JaatoSession._apply_plugin_configs`` hands the same profile
+        block — raw, without either — back to :meth:`expose_tool`.  The
+        old ``config == stored`` test compared a raw dict against an
+        augmented one, never matched, and so every configured plugin was
+        initialized twice per session: ``references`` loaded its
+        embedding model twice, and its second life ran without the
+        runner's ``channel_type: queue`` default.
+
         Args:
             name: Name of a plugin already in ``self._exposed``.
             config: The raw, un-augmented config handed to
@@ -2254,15 +2274,61 @@ class PluginRegistry:
         """
         if config == self._configs.get(name):
             return False
-        if not set(config) <= _IDENTITY_ONLY_CONFIG_KEYS:
+        if set(config) <= _IDENTITY_ONLY_CONFIG_KEYS:
+            reason = "identity-only config"
+        elif self._config_already_in_force(name, config):
+            reason = "config already in force"
+        else:
             return True
-        agent_name = config.get("agent_name")
+        if "agent_name" in config:
+            self._relabel_in_place(name, config["agent_name"])
+        _trace(f" Plugin '{name}' {reason} "
+               f"(agent_name={config.get('agent_name')!r}): "
+               f"not re-initialized")
+        return False
+
+    def _config_already_in_force(
+        self, name: str, config: Dict[str, Any],
+    ) -> bool:
+        """Whether exposed plugin ``name`` already runs under every
+        non-identity value ``config`` carries (#1564).
+
+        ``config`` is augmented exactly as :meth:`expose_tool` would
+        augment it before an ``initialize()``, so like is compared with
+        like: the stored config in :attr:`_configs` is the augmented one.
+        Identity keys (:data:`_IDENTITY_ONLY_CONFIG_KEYS`) are left out
+        of the comparison; :meth:`_config_requires_reinit` relabels them
+        in place.  A stored config may carry MORE keys than ``config``
+        (runner defaults merged under the profile block) — those are
+        already in force and are not a reason to rebuild.
+
+        Args:
+            name: Name of a plugin already in ``self._exposed``.
+            config: The raw, un-augmented config handed to
+                :meth:`expose_tool`.
+
+        Returns:
+            True when re-initializing with ``config`` would change no
+            value the plugin was initialized with.
+        """
+        stored = self._configs.get(name)
+        if not stored:
+            return False
+        missing = object()
+        effective = self._augment_plugin_config(config) or {}
+        return all(
+            stored.get(key, missing) == value
+            for key, value in effective.items()
+            if key not in _IDENTITY_ONLY_CONFIG_KEYS
+        )
+
+    def _relabel_in_place(self, name: str, agent_name: Any) -> None:
+        """Hand a new agent label to a live plugin without rebuilding it
+        (#951): plugins that implement ``set_agent_name`` take it, the
+        rest keep tracing under their existing label."""
         relabel = getattr(self._plugins[name], "set_agent_name", None)
         if callable(relabel):
             relabel(agent_name)
-        _trace(f" Plugin '{name}' identity-only config "
-               f"(agent_name={agent_name!r}): not re-initialized")
-        return False
 
     def _augment_plugin_config(
         self, config: Optional[Dict[str, Any]], name: Optional[str] = None,
