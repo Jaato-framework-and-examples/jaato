@@ -58,7 +58,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_REGISTRY,
-        find="        effective = self._augment_plugin_config(config) or {}\n",
+        find="        effective = self._augment_plugin_config(config, name) or {}\n",
         replace="        effective = dict(config)\n",
         test="test_a_subagent_with_a_different_workspace_view_reinitialises",
         because="comparing un-augmented keys ignores the framework values the "
