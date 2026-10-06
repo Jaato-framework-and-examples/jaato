@@ -2466,6 +2466,51 @@ Today it runs on a dedicated loop in a dedicated thread in the runner process,
 so it cannot reach a daemon-side read task — but it is one `async with` on the
 daemon loop away from doing exactly what this issue describes.
 
+### A Slot Nobody Waited For (#1572)
+
+A pool slot is forked by the runner TEMPLATE, so the template is its
+parent; the daemon tears it down (socket close, the
+`RunnerRPCClient` process-group sweep, `PoolManager`'s teardowns) and is
+not. The daemon's `waitpid(slot.pid)` raises `ChildProcessError` (already
+tolerated), and the template never waited at all, so every torn-down
+slot stayed a zombie of the template: 43 in 17 minutes on a live daemon.
+Each holds a process-table entry counted against `RLIMIT_NPROC`, and
+`kill -0` kept answering for a dead slot.
+
+`server/runner/slot_reaper.py` is the fix:
+
+| Piece | Where |
+|---|---|
+| a `SIGCHLD` handler draining `waitpid(-1, WNOHANG)` until nothing is left (one signal may stand for several exits), installed when the template enters its control loop | `install_slot_reaper`, called by `_template_control_loop` |
+| a forked slot restores `SIG_DFL` first thing after `fork()` | `reset_sigchld_in_child`, called by `_handle_fork_slot`'s child branch |
+
+Rules:
+
+- **A handler, not `SIG_IGN`.** `SIG_IGN` survives `fork()` and `exec`
+  and makes every `waitpid` in the inheriting process fail with `ECHILD`;
+  one missed reset would break every subprocess a slot, and whatever it
+  execs, waits for.
+- **The slot must reset.** It is a Python process that never execs, and
+  kept, the handler would reap the children `subprocess.run`, `pexpect`
+  and notebook kernels wait for.
+- **The template waits for no child of its own.** The reap loop takes
+  every exited child, so it is installed only after discovery and the
+  preload, and the control loop starts nothing but slots. It adds no
+  thread: Python runs the handler on the main thread, and `recvmsg` is
+  retried after it (PEP 475).
+- **Nothing in the daemon needed the zombie.** Slot liveness is the RPC
+  channel (#1058) and the slot's process group is captured before
+  teardown; `/proc/<pid>` and `kill -0` now stop answering for a dead
+  slot.
+
+Stated limit: once reaped, a slot's pid can be reused, so the daemon's
+leftover `waitpid(slot.pid)` / `kill(pid)` calls could, after a full pid
+wrap, name an unrelated process. Not changed here.
+
+Guard: `jaato_server/shared/tests/test_template_reaps_its_slots_1572.py`,
+three reversions. It drives the real control loop and fork handler in a
+forked "template", with only `_run_slot_mode` replaced by a probe.
+
 ### A Key That Said "Reusable" and a Name That Said "New" (#1033)
 
 The slot reuse key was `(cascade_id, config_root)` and the AppArmor profile

@@ -268,8 +268,17 @@ def _template_control_loop(control_sock: "socket.socket", log) -> None:
     have a complete line.
 
     Unknown commands log a warning and are dropped.
+
+    The template is the PARENT of every slot it forks, so it reaps them:
+    :func:`slot_reaper.install_slot_reaper` installs a ``SIGCHLD``
+    handler before the first command is read.  Without it every
+    torn-down slot stayed a zombie of the template (#1572).
     """
     import struct
+
+    from jaato_server.server.runner.slot_reaper import install_slot_reaper
+
+    install_slot_reaper()
 
     while True:
         # ``recvmsg`` lets us receive both bytes AND ancillary data
@@ -385,12 +394,20 @@ def _handle_fork_slot(
 
     - Fork failure: log + reply ``FORK_FAILED\\n`` to daemon.
     - Child-side slot-mode exit: ``sys.exit(0)`` ends the child
-      cleanly — the daemon sees the slot's slot-socket closure +
-      the SIGCHLD signal as the slot's lifecycle terminating.
+      cleanly — the daemon sees the slot's slot-socket closure as the
+      slot's lifecycle terminating.  The exit status goes to the
+      TEMPLATE, the slot's parent, whose ``SIGCHLD`` reaper collects
+      it (#1572); the daemon is not the parent and cannot.
+
+    The child restores ``SIG_DFL`` for ``SIGCHLD`` before anything else
+    runs, so the template's reaper does not steal the statuses of the
+    subprocesses the slot itself waits for (``cli``, ``pexpect``,
+    notebook kernels).
     """
     # Imported here, in the template: an import in the child after fork()
     # could wait on an import lock another template thread held.
     from jaato_server.server.runner_spawner import enter_slot_boundary_in_child
+    from jaato_server.server.runner.slot_reaper import reset_sigchld_in_child
 
     try:
         child_pid = os.fork()
@@ -407,7 +424,11 @@ def _handle_fork_slot(
         return
 
     if child_pid == 0:
-        # CHILD: become a pool slot.  Drop the template's control
+        # CHILD: first, give up the template's SIGCHLD reaper (#1572),
+        # or it would reap the slot's own subprocesses out from under
+        # subprocess.run / pexpect.
+        reset_sigchld_in_child()
+        # Become a pool slot.  Drop the template's control
         # socket (child doesn't talk to the daemon over that pipe;
         # it has its own slot socket) and enter slot-mode.
         try:
