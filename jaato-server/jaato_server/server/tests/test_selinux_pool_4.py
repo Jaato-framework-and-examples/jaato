@@ -48,8 +48,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SPAWN,
-        find="    if slot is not None or not selinux:\n        return slot\n",
-        replace="    return slot\n",
+        find="    return pool_manager.fork_slot_into(SlotKey.build(**fields), entry)\n",
+        replace="    return None\n",
         test="test_an_selinux_miss_forks_a_slot_into_the_boundary",
         because="every SELinux session would cold-spawn, as before phase 4",
     ),
