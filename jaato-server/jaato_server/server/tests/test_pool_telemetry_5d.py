@@ -75,6 +75,7 @@ def test_telemetry_starts_at_zero() -> None:
         # session torn down twice.
         "pool_dead_slot_evicted_total": 0,
         "pool_duplicate_return_refused_total": 0,
+        "pool_slot_retired_total": 0,
         "pool_uid_mismatch_skips_total": 0,
         # Posture-aware capacity (#1507): two counters, and the idle
         # gauges that are always present (per-posture served gauges

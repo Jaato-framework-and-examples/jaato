@@ -780,6 +780,11 @@ class PoolManager:
             # the idle pool.  Nonzero means some session is being torn
             # down twice; the ERROR beside it names the slot.
             "pool_duplicate_return_refused_total": 0,
+            # #1565.  Slots torn down at session end instead of returned,
+            # because a plugin said the process holds memory nothing frees
+            # (an embedding model loaded there).  Each unit is a cold fork
+            # the next session of that posture pays for.
+            "pool_slot_retired_total": 0,
             # #1168 step 3.  Served idle slots passed over because they
             # run as another uid than the arriving session drops to.  Also
             # counted in pool_profile_mismatch_skips_total (the skip
@@ -1530,6 +1535,15 @@ class PoolManager:
             pair[1].last_session_end_ts
             if pair[1].last_session_end_ts is not None else float("-inf"),
         ))
+
+    def note_slot_retired(self, slot: "PoolSlot") -> None:
+        """Count a slot the daemon retired at session end (#1565).
+
+        The slot is not in ``_idle_slots`` (it was acquired) and is closed
+        by the caller's cold path, so this is bookkeeping only; the
+        replenish loop restores the floor as for any other lost slot.
+        """
+        self._incr("pool_slot_retired_total")
 
     def _incr(self, key: str, delta: int = 1) -> None:
         """Atomic-ish bump of a telemetry counter.  Internal helper."""

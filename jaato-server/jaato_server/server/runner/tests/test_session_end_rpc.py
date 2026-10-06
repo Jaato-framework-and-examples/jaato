@@ -127,7 +127,8 @@ def test_session_end_happy_path() -> None:
 
     ok, result = rpc._handle_session_end()
     assert ok is True
-    assert result == {"plugins_reset": 3, "errors": [], "plugins_carried": []}
+    assert result == {"plugins_reset": 3, "errors": [], "plugins_carried": [],
+                      "retire_slot": []}
     assert p1.reset_calls == 1
     assert p2.reset_calls == 1
     assert p3.reset_calls == 1
@@ -202,7 +203,8 @@ def test_session_end_empty_registry_returns_zero() -> None:
     _install_session(rpc, {})
     ok, result = rpc._handle_session_end()
     assert ok is True
-    assert result == {"plugins_reset": 0, "errors": [], "plugins_carried": []}
+    assert result == {"plugins_reset": 0, "errors": [], "plugins_carried": [],
+                      "retire_slot": []}
 
 
 def test_session_end_clears_session_host() -> None:
