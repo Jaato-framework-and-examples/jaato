@@ -118,6 +118,8 @@ CORE_MODULES: Tuple[str, ...] = (
     "jaato_server.server.runner.lsm_confine",
     "jaato_server.server.runner.slot_plugins",
     "jaato_server.shared.ai_disclosure",
+    # Imported by runner/session.py's plugin step.  It used to arrive
+    # through server/core.py, until #1549 made jaato_server.server lazy.
     "jaato_server.shared.bootstrap_timing",
     "jaato_server.shared.capability_drop",
     "jaato_server.shared.completion_schema_loader",
