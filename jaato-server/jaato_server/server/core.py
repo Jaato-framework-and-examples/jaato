@@ -522,6 +522,39 @@ def merge_pending_continuations(
     return text, attachments
 
 
+def _slot_retire_reasons(result: Any) -> List[str]:
+    """The ``retire_slot`` reasons a runner's ``session.end`` answer carries (#1565).
+
+    Empty for a runner that predates the field, and for anything that is
+    not a list of strings: only a stated reason retires a warm slot.
+    """
+    if not isinstance(result, dict):
+        return []
+    reasons = result.get("retire_slot")
+    if not isinstance(reasons, list):
+        return []
+    return [r for r in reasons if isinstance(r, str) and r]
+
+
+def _note_slot_retired(pool_manager: Any, slot: Any, reasons: List[str]) -> None:
+    """Log and count a pool slot retired at ``session.end`` (#1565).
+
+    The slot is then closed by :meth:`JaatoServer.shutdown`'s cold path,
+    exactly as a slot whose reset failed.  ``pool_slot_retired_total`` is
+    counted through ``PoolManager.note_slot_retired`` when the pool has it.
+    """
+    logger.info(
+        "JaatoServer.shutdown: pool slot pid=%d retired after session_end, "
+        "not returned to pool: %s",
+        getattr(slot, "pid", -1), "; ".join(reasons),
+    )
+    note = getattr(pool_manager, "note_slot_retired", None)
+    if callable(note):
+        try:
+            note(slot)
+        except Exception:  # noqa: BLE001 — telemetry only
+            logger.debug("note_slot_retired raised", exc_info=True)
+
 
 def _slot_return_phrase(pooled: bool) -> str:
     """How to describe what the pool did with a returned slot (#1058).
@@ -8351,6 +8384,91 @@ class JaatoServer:
     # Cleanup
     # =========================================================================
 
+    def _settle_pool_slot(self, rpc: Any, pool_slot: Any,
+                          pool_manager: Any, result: Any) -> bool:
+        """Return a pool slot to the pool, or retire it, after ``session.end``.
+
+        Lifted out of :meth:`shutdown` (#1565).  ``result`` is the
+        runner's ``session.end`` answer.  The slot is pooled only when the
+        reset raised nothing AND no plugin gave a ``retire_slot`` reason;
+        otherwise the caller's cold path closes the transport and reaps
+        the runner.
+
+        Returns:
+            ``True`` when the slot now belongs to the pool (the caller must
+            not close its transport), ``False`` when the caller must close
+            it.
+        """
+        errors = result.get("errors") if isinstance(result, dict) else None
+        retire = _slot_retire_reasons(result)
+        if errors == [] and retire:
+            # #1565: reset fine, but the process keeps memory
+            # no reset frees.  Torn down below like a slot
+            # whose reset failed; the pool forks a fresh one.
+            _note_slot_retired(pool_manager, pool_slot, retire)
+        elif errors == []:
+            # Phase 3 cascade-sharing: stamp the session_id
+            # we just served so the NEXT session to acquire
+            # this slot can apparmor_parser --remove our
+            # apparmor profile after its own transition.
+            pool_slot.last_session_id = self._session_id
+            # Phase 3 hotfix (server 0.6.150+): the rpc
+            # client lives on the slot (asyncio transport
+            # binds the socket exclusively; can't create
+            # a fresh rpc per session).  Clear per-session
+            # state on the rpc but KEEP the transport
+            # bound to the socket.  Next session reuses
+            # this same rpc client.  See PR #173.
+            reset_method = getattr(
+                rpc, "reset_for_slot_reuse", None,
+            )
+            if callable(reset_method):
+                try:
+                    reset_method()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "JaatoServer.shutdown: rpc."
+                        "reset_for_slot_reuse raised %s — "
+                        "slot may still be usable; "
+                        "monitoring", exc,
+                    )
+            pool_slot.rpc = rpc  # idempotent — first
+                                  # session stashed it here;
+                                  # subsequent sessions
+                                  # re-affirm the binding.
+            # The pool decides whether it KEEPS the slot:
+            # at capacity it drops the returner instead, and
+            # it refuses a slot it already holds.  Either way
+            # the slot is the pool's now — so this path still
+            # must not close the transport — but the log has
+            # to say which happened.  It used to assert
+            # "returned to pool ... transport preserved"
+            # unconditionally, which is the sentence an
+            # operator reads when a later session fails on
+            # that slot (#1058).
+            pooled = pool_manager.return_slot_after_session(
+                pool_slot)
+            logger.info(
+                "JaatoServer.shutdown: pool slot pid=%d %s "
+                "after session_end (plugins_reset=%d "
+                "cascade=%s last_session=%s; rpc reset, "
+                "transport preserved)",
+                pool_slot.pid,
+                _slot_return_phrase(pooled),
+                result.get("plugins_reset", 0),
+                pool_slot.cascade_id or "(standalone)",
+                self._session_id,
+            )
+            return True
+        else:
+            logger.warning(
+                "JaatoServer.shutdown: pool slot pid=%d "
+                "session_end returned errors %r — slot will "
+                "be torn down (not returned to pool)",
+                pool_slot.pid, errors,
+            )
+        return False
+
     def shutdown(self) -> None:
         """Clean up resources."""
         if self.registry:
@@ -8462,69 +8580,9 @@ class JaatoServer:
             session_end = getattr(rpc, "session_end_threadsafe", None)
             if callable(session_end):
                 try:
-                    result = session_end(timeout=10.0)
-                    errors = result.get("errors") if isinstance(result, dict) else None
-                    if errors == []:
-                        # Phase 3 cascade-sharing: stamp the session_id
-                        # we just served so the NEXT session to acquire
-                        # this slot can apparmor_parser --remove our
-                        # apparmor profile after its own transition.
-                        pool_slot.last_session_id = self._session_id
-                        # Phase 3 hotfix (server 0.6.150+): the rpc
-                        # client lives on the slot (asyncio transport
-                        # binds the socket exclusively; can't create
-                        # a fresh rpc per session).  Clear per-session
-                        # state on the rpc but KEEP the transport
-                        # bound to the socket.  Next session reuses
-                        # this same rpc client.  See PR #173.
-                        reset_method = getattr(
-                            rpc, "reset_for_slot_reuse", None,
-                        )
-                        if callable(reset_method):
-                            try:
-                                reset_method()
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "JaatoServer.shutdown: rpc."
-                                    "reset_for_slot_reuse raised %s — "
-                                    "slot may still be usable; "
-                                    "monitoring", exc,
-                                )
-                        pool_slot.rpc = rpc  # idempotent — first
-                                              # session stashed it here;
-                                              # subsequent sessions
-                                              # re-affirm the binding.
-                        # The pool decides whether it KEEPS the slot:
-                        # at capacity it drops the returner instead, and
-                        # it refuses a slot it already holds.  Either way
-                        # the slot is the pool's now — so this path still
-                        # must not close the transport — but the log has
-                        # to say which happened.  It used to assert
-                        # "returned to pool ... transport preserved"
-                        # unconditionally, which is the sentence an
-                        # operator reads when a later session fails on
-                        # that slot (#1058).
-                        pooled = pool_manager.return_slot_after_session(
-                            pool_slot)
-                        cascade_returned = True
-                        logger.info(
-                            "JaatoServer.shutdown: pool slot pid=%d %s "
-                            "after session_end (plugins_reset=%d "
-                            "cascade=%s last_session=%s; rpc reset, "
-                            "transport preserved)",
-                            pool_slot.pid,
-                            _slot_return_phrase(pooled),
-                            result.get("plugins_reset", 0),
-                            pool_slot.cascade_id or "(standalone)",
-                            self._session_id,
-                        )
-                    else:
-                        logger.warning(
-                            "JaatoServer.shutdown: pool slot pid=%d "
-                            "session_end returned errors %r — slot will "
-                            "be torn down (not returned to pool)",
-                            pool_slot.pid, errors,
-                        )
+                    cascade_returned = self._settle_pool_slot(
+                        rpc, pool_slot, pool_manager,
+                        session_end(timeout=10.0))
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.warning(
                         "JaatoServer.shutdown: session_end RPC failed "

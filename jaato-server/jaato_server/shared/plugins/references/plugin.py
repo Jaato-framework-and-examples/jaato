@@ -382,6 +382,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # load being retried (and warned about) on every call.
         self._embedding_lock = threading.Lock()
         self._embedding_load_failed = False
+        # #1565: set the first time this process tries to load the model.
+        # Never cleared: the heap a model load leaves (torch's import-time
+        # allocations, pages glibc keeps after the weights are freed) is
+        # not returned by dropping references, so the slot that carries
+        # this instance is worth retiring rather than reusing.
+        self._model_load_attempted = False
         # Whether the session's profile lists this plugin (#1563), as the
         # runner stamped it into ``initialize()``'s config; ``None`` when
         # nobody said.  ``False`` defers the embedder, never refuses it.
@@ -2094,8 +2100,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             provider = self._embedding_provider
             if provider is None:
                 return None
-            if not provider.available and not load_model_offline_first(
-                    provider, self._trace):
+            if not provider.available and not self._load_model(provider):
                 self._embedding_load_failed = True
                 self._embedding_provider = None
                 logger.warning(
@@ -2104,6 +2109,38 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "continues)", getattr(provider, "model_name", "?"))
                 return None
             return provider
+
+    def _load_model(self, provider: EmbeddingProviderProtocol) -> bool:
+        """Load ``provider``'s model, recording that this process tried (#1565).
+
+        The one place this plugin loads a model, so
+        :meth:`slot_retire_reason` cannot miss a load.  Returns what
+        :func:`load_model_offline_first` returns.
+        """
+        self._model_load_attempted = True
+        return load_model_offline_first(provider, self._trace)
+
+    def slot_retire_reason(self) -> Optional[str]:
+        """Why the pool slot holding this instance should not be reused (#1565).
+
+        Asked by the runner's ``session.end`` after every plugin's
+        :meth:`reset_for_next_session`.  Releasing the provider frees the
+        objects, but the memory does not come back: measured on a live
+        slot, ~1.07 GB of anonymous heap stayed after the release, and
+        standalone ``del provider; gc.collect()`` freed ~1 MB of ~1.1 GB
+        (``malloc_trim(0)`` returns about half; torch's import-time heap
+        is returned only by process exit).  So a slot on which a model
+        load was attempted is retired by the daemon instead of returned
+        to the pool, and the pool forks a fresh one.
+
+        Returns:
+            A one-line reason, or ``None`` when no load was attempted in
+            this process (the provider stayed unloaded, or none existed).
+        """
+        if not self._model_load_attempted:
+            return None
+        return ("references: an embedding model was loaded in this "
+                "process; its heap is not returned by releasing it")
 
     def _init_embedding_provider(self, config: Dict[str, Any]) -> None:
         """Initialize the embedding provider via entry point discovery.
@@ -2322,7 +2359,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return
 
         if not self._embedding_provider.available:
-            load_model_offline_first(self._embedding_provider, self._trace)
+            self._load_model(self._embedding_provider)
 
         if not self._embedding_provider.available:
             self._trace(
