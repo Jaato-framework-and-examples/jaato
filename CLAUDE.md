@@ -2193,6 +2193,7 @@ Architecture: daemon spawns a **template subprocess** at startup that imports al
 - Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
 - Pool size via `JAATO_RUNNER_POOL_SIZE` (default 2).
 - Ceiling via `JAATO_RUNNER_POOL_MAX_SIZE` (default `2 x` the pool size) — see below.
+- Or on the start command: `--daemon --pool-size N [--pool-max M]`, each outranking its env var.
 - Both can be changed on a running daemon, without a restart — see [Resizing the Pool Without a Restart](#resizing-the-pool-without-a-restart-protocol-135).
 
 **A reservation is not capacity (#898).** Slots carry a `cascade_id` and
@@ -2329,6 +2330,19 @@ All three reach `server/pool_admin.py::PoolAdmin.answer`, so they share one rule
 | **dropped slots are queued on `_pending_teardown`**, and the replenish thread is started for them even at target 0 (`_start_replenish_thread`, which skips the startup gate) | `_teardown_slot` blocks on the daemon loop; a shrink to 0 on a daemon booted with a disabled pool would otherwise never be reaped |
 | **a derived ceiling follows the floor, a chosen one is kept** (clamped up) | the same reading as startup |
 | **`--restart` keeps it**: `pool_size` / `pool_max_size` in the restart config (`None` max = derived), passed back to `JaatoDaemon` and outranking the env vars; `PoolStatusEvent.persisted` says when that write failed | a resize the next restart dropped would be a silent revert |
+
+**The same flags size a daemon the command starts.** On a command that
+starts one (`--daemon`, `--web-socket`, `--restart`),
+`--pool-size N [--pool-max M]` are its starting sizes instead of a resize
+(`_pool_flags_start_a_daemon`); each outranks its own env knob and leaves
+the other alone, so `--pool-size 6` keeps a `JAATO_RUNNER_POOL_MAX_SIZE`
+(`_startup_pool_sizes`, which reads the env through the one
+`env_pool_sizes`). A flag on `--restart` outranks the recorded resize, and
+the started daemon records the sizes so the next `--restart` keeps them. A
+foreground start (`--ipc-socket` alone) takes the env knobs, because there
+`--ipc-socket` names the daemon a resize is sent to. A negative size exits
+2 before anything is sent or started. Guard:
+`server/tests/test_pool_size_at_start.py`, three reversions.
 
 `--cmd` without `--session` now sends a daemon-level command (no attach,
 no auto-start, refuses a plain message); the IPC transport routes
