@@ -53,8 +53,12 @@ class PoolSlot:
     cascade-affinity bookkeeping for Phase 2 slot reuse.
 
     Attributes:
-        pid: Slot process id.  Template-child; reaped via waitpid by
-            the daemon's subreaper bit (or by shutdown_all on exit).
+        pid: Slot process id.  Template-child, so the TEMPLATE reaps
+            it when it exits (its ``SIGCHLD`` reaper, #1572); the
+            daemon's ``waitpid(pid)`` raises ``ChildProcessError`` and is
+            tolerated.  Only after the template dies does a slot
+            re-parent to the daemon (subreaper bit), and then the
+            daemon's ``waitpid`` reaps it.
         sock: Daemon-side end of the slot's RPC socket.  Closing this
             socket signals the slot to exit (peer-EOF).
         config_root: The ``.jaato`` config root the slot's WARM PLUGIN STATE
