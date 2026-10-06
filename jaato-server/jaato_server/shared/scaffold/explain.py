@@ -1642,7 +1642,28 @@ def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
         return _reference_link_lines(), {"link_relations": _reference_link_rels()}
     if name == "permission":
         return _permission_policy_layers()
+    if name == "mcp":
+        return _mcp_transport_lines()
     return [], {}
+
+
+def _mcp_transport_lines() -> Tuple[List[str], Dict[str, Any]]:
+    """The ``.mcp.json`` transports and the remote rules (#1580).
+
+    Read from ``mcp_remote`` -- the tables ``server_transport`` and the
+    header binding are written against -- so this page cannot list a
+    transport the plugin does not open.
+    """
+    from jaato_server.shared import mcp_remote as MR
+    lines = ["  .mcp.json server \"type\":"]
+    lines.extend(f"    {kind:<6} {what}" for kind, what in MR.TRANSPORT_DOCS)
+    lines.append("  remote servers (http / sse):")
+    lines.extend(f"    - {rule}" for rule in MR.REMOTE_RULES)
+    data = {"transports": [{"type": kind, "description": what}
+                           for kind, what in MR.TRANSPORT_DOCS],
+            "transport_aliases": dict(MR.TRANSPORT_ALIASES),
+            "remote_rules": list(MR.REMOTE_RULES)}
+    return lines, data
 
 
 def _permission_policy_layers() -> Tuple[List[str], Dict[str, Any]]:

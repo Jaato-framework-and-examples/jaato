@@ -1522,14 +1522,11 @@ MCP servers are configured in `.mcp.json`:
 }
 ```
 
-**stdio is the only transport implemented.** `MCPClientManager` imports
-`mcp.client.stdio` and nothing else, and `ServerConfig` carries
-`command`/`args`/`env` with no URL field — so every server is launched as a
-subprocess. The `"type"` key above is accepted for compatibility but read by
-nothing. Remote servers (SSE / streamable HTTP) are **not** supported; a
-URL-based entry will not connect. (The `mcp` help text advertised an `sse`
-transport that never existed — corrected, since a user following it wrote
-config that could not work.)
+Three transports, chosen by `"type"`: `stdio` (the default when the key is
+absent, unchanged), `http` (streamable HTTP; alias `streamable-http`) and
+`sse`. Until #1580 the key was read by nothing and every server was a
+subprocess, so a hosted server needed a local `npx mcp-remote` in front of it.
+See [A Server at a URL](#a-server-at-a-url-1580) below.
 
 **A server's schema text is untrusted.** An MCP server authors its own tool
 names, descriptions, and parameter descriptions, and those land in the
@@ -1539,6 +1536,56 @@ therefore declares `TRAIT_UNTRUSTED_SCHEMA` and routes every schema through
 `sanitize_untrusted_schema()`, and fences its per-server listing in the
 system instructions with `wrap_untrusted_content()`. See the Tool Traits
 table above.
+
+### A Server at a URL (#1580)
+
+```json
+{"mcpServers": {"context7": {"type": "http",
+  "url": "https://mcp.context7.com/mcp",
+  "headers": {"Authorization": "Bearer ${CONTEXT7_API_KEY}"}}}}
+```
+
+`jaato_server/shared/mcp_remote.py` is the remote half; stdio entries take the
+same code path as before, byte for byte.
+
+| Piece | Where |
+|---|---|
+| the transport of one entry: `stdio` / `http` / `sse`; anything else is REFUSED for that server (never spawned as stdio); a `url` with no `type` and no `command` is refused with a hint | `server_transport` |
+| `url` must be `http(s)://` with a host, no `user:password@`, no `${VAR}` | `remote_endpoint` |
+| header values resolved at CONNECT time through `expand_variables` (`${VAR}`, then a whole-value `pass://` / `vault://`); an unresolved value refuses the server, naming the header and never the value | `resolve_headers` |
+| configured headers sent only to the url's host: an httpx request hook removes them from any request to another host (a redirect), `web_fetch`'s `host_matches` rule | `bind_headers_to_host`, `bound_client_factory` |
+| a 404 to our `Mcp-Session-Id` (seen by a response hook, since the SDK's error text depends on the server's body), or a transport that died, reconnects ONCE and retries the call once | `SessionWatch`, `MCPClientManager._call_remote` / `_reconnect_once` |
+| the transport opened and closed by one task (its anyio task group demands it) | `MCPClientManager._own_remote`, `_OwnedTransport` |
+| both SDK generations: 1.x `streamablehttp_client(headers=, httpx_client_factory=)`, 2.x `streamable_http_client(http_client=)`; imported lazily | `open_remote_streams` |
+
+Rules the implementation holds to:
+
+- **`ServerConfig` keeps the templates.** The resolved values exist only in
+  the HTTP client, so a repr, a log line (`mcp show`, the connect line name
+  header KEYS), a trace never carries one.
+- **A failed connect costs that server only.** A bad entry, an unreachable
+  url or a missing stdio command is reported ONCE at WARNING naming the
+  server (`[MCP:<name>] Connection failed`); the manager's own line is DEBUG.
+  This demoted the stdio failure from ERROR-with-traceback.
+- **A header secret is a grant to the configured host**, as a server's `env`
+  is to a stdio server: whoever writes `.mcp.json` chooses the host, and the
+  model-facing `mcp_reload` is not auto-approved.
+- **Egress, not confinement.** A remote server is an outbound connection
+  from the runner; an egress allowlist must include its host. The runner's
+  AppArmor bodies already allow outbound `inet stream`, so no template change.
+  `scrub_secret_env` is subprocess-only and irrelevant here.
+- Tool names (`mcp__<server>__<tool>`), `TRAIT_UNTRUSTED_SCHEMA`
+  sanitization and untrusted-content wrapping are unchanged for remote
+  servers.
+
+Found on the way: under mcp 2.x a `Tool` exposes `input_schema` (the
+camelCase name is only the wire alias), so `get_tool_schemas` raised for
+every server, stdio included; it now reads either. `explain plugin mcp`
+renders `TRANSPORT_DOCS` / `REMOTE_RULES` from the module. Guard:
+`jaato_server/shared/tests/test_mcp_remote_transports_1580.py`, six
+reversions, against a real streamable-HTTP and SSE server
+(`mcp_http_fixture_server.py`, the installed SDK's own under uvicorn);
+verified on mcp 1.30 and 2.3.
 
 ### Streaming & Cancellation
 

@@ -21,6 +21,41 @@ from jaato_server.shared.secret_scrub import scrub_env
 
 logger = logging.getLogger(__name__)
 
+
+class _OwnedTransport:
+    """Closes a remote transport from the task that opened it.
+
+    The streamable-HTTP and SSE clients run an anyio task group, whose cancel
+    scope must be exited by the task that entered it.  A remote connection is
+    therefore opened inside a dedicated task (:meth:`MCPClientManager.
+    _own_remote`) that holds the contexts until ``stop`` is set.  This object
+    is what goes in ``ServerConnection.contexts``: its ``__aexit__`` signals
+    the owner and waits for it, so ``aclose()`` / ``disconnect()`` /
+    ``__aexit__`` close a remote server like any other context.
+    """
+
+    def __init__(self, task: "asyncio.Task", stop: asyncio.Event, watch: Any = None):
+        self.task = task
+        self.stop = stop
+        # mcp_remote.SessionWatch: set when the server answered 404 to our
+        # Mcp-Session-Id (the session it had for us is gone).
+        self.watch = watch
+
+    @property
+    def closed(self) -> bool:
+        """True once the owner task ended (closed, or the transport died)."""
+        return self.task.done()
+
+    async def __aexit__(self, *exc_info) -> None:
+        self.stop.set()
+        if self.task.done():
+            return
+        try:
+            await asyncio.wait_for(self.task, timeout=5.0)
+        except (Exception, asyncio.CancelledError):
+            pass
+
+
 # Reconnection policy when an MCP server is found dead at call time.
 # Mirrors the philosophy of retry_utils.with_retry: a small handful of
 # attempts with exponential backoff, then mark the server as failed so
@@ -62,6 +97,19 @@ class ServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] | None = None
     scrub_secret_env: Sequence[str] = ()
+    # Remote transports (#1580).  ``transport`` is ``"stdio"`` (the default,
+    # unchanged), ``"http"`` (streamable HTTP) or ``"sse"``.  ``headers``
+    # holds the TEMPLATES from .mcp.json (``Bearer ${KEY}``, ``pass://...``):
+    # they are resolved at connect time into the HTTP client only, so this
+    # dataclass -- and its repr -- never carries a resolved secret.
+    transport: str = "stdio"
+    url: str | None = None
+    headers: dict[str, str] | None = None
+
+    @property
+    def is_remote(self) -> bool:
+        """True for an http/sse server (no subprocess, no inherited env)."""
+        return self.transport != "stdio"
 
     def to_stdio_params(self) -> StdioServerParameters:
         # Scrub declared secrets from the INHERITED environment only; the
@@ -97,6 +145,21 @@ class ServerConnection:
     failed: bool = False
     # Timestamp of last failure (used for trace/log context).
     failed_at: float | None = None
+
+    @property
+    def transport_closed(self) -> bool:
+        """True when a remote connection's owner task has ended.
+
+        A stdio connection has no owner task and always answers ``False``.
+        """
+        return any(isinstance(c, _OwnedTransport) and c.closed
+                   for c in self.contexts)
+
+    @property
+    def session_stale(self) -> bool:
+        """True when a remote server answered 404 to our ``Mcp-Session-Id``."""
+        return any(isinstance(c, _OwnedTransport) and c.watch is not None
+                   and c.watch.stale for c in self.contexts)
 
     async def refresh_tools(self) -> list[Tool]:
         """Refresh the cached tool list."""
@@ -250,6 +313,89 @@ class MCPClientManager:
 
         return await self._do_connect(config)
 
+    async def connect_remote(
+        self,
+        name: str,
+        transport: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+    ) -> ServerConnection:
+        """Connect to a remote (``http`` / ``sse``) MCP server (#1580).
+
+        ``headers`` are TEMPLATES (``Bearer ${KEY}``, ``pass://...``); they are
+        resolved here, at connect time, and live only in the HTTP client.  A
+        configured header reaches the url's host and no other.  See
+        :mod:`jaato_server.shared.mcp_remote`.
+
+        Raises:
+            ValueError: If a server with this name is already connected.
+            MCPConfigError: a header that does not resolve.
+            Exception: whatever the transport or initialize raised.
+        """
+        if name in self._connections:
+            raise ValueError(f"Server '{name}' already connected")
+        config = ServerConfig(
+            name=name, command="", transport=transport, url=url,
+            headers=dict(headers or {}),
+        )
+        return await self._do_connect(config)
+
+    async def _own_remote(
+        self,
+        config: ServerConfig,
+        headers: dict[str, str],
+        ready: "asyncio.Future",
+        stop: asyncio.Event,
+        watch: Any = None,
+    ) -> None:
+        """Hold a remote transport + session open until ``stop`` is set.
+
+        Runs as its own task so the transport's task group is entered and
+        exited by the same task (see :class:`_OwnedTransport`).  The session,
+        once initialized, is handed back through ``ready``; a failure before
+        that is set on ``ready`` instead.
+        """
+        from jaato_server.shared.mcp_remote import open_remote_streams
+        try:
+            async with open_remote_streams(
+                    config.transport, config.url, headers, watch) as (read, write):
+                async with ClientSession(read, write, client_info=_CLIENT_INFO) as session:
+                    await session.initialize()
+                    if not ready.done():
+                        ready.set_result(session)
+                    await stop.wait()
+        except BaseException as exc:  # noqa: BLE001 - reported through ready
+            if not ready.done():
+                ready.set_exception(exc if isinstance(exc, Exception)
+                                    else ConnectionError(str(exc) or type(exc).__name__))
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+
+    async def _do_connect_remote(self, config: ServerConfig) -> ServerConnection:
+        """Open a remote connection; on failure nothing is left running."""
+        from jaato_server.shared.mcp_remote import SessionWatch, resolve_headers
+        headers = resolve_headers(config.name, config.headers or {})
+        ready = asyncio.get_running_loop().create_future()
+        stop = asyncio.Event()
+        watch = SessionWatch()
+        task = asyncio.create_task(
+            self._own_remote(config, headers, ready, stop, watch),
+            name=f"mcp-remote-{config.name}",
+        )
+        owner = _OwnedTransport(task, stop, watch)
+        try:
+            session = await asyncio.shield(ready)
+            connection = ServerConnection(
+                config=config, session=session, contexts=[owner],
+            )
+            await connection.refresh_tools()
+        except BaseException:
+            task.cancel()
+            await owner.__aexit__(None, None, None)
+            raise
+        self._connections[config.name] = connection
+        return connection
+
     async def _do_connect(self, config: ServerConfig) -> ServerConnection:
         """Perform the actual connection sequence with cleanup on failure.
 
@@ -257,6 +403,8 @@ class MCPClientManager:
         On any exception, exits all entered contexts in reverse order
         before re-raising — so partial state never leaks.
         """
+        if config.is_remote:
+            return await self._do_connect_remote(config)
         contexts: list[Any] = []
         try:
             # Enter the stdio_client context with custom errlog
@@ -281,7 +429,9 @@ class MCPClientManager:
             # Cleanup any contexts we managed to enter before failing.
             # Run in reverse order; ignore secondary cleanup errors so
             # the original exception is the one that propagates.
-            logger.warning(
+            # DEBUG, not WARNING: the caller (the mcp plugin) reports the
+            # failure once, naming the server (#1580).
+            logger.debug(
                 "MCP server '%s' connect failed: %s. "
                 "Cleaning up partial state.",
                 config.name, exc,
@@ -393,6 +543,10 @@ class MCPClientManager:
             CallToolResult from the MCP server.
         """
         connection = self.get_connection(server)
+        if connection.config.is_remote:
+            return await self._call_remote(
+                server, connection, tool_name, arguments, progress_callback,
+            )
         try:
             return await connection.call_tool(
                 tool_name, arguments, progress_callback=progress_callback,
@@ -408,6 +562,66 @@ class MCPClientManager:
                 tool_name, arguments, progress_callback=progress_callback,
             )
     
+    async def _call_remote(
+        self,
+        server: str,
+        connection: ServerConnection,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+    ) -> CallToolResult:
+        """Call a tool on a remote server, reconnecting ONCE on a stale session.
+
+        A server that forgot our ``Mcp-Session-Id`` (restart, idle expiry)
+        answers 404, which the SDK reports as ``Session terminated``; a
+        transport whose owner task ended is likewise dead.  Either reconnects
+        once and retries the call once -- bounded, so a server that keeps
+        refusing fails this call instead of looping.
+        """
+        from jaato_server.shared.mcp_remote import is_stale_session
+        if not connection.transport_closed:
+            try:
+                return await connection.call_tool(
+                    tool_name, arguments, progress_callback=progress_callback,
+                )
+            except Exception as exc:
+                if not (connection.session_stale or is_stale_session(exc)
+                        or connection.transport_closed):
+                    raise
+                logger.warning(
+                    "MCP server '%s' session is stale during call_tool('%s'); "
+                    "reconnecting once.", server, tool_name,
+                )
+        new_conn = await self._reconnect_once(server)
+        return await new_conn.call_tool(
+            tool_name, arguments, progress_callback=progress_callback,
+        )
+
+    async def _reconnect_once(self, name: str) -> ServerConnection:
+        """Replace a remote connection with one fresh attempt.
+
+        On failure the server is marked failed (as :meth:`reconnect` does
+        after its attempts), so later calls fail fast with
+        ``MCPServerUnavailableError`` until it is reconnected explicitly.
+        """
+        old_conn = self._connections.pop(name)
+        try:
+            await old_conn.aclose()
+        except Exception:
+            pass
+        try:
+            return await self._do_connect(old_conn.config)
+        except Exception as exc:
+            self._connections[name] = ServerConnection(
+                config=old_conn.config,
+                session=None,  # type: ignore[arg-type]
+                failed=True,
+                failed_at=time.time(),
+            )
+            raise MCPServerUnavailableError(
+                f"MCP server '{name}' is unavailable: reconnect failed: {exc}"
+            ) from exc
+
     async def find_tool(self, tool_name: str) -> tuple[str, Tool] | None:
         """Find which server has a given tool."""
         for name, conn in self._connections.items():
