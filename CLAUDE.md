@@ -1039,6 +1039,45 @@ silently, and "reloaded" would be reported about a session still on its
 old credential). `IPCClient.reload_session_env()` / `reloadSessionEnv()`;
 from a prompt, `session reload_env`.
 
+### A Reset Nobody Answered (#1573)
+
+`reset` ("Clear conversation history") was advertised by the TUI's
+command list, the daemon's help text and `rich_client.py --cmd`, parsed
+into a server command and sent as `CommandRequest("reset")`.
+`JaatoServer.execute_command` looked it up among the runner's PLUGIN user
+commands, where nothing registers it, and answered `Unknown command:
+reset`. `JaatoServer.clear_history`, which implements it, had no caller,
+and when called it swallowed a runner failure and said "History cleared".
+
+`execute_command` now answers the names in `JaatoServer._BUILTIN_COMMANDS`
+(today only `reset`) before the plugin lookup; a built-in wins over a
+plugin command of the same name. Every client path reaches it:
+IPC and WS daemon mode through `SessionManager.handle_request` (in the
+loop's executor), standalone WS through `asyncio.to_thread`. Neither runs
+on the loop thread or under `SessionManager._lock`, which is what lets the
+reset make its blocking runner calls (#1355, #1452).
+
+| `clear_history` answers | When |
+|---|---|
+| `{"result": "History cleared", "cleared": True, "messages_cleared": n}` | the runner's `session.reset` confirmed: `reset_session()` (history, turn accounting, consumption ledger, pinned references; plugins hear `on_history_cleared`) and the instruction budget's CONVERSATION entry recomputed |
+| `stage="busy"` | a turn is running. Checked daemon-side and again by the runner, because `session.reset` is a control-lane call that can arrive mid-turn. Nothing changes |
+| `stage="no_runner"` | no runner is attached. Since §7c the daemon holds no conversation of its own, so there is nothing to clear |
+| `stage="runner"` | the runner refused or the call failed; reported, never turned into success |
+
+Only after the runner confirms is the daemon-side mirror cleared
+(`AgentState.history` / `turn_accounting` / `context_usage`, the inputs
+`save` records), and a `ContextUpdatedEvent` and `InstructionBudgetEvent`
+go to every attached client (best effort: a failed read leaves that
+readout stale until the next turn). `handle_request` re-marks the session
+dirty AFTER any command returns, not only before, so a save that read the
+history during the reset cannot clear the mark and leave the empty history
+unpersisted (#1542). The embedded client has no command surface and is
+unchanged.
+
+Guard: `jaato_server/server/tests/test_reset_reaches_the_runner_1573.py`,
+six reversions, driving `SessionManager.handle_request` into a real
+`RunnerRPCClient` / `RunnerRPC` pair and a real `JaatoSession`.
+
 ### Subagent Architecture
 
 Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:

@@ -16394,6 +16394,13 @@ class SessionManager:
                 result = handle_workspace_command(monitor, event.args or [])
             else:
                 result = server.execute_command(event.command, event.args)
+            # Re-mark AFTER the command, not only before it (line above the
+            # dispatch): a command can change what a save must write (``reset``
+            # empties the history, #1573), and a save that read the history
+            # while the command ran would otherwise clear the earlier mark and
+            # leave the change unpersisted (#1542).  No branch, so the
+            # baselined ``handle_request`` does not grow.
+            session.is_dirty = True
             # Format result properly
             if isinstance(result, dict):
                 if "_pager" in result:

@@ -135,7 +135,7 @@ BASELINE: Dict[str, int] = {
     # have made the one behavioural difference (which exceptions survive)
     # unreviewable.  Splitting it is worth doing on its own.
     "jaato-server/jaato_server/server/core.py::JaatoServer._start_model_thread.model_thread._finish_turn": 26,
-    "jaato-server/jaato_server/server/core.py::JaatoServer.execute_command": 27,
+    "jaato-server/jaato_server/server/core.py::JaatoServer.execute_command": 22,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize._run_load_plugins": 16,
     "jaato-server/jaato_server/server/core.py::JaatoServer.shutdown": 25,

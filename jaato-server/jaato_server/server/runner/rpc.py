@@ -3892,18 +3892,43 @@ class RunnerRPC:
     def _handle_session_reset(self) -> "tuple[bool, Any]":
         """Clear the runner-side JaatoSession's conversation history.
 
-        Phase 3 §3.3c precursor.  Calls
-        ``JaatoSession.reset_session()`` with no history — fresh
-        reset.  Restoring a saved history requires Message
-        round-trip serialization (Message lacks ``from_dict``
-        today) and lands as a separate handler when that design
-        completes.
+        Reached from the ``reset`` command (#1573): the daemon's
+        ``JaatoServer.clear_history`` calls ``session.reset``, which is a
+        CONTROL-lane method -- so it can arrive while a turn is running on
+        the work lane.  Clearing history under a streaming turn is a race
+        (the turn would append its answer to a history that no longer holds
+        its question), so a running turn is refused up front with
+        ``stage="busy"`` and nothing is changed, the rule
+        ``session.reload_env`` already follows.
 
-        Returns ``{"ok": True}`` on success.
+        On success ``JaatoSession.reset_session()`` runs with no history (a
+        fresh reset: history, turn accounting, consumption ledger and
+        pinned references cleared, plugins told through
+        ``on_history_cleared``), and the CONVERSATION entry of the
+        instruction budget is recomputed from the now-empty history, so the
+        snapshot the daemon reads next reports the window as emptied rather
+        than as it was before the reset.
+
+        Returns:
+            ``(True, {"ok": True, "messages_cleared": n})``, or
+            ``(False, {"error", "stage"})`` with ``stage`` in
+            ``no_host`` / ``no_session`` / ``busy`` / ``reset``.
         """
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
+        if bool(getattr(session, "is_running", False)):
+            return False, {
+                "error": (
+                    "session.reset: a turn is running on this session; "
+                    "stop it or retry once it is idle"
+                ),
+                "stage": "busy",
+            }
+        try:
+            cleared = len(session.get_history())
+        except Exception:  # noqa: BLE001 -- the count is informational
+            cleared = None
         try:
             session.reset_session()
         except Exception as exc:  # noqa: BLE001 — boundary
@@ -3914,7 +3939,14 @@ class RunnerRPC:
                 ),
                 "stage": "reset",
             }
-        return True, {"ok": True}
+        try:
+            session._update_conversation_budget()
+        except Exception as exc:  # noqa: BLE001 -- the reset itself held
+            logger.warning(
+                "session.reset: history cleared but the instruction budget "
+                "was not recomputed: %s", exc,
+            )
+        return True, {"ok": True, "messages_cleared": cleared}
 
     def _handle_session_set_presentation_context(
         self, args: Dict[str, Any],

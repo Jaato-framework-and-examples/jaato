@@ -7744,19 +7744,46 @@ class JaatoServer:
             )
             return False
 
+    #: Commands the SERVER answers itself, ahead of the plugin user commands
+    #: the runner registers (#1573).  Name (lower-case) -> handler attribute;
+    #: each handler takes the argv list and returns the result dict.
+    #: ``reset`` was advertised by every client and the help text, parsed
+    #: into a server command, and then answered "Unknown command" because
+    #: no plugin registers it -- while :meth:`clear_history`, the method
+    #: that implements it, had no caller.  A built-in wins over a plugin
+    #: command of the same name.
+    _BUILTIN_COMMANDS: Dict[str, str] = {
+        "reset": "_command_reset",
+    }
+
     def execute_command(self, command: str, args: List[str]) -> Dict[str, Any]:
         """Execute a command.
 
+        Built-in server commands (:attr:`_BUILTIN_COMMANDS`, today only
+        ``reset``) are answered here; anything else is a plugin user command
+        and runs in the runner (``session.execute_user_command``).
+
+        Runs on a worker thread on every client path -- IPC and WS daemon
+        mode reach it through ``SessionManager.handle_request`` in the
+        loop's executor, standalone WS through ``asyncio.to_thread`` -- and
+        never under ``SessionManager._lock``, which is what lets both
+        branches make blocking ``*_threadsafe`` runner calls (#1355, #1452).
+
         Args:
-            command: Command name (e.g., 'model', 'save', 'resume').
+            command: Command name (e.g., 'model', 'save', 'reset').
             args: Command arguments.
 
         Returns:
-            Command result dict.
+            Command result dict: ``{"error": ...}`` on failure,
+            ``{"result": ...}`` for a one-line answer, ``{"_pager": True}``
+            when the answer went out as a ``HelpTextEvent``.
 
         Phase 3 §7c step 6.6.4.5e: ``if not self._jaato`` guard
         dropped (always-true branch post-seat-flip).
         """
+        builtin = self._BUILTIN_COMMANDS.get(command.lower())
+        if builtin is not None:
+            return getattr(self, builtin)(args)
         # Phase 3 §7c step 6.6.4.5c.2: route through runner-RPC
         # (dict-shape-only wire format reconstructed daemon-side
         # into UserCommand NamedTuples — full ``parse_command_args``
@@ -7808,24 +7835,9 @@ class JaatoServer:
                         style="info",
                     ))
 
-            # After memory commands, push updated memory list for completion cache
-            # (must run before HelpLines early return so memory list/help also refresh)
-            # Read from the copy the command just ran on -- the runner's
-            # (#1232), never the daemon's own copy of the plugin.
-            if command.lower() == "memory":
-                memory_list = self.memory_list_event()
-                if memory_list is not None:
-                    self.emit(memory_list)
-
-            # After sandbox commands, push updated sandbox paths for @@ completion cache
-            if command.lower() == "sandbox":
-                self.emit(SandboxPathsEvent(paths=self._get_sandbox_paths()))
-
-            # After services commands, push updated service list for completion cache
-            if command.lower() == "services":
-                svc_plugin = self._find_plugin_for_command("services")
-                if svc_plugin and hasattr(svc_plugin, 'get_service_metadata'):
-                    self.emit(ServiceListEvent(services=svc_plugin.get_service_metadata()))
+            # Must run before the HelpLines early return so `memory help`
+            # and friends refresh the completion caches too.
+            self._refresh_completion_caches(command)
 
             # Handle HelpLines result - emit HelpTextEvent for pager display
             if isinstance(result, HelpLines):
@@ -7874,40 +7886,159 @@ class JaatoServer:
             if plugin and hasattr(plugin, 'set_output_callback'):
                 plugin.set_output_callback(None)
 
-    def clear_history(self) -> None:
-        """Clear conversation history.
+    def _refresh_completion_caches(self, command: str) -> None:
+        """Push the completion-cache event a user command may have staled.
 
-        Phase 3 §7c step 6.3: daemon-side leg dropped.  The
-        runner-side ``session.reset`` RPC is now the only source
-        of truth for conversation-history state.  Pre-step-6.3
-        the daemon-side ``_jaato.reset_session()`` call mirrored
-        the reset onto an in-process ``JaatoSession`` whose state
-        was orphan post-§7b.2 (no message processing happens
-        daemon-side).
+        Lifted out of :meth:`execute_command`, verbatim, to pay for the
+        built-in dispatch (#1573) on the complexity ratchet.
+
+        * ``memory`` -- the memory list, read from the copy the command just
+          ran on: the runner's (#1232), never the daemon's own copy.
+        * ``sandbox`` -- the sandbox paths for ``@@`` completion.
+        * ``services`` -- the service list.
+
+        Any other command emits nothing.
         """
+        name = command.lower()
+        if name == "memory":
+            memory_list = self.memory_list_event()
+            if memory_list is not None:
+                self.emit(memory_list)
+        elif name == "sandbox":
+            self.emit(SandboxPathsEvent(paths=self._get_sandbox_paths()))
+        elif name == "services":
+            svc_plugin = self._find_plugin_for_command("services")
+            if svc_plugin and hasattr(svc_plugin, 'get_service_metadata'):
+                self.emit(ServiceListEvent(services=svc_plugin.get_service_metadata()))
+
+    def _command_reset(self, args: List[str]) -> Dict[str, Any]:
+        """The built-in ``reset`` command: clear the conversation (#1573).
+
+        Args:
+            args: Ignored; ``reset`` takes none.
+
+        Returns:
+            :meth:`clear_history`'s result dict.
+        """
+        return self.clear_history()
+
+    def clear_history(self) -> Dict[str, Any]:
+        """Clear this session's conversation history.
+
+        The ``reset`` command's implementation (#1573); until then it had no
+        caller and ``reset`` answered "Unknown command".
+
+        The conversation lives in the RUNNER: ``session.reset`` there runs
+        ``JaatoSession.reset_session()`` (history, turn accounting, the
+        consumption ledger, pinned references; plugins hear
+        ``on_history_cleared``) and recomputes the instruction budget.  Only
+        after the runner confirms does this clear the daemon-side mirror
+        (``AgentState.history`` / ``turn_accounting`` / ``context_usage``,
+        and the inputs ``save`` records), then push a fresh
+        ``ContextUpdatedEvent`` and ``InstructionBudgetEvent`` so every
+        attached client's readouts show the emptied window.
+
+        Refusals, each with nothing changed:
+
+        * ``stage="busy"`` -- a turn is running.  Clearing history under a
+          streaming turn is a race; checked here and again by the runner,
+          because ``session.reset`` is a control-lane call that can arrive
+          mid-turn.
+        * ``stage="no_runner"`` -- no runner is attached.  Since §7c the
+          daemon holds no conversation of its own, so there is nothing here
+          to clear, and saying "History cleared" would be false.
+        * ``stage="runner"`` -- the runner refused or the call failed.  The
+          old version swallowed this and reported success.
+
+        Persisting the cleared history is the caller's half:
+        ``SessionManager.handle_request`` re-marks the session dirty AFTER
+        the command returns, so a save that read the history before the
+        reset cannot clear the mark (#1542).
+
+        Blocking runner calls: never call this from the daemon loop thread
+        or under ``SessionManager._lock`` (#1355, #1452).
+
+        Returns:
+            ``{"result": "History cleared", "cleared": True,
+            "messages_cleared": n}`` on success, else
+            ``{"error": <sentence>, "stage": <stage>}``.
+        """
+        if self._model_running:
+            return {
+                "error": (
+                    "History not cleared: a turn is running. Stop it or wait "
+                    "until the session is idle, then reset again."
+                ),
+                "stage": "busy",
+            }
         rpc = self._runner_rpc
-        if rpc is not None:
-            forwarder = getattr(rpc, "session_reset_threadsafe", None)
-            if callable(forwarder):
-                try:
-                    forwarder(timeout=2.0)
-                except Exception as exc:  # noqa: BLE001 — best-effort
-                    logger.debug(
-                        "clear_history: runner RPC propagation "
-                        "failed (%s) — daemon-side AgentState still cleared",
-                        exc,
-                    )
+        if rpc is None:
+            return {
+                "error": (
+                    "History not cleared: no runner is attached to this "
+                    "session, so there is no conversation here to clear."
+                ),
+                "stage": "no_runner",
+            }
+        try:
+            answer = rpc.session_reset_threadsafe(timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 -- reported, not raised
+            logger.warning("clear_history: runner refused the reset: %s", exc)
+            return {"error": f"History not cleared: {exc}", "stage": "runner"}
         self._original_inputs = []
-        if self._main_agent_id in self._agents:
-            main_state = self._agents[self._main_agent_id]
+        main_state = self._agents.get(self._main_agent_id)
+        if main_state is not None:
             main_state.history = []
             main_state.turn_accounting = []
             main_state.context_usage = {}
+        self._emit_state_after_reset(rpc)
+        cleared = answer.get("messages_cleared") if isinstance(answer, dict) else None
+        return {
+            "result": "History cleared",
+            "cleared": True,
+            "messages_cleared": cleared,
+        }
 
-        self.emit(SystemMessageEvent(
-            message="History cleared",
-            style="info",
-        ))
+    def _emit_state_after_reset(self, rpc: Any) -> None:
+        """Tell attached clients what the window holds after a reset.
+
+        Reads the runner's context usage and instruction-budget snapshot and
+        emits a ``ContextUpdatedEvent`` and an ``InstructionBudgetEvent`` for
+        the main agent.  Best effort, each half on its own: the reset has
+        already happened, and a read (or an event build) that fails leaves
+        that readout stale until the next turn rather than turning a done
+        reset into a reported failure.  Logged at DEBUG.
+        """
+        try:
+            usage = rpc.session_get_context_usage_threadsafe()
+            context_limit = usage.get("context_limit") or self._cached_context_limit
+            self.emit(ContextUpdatedEvent(
+                agent_id=self._main_agent_id,
+                source="budget",
+                usage=self._build_usage(
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                ),
+                context_limit=context_limit,
+                percent_used=usage.get("percent_used", 0.0),
+                tokens_remaining=usage.get("tokens_remaining", context_limit),
+                reserved_output_tokens=usage.get("reserved_output_tokens", 0),
+                turns=usage.get("turns", 0),
+            ))
+        except Exception as exc:  # noqa: BLE001 -- best effort
+            logger.debug("clear_history: context update not sent: %s", exc)
+        try:
+            snapshot = rpc.session_snapshot_instruction_budget_threadsafe(
+                timeout=5.0,
+            )
+            if snapshot:
+                self.emit(InstructionBudgetEvent(
+                    agent_id=self._main_agent_id,
+                    budget_snapshot=snapshot,
+                ))
+        except Exception as exc:  # noqa: BLE001 -- best effort
+            logger.debug("clear_history: budget update not sent: %s", exc)
 
     # =========================================================================
     # Getters

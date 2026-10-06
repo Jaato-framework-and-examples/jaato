@@ -453,13 +453,23 @@ def test_session_memory_is_a_named_runner_method():
 
 def test_the_push_after_the_memory_command_asks_the_holding_copy():
     """``execute_command``'s memory push must go through memory_list_event
-    (the runner) and never through the daemon plugin's own metadata."""
+    (the runner) and never through the daemon plugin's own metadata.
+
+    The push lives in ``_refresh_completion_caches`` since #1573 lifted it
+    out of ``execute_command``; both are walked, and ``execute_command``
+    must still call the helper."""
     tree = ast.parse(Path(__file__).resolve().parents[2]
                      .joinpath("server", "core.py").read_text())
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "execute_command")
-    calls = {n.func.attr for n in ast.walk(fn)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+
+    def _calls(name):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        return {n.func.attr for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+
+    outer = _calls("execute_command")
+    assert "_refresh_completion_caches" in outer
+    calls = outer | _calls("_refresh_completion_caches")
     assert "memory_list_event" in calls
     assert "get_memory_metadata" not in calls
 

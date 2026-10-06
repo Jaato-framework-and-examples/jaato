@@ -3122,19 +3122,27 @@ class RunnerRPCClient:
 
     async def session_reset(
         self, *, timeout: Optional[float] = 5.0,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Clear the runner-side conversation history (fresh reset).
 
         Currently only the no-history reset path is supported.
         Restoring a saved history requires Message round-trip
         serialization that's deferred to a future commit.
+
+        Returns:
+            The runner's answer, ``{"ok": True, "messages_cleared": n}``.
+
+        Raises:
+            RunnerCallError: When the runner refuses -- a running turn
+                (``stage="busy"``, #1573) or a failed reset; the message
+                carries the runner's wording.
         """
-        await self._call_named("session.reset", {}, timeout=timeout)
+        return await self._call_named("session.reset", {}, timeout=timeout)
 
     def session_reset_threadsafe(
         self, *, timeout: Optional[float] = 5.0,
-    ) -> None:
-        self._run_threadsafe(
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
             self.session_reset(timeout=timeout), timeout=timeout,
         )
 
