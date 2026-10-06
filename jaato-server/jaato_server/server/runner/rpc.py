@@ -340,6 +340,36 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
 SEEN_REQUEST_ID_MEMORY = 256
 
 
+
+def slot_retire_reasons(registry: Any) -> List[str]:
+    """The reasons plugins give for not reusing this pool slot (#1565).
+
+    Asks every plugin in ``registry`` that implements
+    ``slot_retire_reason()``, after its ``reset_for_next_session()``.
+    A plugin answers with a one-line reason when the process holds
+    something no reset can free (the references plugin, after it loaded
+    an embedding model: ~1 GB of heap stays).  A plugin without the
+    method, one answering ``None`` or ``""``, and one that raises (logged)
+    give no reason; a raising probe is not a reason to lose a warm slot.
+
+    Returns:
+        The reasons, in registry order; empty when the slot may be pooled.
+    """
+    reasons: List[str] = []
+    for name in registry.list_available():
+        plugin = registry.get_plugin(name)
+        probe = getattr(plugin, "slot_retire_reason", None)
+        if not callable(probe):
+            continue
+        try:
+            reason = probe()
+        except Exception:  # noqa: BLE001 — per-plugin boundary
+            logger.exception("session.end: %s.slot_retire_reason raised", name)
+            continue
+        if isinstance(reason, str) and reason:
+            reasons.append(reason)
+    return reasons
+
 class RunnerRPC:
     """Bidirectional dispatcher serving on a blocking Unix socket.
 
@@ -2214,9 +2244,13 @@ class RunnerRPC:
 
         Returns:
             ``(True, {"plugins_reset": int, "errors": List[str],
-            "plugins_carried": List[str]})`` — ``ok`` stays True even
-            when individual plugin resets fail; daemon branches on
-            ``errors``.  ``plugins_carried`` names the instances parked
+            "plugins_carried": List[str], "retire_slot": List[str]})``
+            — ``ok`` stays True even when individual plugin resets fail;
+            daemon branches on ``errors``.  ``retire_slot`` holds the
+            reasons plugins gave through ``slot_retire_reason()`` (#1565):
+            the reset succeeded but the process keeps memory nothing can
+            free, so the daemon tears the slot down instead of pooling
+            it.  Empty when every plugin can be reused as is.  ``plugins_carried`` names the instances parked
             for the next session (empty for a standalone session, or
             when ``errors`` made the slot unpoolable).  ``(False,
             error)`` only on the structural "no session host" case
@@ -2297,10 +2331,15 @@ class RunnerRPC:
         # ``errors``), so parking state for a next session that will never
         # arrive would only defer the teardown.  Same reasoning as the
         # daemon's own "errors ⇒ do not pool" rule.
+        # #1565: a plugin may say the slot cannot be reused at all (a
+        # model loaded in this process leaves heap no release returns).
+        # Asked after the resets, and nothing is parked for a slot the
+        # daemon will retire.
+        retire = slot_retire_reasons(registry)
         try:
             envelope = getattr(host, "envelope", None)
             parked, park_errors = slot_plugins.park_from(
-                registry, envelope, allow_carry=not errors,
+                registry, envelope, allow_carry=not errors and not retire,
             )
             for name in park_errors:
                 errors.append(f"{name}: shutdown() raised during session.end")
@@ -2351,6 +2390,7 @@ class RunnerRPC:
             "plugins_reset": plugins_reset,
             "errors": errors,
             "plugins_carried": parked,
+            "retire_slot": retire,
         }
 
     def _require_ready_session(
