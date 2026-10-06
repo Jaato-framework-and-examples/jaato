@@ -2315,7 +2315,7 @@ class PluginRegistry:
         if not stored:
             return False
         missing = object()
-        effective = self._augment_plugin_config(config) or {}
+        effective = self._augment_plugin_config(config, name) or {}
         return all(
             stored.get(key, missing) == value
             for key, value in effective.items()
