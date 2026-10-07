@@ -2182,8 +2182,9 @@ is the sentence naming the scope that excludes one.
 
 Per session, never per instance: the registry and plugin instances are
 shared with sibling subagents (#944, #957), the scopes are not. A tool whose
-plugin the profile did not scope, including every core tool
-(`list_tools`, `signal_completion`, `askPermission`), is in the surface.
+plugin the profile enables and did not scope, and every core tool
+(`list_tools`, `signal_completion`, `askPermission`), is in the surface; a
+tool of a plugin the profile does not enable is not (#1590, next section).
 Prompt enrichment now sets the session ContextVar before asking the
 enrichers, so a shared enricher answers for the session it is serving.
 
@@ -2195,6 +2196,46 @@ Not taken on here: #1468 (instructions for dropped tools in general).
 Guard: `jaato_server/shared/tests/test_a_scoped_out_tool_does_not_exist_1513.py`,
 seven reversions, on a real registry with the real `references`,
 `introspection` and `permission` plugins and two sessions sharing it.
+
+### A Plugin the Profile Does Not Enable Enriches Nothing (#1590)
+
+A stage whose `plugins:` was `[permission, file_edit(mode:preload,
+tools:[readFile])]` received the `references` plugin's prompt enrichment:
+a 16k-character "**Reference sources available** — use `selectReferences`"
+block naming 139 ids and a tool it could not call. The model read the ids
+as pages, guessed paths, failed and signalled completion with an error.
+The registry initializes every discovered plugin whatever the profile
+lists (#950, #1563), its enrichment subscriber lists asked every exposed
+plugin, and #1491's guard read `tool_in_surface`, which answered True for
+any tool whose plugin the profile did not SCOPE, so an unlisted plugin's
+tools counted as present.
+
+**`JaatoSession.plugin_enabled(name)` is the session's enabled set**: the
+`plugins:` list as `configure()` received it, plus
+`PluginRegistry._ALWAYS_INITIALIZE_PLUGINS` (`introspection`,
+`permission`) and every enrichment-only plugin (`PLUGIN_KIND =
+"enrichment"`, never named in `plugins:`). A session with no list
+(embedded, profile-less: every plugin on the wire) enables everything.
+
+| Reader | Change |
+|---|---|
+| `tool_in_surface` / `tool_scope_refusal` | False for a tool whose plugin is not enabled, refusal "the profile does not enable plugin `X`"; then the #1513 scope. One `_tool_surface_exclusion` answers both |
+| `activate_discovered_tools` | its own `_tool_plugins + introspection` filter is gone; it asks `tool_in_surface` |
+| the registry's prompt, system-instruction and tool-result subscriber lists | skip a plugin `tool_visibility.plugin_enabled_for_session` says the calling session (the ContextVar) does not enable |
+
+Per session, never per instance, as #1513: the sibling that enables
+`references` on the same registry still gets its hints. No session in the
+ContextVar, or a session without the method, means every plugin enriches,
+as before. Behaviour change, stated: a tool plugin that enriches
+(`memory`, `template`, `lsp`, `artifact_tracker`, `result_grep`,
+`multimodal`, `waypoint`) now enriches only sessions whose profile lists
+it. Because `tool_in_surface` feeds discovery, `list_tools`' global view
+no longer lists an unlisted plugin's tools as `available: false`.
+
+Guard: `jaato_server/shared/tests/test_a_plugin_not_enabled_does_not_enrich_1590.py`,
+seven reversions, on a real registry with the real `references` plugin,
+two sessions sharing it and a probe enricher that checks nothing (so the
+registry gate and #1491's guard are each proved alone).
 
 ### A Repository's Own Guidance, Pointed At (#1347)
 

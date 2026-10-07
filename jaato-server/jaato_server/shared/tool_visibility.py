@@ -31,6 +31,9 @@ Before that only the initial wire schema honoured a scope: ``list_tools``
 listed the scoped-out tools, ``get_tool_schemas`` returned them and the
 executor ran them.  :func:`tool_in_session_surface` is the same question
 for a plugin deciding whether to mention one of its tools in a hint.
+Since #1590 that predicate is also False for every tool of a plugin the
+session's profile does not enable, and :func:`plugin_enabled_for_session`
+is what the registry's enrichment subscriber lists ask.
 
 The predicates answer for "the current session" (#1195), so the caller
 must have set the session ContextVar for the session it is serving before
@@ -75,6 +78,30 @@ def tool_in_session_surface(tool_name: str, session: Any = None) -> bool:
         return True
     try:
         return bool(predicate(tool_name))
+    except Exception:
+        return True
+
+
+def plugin_enabled_for_session(plugin_name: str, session: Any = None) -> bool:
+    """Whether the calling session's profile enables ``plugin_name`` (#1590).
+
+    Delegates to ``JaatoSession.plugin_enabled`` on ``session`` or, when
+    none is passed, the session the ContextVar names.  With no session, or
+    a session without the method, every plugin is enabled: there is no
+    plugin list to apply.  A predicate that raises answers ``True`` for
+    the same reason.
+
+    The registry's enrichment subscriber lists read this, so a plugin the
+    session's profile does not enable contributes no prompt, system
+    instruction or tool-result enrichment to that session, although the
+    shared registry initialized it (#950, #1563).
+    """
+    session = _session_or_current(session)
+    predicate = getattr(session, 'plugin_enabled', None)
+    if predicate is None:
+        return True
+    try:
+        return bool(predicate(plugin_name))
     except Exception:
         return True
 
