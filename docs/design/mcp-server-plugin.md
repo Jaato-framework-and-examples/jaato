@@ -68,11 +68,11 @@ one side and an ordinary `IPCClient` (or `WSClient`) on the other.**
 
 | | Separate process | Daemon extension (A2A sketch's shape) |
 |---|---|---|
-| How MCP hosts reach it | **stdio**: the host launches `jaato-mcp --connect /tmp/jaato.sock --expose .jaato/mcp-expose.yaml` | needs an HTTP listener and its auth |
+| How MCP hosts reach it | **stdio**: the host launches `jaato-mcp --connect /tmp/jaato.sock --config mcp.yaml` | needs an HTTP listener and its auth |
 | Caller identity | free: the daemon reads `SO_PEERCRED` and stamps `created_by` (see CLAUDE.md, *Two Principals on One Socket*) | must be built before the first commit (A2A §11.1) |
 | What it depends on | the versioned client protocol, whose verbs already refuse an older daemon by name | `SessionManager` internals and the `_lock` re-entrancy rule (A2A §5.2) |
 | A port to secure | none in stdio mode | yes |
-| Cascades | the process **is** the cascade driver, so the fork-cid gap (A2A §7.1) does not arise | depends on reactors and that gap |
+| Cascades | the process hosts the cascade driver script (§3.3), and the script orchestrates in code or through reactor rules | depends on reactors and the fork-cid gap (A2A §7.1) |
 | Crash isolation | a crash ends one MCP connection | a crash is in the daemon |
 
 The engine is still written behind one interface (A2A §2.4), so an
@@ -93,77 +93,163 @@ working unchanged.  The daemon learns nothing about MCP.
 
 ## 3. What the caller sees
 
-### 3.1 One tool per exposed skill
+### 3.1 Two kinds of tool
 
-An explicit manifest decides what is callable.  It is also the export
-allowlist the A2A sketch requires (§11.2): a caller can never name a
-profile the manifest does not list.
+A tool starts one of two things, and nothing else:
 
-```yaml
-# .jaato/mcp-expose.yaml
-server:
-  name: acme-agents
-  workspace: provision            # provision | <absolute path>
-  max_concurrent_tasks: 4
-tools:
-  review_pr:
-    kind: session
-    profile: reviewer
-    description: "Reviews a diff and returns findings."  # never the persona
-    input: spawn_schema           # spawn_payload_schema, or {prompt}
-    budget_control:
-      limits: {usd: 2.0}
-      degrade: [{at: 100, action: abort}]
-    task_support: optional
-  ship_feature:
-    kind: cascade
-    stages:
-      - {name: plan,      profile: planner}
-      - {name: implement, profile: implementer, input_from: plan}
-      - {name: review,    profile: reviewer,    input_from: implement}
-    result: last                  # last | all
-    task_support: required
-```
+| Kind | `jaato-mcp` starts | Done when |
+|---|---|---|
+| `session` | one session from a profile | the session completes (`AgentCompletedEvent`, or a terminal `SessionTerminatedEvent`) |
+| `driver` | a **cascade driver script**, the workspace author's own code | the script returns, raises, or hits the tool's deadline |
 
-| MCP field | Comes from |
-|---|---|
-| `name` | the manifest key, checked against MCP's tool-name grammar |
-| `description` | the manifest, **never** the profile's `description` or persona text, which are internal authoring artifacts |
-| `inputSchema` | the profile's `spawn_payload_schema` (every property a string, #883), or `{prompt: string}` |
-| `outputSchema` | the profile's `completion_payload_schema` (for `result: all`, an object keyed by stage name) |
-| `execution.taskSupport` | the manifest |
+What a driver script does inside is its own business.  It may orchestrate
+**programmatically** (start stage A, wait for its payload, start B), or
+**semantically** (start an entry session and let premium reactor rules fork
+the next stages), or mix the two.  `jaato-mcp` cannot tell these apart and
+does not need to.  An earlier draft of this sketch had two further kinds, a
+manifest-declared list of stages (`kind: cascade`) and a reactor entry point
+(`kind: reactor`); both were the MCP layer knowing something about topology
+that belongs to the script, and both are dropped.
 
-The result is returned as `structuredContent`, with a text rendering
-beside it for clients that ignore structured output.  The completion gate
-validates the payload before `signal_completion` succeeds, so a tool with
-an `outputSchema` is held to it by the callee, not only checked by the
-caller.
+### 3.2 Declaring what is exposed
+
+Something has to name what an MCP caller may invoke.  That is also the
+export allowlist the A2A sketch requires (§11.2): a caller can never name a
+profile or script that is not listed.  The declaration is
+**`jaato-mcp`'s own format**, owned and validated by the
+`jaato-mcp-transport` repository.  It adds no key to jaato's profile schema
+and nothing to the `.jaato/` tree's fixed layout.
+
+Two equivalent forms, one code path (flags become a one-entry config):
+
+- **flags**, enough for one or two plain tools:
+
+  ```
+  jaato-mcp --connect /tmp/jaato.sock --workspace /srv/ws \
+            --expose-session review_pr=reviewer \
+            --expose-driver  ship_feature=scripts/ship_feature.py
+  ```
+
+- **a config file** (`--config PATH`), once a workspace exposes several
+  tools or any of them needs its own settings:
+
+  ```yaml
+  server:
+    name: acme-agents
+    workspace: /srv/ws              # or per tool; or `provision`
+    max_concurrent_tasks: 4
+  defaults:
+    deadline_seconds: 1800
+    permission_prompts: refuse      # refuse | elicit
+  tools:
+    review_pr:
+      kind: session
+      profile: reviewer
+      description: "Reviews a diff and returns findings."  # never the persona
+      budget_control:
+        limits: {usd: 2.0}
+        degrade: [{at: 100, action: abort}]
+      task_support: optional
+    ship_feature:
+      kind: driver
+      script: scripts/ship_feature.py
+      description: "Plans, implements and reviews a feature."
+      deadline_seconds: 3600
+      max_concurrent: 1
+      task_support: required
+  ```
+
+Rules for a server exposing several tools:
+
+- **Tool names are unique**; startup refuses a duplicate.  The name is the
+  MCP contract and is independent of any profile or script name.
+- **Each tool is validated on its own.**  A broken entry is dropped with a
+  logged reason and the rest are served, so a missing tool is never silent.
+- **Every call gets its own `cascade_driver_id`**, including two concurrent
+  calls to the same tool.
+- **Concurrency is capped per tool and in total**, because one driver call
+  may fan out many sessions and must not starve the other tools.
+- **One process per workspace** is the default shape; a per-tool
+  `workspace` lets one process serve several, if it can reach all of them.
+
+Where each MCP field comes from:
+
+| MCP field | `kind: session` | `kind: driver` |
+|---|---|---|
+| `name` | the config key, checked against MCP's tool-name grammar | same |
+| `description` | the config, **never** the profile's `description` or persona | the config |
+| `inputSchema` | the profile's `spawn_payload_schema` (every property a string, #883), or `{prompt: string}` | the script's `INPUT_SCHEMA` |
+| `outputSchema` | the profile's `completion_payload_schema` | the script's `OUTPUT_SCHEMA` |
+| `execution.taskSupport` | the config | the config |
+
+The result is returned as `structuredContent`, with a text rendering beside
+it for clients that ignore structured output.  For a session tool the
+completion gate validates the payload before `signal_completion` succeeds,
+so the `outputSchema` is held by the callee.  For a driver tool `jaato-mcp`
+validates the script's return value against `OUTPUT_SCHEMA` and reports a
+mismatch as `isError: true` rather than passing it on.
 
 **Rejected: a generic tool set** (`jaato_start`, `jaato_send`,
 `jaato_status`) in place of per-skill tools.  It is more flexible and
 untyped, and it puts the profile name in the caller's hands, which is the
 #944 / #1052 failure one layer out.
 
-### 3.2 A cascade is one tool and one task
+### 3.3 The driver contract
 
-A `kind: cascade` tool runs its stages in order, each a headless session
-under one `cascade_driver_id` minted per call, with the completion payload
-of stage *n* handed to stage *n+1* (`input_from`) through that stage's
-spawn schema.  The caller sees one call and one result.  Stage progress is
-reported as progress notifications and, where a task is in play, as the
-task's `statusMessage` (`stage 2/3: implement`).
+A driver script is a Python module exposing two schemas and one coroutine:
 
-The manifest's stage list is deliberately **linear with named inputs**:
-data, not a driver program.  Branching and fan-in are reactor territory
-(A2A §6.2, §7.3).  A later `kind: reactor` tool type can point at a rule
-set once A2A §7.1's fork-cid propagation and §7.2's terminal rule exist.
+```python
+INPUT_SCHEMA = {...}     # JSON Schema of the tool's arguments
+OUTPUT_SCHEMA = {...}    # JSON Schema of what run() returns
 
-### 3.3 Continuing a finished task
+async def run(input: dict, ctx) -> dict:
+    # ctx.client     a connected SDK client, workspace already selected
+    # ctx.cid        the cascade_driver_id jaato-mcp minted for this call
+    # ctx.cancelled  set when the caller cancels or the deadline passes
+    # ctx.progress(message)   -> MCP progress / task statusMessage
+    ...
+```
+
+`jaato-mcp` keeps everything that is about the *call*, so a script never
+has to:
+
+| Per call, `jaato-mcp` | Why it, not the script |
+|---|---|
+| mints the cid and passes it in | it must cancel and observe the cascade whatever the script does |
+| registers as the cid's observer (`cascade.register`) **before** `run()` starts | no event from the chain can arrive before the subscription exists |
+| forwards clarifications from **any** session under the cid to the MCP caller (§4.2) | the script should not re-implement MRTR |
+| refuses permission ASKs by default (§4.2) | same rule for every tool |
+| enforces the deadline, and sends `cascade.cancel <cid>` on MCP cancel or deadline | a hung or crashed script must not leave sessions running |
+| validates the return value against `OUTPUT_SCHEMA` | the schema is the published contract |
+
+**The one rule a script must follow: every session it creates carries
+`ctx.cid`** (`create_session(..., cascade_driver_id=ctx.cid)`).  A session
+created without it escapes cancellation and clarification forwarding.  For
+semantic orchestration that rule extends to the reactor forks, which is why
+jaato-premium#79 (forks inherit the cid) is a prerequisite for driver
+scripts that delegate to reactor rules.  Knowing when such a chain has
+*finished* is the script's problem, not the MCP layer's; jaato-premium#80
+(an explicit workflow terminus) is what a script would wait for.
+
+`jaato-scaffold new cascade` already emits driver scripts; a driver for
+`jaato-mcp` is that shape with the fixed signature above, and the archetype
+is the obvious place to generate one.
+
+**In-process, not a subprocess, for v1.**  The script is loaded the way
+completion processors are (`spec_from_file_location`) and runs on
+`jaato-mcp`'s event loop.  A subprocess would stop a crashing script taking
+the server down, at the cost of carrying `ctx` across a boundary.  The
+deadline plus `cascade.cancel` already bounds what a hung script's sessions
+can do, so isolation is deferred.  The script runs as `jaato-mcp`'s uid with
+`jaato-mcp`'s access, which is the same trust as any driver script the
+workspace author runs by hand.
+
+### 3.4 Continuing a finished task
 
 An optional generic tool, `jaato_continue(task_id, message)`, drives a
 completed session again through `session.wake`.  #913 / #915 made a
 completed session drivable.  It is off by default: a caller holding a task
-id can steer a session that already spent its budget, and the manifest
+id can steer a session that already spent its budget, and the config
 should say so explicitly (`allow_continue: true` per tool).
 
 ---
@@ -217,7 +303,7 @@ Two limits, stated rather than discovered:
 - **A permission ASK is not a clarification.**  A remote model answering
   "may I run this?" on the user's behalf is a rubber stamp.  `jaato-mcp`
   refuses at startup to expose a profile whose effective permission policy
-  can ASK, unless the manifest opts in per tool
+  can ASK, unless the config opts in per tool
   (`permission_prompts: elicit`) and the client advertises elicitation.
   The effective policy is known daemon-side (#1474's layers);
   `scaffold.validate` is where that check would run.
@@ -262,7 +348,7 @@ Most of A2A §11 carries over.  What changes or is added:
 1. **Stdio is the safe default.**  The process speaks for the user who
    launched it and nobody else.  HTTP mode is opt-in and refuses to start
    without auth configured (§2.1).
-2. **The workspace comes from the manifest, never the caller.**  The
+2. **The workspace comes from the config, never the caller.**  The
    default, `provision`, gives each task a workspace of its own, so one
    caller's task cannot read another's.  A fixed path is for a single-user
    stdio deployment.
@@ -274,9 +360,10 @@ Most of A2A §11 carries over.  What changes or is added:
    fan-out nobody planned.
 5. **A tool's own description is the only text published.**  Profile
    names, descriptions and personas stay internal (A2A §8.3).
-6. **The manifest is validated at startup** through `scaffold.validate`
-   (protocol 1.34): a profile with errors is not exposed, and the
-   manifest's own checks (tool-name collisions, a tool with no completion
+6. **The config is validated at startup** through `scaffold.validate`
+   (protocol 1.34): a profile with errors is not exposed, a driver script
+   that does not load or declares no schemas is not exposed, and the
+   config's own checks (tool-name collisions, a tool with no completion
    schema, an ASK-able policy without opt-in) run beside it.
 
 ---
@@ -284,14 +371,19 @@ Most of A2A §11 carries over.  What changes or is added:
 ## 6. What the package owns, and what it does not
 
 **Owns**: the MCP server (stdio first, streamable HTTP second), the
-manifest and its validation, the task store and `requestState` signing,
-the cascade runner for `kind: cascade`, result and resource rendering.
+tool configuration (flags and file) and its validation, the driver-script
+loader and the `ctx` it hands over, the task store and `requestState`
+signing, result and resource rendering.
 
 **Does not own**: anything in the daemon.  No framework change is required
-for phases 0–3 below.  Phase 5 needs A2A §9's premium change (fork cid
-propagation).
+for any phase below.  A driver script that delegates to reactor rules
+needs jaato-premium#79 (forks inherit the cid) and, to know when the chain
+ended, jaato-premium#80; that is a property of the script, not of
+`jaato-mcp`.
 
-**Packaging**: a separate distribution, `jaato-mcp`, depending on
+**Packaging**: a separate repository,
+[jaato-mcp-transport](https://github.com/Jaato-framework-and-examples/jaato-mcp-transport),
+publishing a distribution `jaato-mcp` that depends on
 `jaato-sdk` and `mcp`.  It declares no `jaato.plugins` entry point, so the
 `PLUGIN_TIER` / `PLUGIN_KIND` trap (#917) does not apply.  If it ever
 contributes a plugin, that rule does.
@@ -305,9 +397,8 @@ contributes a plugin, that rule does.
 | 0 | stdio, `kind: session` tools, blocking `tools/call`, `structuredContent` | nothing |
 | 1 | MRTR clarification ↔ `ClarificationBatchEvent`; startup refusal of ASK-able profiles | nothing |
 | 2 | tasks through the extension seam; restart-safe task store; `notifications/tasks/status` where the wire has it | nothing |
-| 3 | `kind: cascade` (linear stages, `input_from`); `resource_link` outputs; `jaato_continue` | nothing |
+| 3 | `kind: driver` tools (§3.3): cid minting, `cascade.register` before `run()`, clarification forwarding across the cid, deadline + `cascade.cancel`; `resource_link` outputs; `jaato_continue` | nothing for programmatic drivers; jaato-premium#79 / #80 for drivers that delegate to reactor rules |
 | 4 | streamable HTTP with app credential + `ticket.bind` per principal | nothing (#1074 exists) |
-| 5 | `kind: reactor` tools | A2A §7.1 and §7.2 (premium) |
 
 ---
 
@@ -316,7 +407,7 @@ contributes a plugin, that rule does.
 | A2A sketch | Here |
 |---|---|
 | §5 server inside the daemon | §2: beside it, as an SDK client, first |
-| §7.1 fork cid gap blocks workflows | does not arise for `kind: cascade`; still blocks `kind: reactor` |
+| §7.1 fork cid gap blocks workflows | blocks only driver scripts that delegate to reactor rules (jaato-premium#79) |
 | §2.2 `input_required` + `tasks/update` | §4.2: MRTR on a blocking call; `tasks/update` does not exist in the SDK |
 | §12 "MCP is poll-only" | §1: push exists on 2025-11-25; the 2026-07-28 extension is poll-only as published |
 | §13 Q2 which MCP revision the SDK speaks | answered in §1 |
@@ -325,14 +416,28 @@ contributes a plugin, that rule does.
 
 ## 9. Decisions
 
-1. **Placement**: beside the daemon first (recommended) or inside it.
-   Decides whether A2A §7.1 blocks the cascade case.
-2. **Cascade definition**: manifest stages (§3.2) first, reactor rule sets
-   later, or reactors only.
-3. **Permission ASK**: refuse at startup (recommended) or bridge to
-   elicitation by default.
-4. **Engine sharing with A2A**: one package with two transports, or two
-   packages sharing an engine library.
+Recorded 2026-10-07:
+
+1. **Placement**: a separate process beside the daemon, an SDK client
+   (§2).  An in-daemon backend stays possible behind the engine interface.
+2. **Cascades**: one `driver` kind (§3.3).  How the script orchestrates,
+   in code or through premium reactor rules, is not the MCP layer's
+   concern.  Manifest-declared stages and a `kind: reactor` entry point are
+   dropped.
+3. **Permission ASK**: refused at startup by default; a tool opts in with
+   `permission_prompts: elicit` (§4.2).
+4. **Repository**: implementation lives in
+   [jaato-mcp-transport](https://github.com/Jaato-framework-and-examples/jaato-mcp-transport),
+   and ships separately from any A2A work.
+5. **Configuration**: owned by `jaato-mcp`, as flags or a `--config` file
+   (§3.2); jaato's profile schema and `.jaato/` layout are unchanged.
+
+Still open:
+
+- **Engine sharing with A2A**: one package with two transports, or two
+  packages sharing an engine library.
+- **Driver isolation**: in-process for v1 (§3.3); whether a subprocess
+  mode is worth its cost.
 
 ---
 
@@ -358,8 +463,8 @@ command, not an SDK method; the Python SDK has no `workspace.file.fetch`.
   server;
 - the `io.modelcontextprotocol/tasks` extension's own method set at
   2026-07-28 (not shipped in the SDK, so not readable here);
-- how a cascade-driving SDK client observes stage events across N sessions
-  under one cid.  The daemon side is `register_in_process_client`; the
-  client-side subscription path was not traced.
+- that the SDK's cascade-event subscription (`cascade.register`) delivers
+  clarification batches from every session under the cid in a form
+  `jaato-mcp` can answer, without being attached to each session.
 
 **Not measured at all**: performance.  Every claim here is structural.
