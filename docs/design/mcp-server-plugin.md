@@ -128,7 +128,7 @@ file does not repeat them:
 ```yaml
 server:
   name: acme-agents
-  workspace: /srv/ws              # or per tool; or `provision`
+  workspace: /srv/ws              # required, here or per tool
   max_concurrent_tasks: 4
 defaults:
   permission_prompts: refuse      # refuse | elicit
@@ -355,10 +355,15 @@ Most of A2A §11 carries over.  What changes or is added:
 1. **Stdio is the safe default.**  The process speaks for the user who
    launched it and nobody else.  HTTP mode is opt-in and refuses to start
    without auth configured (§2.1).
-2. **The workspace comes from the config, never the caller.**  The
-   default, `provision`, gives each task a workspace of its own, so one
-   caller's task cannot read another's.  A fixed path is for a single-user
-   stdio deployment.
+2. **The workspace comes from the config, never the caller.**  It is a
+   path, required server-wide or per tool.  The daemon does not provision
+   one over IPC: auto-provisioning exists only in the WS server, and
+   `jaato-mcp` is an IPC client, so the daemon only checks that the
+   connecting user can reach the declared path (`SO_PEERCRED`).  A fixed
+   path suits a single-user stdio deployment.  Per-task isolation (HTTP
+   mode, several callers) is an option `jaato-mcp` implements itself: it
+   creates `<workspace>/<task_id>` as the user it runs as and declares
+   that path, so one caller's task cannot read another's.
 3. **Caller input is untrusted.**  It is wrapped the way a wake payload is
    (`_wrap_wake_content`, #845), so text arriving from a remote model reads
    as data to the model that receives it.
