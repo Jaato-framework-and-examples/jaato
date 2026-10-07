@@ -44,6 +44,7 @@ from .enrichment_formatter import (
     format_enrichment_notifications,
 )
 from jaato_server.shared.trace import trace as _trace_write
+from jaato_server.shared.tool_visibility import plugin_enabled_for_session
 
 # Config keys that name WHO is exposing a plugin rather than HOW it
 # should behave.  Every in-process subagent spawn stamps ``agent_name``
@@ -3491,10 +3492,25 @@ class PluginRegistry:
             return plugin.get_enrichment_priority()
         return 50  # Default priority
 
+    def is_enrichment_only(self, name: str) -> bool:
+        """Whether ``name`` is registered as an enrichment-only plugin.
+
+        An enrichment-only plugin provides no tools, so no profile names it
+        in ``plugins:``; ``JaatoSession.plugin_enabled`` counts it as
+        enabled for every session (#1590).
+        """
+        return name in self._enrichment_only
+
     def get_prompt_enrichment_subscribers(self) -> List[AnyPlugin]:
         """Get plugins that subscribe to prompt enrichment, sorted by priority.
 
-        Includes both exposed plugins and enrichment-only plugins.
+        Includes both exposed plugins and enrichment-only plugins, minus
+        the plugins the calling session's profile does not enable
+        (:func:`~jaato_server.shared.tool_visibility.plugin_enabled_for_session`,
+        #1590): the registry is shared and initializes plugins a profile
+        does not list, and such a plugin must not hint at tools the session
+        cannot call.  The same filter applies to the system-instruction and
+        tool-result subscriber lists.
         Plugins are sorted by enrichment priority (lower values run first).
 
         Returns:
@@ -3507,6 +3523,8 @@ class PluginRegistry:
         for name in all_enrichment_names:
             try:
                 plugin = self._plugins[name]
+                if not plugin_enabled_for_session(name):
+                    continue
                 if (hasattr(plugin, 'subscribes_to_prompt_enrichment') and
                         plugin.subscribes_to_prompt_enrichment()):
                     subscribers.append(plugin)
@@ -3591,6 +3609,8 @@ class PluginRegistry:
         for name in all_enrichment_names:
             try:
                 plugin = self._plugins[name]
+                if not plugin_enabled_for_session(name):
+                    continue
                 if (hasattr(plugin, 'subscribes_to_system_instruction_enrichment') and
                         plugin.subscribes_to_system_instruction_enrichment()):
                     subscribers.append(plugin)
@@ -3680,6 +3700,8 @@ class PluginRegistry:
         for name in all_enrichment_names:
             try:
                 plugin = self._plugins[name]
+                if not plugin_enabled_for_session(name):
+                    continue
                 if (hasattr(plugin, 'subscribes_to_tool_result_enrichment') and
                         plugin.subscribes_to_tool_result_enrichment()):
                     subscribers.append(plugin)

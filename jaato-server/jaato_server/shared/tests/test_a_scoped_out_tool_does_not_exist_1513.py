@@ -73,8 +73,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SESSION,
-        find=("        scope = self._tool_scope_of(tool_name)\n"
-              "        return scope is None or tool_name in scope[1]\n"),
+        find="        return self._tool_surface_exclusion(tool_name) is None\n",
         replace="        return True\n",
         test="test_calling_a_scoped_out_tool_is_refused_before_the_permission_gate",
         because="the one predicate admits everything, so no point holds the scope",

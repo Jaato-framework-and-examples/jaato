@@ -4217,15 +4217,53 @@ class JaatoSession:
             kept.append(schema)
         return kept
 
-    def _tool_scope_of(self, tool_name: str) -> Optional[Tuple[str, List[str]]]:
-        """``(plugin_name, allow_list)`` when ``tool_name``'s plugin is
-        scoped by this session's profile, else ``None``.
+    def plugin_enabled(self, plugin_name: str) -> bool:
+        """Whether THIS session's profile enables ``plugin_name`` (#1590).
 
-        A tool with no owning plugin (``signal_completion``,
-        ``askPermission``, core infra) or whose plugin the profile did not
-        scope has no scope.  Never consults another session's scopes.
+        The session's enabled set is the profile's ``plugins:`` list as
+        ``configure()`` received it (``self._tool_plugins``), plus what
+        every session has whatever it lists: the registry's
+        ``_ALWAYS_INITIALIZE_PLUGINS`` (``introspection``, ``permission``)
+        and every enrichment-only plugin (``PLUGIN_KIND = "enrichment"``,
+        which provides no tools and so is never named in ``plugins:``).
+        A session with no list (``_tool_plugins is None``: embedded,
+        profile-less, every plugin on the wire) enables every plugin.
+
+        Per session: the registry, and so every plugin instance, is shared
+        with sibling subagents and initializes plugins the profile does not
+        list (#950, #1563); which of them a session may reach is a property
+        of the session.  Read by :meth:`tool_in_surface` (a disabled
+        plugin's tools do not exist) and by the registry's enrichment
+        subscriber lists (a disabled plugin enriches nothing for this
+        session).
         """
-        if not self._tool_scopes:
+        if self._tool_plugins is None or plugin_name in self._tool_plugins:
+            return True
+        from .plugins.registry import PluginRegistry
+        if plugin_name in PluginRegistry._ALWAYS_INITIALIZE_PLUGINS:
+            return True
+        registry = getattr(self._runtime, 'registry', None)
+        is_enrichment_only = getattr(registry, 'is_enrichment_only', None)
+        if callable(is_enrichment_only):
+            try:
+                return is_enrichment_only(plugin_name) is True
+            except Exception:
+                return False
+        return False
+
+    def _tool_surface_exclusion(self, tool_name: str) -> Optional[str]:
+        """The sentence saying why ``tool_name`` is not in THIS session's
+        surface, or ``None`` when it is.
+
+        Two reasons, checked in this order: the tool's plugin is not
+        enabled for the session (:meth:`plugin_enabled`, #1590), or the
+        profile scopes that plugin to a ``tools:[...]`` list that leaves
+        the tool out (#1513).  A tool with no owning plugin
+        (``signal_completion``, ``askPermission``, core infra, a client
+        tool) is always in the surface.  Never consults another session's
+        plugin list or scopes.
+        """
+        if not self._tool_scopes and self._tool_plugins is None:
             return None
         registry = getattr(self._runtime, 'registry', None)
         if registry is None:
@@ -4236,43 +4274,46 @@ class JaatoSession:
             return None
         if plugin is None:
             return None
+        if not self.plugin_enabled(plugin.name):
+            return (
+                f"`{tool_name}` is not available in this session: the "
+                f"profile does not enable plugin `{plugin.name}`"
+            )
         allow = self._tool_scopes.get(plugin.name)
-        if allow is None:
+        if allow is None or tool_name in allow:
             return None
-        return plugin.name, list(allow)
-
-    def tool_in_surface(self, tool_name: str) -> bool:
-        """Whether ``tool_name`` exists for THIS session under its
-        profile's ``plugin(tools:[...])`` scopes (#1513).
-
-        The ONE predicate behind the four places a scope must hold: the
-        initial wire schema (:meth:`_apply_tool_scopes`), discovery
-        (``filter_visible_tool_schemas``, read by ``list_tools`` /
-        ``get_tool_schemas``), execution (``ToolExecutor`` refuses an
-        out-of-scope call before the permission gate) and plugin hints
-        (``references``' enrichment, #1491).  Per session: the registry
-        and its plugin instances are shared with sibling subagents, the
-        scopes are not.  A tool whose plugin the profile did not scope —
-        including every core / always-initialized tool not named in a
-        scope — is in the surface.
-        """
-        scope = self._tool_scope_of(tool_name)
-        return scope is None or tool_name in scope[1]
-
-    def tool_scope_refusal(self, tool_name: str) -> str:
-        """The sentence naming the scope that excludes ``tool_name``.
-
-        Used by the executor's refusal and the traces, so they say the
-        same thing.  Empty when the tool is in the surface.
-        """
-        scope = self._tool_scope_of(tool_name)
-        if scope is None or tool_name in scope[1]:
-            return ""
-        plugin_name, allow = scope
         return (
             f"`{tool_name}` is not available in this session: the profile "
-            f"scopes plugin `{plugin_name}` to [{', '.join(allow)}]"
+            f"scopes plugin `{plugin.name}` to [{', '.join(allow)}]"
         )
+
+    def tool_in_surface(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` exists for THIS session (#1513, #1590).
+
+        The ONE predicate behind the four places a session's surface must
+        hold: the initial wire schema (:meth:`_apply_tool_scopes`),
+        discovery (``filter_visible_tool_schemas``, read by ``list_tools``
+        / ``get_tool_schemas``) and activation
+        (:meth:`activate_discovered_tools`), execution (``ToolExecutor``
+        refuses an out-of-surface call before the permission gate) and
+        plugin hints (``references``' enrichment, #1491).  A tool is out
+        when its plugin is not enabled for the session (#1590) or the
+        profile's ``plugin(tools:[...])`` scope leaves it out (#1513).
+        Per session: the registry and its plugin instances are shared with
+        sibling subagents, the plugin list and scopes are not.  Core /
+        always-initialized tools, and every tool of a session with no
+        plugin list, are in the surface.
+        """
+        return self._tool_surface_exclusion(tool_name) is None
+
+    def tool_scope_refusal(self, tool_name: str) -> str:
+        """The sentence naming why ``tool_name`` is out of the surface.
+
+        Used by the executor's refusal, introspection's ``not_available``
+        and the traces, so they say the same thing.  Empty when the tool
+        is in the surface.
+        """
+        return self._tool_surface_exclusion(tool_name) or ""
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -4954,12 +4995,6 @@ class JaatoSession:
         current_tool_names = {t.name for t in (self._tools or [])}
         activated = []
 
-        # Build allowed plugin set from session's tool_plugins (profile filter)
-        allowed_plugins: Optional[set] = None
-        if self._tool_plugins is not None:
-            allowed_plugins = set(self._tool_plugins)
-            allowed_plugins.add("introspection")  # Always allowed
-
         # Get schemas for requested tools from registry
         all_schemas = self._runtime.registry.get_exposed_tool_schemas()
         schema_map = {s.name: s for s in all_schemas}
@@ -4970,21 +5005,11 @@ class JaatoSession:
             if tool_name not in schema_map:
                 continue  # Tool doesn't exist
 
-            # Enforce profile plugin filter: only activate tools from
-            # plugins that the profile explicitly lists.
-            if allowed_plugins is not None:
-                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
-                if plugin and plugin.name not in allowed_plugins:
-                    self._trace(
-                        f"activate_discovered_tools: skipping '{tool_name}' "
-                        f"(plugin '{plugin.name}' not in profile)"
-                    )
-                    continue
-
-            # Enforce per-plugin tool allow-list (profile ``tools:[...]``):
-            # a scoped-out tool must not be activatable even if the model
-            # discovers it via introspection.  One granularity finer than
-            # the plugin filter above.
+            # Enforce the session's surface: a tool whose plugin the
+            # profile does not enable (#1590), or that its plugin's
+            # ``tools:[...]`` scope leaves out (#1513), must not be
+            # activatable even if the model discovers it.  The same
+            # predicate the wire, discovery and the executor read.
             if not self.tool_in_surface(tool_name):
                 self._trace(
                     f"activate_discovered_tools: skipping '{tool_name}' "
