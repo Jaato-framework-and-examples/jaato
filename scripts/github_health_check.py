@@ -119,13 +119,13 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
 
     # .env should already be loaded by caller
-    from shared.http import (
+    from jaato_server.shared.http import (
         get_proxy_url,
         is_kerberos_proxy_enabled,
         is_ssl_verify_disabled,
         get_httpx_client,
     )
-    from shared.ssl_helper import active_cert_bundle
+    from jaato_server.shared.ssl_helper import active_cert_bundle
 
     # SSL
     ssl_verify_off = is_ssl_verify_disabled()
@@ -158,7 +158,7 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     info(f"Kerberos proxy: {kerberos}")
 
     # Token sources
-    from shared.plugins.model_provider.github_models.env import (
+    from jaato_server.shared.plugins.model_provider.github_models.env import (
         resolve_token,
         resolve_token_source,
         resolve_endpoint,
@@ -211,7 +211,7 @@ def check_device_code_endpoint(results: CheckResult) -> None:
     """Verify the device code endpoint is reachable (POST with empty scope)."""
     header("Step 1: OAuth Device Code Endpoint")
 
-    from shared.plugins.model_provider.github_models.oauth import (
+    from jaato_server.shared.plugins.model_provider.github_models.oauth import (
         DEVICE_CODE_URL,
         OAUTH_CLIENT_ID,
     )
@@ -220,7 +220,7 @@ def check_device_code_endpoint(results: CheckResult) -> None:
     info(f"Client ID: {OAUTH_CLIENT_ID}")
 
     import httpx
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     t0 = time.monotonic()
     try:
@@ -266,7 +266,7 @@ def check_token_endpoint(results: CheckResult) -> None:
     """Verify the token endpoint is reachable (sends invalid device_code)."""
     header("Step 2: OAuth Token Endpoint")
 
-    from shared.plugins.model_provider.github_models.oauth import (
+    from jaato_server.shared.plugins.model_provider.github_models.oauth import (
         TOKEN_URL,
         OAUTH_CLIENT_ID,
     )
@@ -274,7 +274,7 @@ def check_token_endpoint(results: CheckResult) -> None:
     info(f"POST {TOKEN_URL}")
 
     import httpx
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     t0 = time.monotonic()
     try:
@@ -328,7 +328,7 @@ def check_copilot_token_exchange(
     """
     header("Step 3: Copilot Token Exchange")
 
-    from shared.plugins.model_provider.github_models.oauth import (
+    from jaato_server.shared.plugins.model_provider.github_models.oauth import (
         COPILOT_TOKEN_URL,
     )
 
@@ -341,7 +341,7 @@ def check_copilot_token_exchange(
         )
         return None
 
-    from shared.plugins.model_provider.github_models.oauth import (
+    from jaato_server.shared.plugins.model_provider.github_models.oauth import (
         get_stored_access_token,
         load_tokens,
         load_copilot_token,
@@ -394,7 +394,7 @@ def check_copilot_models(
     """
     header("Step 4a: Copilot Models Endpoint")
 
-    from shared.plugins.model_provider.github_models.copilot_client import (
+    from jaato_server.shared.plugins.model_provider.github_models.copilot_client import (
         COPILOT_MODELS_ENDPOINT,
         COPILOT_HEADERS,
     )
@@ -408,7 +408,7 @@ def check_copilot_models(
         )
         return None
 
-    from shared.http import get_requests_session, should_bypass_proxy
+    from jaato_server.shared.http import get_requests_session, should_bypass_proxy
 
     session = get_requests_session()
     headers = {
@@ -467,7 +467,7 @@ def check_catalog_endpoint(
     """List models from the GitHub Models catalog API (PAT path)."""
     header("Step 4b: GitHub Models Catalog Endpoint")
 
-    from shared.plugins.model_provider.github_models.provider import (
+    from jaato_server.shared.plugins.model_provider.github_models.provider import (
         CATALOG_API_ENDPOINT,
     )
 
@@ -481,7 +481,7 @@ def check_catalog_endpoint(
         return None
 
     import httpx
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     t0 = time.monotonic()
     try:
@@ -549,7 +549,7 @@ def check_copilot_chat(
     """Send a minimal chat completion through the Copilot API."""
     header("Step 5a: Copilot Chat Completions Endpoint")
 
-    from shared.plugins.model_provider.github_models.copilot_client import (
+    from jaato_server.shared.plugins.model_provider.github_models.copilot_client import (
         COPILOT_CHAT_ENDPOINT,
         COPILOT_HEADERS,
     )
@@ -564,7 +564,7 @@ def check_copilot_chat(
         )
         return
 
-    from shared.http import get_requests_session, should_bypass_proxy
+    from jaato_server.shared.http import get_requests_session, should_bypass_proxy
 
     session = get_requests_session()
     headers = {
@@ -647,7 +647,7 @@ def check_models_inference(
         return
 
     import httpx
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     payload = {
         "model": model,

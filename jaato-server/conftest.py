@@ -103,7 +103,7 @@ def _credential_env_vars() -> tuple:
     that carries the disclosure fix.
     """
     try:
-        from shared.env_scope import CATALOG
+        from jaato_server.shared.env_scope import CATALOG
     except Exception:  # pragma: no cover - defensive
         return ()
     return tuple(sorted(n for n in CATALOG if _CREDENTIAL_NAME_RE.search(n)))
@@ -261,10 +261,26 @@ def isolated_session_context():
     A leak is not a *defect* in the test that causes it — the defect was
     that it escaped — so there is nothing here for anyone to act on.
     """
-    from shared.session_context import isolated_current_session
+    from jaato_server.shared.session_context import isolated_current_session
 
     with isolated_current_session():
         yield
+
+
+@pytest.fixture(autouse=True)
+def isolated_secret_redactor():
+    """Keep one test's installed secret redactor out of the next one (#1215).
+
+    ``bootstrap_session`` installs a process-wide value redactor built from
+    the envelope's ``session_env``, and dozens of runner tests bootstrap with
+    fixture envelopes.  Without a reset, a later test in the same worker
+    would see its output rewritten because of a value another test declared.
+    """
+    from jaato_server.shared.secret_redaction import reset_redaction_sources
+
+    reset_redaction_sources()
+    yield
+    reset_redaction_sources()
 
 
 @pytest.fixture(scope="session")
@@ -290,3 +306,23 @@ def isolated_home() -> Path:
 def credential_env_vars() -> tuple:
     """Credential env vars cleared for every test (see module docstring)."""
     return CREDENTIAL_ENV_VARS
+
+
+@pytest.fixture(autouse=True)
+def restore_sandbox_temp_roots():
+    """Undo a runner bootstrap's narrowing of the sandbox temp roots.
+
+    A confined ``bootstrap_session`` narrows
+    ``sandbox_utils.SYSTEM_TEMP_PATHS`` to its session tmpdir (#1361).  In a
+    runner that is the point; in the suite it would leak into every later
+    test that expects ``/tmp`` to be allowed.
+    """
+    try:
+        from jaato_server.shared.plugins import sandbox_utils
+    except Exception:  # pragma: no cover - defensive
+        yield
+        return
+    saved = sandbox_utils.SYSTEM_TEMP_PATHS
+    yield
+    sandbox_utils.SYSTEM_TEMP_PATHS = saved
+

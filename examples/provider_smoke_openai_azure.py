@@ -55,7 +55,7 @@ for _pkg in ("jaato-server", "jaato-sdk"):
 from jaato_sdk.plugins.model_provider.types import (  # noqa: E402
     FinishReason, Message, Part, Role,
 )
-from shared.plugins.model_provider.base import ProviderConfig  # noqa: E402
+from jaato_server.shared.plugins.model_provider.base import ProviderConfig  # noqa: E402
 
 MOCK_HOST, MOCK_PORT = "127.0.0.1", 8123
 MOCK_BASE = f"http://{MOCK_HOST}:{MOCK_PORT}"
@@ -226,7 +226,7 @@ def _one_turn(provider, *, stream: bool) -> Tuple[str, int, FinishReason]:
 def check_openai(*, base_url: Optional[str], api_mode: str,
                  model: str, context_length: int) -> List[str]:
     """Connect the native provider on one wire and run a turn each way."""
-    from shared.plugins.model_provider.openai.provider import OpenAIProvider
+    from jaato_server.shared.plugins.model_provider.openai.provider import OpenAIProvider
 
     extra: Dict[str, Any] = {"context_length": context_length,
                              "api": api_mode}
@@ -262,7 +262,7 @@ def check_azure(*, endpoint: str, api_version: str, deployment: str,
     provider — the name the subscription chose, which the SDK turns into
     the URL path.
     """
-    from shared.plugins.model_provider.azure_openai.provider import (
+    from jaato_server.shared.plugins.model_provider.azure_openai.provider import (
         AzureOpenAIProvider,
     )
 

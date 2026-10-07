@@ -1,41 +1,110 @@
 #!/usr/bin/env bash
-# Pre-commit hook: keep the generated TS SDK events mirror in sync.
+# Pre-commit hook: keep generated files in sync with their sources.
 #
-# When jaato-sdk/jaato_sdk/events.py is part of the commit, regenerate
-# jaato-sdk-ts/src/events.ts (via scripts/codegen_ts_events.py) and stage it,
-# so the committed mirror is never stale and the "Codegen: jaato-sdk-ts
-# events.ts staleness" CI check stays green.
+# 1. jaato-sdk/jaato_sdk/events.py -> jaato-sdk-ts/src/events.ts
+#    (scripts/codegen_ts_events.py), so the "Codegen: jaato-sdk-ts events.ts
+#    staleness" CI check stays green.
+# 2. jaato-server source (and its pyproject.toml, whose version the snapshot
+#    records) -> jaato-sdk/jaato_sdk/scaffold/authoring_snapshot.json
+#    (python -m jaato_server.shared.scaffold.authoring_contracts --write), so
+#    test_authoring_does_not_load_introspection_1267 stays green (#1267).
+# 3. jaato-server or jaato-sdk source -> jaato-sdk/jaato_sdk/scaffold/
+#    explain_snapshot.json (python -m
+#    jaato_server.shared.scaffold.explain_snapshot --write), so
+#    test_explain_snapshot_mirrors_the_server stays green.
+#
+# Each regenerates only when a commit touches its sources, and stages the
+# result so it lands in the same commit.
 #
 # Activate once per clone:
 #     git config core.hooksPath .githooks
 #
-# Override the interpreter if the jaato-sdk isn't on the default python:
+# Override the interpreter if jaato isn't on the default python:
 #     PYTHON=/path/to/venv/bin/python git commit ...
 # Bypass entirely:  git commit --no-verify
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-
-# Only act when events.py is actually part of this commit — otherwise every
-# commit would needlessly run the codegen.
-if ! git diff --cached --name-only | grep -qx 'jaato-sdk/jaato_sdk/events.py'; then
-    exit 0
-fi
-
 py="${PYTHON:-python3}"
-echo "pre-commit: events.py changed — regenerating events.ts ..."
-if ! "$py" "$repo_root/scripts/codegen_ts_events.py"; then
-    {
-        echo "pre-commit: FAILED to regenerate events.ts."
-        echo "  Run it with jaato-sdk installed (pip install -e jaato-sdk/):"
-        echo "      python scripts/codegen_ts_events.py"
-        echo "  or point the hook at your venv: PYTHON=.venv/bin/python git commit ..."
-        echo "  To bypass this hook: git commit --no-verify"
-    } >&2
-    exit 1
+staged="$(git diff --cached --name-only --diff-filter=ACMRD)"
+
+# --- 1. events.ts -----------------------------------------------------------
+if grep -qx 'jaato-sdk/jaato_sdk/events.py' <<<"$staged"; then
+    echo "pre-commit: events.py changed — regenerating events.ts ..."
+    if ! "$py" "$repo_root/scripts/codegen_ts_events.py"; then
+        {
+            echo "pre-commit: FAILED to regenerate events.ts."
+            echo "  Run it with jaato-sdk installed (pip install -e jaato-sdk/):"
+            echo "      python scripts/codegen_ts_events.py"
+            echo "  or point the hook at your venv: PYTHON=.venv/bin/python git commit ..."
+            echo "  To bypass this hook: git commit --no-verify"
+        } >&2
+        exit 1
+    fi
+    git add "$repo_root/jaato-sdk-ts/src/events.ts"
+    echo "pre-commit: events.ts regenerated + staged."
 fi
 
-# Stage the (possibly) updated mirror so it lands in this commit.
-git add "$repo_root/jaato-sdk-ts/src/events.ts"
-echo "pre-commit: events.ts regenerated + staged."
+# --- 2. authoring_snapshot.json ---------------------------------------------
+# The snapshot projects env-var reads from any non-test module under
+# jaato_server/{server,shared} and the provider contracts under
+# model_provider/, so any such .py file can change it, and it records
+# jaato-server's version, so a bump in its pyproject.toml does too.  Tests
+# cannot.  It ships in the SDK wheel (#1267), so it lives under jaato-sdk/.
+snapshot="jaato-sdk/jaato_sdk/scaffold/authoring_snapshot.json"
+# (No `grep -q` here: under pipefail, -q exiting early can SIGPIPE the first
+# grep and turn a match into a non-zero pipeline.)
+sources="$(grep -E '^jaato-server/(jaato_server/(server|shared)/.*\.py|pyproject\.toml)$' <<<"$staged" \
+           | grep -vE '/tests/' || true)"
+if [ -n "$sources" ]; then
+    echo "pre-commit: jaato-server source changed — regenerating $(basename "$snapshot") ..."
+    # PYTHONPATH first, so the scan reads -- and the snapshot is written into --
+    # THIS checkout, not whichever one an editable install points at (a git
+    # worktree shares the venv of the main clone).  Both packages: the scan is
+    # jaato-server's, the writer and the file are jaato-sdk's.
+    if ! PYTHONPATH="$repo_root/jaato-server:$repo_root/jaato-sdk${PYTHONPATH:+:$PYTHONPATH}" \
+            "$py" -m jaato_server.shared.scaffold.authoring_contracts --write >/dev/null; then
+        {
+            echo "pre-commit: FAILED to regenerate $snapshot."
+            echo "  Run it with both packages installed (pip install -e jaato-sdk/ -e jaato-server/):"
+            echo "      python -m jaato_server.shared.scaffold.authoring_contracts --write"
+            echo "  or point the hook at your venv: PYTHON=.venv/bin/python git commit ..."
+            echo "  To bypass this hook: git commit --no-verify"
+        } >&2
+        exit 1
+    fi
+    git add "$repo_root/$snapshot"
+    if ! git diff --cached --quiet -- "$repo_root/$snapshot"; then
+        echo "pre-commit: $(basename "$snapshot") regenerated + staged."
+    fi
+fi
+
+# --- 3. explain_snapshot.json -----------------------------------------------
+# Every `explain` topic rendered ahead of time, for an install with no
+# jaato-server.  The renderers read jaato-server (plugins, providers, env vars)
+# AND jaato-sdk (the event catalog, the archetypes), so a non-test change to
+# either regenerates it, as does jaato-server's version, which it records.
+# Generation refuses an environment that lacks an in-tree plugin's extra or
+# holds a foreign plugin; its message names what to install or remove.
+explain_snapshot="jaato-sdk/jaato_sdk/scaffold/explain_snapshot.json"
+explain_sources="$(grep -E '^jaato-(server/(jaato_server/.*\.py|pyproject\.toml)|sdk/jaato_sdk/.*\.py)$' <<<"$staged" \
+                   | grep -vE '/tests/' || true)"
+if [ -n "$explain_sources" ]; then
+    echo "pre-commit: framework source changed — regenerating $(basename "$explain_snapshot") ..."
+    if ! PYTHONPATH="$repo_root/jaato-server:$repo_root/jaato-sdk${PYTHONPATH:+:$PYTHONPATH}" \
+            "$py" -m jaato_server.shared.scaffold.explain_snapshot --write >/dev/null; then
+        {
+            echo "pre-commit: FAILED to regenerate $explain_snapshot (reason above)."
+            echo "  Run it with both packages and the [interactive] extra installed:"
+            echo "      python -m jaato_server.shared.scaffold.explain_snapshot --write"
+            echo "  To bypass this hook: git commit --no-verify"
+        } >&2
+        exit 1
+    fi
+    git add "$repo_root/$explain_snapshot"
+    if ! git diff --cached --quiet -- "$repo_root/$explain_snapshot"; then
+        echo "pre-commit: $(basename "$explain_snapshot") regenerated + staged."
+    fi
+fi
+
 exit 0

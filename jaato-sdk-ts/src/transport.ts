@@ -116,9 +116,15 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
   const url = _resolveAuthUrl(options);
 
   // The standard WebSocket constructor accepts only (url, protocols).
-  // Node-specific WebSocket implementations may accept a third
-  // options arg for custom headers; cast through any to support
-  // that without taking a hard dep on @types/ws.
+  // Runtimes that let a client set request headers take them as an
+  // OPTIONS OBJECT IN THE SECOND POSITION: Node's built-in WebSocket
+  // (undici) reads ``{ headers }`` there and ignores a third argument
+  // entirely, and the ``ws`` package treats a non-array object in that
+  // position as its options bag too.  Passing them as a third argument
+  // — the ``ws``-only spelling this code used before — sent nothing on
+  // Node 22, so a header-authenticated connection (an app-credential
+  // bind channel, #1074) was refused as anonymous.  Cast through any so
+  // no hard dep on @types/ws is needed.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ctor: any = (globalThis as any).WebSocket;
   if (ctor == null) {
@@ -132,10 +138,12 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
   let ws: WebSocket;
   try {
     if (options.headers) {
-      // Node's WebSocket signature: new WebSocket(url, protocols, options)
-      // Browsers don't accept a third arg — calling like this is harmless
-      // because the headers are sent only when the runtime understands them.
-      ws = new ctor(url, undefined, { headers: options.headers });
+      // Second-position options object: honoured by Node's built-in
+      // WebSocket and by ``ws``.  A browser's constructor would reject
+      // a non-string, non-array second argument, but browsers cannot set
+      // headers at all, so a caller there must use ``token`` instead —
+      // which _resolveAuthUrl already documents.
+      ws = new ctor(url, { headers: options.headers });
     } else {
       ws = new ctor(url);
     }
@@ -155,6 +163,12 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
   let closed = false;
   let closeInfo: { code: number; reason: string } | null = null;
   const closeHandlers: Array<(info: { code: number; reason: string }) => void> = [];
+  // A ``workspace.file.content`` header that announced a binary frame, held
+  // until that frame arrives (protocol 1.20).  The daemon writes the two
+  // back to back under its send lock, so the next binary frame IS this
+  // file; the header is delivered once, with the bytes attached as
+  // ``data``, so a consumer never sees a file header without its file.
+  let awaitingBinary: JaatoEvent | null = null;
 
   const _drainOnClose = (): void => {
     closed = true;
@@ -253,6 +267,13 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
     };
 
     ws.onmessage = (msg: MessageEvent): void => {
+      if (awaitingBinary && msg.data instanceof ArrayBuffer) {
+        const header = awaitingBinary;
+        awaitingBinary = null;
+        (header as { data?: Uint8Array }).data = new Uint8Array(msg.data);
+        _deliver(header);
+        return;
+      }
       let payload: string;
       if (typeof msg.data === "string") {
         payload = msg.data;
@@ -312,12 +333,30 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
         }
         return;
       }
+      if (_announcesBinary(parsed)) {
+        awaitingBinary = parsed;
+        return;
+      }
+      _deliver(parsed);
+    }
+
+    function _deliver(event: JaatoEvent): void {
       if (waiters.length > 0) {
         const w = waiters.shift()!;
-        w(parsed);
+        w(event);
       } else {
-        incoming.push(parsed);
+        incoming.push(event);
       }
     }
   });
+}
+
+/**
+ * True for a header the daemon follows with ONE raw binary frame: a
+ * successful, non-metadata ``workspace.file.content`` (protocol 1.20).
+ * Exported for tests.
+ */
+export function _announcesBinary(event: JaatoEvent): boolean {
+  const e = event as { type?: string; ok?: boolean; metadata_only?: boolean };
+  return e.type === "workspace.file.content" && e.ok === true && e.metadata_only !== true;
 }

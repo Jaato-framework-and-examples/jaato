@@ -25,8 +25,8 @@ import time
 
 import pytest
 
-from server.runner_rpc_client import RunnerCallError, RunnerRPCClient
-from server.runner_spawner import RunnerSpawner
+from jaato_server.server.runner_rpc_client import RunnerCallError, RunnerRPCClient
+from jaato_server.server.runner_spawner import RunnerSpawner
 
 
 PHASE2_CRASH_DETECT_BUDGET_SECONDS = 0.100  # 100 ms

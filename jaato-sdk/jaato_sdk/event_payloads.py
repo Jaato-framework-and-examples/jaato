@@ -207,6 +207,7 @@ class ToolCallStartedPayload(TypedDict):
     tool_name: str
     tool_args: Dict[str, Any]
     call_id: NotRequired[Optional[str]]
+    tool_class: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.
@@ -230,6 +231,9 @@ class ToolCallCompletedPayload(TypedDict):
     continuation_id: NotRequired[Optional[str]]
     show_output: NotRequired[Optional[bool]]
     show_popup: NotRequired[Optional[bool]]
+    diff: NotRequired[Optional[str]]
+    diff_truncated: NotRequired[Optional[bool]]
+    path: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.
@@ -253,6 +257,11 @@ class ToolOutputPayload(TypedDict):
     mime_type: NotRequired[Optional[str]]
     data_b64: NotRequired[Optional[str]]
     final: NotRequired[bool]
+    # Provenance of the bytes (protocol 1.14, EU AI Act Art. 50(2)):
+    # ``{"kind": "ai", provider, model, session_id, agent_id}`` on the
+    # model's own media, a producer's claim on a tool attachment, absent
+    # on a relayed file.  See ``ToolOutputEvent.generated_by``.
+    generated_by: NotRequired[Optional[Dict[str, Any]]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.
@@ -343,7 +352,14 @@ class ContextUpdatedPayload(TypedDict):
     context_limit: int
     percent_used: float
     tokens_remaining: int
+    # Output cap every request reserves (#1444); ``percent_used`` and
+    # ``tokens_remaining`` are net of it.  NotRequired: an older daemon
+    # omits it, which means no reservation.
+    reserved_output_tokens: NotRequired[int]
     turns: int
+    # ``"budget"`` or ``"provider"`` -- which measurement ``usage`` is
+    # (#1440).  NotRequired: absent from a daemon that does not say.
+    source: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

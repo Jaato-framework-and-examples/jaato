@@ -1,0 +1,139 @@
+<svg class="rich-terminal" viewBox="0 0 1287 562.4" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-4261474840-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-4261474840-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-4261474840-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-4261474840-r2 { fill: #c5c8c6 }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-4261474840-clip-terminal">
+      <rect x="0" y="0" width="1267.8" height="511.4" />
+    </clipPath>
+    <clipPath id="terminal-4261474840-line-0">
+    <rect x="0" y="1.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-1">
+    <rect x="0" y="25.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-2">
+    <rect x="0" y="50.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-3">
+    <rect x="0" y="74.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-4">
+    <rect x="0" y="99.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-5">
+    <rect x="0" y="123.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-6">
+    <rect x="0" y="147.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-7">
+    <rect x="0" y="172.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-8">
+    <rect x="0" y="196.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-9">
+    <rect x="0" y="221.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-10">
+    <rect x="0" y="245.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-11">
+    <rect x="0" y="269.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-12">
+    <rect x="0" y="294.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-13">
+    <rect x="0" y="318.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-14">
+    <rect x="0" y="343.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-15">
+    <rect x="0" y="367.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-16">
+    <rect x="0" y="391.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-17">
+    <rect x="0" y="416.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-18">
+    <rect x="0" y="440.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4261474840-line-19">
+    <rect x="0" y="465.1" width="1268.8" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="560.4" rx="8"/><text class="terminal-4261474840-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">explain&#160;audit&#160;&lt;profile&gt;:&#160;the&#160;files&#160;this&#160;profile&#160;writes</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-4261474840-clip-terminal)">
+    
+    <g class="terminal-4261474840-matrix">
+    <text class="terminal-4261474840-r1" x="0" y="20" textLength="475.8" clip-path="url(#terminal-4261474840-line-0)">$&#160;jaato-scaffold&#160;explain&#160;audit&#160;screener</text><text class="terminal-4261474840-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-4261474840-line-0)">
+</text><text class="terminal-4261474840-r2" x="0" y="44.4" textLength="622.2" clip-path="url(#terminal-4261474840-line-1)">the&#160;audit&#160;record,&#160;as&#160;WRITTEN&#160;by&#160;profile&#160;&#x27;screener&#x27;:</text><text class="terminal-4261474840-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-4261474840-line-1)">
+</text><text class="terminal-4261474840-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-4261474840-line-2)">
+</text><text class="terminal-4261474840-r2" x="0" y="93.2" textLength="744.2" clip-path="url(#terminal-4261474840-line-3)">&#160;&#160;ledger&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;/srv/acme-support/.jaato/logs/ledger.jsonl</text><text class="terminal-4261474840-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-4261474840-line-3)">
+</text><text class="terminal-4261474840-r2" x="0" y="117.6" textLength="829.6" clip-path="url(#terminal-4261474840-line-4)">&#160;&#160;session&#160;trace&#160;&#160;&#160;&#160;/srv/acme-support/.jaato/logs/session_trace.jsonl</text><text class="terminal-4261474840-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-4261474840-line-4)">
+</text><text class="terminal-4261474840-r2" x="0" y="142" textLength="939.4" clip-path="url(#terminal-4261474840-line-5)">&#160;&#160;provider&#160;trace&#160;&#160;&#160;NOT&#160;WRITTEN&#160;--&#160;this&#160;profile&#160;declares&#160;no&#160;trace.provider_log</text><text class="terminal-4261474840-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-4261474840-line-5)">
+</text><text class="terminal-4261474840-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-4261474840-line-6)">
+</text><text class="terminal-4261474840-r2" x="0" y="190.8" textLength="268.4" clip-path="url(#terminal-4261474840-line-7)">&#160;&#160;retention_days&#160;&#160;&#160;180</text><text class="terminal-4261474840-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-4261474840-line-7)">
+</text><text class="terminal-4261474840-r2" x="0" y="215.2" textLength="671" clip-path="url(#terminal-4261474840-line-8)">&#160;&#160;conversation&#160;&#160;&#160;&#160;&#160;30&#160;&#160;&#160;days&#160;the&#160;SESSION&#160;RECORD&#160;is&#160;kept</text><text class="terminal-4261474840-r2" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#terminal-4261474840-line-8)">
+</text><text class="terminal-4261474840-r2" x="0" y="239.6" textLength="378.2" clip-path="url(#terminal-4261474840-line-9)">&#160;&#160;integrity&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;sha256-chain</text><text class="terminal-4261474840-r2" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#terminal-4261474840-line-9)">
+</text><text class="terminal-4261474840-r2" x="0" y="264" textLength="707.6" clip-path="url(#terminal-4261474840-line-10)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;each&#160;record&#160;links&#160;to&#160;the&#160;previous&#160;one&#x27;s</text><text class="terminal-4261474840-r2" x="1268.8" y="264" textLength="12.2" clip-path="url(#terminal-4261474840-line-10)">
+</text><text class="terminal-4261474840-r2" x="0" y="288.4" textLength="646.6" clip-path="url(#terminal-4261474840-line-11)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;digest.&#160;&#160;Verify&#160;with&#160;`jaato-doctor</text><text class="terminal-4261474840-r2" x="1268.8" y="288.4" textLength="12.2" clip-path="url(#terminal-4261474840-line-11)">
+</text><text class="terminal-4261474840-r2" x="0" y="312.8" textLength="756.4" clip-path="url(#terminal-4261474840-line-12)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;--audit-verify&#160;&lt;path&gt;`.&#160;&#160;It&#160;proves&#160;the&#160;file</text><text class="terminal-4261474840-r2" x="1268.8" y="312.8" textLength="12.2" clip-path="url(#terminal-4261474840-line-12)">
+</text><text class="terminal-4261474840-r2" x="0" y="337.2" textLength="744.2" clip-path="url(#terminal-4261474840-line-13)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;was&#160;not&#160;edited&#160;IN&#160;PLACE;&#160;it&#160;does&#160;NOT&#160;prove</text><text class="terminal-4261474840-r2" x="1268.8" y="337.2" textLength="12.2" clip-path="url(#terminal-4261474840-line-13)">
+</text><text class="terminal-4261474840-r2" x="0" y="361.6" textLength="732" clip-path="url(#terminal-4261474840-line-14)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;who&#160;wrote&#160;it&#160;--&#160;a&#160;writer&#160;holding&#160;the&#160;file</text><text class="terminal-4261474840-r2" x="1268.8" y="361.6" textLength="12.2" clip-path="url(#terminal-4261474840-line-14)">
+</text><text class="terminal-4261474840-r2" x="0" y="386" textLength="707.6" clip-path="url(#terminal-4261474840-line-15)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;can&#160;re-chain&#160;from&#160;any&#160;point.&#160;&#160;A&#160;chained</text><text class="terminal-4261474840-r2" x="1268.8" y="386" textLength="12.2" clip-path="url(#terminal-4261474840-line-15)">
+</text><text class="terminal-4261474840-r2" x="0" y="410.4" textLength="719.8" clip-path="url(#terminal-4261474840-line-16)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;file&#160;cannot&#160;be&#160;pruned&#160;from&#160;the&#160;front,&#160;so</text><text class="terminal-4261474840-r2" x="1268.8" y="410.4" textLength="12.2" clip-path="url(#terminal-4261474840-line-16)">
+</text><text class="terminal-4261474840-r2" x="0" y="434.8" textLength="634.4" clip-path="url(#terminal-4261474840-line-17)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;retention&#160;rotates&#160;whole&#160;segments.</text><text class="terminal-4261474840-r2" x="1268.8" y="434.8" textLength="12.2" clip-path="url(#terminal-4261474840-line-17)">
+</text><text class="terminal-4261474840-r2" x="1268.8" y="459.2" textLength="12.2" clip-path="url(#terminal-4261474840-line-18)">
+</text><text class="terminal-4261474840-r2" x="0" y="483.6" textLength="805.2" clip-path="url(#terminal-4261474840-line-19)">&#160;&#160;`explain&#160;audit`&#160;(bare)&#160;is&#160;the&#160;schema:&#160;which&#160;events&#160;are&#160;recorded,</text><text class="terminal-4261474840-r2" x="1268.8" y="483.6" textLength="12.2" clip-path="url(#terminal-4261474840-line-19)">
+</text><text class="terminal-4261474840-r2" x="0" y="508" textLength="719.8" clip-path="url(#terminal-4261474840-line-20)">&#160;&#160;which&#160;fields&#160;each&#160;carries,&#160;and&#160;which&#160;store&#160;each&#160;lands&#160;in.</text><text class="terminal-4261474840-r2" x="1268.8" y="508" textLength="12.2" clip-path="url(#terminal-4261474840-line-20)">
+</text>
+    </g>
+    </g>
+</svg>

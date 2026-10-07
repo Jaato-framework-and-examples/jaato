@@ -135,7 +135,7 @@ cross-provider lift rides the existing V2 tier roadmap, not this design.
 Multimodality is **per-model** (a gateway serves both vision and text-only
 models), so capability answers for the *active* model, resolved by the same
 precedence as the context-window work — a sibling helper in
-`shared/plugins/model_provider/base.py`:
+`jaato_server/shared/plugins/model_provider/base.py`:
 
 ```python
 def resolve_modalities(

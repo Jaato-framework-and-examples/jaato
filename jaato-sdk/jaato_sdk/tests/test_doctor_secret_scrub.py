@@ -11,7 +11,7 @@ def _diag(code, profile, where):
 
 def _patch_validator(monkeypatch, diags):
     mod = SimpleNamespace(validate_workspace=lambda ws, config_root=None: diags)
-    monkeypatch.setitem(sys.modules, "shared.scaffold.validate", mod)
+    monkeypatch.setitem(sys.modules, "jaato_server.shared.scaffold.validate", mod)
 
 
 def test_warns_naming_each_leaky_profile(monkeypatch):
@@ -35,7 +35,7 @@ def test_passes_when_every_surface_is_scrubbed(monkeypatch):
 
 
 def test_client_only_install_warns_instead_of_passing_on_nothing(monkeypatch):
-    monkeypatch.setitem(sys.modules, "shared.scaffold.validate", None)
+    monkeypatch.setitem(sys.modules, "jaato_server.shared.scaffold.validate", None)
     [c] = doctor.check_secret_scrub("/ws", None)
     assert c.status == doctor.WARN and "not importable" in c.detail
 
@@ -43,7 +43,7 @@ def test_client_only_install_warns_instead_of_passing_on_nothing(monkeypatch):
 def test_validator_failure_is_a_warn_not_a_crash(monkeypatch):
     def boom(ws, config_root=None):
         raise RuntimeError("no such workspace")
-    monkeypatch.setitem(sys.modules, "shared.scaffold.validate",
+    monkeypatch.setitem(sys.modules, "jaato_server.shared.scaffold.validate",
                         SimpleNamespace(validate_workspace=boom))
     [c] = doctor.check_secret_scrub("/ws", None)
     assert c.status == doctor.WARN and "no such workspace" in c.detail
@@ -54,7 +54,7 @@ def test_config_root_is_forwarded(monkeypatch):
     def rec(ws, config_root=None):
         seen["args"] = (ws, config_root)
         return []
-    monkeypatch.setitem(sys.modules, "shared.scaffold.validate",
+    monkeypatch.setitem(sys.modules, "jaato_server.shared.scaffold.validate",
                         SimpleNamespace(validate_workspace=rec))
     doctor.check_secret_scrub("/ws", "/elsewhere/.jaato")
     assert seen["args"] == ("/ws", "/elsewhere/.jaato")

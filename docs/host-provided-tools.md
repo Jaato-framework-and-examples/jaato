@@ -51,12 +51,12 @@ Model                    Daemon (jaato-server)                   WS Client (brow
 | Component | File | Role |
 |-----------|------|------|
 | Event definitions | `jaato_sdk/events.py` | `ToolsRegisterClientRequest`, `ToolExecuteRequestEvent`, `ToolExecuteResultEvent`, `ToolDisableRequest` |
-| WS message dispatch | `server/websocket.py` | Routes `tools.register_client` and `tool.execute_result` events |
-| Tool registration | `server/websocket.py` (`_register_client_tools`) | Creates proxy executors in the session registry |
+| WS message dispatch | `jaato_server/server/websocket.py` | Routes `tools.register_client` and `tool.execute_result` events |
+| Tool registration | `jaato_server/server/websocket.py` (`_register_client_tools`) | Creates proxy executors in the session registry |
 | Tool schema | `jaato_sdk/plugins/model_provider/types.py` (`ToolSchema`) | Provider-agnostic tool declaration |
-| Tool registry | `shared/plugins/registry.py` (`register_core_tool`) | Stores schemas and executors |
-| Runtime refresh | `server/core.py` | Updates the model's tool list after registration |
-| Tool ID registry | `server/core.py` (`_emit_tool_id_registry_from_schemas`) | Emits hash ID → name mappings to clients |
+| Tool registry | `jaato_server/shared/plugins/registry.py` (`register_core_tool`) | Stores schemas and executors |
+| Runtime refresh | `jaato_server/server/core.py` | Updates the model's tool list after registration |
+| Tool ID registry | `jaato_server/server/core.py` (`_emit_tool_id_registry_from_schemas`) | Emits hash ID → name mappings to clients |
 
 ## 3. Registration Protocol
 
@@ -456,8 +456,8 @@ being available.
 | File | What It Contains |
 |------|-----------------|
 | `jaato_sdk/events.py` | `ToolsRegisterClientRequest`, `ToolExecuteRequestEvent`, `ToolExecuteResultEvent`, `ToolDisableRequest`, `ToolCallStartEvent`, `ToolCallEndEvent`, `ToolIdRegistryEvent`, `ToolStatusEvent` |
-| `server/websocket.py` | `_register_client_tools()` (proxy creation, lines ~1395-1540), `_handle_tool_execute_result()` (result routing), `ToolsRegisterClientRequest` dispatch (lines ~1245-1260), pending tool buffering |
-| `server/core.py` | `_build_tool_id_mappings()`, `_emit_tool_id_registry_from_schemas()`, `_current_tool_agent_id` tracking |
+| `jaato_server/server/websocket.py` | `_register_client_tools()` (proxy creation, lines ~1395-1540), `_handle_tool_execute_result()` (result routing), `ToolsRegisterClientRequest` dispatch (lines ~1245-1260), pending tool buffering |
+| `jaato_server/server/core.py` | `_build_tool_id_mappings()`, `_emit_tool_id_registry_from_schemas()`, `_current_tool_agent_id` tracking |
 | `jaato_sdk/plugins/model_provider/types.py` | `ToolSchema` dataclass (line 161), `FunctionCall` dataclass |
-| `shared/plugins/registry.py` | `register_core_tool()` (line 751), `register_category()` (line 668), `disable_tool()`, `_core_tools`, `_core_executors`, `_core_auto_approved` |
-| `shared/jaato_session.py` | Session-level tool registration (lines ~1349-1362), session.new handling with pending tools |
+| `jaato_server/shared/plugins/registry.py` | `register_core_tool()` (line 751), `register_category()` (line 668), `disable_tool()`, `_core_tools`, `_core_executors`, `_core_auto_approved` |
+| `jaato_server/shared/jaato_session.py` | Session-level tool registration (lines ~1349-1362), session.new handling with pending tools |

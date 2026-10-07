@@ -1,0 +1,7 @@
+{
+  "type": "workspace.delete",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "name": "",
+  "stop_sessions": false
+}

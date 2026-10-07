@@ -14,7 +14,7 @@ daemon's broad profile.
 
 The daemon's AppArmor profile is pinned to a single workspace at startup
 (today: whichever session attaches first via the IPC AppArmor hook in
-`server/__main__.py:_register_ipc_apparmor_hook`). Once the profile is loaded,
+`jaato_server/server/__main__.py:_register_ipc_apparmor_hook`). Once the profile is loaded,
 the daemon's kernel-side allow list is fixed. A second client connecting from
 a different workspace can't even complete the IPC handshake — the daemon's
 discovery sites (`.jaato/profiles/`, `.jaato/agents/`, `.jaato/prompts/`,
@@ -128,7 +128,7 @@ length-prefixed JSON frames, single multiplexed channel per socket carrying
 both directions' calls and call-progress events.
 
 - Length prefix: 4-byte big-endian, max frame 10 MB. Same shape as
-  `server/ipc.py:HEADER_SIZE / MAX_MESSAGE_SIZE`. We deliberately reuse the
+  `jaato_server/server/ipc.py:HEADER_SIZE / MAX_MESSAGE_SIZE`. We deliberately reuse the
   existing framing so the helpers (`_read_frame`, `_write_frame`) can be
   shared between IPC and runner-RPC; we don't end up with two slightly
   different framing dialects.
@@ -523,8 +523,8 @@ isn't justified by any cross-session shared state.
 - **Spawn:** `RunnerSpawner.spawn(session_id, workspace_path, profile_name,
   env)` is called from `SessionManager.create_session` AFTER the AppArmor
   profile is loaded (today's `_run_pre_initialize_hooks` already provisions
-  the profile before `server.initialize()`; we hook in here). Spawn creates
-  the socketpair, forks, exec's `python -m server.runner` with workspace
+  the profile before `jaato_server.server.initialize()`; we hook in here). Spawn creates
+  the socketpair, forks, exec's `python -m jaato_server.runner` with workspace
   context in env. The fork inherits no Python state — clean cold start.
 
   **Spawn fires per TOP-LEVEL session only.** Subagent JaatoSessions
@@ -625,7 +625,7 @@ isn't justified by any cross-session shared state.
 profile name in env; the runner self-confines via `aa_change_profile`. No
 `aa-exec` wrapper.
 
-- Same template (`PROFILE_TEMPLATE` in `server/apparmor.py`). The runner
+- Same template (`PROFILE_TEMPLATE` in `jaato_server/server/apparmor.py`). The runner
   inherits exactly what the daemon's confined-thread pattern inherits today.
   Including the `change_profile -> unconfined,` rule and the
   `tool_hat` sub-profile. Subprocess inheritance still works.
@@ -923,36 +923,36 @@ land 2 without 1.
 
 ### Existing code anchors that Phase 2 will touch:
 
-- `jaato-server/server/__main__.py:_register_ipc_apparmor_hook` (lines
+- `jaato-server/jaato_server/server/__main__.py:_register_ipc_apparmor_hook` (lines
   656–835) — the daemon-side AppArmor hook gets relocated to spawn a
   runner instead of confining a daemon thread.
-- `jaato-server/server/session_manager.py:create_session` (lines
+- `jaato-server/jaato_server/server/session_manager.py:create_session` (lines
   948–1382) — `RunnerSpawner` integration lands after profile
-  provisioning, before `server.initialize()`.
-- `jaato-server/shared/ai_tool_runner.py:execute / _execute_impl`
+  provisioning, before `jaato_server.server.initialize()`.
+- `jaato-server/jaato_server/shared/ai_tool_runner.py:execute / _execute_impl`
   (lines 756–950) — the daemon-side `ToolExecutor` becomes an RPC stub;
   the actual `_execute_impl` body moves to the runner.
-- `jaato-server/server/ipc.py` — the framing helpers (`_read_frame`,
+- `jaato-server/jaato_server/server/ipc.py` — the framing helpers (`_read_frame`,
   `_write_frame`) get factored into a shared module that both the IPC
   server and the runner-RPC client/server import.
-- `jaato-server/shared/jaato_runtime.py:create_session` and
-  `jaato-server/shared/jaato_session.py` — `JaatoSession` moves to the
+- `jaato-server/jaato_server/shared/jaato_runtime.py:create_session` and
+  `jaato-server/jaato_server/shared/jaato_session.py` — `JaatoSession` moves to the
   runner; the daemon retains `JaatoServer` (a thin shell) and a
   runner-RPC handle.
-- `jaato-server/shared/plugins/permission/plugin.py:check_permission`
+- `jaato-server/jaato_server/shared/plugins/permission/plugin.py:check_permission`
   (lines 1058+) — split into a thin runner-side cache + a daemon-side
   full implementation, glued by RPC.
-- `jaato-server/server/apparmor.py:PROFILE_TEMPLATE` — unchanged
+- `jaato-server/jaato_server/server/apparmor.py:PROFILE_TEMPLATE` — unchanged
   template, but the load site moves earlier (before runner spawn) and
   the unload site moves later (after runner exit).
 
 Phase 6 cleanup will remove: the `apparmor_confine` thread-context
-machinery from `server/apparmor.py` (the per-thread pattern is no longer
+machinery from `jaato_server/server/apparmor.py` (the per-thread pattern is no longer
 needed because the whole runner process is confined), the
 `SafeThreadPoolExecutor`'s pre-task AppArmor hook (no thread is ever
 confined daemon-side), and the
 `set_apparmor_context` / `_apparmor_context` plumbing in
-`shared/ai_tool_runner.py`.
+`jaato_server/shared/ai_tool_runner.py`.
 
 ## 8. Success criteria (Phase 5 acceptance gate)
 

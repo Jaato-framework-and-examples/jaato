@@ -22,9 +22,9 @@ The **effect** matches that model, but only for **loaded** sessions. The
 
 | Fact | Evidence |
 |------|----------|
-| Each runtime creates its **own** `EventBus` instance | `jaato-server/shared/jaato_runtime.py:317` — `self._event_bus = EventBus()` |
+| Each runtime creates its **own** `EventBus` instance | `jaato-server/jaato_server/shared/jaato_runtime.py:317` — `self._event_bus = EventBus()` |
 | …**deliberately**, for session isolation | `jaato_runtime.py:511` docstring — *"Each runtime has its own EventBus instance, ensuring session isolation"* |
-| Each `JaatoServer` builds its own runtime (in `connect`) | `jaato-server/server/core.py:1933` — `self._runtime = JaatoRuntime(...)` |
+| Each `JaatoServer` builds its own runtime (in `connect`) | `jaato-server/jaato_server/server/core.py:1933` — `self._runtime = JaatoRuntime(...)` |
 | ⇒ **N sessions = N EventBus instances** | (the two above) |
 | The reactor **engine** is a single daemon-lifetime object | premium `reactors/engine.py` — one instance, `engine.start()` called once |
 | `engine.start()` does **not** subscribe to any bus | `engine.py:77` — loads home rules + starts the file watcher only |
@@ -50,7 +50,7 @@ subscriber to receive it**. There is no daemon-lifetime bus for it.
 ## Where this bites: `gate.released` for an unloaded session (reliability T2)
 
 `registry._emit_released` (premium) delivers `gate.released` via the parked
-session's `server.emit()` — which resolves to that session's per-session bus.
+session's `jaato_server.server.emit()` — which resolves to that session's per-session bus.
 For the reliability "free-the-runner" tier (T2), the parked session is
 **deliberately unloaded** during the human-approval wait. When the gate is later
 released, `server` is `None` → the release is skipped → the resume reactor never
@@ -78,7 +78,7 @@ designed + substantially landed but not finished; the per-session `EventBus()` +
 The smallest change that keeps the *reactor-subscribe* pattern:
 
 - **jaato-server:** construct one daemon-lifetime `EventBus` at daemon init and
-  expose it on `_ExtensionContext` (`server/__main__.py:73` — it already carries
+  expose it on `_ExtensionContext` (`jaato_server/server/__main__.py:73` — it already carries
   `session_manager` + `broadcast_event`; `event_bus` is the natural sibling).
 - **premium engine:** `engine.start()` subscribes to `ctx.event_bus` (the
   catch-all), **in addition to** the per-session subscriptions. This one is
@@ -117,7 +117,7 @@ daemon-wide delivery — a hybrid of A and C rather than either alone:
 - **One daemon-wide reactor `EventBus`**, owned by `SessionManager`, is added.
   Every per-session bus **sinks** into it via a `reactor_bus_sink` forwarding
   subscription (`callback=reactor_bus.publish`, `replay_history=False`) wired at
-  session build, right after `server.initialize()`.  Only the forward crosses
+  session build, right after `jaato_server.server.initialize()`.  Only the forward crosses
   into the daemon-wide bus — per-session payload stays isolated on the
   per-session bus.
 - The daemon-wide bus is exposed on `_ExtensionContext.event_bus`.

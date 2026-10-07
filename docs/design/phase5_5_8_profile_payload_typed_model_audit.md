@@ -14,7 +14,7 @@ list).
 RPC arg as `Dict[str, Any]`.  The only validation is
 `isinstance(args["profile_payload"], dict)` — anything is allowed
 inside.  Reconstruction goes through
-`shared/plugins/subagent/config.py:build_inline_profile`, which is
+`jaato_server/shared/plugins/subagent/config.py:build_inline_profile`, which is
 intentionally permissive (it uses `.get(key, default)` and never
 inspects unknown keys).
 
@@ -44,7 +44,7 @@ serialization) and the field-level checks were deferred to
 
 ## 3. Producer-side wire shape (single source of truth)
 
-`shared/plugins/subagent/plugin.py:2283-2325` builds `profile_payload`
+`jaato_server/shared/plugins/subagent/plugin.py:2283-2325` builds `profile_payload`
 from a resolved `SubagentProfile`:
 
 ```python
@@ -150,7 +150,7 @@ nested-shape checks.
 
 ### 5.1 Schema module
 
-Add `server/runner_rpc_handlers/profile_payload_schema.py`
+Add `jaato_server/server/runner_rpc_handlers/profile_payload_schema.py`
 exporting:
 
 ```python
@@ -238,7 +238,7 @@ surface.
 
 ## 6. Test plan
 
-Add `server/runner_rpc_handlers/tests/test_profile_payload_schema.py`
+Add `jaato_server/server/runner_rpc_handlers/tests/test_profile_payload_schema.py`
 with:
 
 1. **happy_path:** payload mirroring the full producer-side shape
@@ -274,7 +274,7 @@ with:
     `suppress_base_instructions: "yes"` → ValueError.
 
 And extend
-`server/runner_rpc_handlers/tests/test_spawn_isolated_runner.py`
+`jaato_server/server/runner_rpc_handlers/tests/test_spawn_isolated_runner.py`
 with:
 
 20. **handler_calls_validator:** patch `validate_profile_payload`
@@ -290,11 +290,11 @@ with:
 When a future `SubagentProfile` field needs to ride this wire,
 **three** files change in lockstep:
 
-1. `shared/plugins/subagent/plugin.py:2283-2325` — producer adds
+1. `jaato_server/shared/plugins/subagent/plugin.py:2283-2325` — producer adds
    the key to the `profile_payload` dict.
-2. `shared/plugins/subagent/config.py:build_inline_profile` —
+2. `jaato_server/shared/plugins/subagent/config.py:build_inline_profile` —
    consumer reads it during reconstruction.
-3. `server/runner_rpc_handlers/profile_payload_schema.py` —
+3. `jaato_server/server/runner_rpc_handlers/profile_payload_schema.py` —
    validator allow-list grows by one entry; type rule added.
 
 The validator's role is to make step 3 **mandatory** — a

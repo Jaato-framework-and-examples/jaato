@@ -1,0 +1,9 @@
+{
+  "type": "ticket.bind",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "user": "",
+  "ttl_seconds": 300,
+  "single_use": true
+}

@@ -11,7 +11,7 @@
 **daemon-side** `session_plugin` instance:
 
 ```python
-# jaato-server/server/core.py:2360-2367
+# jaato-server/jaato_server/server/core.py:2360-2367
 if hasattr(session_plugin, 'set_description_callback'):
     def on_description_changed(session_id: str, description: str) -> None:
         self.emit(SessionDescriptionUpdatedEvent(
@@ -25,7 +25,7 @@ The `_on_description_changed` callback fires from inside the
 `session_plugin`'s `set_description` tool handler:
 
 ```python
-# jaato-server/shared/plugins/session/file_session.py:743-747
+# jaato-server/jaato_server/shared/plugins/session/file_session.py:743-747
 if self._current_session_id and self._on_description_changed:
     try:
         self._on_description_changed(self._current_session_id, description)
@@ -142,17 +142,17 @@ to be cleaner than Option A.
 
 ## Files to touch (when scheduled)
 
-- `jaato-server/server/runner/envelope.py` — new
+- `jaato-server/jaato_server/server/runner/envelope.py` — new
   `_NOTIF_DESCRIPTION_UPDATED = "description_updated"` constant
-- `jaato-server/server/runner/rpc.py` — extend
+- `jaato-server/jaato_server/server/runner/rpc.py` — extend
   `_install_session_notification_callbacks` /
   `_restore_session_notification_callbacks`; new constant
-- `jaato-server/server/core.py` — extend
+- `jaato-server/jaato_server/server/core.py` — extend
   `_build_send_message_notification_handler` with 9th branch; delete
   the daemon-side `set_description_callback` wiring at line 2366 once
   runner-side fix lands
 - Tests: extend
-  `jaato-server/server/runner/tests/test_session_send_message_notification_emit.py`
+  `jaato-server/jaato_server/server/runner/tests/test_session_send_message_notification_emit.py`
   with description-callback emission test; extend
-  `jaato-server/server/tests/test_send_message_seat_flip_643b.py` with
+  `jaato-server/jaato_server/server/tests/test_send_message_seat_flip_643b.py` with
   daemon-side demuxer branch test

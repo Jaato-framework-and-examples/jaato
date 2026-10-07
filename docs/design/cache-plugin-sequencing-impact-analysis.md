@@ -24,15 +24,15 @@ Variant A was fully implemented in commit `8500019` ("Implement Variant A cache 
 
 | Path | LOC | Purpose | Status |
 |------|:---:|---------|:------:|
-| `shared/plugins/cache/__init__.py` | 129 | Package init, `discover_cache_plugins()`, `PLUGIN_KIND = "cache"` | Done |
-| `shared/plugins/cache/base.py` | 146 | `CachePlugin` protocol/ABC | Done |
-| `shared/plugins/cache/tests/test_protocol.py` | 37 | Protocol conformance tests (5 tests) | Done |
-| `shared/plugins/cache_anthropic/__init__.py` | 12 | Package init, `create_plugin()` | Done |
-| `shared/plugins/cache_anthropic/plugin.py` | 473 | `AnthropicCachePlugin` — explicit breakpoints, budget-aware BP3 | Done |
-| `shared/plugins/cache_anthropic/tests/test_plugin.py` | 350 | Unit tests (31 tests) | Done |
-| `shared/plugins/cache_zhipuai/__init__.py` | 12 | Package init, `create_plugin()` | Done |
-| `shared/plugins/cache_zhipuai/plugin.py` | 166 | `ZhipuAICachePlugin` — monitoring-only, implicit caching | Done |
-| `shared/plugins/cache_zhipuai/tests/test_plugin.py` | 189 | Unit tests (21 tests) | Done |
+| `jaato_server/shared/plugins/cache/__init__.py` | 129 | Package init, `discover_cache_plugins()`, `PLUGIN_KIND = "cache"` | Done |
+| `jaato_server/shared/plugins/cache/base.py` | 146 | `CachePlugin` protocol/ABC | Done |
+| `jaato_server/shared/plugins/cache/tests/test_protocol.py` | 37 | Protocol conformance tests (5 tests) | Done |
+| `jaato_server/shared/plugins/cache_anthropic/__init__.py` | 12 | Package init, `create_plugin()` | Done |
+| `jaato_server/shared/plugins/cache_anthropic/plugin.py` | 473 | `AnthropicCachePlugin` — explicit breakpoints, budget-aware BP3 | Done |
+| `jaato_server/shared/plugins/cache_anthropic/tests/test_plugin.py` | 350 | Unit tests (31 tests) | Done |
+| `jaato_server/shared/plugins/cache_zhipuai/__init__.py` | 12 | Package init, `create_plugin()` | Done |
+| `jaato_server/shared/plugins/cache_zhipuai/plugin.py` | 166 | `ZhipuAICachePlugin` — monitoring-only, implicit caching | Done |
+| `jaato_server/shared/plugins/cache_zhipuai/tests/test_plugin.py` | 189 | Unit tests (21 tests) | Done |
 
 **Test totals:** 57 new tests (5 protocol + 31 Anthropic + 21 ZhipuAI), 0 regressions.
 
@@ -71,7 +71,7 @@ AnthropicProvider response
 |-----------|------|--------|
 | SDK events | `jaato_sdk/events.py` | `TurnCompletedEvent` + `TurnProgressEvent` gained `cache_read_tokens`, `cache_creation_tokens` fields |
 | Session | `jaato_session.py` | `_accumulate_turn_tokens()` extracts cache tokens from `ProviderResponse.usage` |
-| Server | `server/core.py` | `on_agent_turn_completed` + `on_agent_turn_progress` forward cache fields |
+| Server | `jaato_server/server/core.py` | `on_agent_turn_completed` + `on_agent_turn_progress` forward cache fields |
 | Subagent hooks | `subagent/ui_hooks.py` | Cache fields threaded through subagent turn callbacks |
 | TUI registry | `agent_registry.py` | Stores cache fields in per-turn accounting |
 | TUI types | `command_types.py` | Added cache fields to turn data types |
@@ -154,16 +154,16 @@ Variant B remains blocked on **session-owned history Phase 2** (stateless `compl
 
 | Path | Purpose | Estimated LOC |
 |------|---------|:---:|
-| `shared/plugins/cache/__init__.py` | Package init | 5 |
-| `shared/plugins/cache/base.py` | `CachePlugin` protocol/ABC | ~80 |
-| `shared/plugins/cache_anthropic/__init__.py` | Package init | 5 |
-| `shared/plugins/cache_anthropic/plugin.py` | `AnthropicCachePlugin` implementation | ~250 |
-| `shared/plugins/cache_anthropic/tests/` | Unit tests | ~200 |
-| `shared/plugins/cache_zhipuai/plugin.py` | ZhipuAI monitoring-only plugin | ~80 |
+| `jaato_server/shared/plugins/cache/__init__.py` | Package init | 5 |
+| `jaato_server/shared/plugins/cache/base.py` | `CachePlugin` protocol/ABC | ~80 |
+| `jaato_server/shared/plugins/cache_anthropic/__init__.py` | Package init | 5 |
+| `jaato_server/shared/plugins/cache_anthropic/plugin.py` | `AnthropicCachePlugin` implementation | ~250 |
+| `jaato_server/shared/plugins/cache_anthropic/tests/` | Unit tests | ~200 |
+| `jaato_server/shared/plugins/cache_zhipuai/plugin.py` | ZhipuAI monitoring-only plugin | ~80 |
 
 ### 1.2 Modifications to Existing Files
 
-#### `AnthropicProvider` (`shared/plugins/model_provider/anthropic/provider.py`)
+#### `AnthropicProvider` (`jaato_server/shared/plugins/model_provider/anthropic/provider.py`)
 
 **What moves out** (~186 lines removed from provider):
 
@@ -202,7 +202,7 @@ else:
 
 **Net effect on provider:** ~170 lines removed. The provider sheds cache policy logic while retaining the API call orchestration. `_build_api_kwargs()` shrinks from 73 lines to ~40 lines.
 
-#### `JaatoSession` (`shared/jaato_session.py`)
+#### `JaatoSession` (`jaato_server/shared/jaato_session.py`)
 
 **Added** (~30 lines):
 
@@ -229,7 +229,7 @@ if self._cache_plugin:
     self._cache_plugin.on_gc_result(result)
 ```
 
-#### `ModelProviderPlugin` Protocol (`shared/plugins/model_provider/types.py`)
+#### `ModelProviderPlugin` Protocol (`jaato_server/shared/plugins/model_provider/types.py`)
 
 **Added** (~5 lines): Optional `set_cache_plugin()` method. Since it's duck-typed (checked via `hasattr`), providers that don't support caching don't need to implement it.
 

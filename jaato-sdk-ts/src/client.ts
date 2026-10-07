@@ -18,6 +18,8 @@
 
 import {
   ConnectionClosedError,
+  RequestInterruptedError,
+  RequestRefusedError,
   ConnectionError,
   IncompatibleServerError,
   ReconnectingError,
@@ -38,15 +40,18 @@ import {
   type ClientConfigRequest,
   type CommandRequest,
   type ConnectedEvent,
+  type ExternalEventRequest,
   type JaatoEvent,
   type SendMessageRequest,
   type StopRequest,
   type PermissionResponseRequest,
+  type PostAuthSetupResponse,
   type ClarificationResponseRequest,
   type ClarificationBatchResponseEvent,
   type ReferenceSelectionResponseRequest,
   type CommandListRequest,
   type HistoryRequest,
+  type HistoryPageEvent,
   type ToolDisableRequest,
   type ToolsRegisterClientRequest,
   type ToolExecuteResultEvent,
@@ -62,6 +67,20 @@ import {
   type PermissionClearRequest,
   type PermissionSetDefaultRequest,
   type PermissionPolicySnapshotRequest,
+  type WorkspaceFileContentEvent,
+  type WorkspaceFilesSearchResultEvent,
+  type WorkspaceFileFetchRequest,
+  type MemoryListEvent,
+  type ReferenceClaimsEvent,
+  type ReferenceCurationResultEvent,
+  type ReferenceCatalogEvent,
+  type ReferenceLinksUpdateResultEvent,
+  type ReferenceBundleCreateResultEvent,
+  type MemoryGetResultEvent,
+  type MemoryUpdateResultEvent,
+  type MemoryDeleteResultEvent,
+  type DiagnosticsResultEvent,
+  type WorkspaceInspectEvent,
 } from "./events.js";
 import type {
   CatchallEventHandler,
@@ -124,6 +143,209 @@ export const MIN_ATTACHMENT_RESUME_PROTOCOL = "1.5";
 export const MIN_CLARIFICATION_ATTACHMENT_PROTOCOL = "1.6";
 
 /**
+ * Protocol floor for {@link JaatoClient.reloadSessionEnv}.  A daemon that
+ * does not know the verb ignores it silently, and "reloaded" would then be
+ * reported about a session still running on its old credential -- so the
+ * call is refused below this version rather than sent blind.
+ */
+export const MIN_SESSION_RELOAD_ENV_PROTOCOL = "1.11";
+
+/**
+ * Protocol floor for {@link JaatoClient.toggleWorkspaceIgnore}.  Same rule
+ * as {@link MIN_SESSION_RELOAD_ENV_PROTOCOL}: an older daemon ignores the
+ * verb, and a client that then reported the entry as ignored would be
+ * describing a ``.gitignore`` nobody changed.
+ */
+export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
+
+/**
+ * Protocol floor for {@link JaatoClient.fetchWorkspaceFile}.  A missing
+ * VERB: an older daemon answers ``ErrorEvent("Unknown message type")`` and
+ * never the ``workspace.file.content`` the call waits on, so the call is
+ * refused below this version rather than left to time out.
+ */
+export const MIN_FILE_FETCH_PROTOCOL = "1.20";
+
+/**
+ * Protocol floor for {@link JaatoClient.searchWorkspaceFiles}.  A missing
+ * VERB (the 1.7 rule): an older daemon never answers
+ * ``workspace.files.search``, so the call is refused rather than timed out.
+ */
+export const MIN_FILE_SEARCH_PROTOCOL = "1.32";
+
+/**
+ * Protocol floor for {@link JaatoClient.listReferenceClaims},
+ * {@link JaatoClient.promoteReferenceClaim} and
+ * {@link JaatoClient.dismissReferenceClaim}, and for the catalog's
+ * {@link JaatoClient.listReferenceCatalog} /
+ * {@link JaatoClient.updateReferenceLinks}.  Same rule as
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores the verbs,
+ * and "promoted" would describe a catalog nobody changed.
+ */
+export const MIN_REFERENCE_CURATION_PROTOCOL = "1.33";
+
+/**
+ * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
+ * as {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``scaffold.integration`` silently, and a client that then reported the
+ * skill as installed would be describing a copy nobody wrote.  So the call
+ * is refused below this version rather than sent blind.
+ */
+export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
+
+/**
+ * Protocol floor for {@link JaatoClient.validateScaffoldWorkspace}.  Same
+ * rule as {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``scaffold.validate`` silently, and a caller waiting on findings would
+ * read the silence as "no findings".
+ */
+export const MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34";
+
+/**
+ * Floor for {@link JaatoClient.createReferenceBundle} (protocol 1.36, #1478).
+ * A new verb (the 1.7 rule): an older daemon ignores it, and the caller would
+ * wait out its timeout for a bundle nobody created.
+ */
+export const MIN_REFERENCE_BUNDLE_PROTOCOL = "1.36";
+
+/**
+ * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
+ * friends, #1232).  A missing VERB: an older daemon answers ``ErrorEvent(
+ * "Unknown request type")`` with no ``request_id`` and never the result the
+ * call waits on, so every memory call is refused below this version rather
+ * than left to time out.
+ */
+export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
+
+/**
+ * Protocol floor for {@link JaatoClient.requestHistoryPage} (1.28).  A new
+ * VERB: an older daemon answers ``ErrorEvent("Unknown request type")`` and
+ * never the page, so the call is refused below this version.
+ */
+export const MIN_HISTORY_PAGE_PROTOCOL = "1.28";
+
+/**
+ * The first protocol in which {@link JaatoClient.endSession} leaves the
+ * session listed as FINISHED (1.29): the daemon marks the record and the
+ * session rows carry ``ended_at`` / ``end_reason``.  Nothing is refused
+ * below it -- ``session.end`` has always existed -- but a client that means
+ * "end, and keep it listed" needs to know whether the daemon will keep it:
+ * below 1.29 an ended session is indistinguishable from a sleeping one.
+ */
+export const MIN_SESSION_FINISH_PROTOCOL = "1.29";
+
+/**
+ * The first protocol whose daemon answers ``workspace.app_write`` (1.30): an
+ * application asking, over its bind channel, for a binding's ``app://``
+ * reference to be written into a workspace it cannot reach itself.  An older
+ * daemon answers the verb with an error frame and never its result, so an
+ * application checks this before sending it.
+ */
+export const MIN_WORKSPACE_APP_WRITE_PROTOCOL = "1.30";
+
+/**
+ * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``session.message`` silently, and a client that then reported the message
+ * as delivered would be describing one nobody carried.  So the call is
+ * refused below this version rather than sent blind.
+ */
+export const MIN_SESSION_MESSAGE_PROTOCOL = "1.23";
+
+/**
+ * Protocol floor for a {@link JaatoClient.sendSessionMessage} that carries
+ * `fileRefs` or `textAttachments` (1.24).  Two NEW keys on an existing
+ * verb: a 1.23 daemon reads neither, delivers the text alone and answers
+ * `accepted` — a degraded call that reads as success — so a call carrying
+ * either is refused below this while a text-only call keeps the 1.23 floor.
+ */
+export const MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24";
+
+/**
+ * Protocol floor for {@link JaatoClient.getDiagnostics} (#1294). A missing
+ * VERB, the same shape as {@link MIN_MEMORY_VERBS_PROTOCOL}: an older
+ * daemon answers ``ErrorEvent("Unknown request type")`` with no
+ * ``request_id`` and never the result the call waits on, so the call is
+ * refused below this version rather than left to time out.
+ */
+export const MIN_DIAGNOSTICS_PROTOCOL = "1.25";
+
+/**
+ * Protocol floor for the workspace/session pickers (1.27):
+ * {@link JaatoClient.inspectWorkspace}, {@link JaatoClient.cloneIntoWorkspace},
+ * ``WorkspaceDeleteRequest.stop_sessions`` and the ``model`` / ``provider``
+ * override on {@link JaatoClient.createSession}.  Below it a new verb is
+ * answered "Unknown message type" and never the result, and an older
+ * ``session.new`` parser would read ``--model`` as the session NAME -- so
+ * each is refused client-side rather than silently degraded.
+ */
+export const MIN_WORKSPACE_PICKER_PROTOCOL = "1.27";
+
+/**
+ * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
+ *
+ * ``maxMessageSize`` is the largest single WebSocket message the daemon
+ * accepts; a larger one makes it close the connection with 1009.  A staged
+ * file travels as ONE binary message, so ``stagePerFileLimit`` is never
+ * above it.
+ */
+export interface ServerLimits {
+  maxMessageSize: number;
+  stagePerFileLimit: number;
+  stageTotalLimit: number;
+  /** ``false`` when the daemon advertised nothing and these are the legacy values. */
+  advertised: boolean;
+}
+
+/**
+ * What a daemon that advertises no limits enforces: the ``websockets``
+ * default of 1 MiB per message (the daemon never set one), which also caps
+ * a staged file whatever the 10 MB staging cap says.
+ */
+export const LEGACY_SERVER_LIMITS: ServerLimits = {
+  maxMessageSize: 1024 * 1024,
+  stagePerFileLimit: 1024 * 1024,
+  stageTotalLimit: 50 * 1024 * 1024,
+  advertised: false,
+};
+
+/** Read {@link ServerLimits} out of ``server_info``; legacy values when absent. */
+export function serverLimitsFrom(info: Record<string, unknown> | null | undefined): ServerLimits {
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+  const max = num(info?.max_message_size);
+  if (max === null) return { ...LEGACY_SERVER_LIMITS };
+  return {
+    maxMessageSize: max,
+    stagePerFileLimit: Math.min(num(info?.stage_per_file_limit) ?? max, max),
+    stageTotalLimit: num(info?.stage_total_limit) ?? LEGACY_SERVER_LIMITS.stageTotalLimit,
+    advertised: true,
+  };
+}
+
+/**
+ * How long {@link JaatoClient.stageFiles} waits for the daemon's
+ * ``workspace.files.staged`` response before giving up (default 120 s, the
+ * sibling {@link JaatoClient.fetchWorkspaceFile} value).  The wait had no
+ * deadline: if the response never arrived (lost, the daemon errored before
+ * emitting it, the connection stalled without closing) the promise never
+ * settled and the caller's ``staging`` indicator pulsed forever with no
+ * error to react to.  The timeout rejects with a clear message so a caller's
+ * ``catch`` marks the upload ``failed`` instead of hanging (#1248).
+ */
+export const STAGE_FILES_TIMEOUT_MS = 120_000;
+
+/**
+ * What {@link JaatoClient.fetchWorkspaceFile} resolves with.  ``event`` is
+ * the daemon's header; ``data`` is the file's bytes when it was fetched
+ * (``null`` for a metadata-only fetch or a refusal).
+ */
+export interface WorkspaceFileFetchResult {
+  event: WorkspaceFileContentEvent;
+  data: Uint8Array | null;
+}
+
+/**
  * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
  * are tolerated and dropped (e.g. ``"1.0.5"`` → ``[1, 0]``).  Returns
  * ``null`` on malformed input rather than throwing — the compat check
@@ -162,6 +384,17 @@ export function isProtocolCompatible(
 }
 
 /**
+ * Supplies the credential for one connection attempt.
+ *
+ * Called by {@link JaatoClient} immediately before each WebSocket open,
+ * never cached: the value it returns is presented on that attempt and
+ * on no other.  May return the credential directly or as a promise.
+ * Returning ``undefined`` connects with no token, the
+ * ``--ws-unsafe-no-auth`` posture.
+ */
+export type TokenProvider = () => string | undefined | Promise<string | undefined>;
+
+/**
  * Constructor options for {@link JaatoClient}.
  */
 export interface JaatoClientOptions {
@@ -170,8 +403,27 @@ export interface JaatoClientOptions {
   /**
    * Bearer token presented as ``?token=<token>`` query parameter.
    * Omit when the daemon is started with ``--ws-unsafe-no-auth``.
+   *
+   * A **string** is presented as-is on every connection attempt — right
+   * for the daemon's shared token (``--ws-token-file``), which is valid
+   * until the operator rotates it.
+   *
+   * A **function** (a {@link TokenProvider}) is called before *each*
+   * attempt, the initial ``connect()`` and every automatic reconnect,
+   * and its result is presented once.  This is the shape a per-user
+   * ticket needs (protocol 1.10, #1074): a ticket is single-use and
+   * consumed at accept, so replaying the value that opened the last
+   * connection can never open the next one.  A browser client behind a
+   * backend-for-frontend passes a provider that asks that backend for a
+   * fresh ticket; see ``docs/design/web-server-bff.md``.
+   *
+   * A provider that throws fails that attempt only: on ``connect()`` the
+   * error propagates to the caller; during reconnect the attempt is
+   * counted and the next one is scheduled with the usual backoff, so a
+   * backend that is briefly down degrades into the reconnect loop rather
+   * than into a dead connection.
    */
-  token?: string;
+  token?: string | TokenProvider;
   /**
    * Custom request headers (Node only).  Mutually exclusive with
    * {@link token}.  See {@link openTransport} for caveats.
@@ -235,6 +487,16 @@ export class JaatoClient {
   private _state: ConnectionState = ConnectionState.DISCONNECTED;
   private _serverVersion: string | null = null;
   private _serverProtocolVersion: string | null = null;
+  /** Monotonic part of each ``fetchWorkspaceFile`` request id. */
+  private _fileFetchSeq = 0;
+  private _memorySeq = 0;
+  /**
+   * Requests waiting for an answer on the CURRENT connection, told when it
+   * closes so they reject at once instead of waiting out their deadline.
+   * Cleared by each waiter as it settles.
+   */
+  private _closeWaiters: Set<(info: { code: number; reason: string }) => void> = new Set();
+  private _limits: ServerLimits | null = null;
   private _clientId: string | null = null;
   private _sessionId: string | null = null;
   private _statusHandlers: Array<(s: ConnectionStatus) => void> = [];
@@ -261,8 +523,9 @@ export class JaatoClient {
     // fires attachSession(sessionId) on every RECONNECTING →
     // CONNECTED transition (i.e. after a successful reconnect, not
     // on the initial connect — sessionId is null at that point).
-    // The server then replays buffered events from the session
-    // journal so the consumer doesn't have to wire this manually.
+    // The server then answers the attach with the session's state and
+    // conversation so far (see ``attachSession``), so the consumer
+    // doesn't have to wire this manually.
     if (this._recovery.autoReattachSessionId) {
       let sawReconnecting = false;
       this.onStatus((status) => {
@@ -313,6 +576,17 @@ export class JaatoClient {
    */
   get serverProtocolVersion(): string | null {
     return this._serverProtocolVersion;
+  }
+
+  /**
+   * The size limits the connected daemon enforces, from
+   * ``ConnectedEvent.server_info``.  Against a daemon that advertises none
+   * (every release before it did) this is {@link LEGACY_SERVER_LIMITS}:
+   * those daemons closed the connection on any message over 1 MiB whatever
+   * their staging caps said.  ``null`` before the first handshake.
+   */
+  get serverLimits(): ServerLimits | null {
+    return this._limits;
   }
 
   /** Client ID assigned by the server in {@link ConnectedEvent}. */
@@ -518,6 +792,28 @@ export class JaatoClient {
     } as PermissionResponseRequest);
   }
 
+  /**
+   * Answer the daemon's post-auth setup offer (``auth.setup``).
+   *
+   * After a daemon-level auth command succeeds with no session open
+   * (``anthropic-auth login`` and friends), the daemon offers to create
+   * one: pick a model, optionally persist ``JAATO_PROVIDER`` /
+   * ``MODEL_NAME`` to the workspace ``.env``.  ``connect: false``
+   * declines.  Mirrors the Python SDK's ``respond_to_post_auth_setup``.
+   */
+  async respondToPostAuthSetup(
+    requestId: string,
+    options: { connect: boolean; modelName?: string; persistEnv?: boolean },
+  ): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.POST_AUTH_SETUP_RESPONSE,
+      request_id: requestId,
+      connect: options.connect,
+      model_name: options.modelName ?? "",
+      persist_env: options.persistEnv ?? false,
+    } as PostAuthSetupResponse);
+  }
+
   async respondToClarification(
     requestId: string,
     response: string,
@@ -681,6 +977,18 @@ export class JaatoClient {
      * mirroring Python ``IPCClient.create_session(cascade_driver_id=...)``.
      */
     cascadeDriverId?: string;
+    /**
+     * Override the model the resolved profile (or, with no profile, the
+     * workspace ``.env``) binds.  Sent as ``--model`` on ``session.new``
+     * (protocol 1.27).  The daemon applies it to a COPY of the profile, and
+     * a revived session keeps it.
+     */
+    model?: string;
+    /**
+     * Override the provider too (``--provider``).  Only with ``model``:
+     * passing it alone throws here, and the daemon refuses it as well.
+     */
+    provider?: string;
   } = {}): Promise<void> {
     const args: string[] = options.name ? [options.name] : [];
     let payload: Record<string, unknown> | undefined;
@@ -710,6 +1018,26 @@ export class JaatoClient {
     }
     if (options.cascadeDriverId) {
       args.push("--cascade-driver-id", options.cascadeDriverId);
+    }
+    if (options.provider && !options.model) {
+      throw new TypeError("createSession: 'provider' requires 'model'");
+    }
+    if (
+      options.model &&
+      (this._serverProtocolVersion === null ||
+        !isProtocolCompatible(this._serverProtocolVersion, MIN_WORKSPACE_PICKER_PROTOCOL))
+    ) {
+      throw new Error(
+        `createSession: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and would read --model ` +
+          `as the session name (needs >= ${MIN_WORKSPACE_PICKER_PROTOCOL}).`,
+      );
+    }
+    if (options.model) {
+      args.push("--model", options.model);
+    }
+    if (options.provider) {
+      args.push("--provider", options.provider);
     }
     await this._sendEvent({
       type: EventTypeValue.COMMAND,
@@ -745,11 +1073,20 @@ export class JaatoClient {
   /**
    * Attach to an existing session.
    *
-   * After successful attach, the server replays buffered events
-   * from the session journal (per the WS reconnect contract) so
-   * the client picks up where it left off.  Combined with the
-   * reconnect state-machine, this is the building block for
-   * "survive a network blip" workflows.
+   * The server answers with the session's current state -- its
+   * agents and their status -- and the conversation so
+   * far, rebuilt from the session's stored HISTORY.  How the
+   * conversation arrives is the client's choice
+   * (``PresentationContext.history_replay``, protocol 1.28):
+   * ``"full"`` replays it as output events, oldest first (the default
+   * for every client type but chat); ``"paged"`` sends only the most
+   * recent page as a ``HistoryPageEvent``, with older pages fetched via
+   * {@link requestHistoryPage}; ``"none"`` sends none of it (the chat
+   * default).  It is NOT a replay of the events this client missed
+   * while disconnected: output streamed mid-turn reaches the history
+   * only when its turn completes.  Combined with the reconnect
+   * state-machine, this is the building block for "survive a network
+   * blip" workflows.
    *
    * Mirror of Python ``IPCClient.attach_session``.
    *
@@ -824,6 +1161,817 @@ export class JaatoClient {
       command: "session.end",
       args: [],
     } as CommandRequest);
+  }
+
+  /**
+   * Re-read a live session's ``.env`` and credentials and rebuild its
+   * provider.
+   *
+   * A session resolves its environment and its provider credential once,
+   * when its runner boots; a key stored with ``<provider>-auth key`` or a
+   * ``.env`` line written afterwards never reaches the open session.  This
+   * sends ``session.reload_env``: the daemon re-resolves and the runner
+   * re-applies the whole environment and re-creates the provider, so the
+   * next turn runs on the credential now on disk.  Refused by the daemon,
+   * with nothing changed, while a turn is running.  The daemon confirms
+   * with a ``system.message`` naming the outcome and the credential source
+   * the rebuilt provider resolved.  Mirror of Python
+   * ``IPCClient.reload_session_env``.
+   *
+   * @param sessionId The session to reload; omit for the one this client
+   *   is attached to.
+   * @throws Error against a daemon below {@link MIN_SESSION_RELOAD_ENV_PROTOCOL}.
+   */
+  async reloadSessionEnv(sessionId?: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_RELOAD_ENV_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `reloadSessionEnv: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `session.reload_env (needs >= ${MIN_SESSION_RELOAD_ENV_PROTOCOL}).  ` +
+          `It would ignore the command silently.  Upgrade the daemon, or ` +
+          `start a new session to pick up the credential.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.reload_env",
+      args: sessionId ? [sessionId] : [],
+    } as CommandRequest);
+  }
+
+  /**
+   * Add an entry to the session workspace's ``.gitignore``, or remove it
+   * again — the TUI workspace panel's ``i`` key, served daemon-side
+   * (protocol 1.12) so a browser client can make the same edit.  Exact-match
+   * toggle of ONE line: a directory entry keeps its trailing ``/``.  The
+   * daemon answers with one ``workspace.ignore.result`` whatever happened —
+   * ``ok`` / ``ignored`` on success, ``ok: false`` with the reason otherwise.
+   * Mirror of Python ``IPCClient.toggle_workspace_ignore``.
+   *
+   * @param path The workspace-relative entry, as the workspace panel shows it.
+   * @throws Error against a daemon below {@link MIN_WORKSPACE_IGNORE_PROTOCOL}.
+   */
+  async toggleWorkspaceIgnore(path: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_WORKSPACE_IGNORE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `toggleWorkspaceIgnore: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.ignore (needs >= ${MIN_WORKSPACE_IGNORE_PROTOCOL}).  ` +
+          `It would ignore the command silently.  Upgrade the daemon, or ` +
+          `edit the workspace's .gitignore directly.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "workspace.ignore",
+      args: [path],
+    } as CommandRequest);
+  }
+
+  /**
+   * List the reference claims agents proposed in this workspace (protocol
+   * 1.33).  An agent's ``proposeReference`` writes a CLAIM under
+   * ``.jaato/references-claims/``, never a catalog entry; this is the
+   * curator's view of them, read by the daemon.  Each row carries the
+   * proposed entry, its recorded ``origin`` (who proposed it, and
+   * ``witnessed_by`` when a person approved the call) and ``problems`` --
+   * why a promotion would be refused right now.  ``may_curate`` says
+   * whether this connection may act.  ``ok === false`` means the claims
+   * could not be read, never "nothing proposed".
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async listReferenceClaims(options: { timeoutMs?: number } = {}): Promise<ReferenceClaimsEvent> {
+    return this._quietRequest<ReferenceClaimsEvent>(
+      "listReferenceClaims",
+      { type: EventTypeValue.REFERENCE_CLAIMS_REQUEST },
+      EventTypeValue.REFERENCE_CLAIMS,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference-claim verbs (upgrade the daemon)",
+      "refc",
+    );
+  }
+
+  /**
+   * Promote an agent's reference claim into the workspace catalog
+   * (protocol 1.33).  The daemon re-validates it, writes
+   * ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamped
+   * with this connection's identity as ``origin.curated_by``, and removes
+   * the claim.  When the destination bundle has a vector index the daemon
+   * reconciles it with vectors from this connection's session and says how
+   * in ``reconcile``.  Only the workspace owner may, on an owned workspace.
+   * Resolves with the daemon's answer; a refusal is ``ok === false`` with a
+   * ``category``.  The default timeout is generous (180 s): reconciling may
+   * wait on the session loading its embedding model.  Mirror of Python
+   * ``IPCClient.promote_reference_claim``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async promoteReferenceClaim(
+    claimId: string,
+    options: { bundle?: string; timeoutMs?: number } = {},
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._sendReferenceCuration(
+      "promote", claimId, options.timeoutMs ?? 180_000, options.bundle ?? "",
+    );
+  }
+
+  /**
+   * Drop an agent's reference claim without promoting it (protocol 1.33).
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async dismissReferenceClaim(
+    claimId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._sendReferenceCuration("dismiss", claimId, options.timeoutMs);
+  }
+
+  /**
+   * List this workspace's reference catalog with its typed links (protocol
+   * 1.33).  Every reference in ``.jaato/references/`` and its sub-bundles,
+   * read by the daemon: each row carries its declared ``links`` (a target
+   * this catalog does not hold is ``dangling``) and ``linked_from``, the
+   * edges pointing at it.  ``may_curate`` says whether this connection may
+   * edit them.  Mirror of Python ``IPCClient.list_reference_catalog``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async listReferenceCatalog(options: { timeoutMs?: number } = {}): Promise<ReferenceCatalogEvent> {
+    return this._quietRequest<ReferenceCatalogEvent>(
+      "listReferenceCatalog",
+      { type: EventTypeValue.REFERENCE_CATALOG_REQUEST },
+      EventTypeValue.REFERENCE_CATALOG,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference catalog verbs (upgrade the daemon)",
+      "refk",
+    );
+  }
+
+  /**
+   * Replace one catalog reference's typed links (protocol 1.33).  ``links``
+   * is the complete new list of ``{to, rel, note?}``; ``[]`` removes every
+   * declared edge.  The daemon validates them, writes only the reference
+   * file's ``links`` key, and answers with the links as written and any
+   * ``warnings``.  Only the workspace owner may, on an owned workspace.
+   * Mirror of Python ``IPCClient.update_reference_links``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_CURATION_PROTOCOL}.
+   */
+  async updateReferenceLinks(
+    referenceId: string,
+    links: Array<{ to: string; rel: string; note?: string }>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceLinksUpdateResultEvent> {
+    return this._quietRequest<ReferenceLinksUpdateResultEvent>(
+      "updateReferenceLinks",
+      {
+        type: EventTypeValue.REFERENCE_LINKS_UPDATE_REQUEST,
+        reference_id: referenceId,
+        links,
+      },
+      EventTypeValue.REFERENCE_LINKS_UPDATE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference catalog verbs (upgrade the daemon)",
+      "refk",
+    );
+  }
+
+  /**
+   * Create a workspace-tier reference sub-bundle, unindexed (protocol 1.36,
+   * #1478).  Needs no session and no embedding provider, so a driver can
+   * create the bundle it then promotes into.  An existing bundle (or
+   * directory) by that name answers ``category: "collision"`` with nothing
+   * changed.  Only the workspace owner may, on an owned workspace.  Mirror
+   * of Python ``IPCClient.create_reference_bundle``.
+   *
+   * @throws Error against a daemon below {@link MIN_REFERENCE_BUNDLE_PROTOCOL}.
+   */
+  async createReferenceBundle(
+    name: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ReferenceBundleCreateResultEvent> {
+    return this._quietRequest<ReferenceBundleCreateResultEvent>(
+      "createReferenceBundle",
+      { type: EventTypeValue.REFERENCE_BUNDLE_CREATE_REQUEST, name },
+      EventTypeValue.REFERENCE_BUNDLE_CREATE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_REFERENCE_BUNDLE_PROTOCOL,
+      "reference bundle creation (upgrade the daemon)",
+      "refb",
+    );
+  }
+
+  private async _sendReferenceCuration(
+    action: "promote" | "dismiss",
+    claimId: string,
+    timeoutMs?: number,
+    bundle = "",
+  ): Promise<ReferenceCurationResultEvent> {
+    return this._quietRequest<ReferenceCurationResultEvent>(
+      `${action}ReferenceClaim`,
+      {
+        type: EventTypeValue.REFERENCE_CURATION_REQUEST, action, claim_id: claimId,
+        ...(bundle ? { bundle } : {}),
+      },
+      EventTypeValue.REFERENCE_CURATION_RESULT,
+      timeoutMs ?? 10_000,
+      MIN_REFERENCE_CURATION_PROTOCOL,
+      "the reference-claim verbs (upgrade the daemon)",
+      "refc",
+    );
+  }
+
+  /**
+   * Message another session in this session's GROUP, waking it if it is
+   * cold (protocol 1.22).  The client-tier form of the ``courier`` plugin's
+   * ``send_to_session``: the sender is this connection's OWN session,
+   * resolved daemon-side, and the target must share a group with it — a
+   * cascade, or the same authenticated creator.  A cold target is revived
+   * from disk and driven; a busy one queues the message on the idle-only
+   * peer tier; a terminated one is never woken.  Mirror of Python
+   * ``IPCClient.send_session_message``.
+   *
+   * Fire-and-forget: the daemon answers with one ``session.message.result``
+   * event carrying the receipt — ``status`` is ``accepted`` / ``queued`` /
+   * ``spooled`` (delivered, or held in the target's durable inbox),
+   * ``no_such_session``, ``ambiguous`` (with ``candidates``),
+   * ``session_cold``, ``duplicate``, ``terminated`` or ``refused`` (with
+   * ``error``).  No delivered status claims the peer read or acted on
+   * anything.
+   *
+   * @param target A session id, or a cascade-scoped sibling name.
+   * @param text The message; may be empty when attachments, file
+   *   references or text attachments carry the content.
+   * @param options.attachments Binary content in the canonical wire shape
+   *   (``{mime_type, data, display_name}``), delivered on the drive branch
+   *   only — a busy target's message is spooled rather than stripped.
+   * @param options.fileRefs Files in the SENDER session's workspace to hand
+   *   the target (1.24): workspace-relative paths, or ``{path, workspace?}``
+   *   rows.  References the DAEMON resolves on its own host — never bytes
+   *   read here.  A target sharing the workspace reads the file in place;
+   *   one in another workspace gets a copy under its own inbox (10 MB per
+   *   file, 50 MB per message).  The result event's ``files`` says per file
+   *   what became of it; one refused file refuses the whole message.
+   * @param options.textAttachments ``{text, display_name?, mime_type?}``
+   *   rows (1.24) — a patch, a snippet — inlined for the target up to 32 KiB
+   *   in total, stored as files beyond it.
+   * @param options.eventId Idempotency key; a redelivered id answers
+   *   ``duplicate``, a benign no-op.
+   * @param options.requestId Correlation id echoed on the result event.
+   * @throws Error against a daemon below {@link MIN_SESSION_MESSAGE_PROTOCOL};
+   *   against one below {@link MIN_SESSION_MESSAGE_FILES_PROTOCOL} when
+   *   ``fileRefs`` or ``textAttachments`` are given (it would deliver the
+   *   text without them and call that accepted); or when no content at all
+   *   is given.
+   */
+  async sendSessionMessage(
+    target: string,
+    text = "",
+    options?: {
+      attachments?: Array<Record<string, unknown>>;
+      fileRefs?: Array<string | Record<string, unknown>>;
+      textAttachments?: Array<Record<string, unknown>>;
+      eventId?: string;
+      requestId?: string;
+    },
+  ): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_MESSAGE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `sendSessionMessage: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `session.message (needs >= ${MIN_SESSION_MESSAGE_PROTOCOL}).  ` +
+          `It would ignore the command silently.  Upgrade the daemon.`,
+      );
+    }
+    const fileRefs = options?.fileRefs ?? [];
+    const textAttachments = options?.textAttachments ?? [];
+    if (
+      (fileRefs.length > 0 || textAttachments.length > 0) &&
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_MESSAGE_FILES_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `sendSessionMessage: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion} and does not carry fileRefs / ` +
+          `textAttachments on session.message (needs >= ` +
+          `${MIN_SESSION_MESSAGE_FILES_PROTOCOL}).  It would deliver the ` +
+          `text without them and report accepted.  Upgrade the daemon, or ` +
+          `send text only.`,
+      );
+    }
+    const attachments = options?.attachments ?? [];
+    if (
+      !text &&
+      attachments.length === 0 &&
+      fileRefs.length === 0 &&
+      textAttachments.length === 0
+    ) {
+      throw new Error(
+        "sendSessionMessage requires text, attachments, fileRefs or " +
+          "textAttachments — a message with no content drives a turn the " +
+          "peer has nothing to answer",
+      );
+    }
+    const payload: Record<string, unknown> = { target, text };
+    if (options?.eventId !== undefined) payload.event_id = options.eventId;
+    if (attachments.length > 0) payload.attachments = attachments;
+    if (fileRefs.length > 0) payload.file_refs = fileRefs;
+    if (textAttachments.length > 0) payload.text_attachments = textAttachments;
+    // CommandRequest carries no request_id of its own, so the correlation
+    // id rides the payload and the daemon echoes it from there.
+    if (options?.requestId !== undefined) payload.request_id = options.requestId;
+    await this.executeCommand("session.message", [], payload);
+  }
+
+  /**
+   * Run ``jaato-scaffold integration <name>`` on the daemon (protocol 1.21)
+   * — install or refresh an integration payload, the ``jaato-sdk`` skill
+   * among them, into the workspace this connection is in.  The sibling of
+   * ``scaffold.explain``: the command must run on the install that serves
+   * the session, because the copy it writes is stamped with THAT
+   * ``jaato-server``'s version and the workspace directory is on THAT host —
+   * so the daemon runs it rather than the caller shelling out to its own
+   * venv, and the application never carries (and so never drifts) a copy of
+   * the skill's text.
+   *
+   * The daemon keeps the copy current with the ``--refresh`` contract: it
+   * re-applies an ``absent`` / ``stale`` / ``outdated`` copy and LEAVES an
+   * ``edited`` / ``diverged`` / ``unstamped`` one alone.  It answers with one
+   * ``scaffold.integration.result`` event whatever happened — ``ok`` with
+   * ``changed`` / ``state_before`` / ``state_after`` / ``skipped_reason``, or
+   * ``ok: false`` with the reason and the ``available`` integrations it
+   * ships.  A refresh it declined to apply is ``ok: true`` with a
+   * ``skipped_reason``, so a client reports it in a notice, not as an error.
+   * Mirror of Python ``IPCClient.run_integration``.
+   *
+   * The integration installs into the caller's OWN workspace, resolved
+   * daemon-side (the same entitlement path ``workspace.file.fetch`` uses), so
+   * there is no directory parameter.
+   *
+   * @param name The integration to run, e.g. ``"claude-code"``.
+   * @throws Error against a daemon below
+   *   {@link MIN_SCAFFOLD_INTEGRATION_PROTOCOL}, which would ignore the
+   *   command silently — indistinguishable from the skill having been
+   *   installed, which a caller must not report.
+   */
+  async runScaffoldIntegration(name: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `runScaffoldIntegration: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `scaffold.integration (needs >= ${MIN_SCAFFOLD_INTEGRATION_PROTOCOL}).  ` +
+          `It would ignore the command silently, which is indistinguishable ` +
+          `from the skill having been installed.  Upgrade the daemon, or run ` +
+          `jaato-scaffold integration in the daemon's own virtualenv.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "scaffold.integration",
+      args: [name],
+    } as CommandRequest);
+  }
+
+  /**
+   * Run ``jaato-scaffold validate`` on the daemon (protocol 1.34): the
+   * daemon's full validator checks the workspace this connection selected,
+   * as it stands on the server.  Mirror of Python
+   * ``IPCClient.validate_workspace``.
+   *
+   * ``validate`` needs jaato-server's loader (a profile is checked once it
+   * is parsed, merged with its ``inherits:`` and set overlay, and
+   * constructed), so a client asks the daemon rather than carrying a second
+   * validator.  The daemon answers with one ``scaffold.validate.result``
+   * event: ``ok`` with the ``findings`` and their ``errors`` / ``warnings``
+   * counts, or ``ok: false`` when the validator could not run.  ``ok`` never
+   * means "valid".  There is no directory parameter: the workspace is the
+   * one this connection selected.
+   *
+   * @param profileSet A ``JAATO_PROFILE_SET`` name to overlay.
+   * @param profile Validate only this profile.
+   * @throws Error against a daemon below
+   *   {@link MIN_SCAFFOLD_VALIDATE_PROTOCOL}.
+   */
+  async validateScaffoldWorkspace(
+    profileSet?: string,
+    profile?: string,
+  ): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SCAFFOLD_VALIDATE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `validateScaffoldWorkspace: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `scaffold.validate (needs >= ${MIN_SCAFFOLD_VALIDATE_PROTOCOL}).  ` +
+          `It would ignore the command silently, which a caller would read ` +
+          `as no findings.  Upgrade the daemon.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "scaffold.validate",
+      args: [profileSet ?? "", profile ?? ""],
+    } as CommandRequest);
+  }
+
+  /**
+   * Download one file from the workspace this connection is in (protocol
+   * 1.20, WS only) -- the reverse of {@link stageFiles}.
+   *
+   * ``path`` is workspace-relative (or absolute inside the workspace).  The
+   * daemon answers with a ``workspace.file.content`` header and, on success,
+   * one binary frame the transport attaches to it, so the result carries
+   * the bytes.  A refusal is NOT thrown: it resolves with ``event.ok ===
+   * false`` and ``event.category`` naming why (``not_found``,
+   * ``unsafe_path``, ``credential``, ``too_large``, ...), because a caller
+   * renders those differently.
+   *
+   * Calls are correlated by ``request_id``, so several may be in flight.
+   *
+   * @param options.metadataOnly Ask whether the file exists, its size and
+   *   type, without transferring it.
+   * @param options.timeoutMs Give up after this long (default 120 s).
+   * @throws Error against a daemon below {@link MIN_FILE_FETCH_PROTOCOL},
+   *   or on timeout.
+   */
+  async fetchWorkspaceFile(
+    path: string,
+    options: { metadataOnly?: boolean; timeoutMs?: number } = {},
+  ): Promise<WorkspaceFileFetchResult> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_FILE_FETCH_PROTOCOL)
+    ) {
+      throw new Error(
+        `fetchWorkspaceFile: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.file.fetch (needs >= ${MIN_FILE_FETCH_PROTOCOL}).  ` +
+          `Upgrade the daemon to download workspace files.`,
+      );
+    }
+    const requestId = `dl-${++this._fileFetchSeq}-${Date.now().toString(36)}`;
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const answer = new Promise<WorkspaceFileFetchResult>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        unsub();
+        this._closeWaiters.delete(onClose);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error(`fetchWorkspaceFile: no answer for ${path} after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onClose = (info: { code: number; reason: string }) => {
+        done();
+        reject(new RequestInterruptedError(`fetchWorkspaceFile ${path}`, info.code, info.reason));
+      };
+      this._closeWaiters.add(onClose);
+      const unsub = this.subscribeAll((raw) => {
+        const event = raw as WorkspaceFileContentEvent & { data?: Uint8Array };
+        if (event.type !== EventTypeValue.WORKSPACE_FILE_CONTENT) return;
+        if (event.request_id !== requestId) return;
+        done();
+        resolve({ event, data: event.data ?? null });
+      });
+    });
+    await this._sendEvent({
+      type: EventTypeValue.WORKSPACE_FILE_FETCH_REQUEST,
+      request_id: requestId,
+      path,
+      metadata_only: options.metadataOnly ?? false,
+    } as WorkspaceFileFetchRequest);
+    return answer;
+  }
+
+  /**
+   * Find files in this connection's workspace by name (protocol 1.32, WS
+   * only).  Every whitespace-separated term of ``query`` must appear,
+   * ignoring case, in a file's workspace-relative path; dotfiles,
+   * gitignored files and files the Files panel hides are all searched.
+   * Each match's ``path`` is what {@link fetchWorkspaceFile} takes.
+   *
+   * ``truncated`` on the answer means the daemon's walk stopped at its
+   * bound, so "no match" then is not "no such file".
+   *
+   * @throws Error against a daemon below {@link MIN_FILE_SEARCH_PROTOCOL},
+   *   on timeout, or on a closed connection.
+   */
+  async searchWorkspaceFiles(
+    query: string,
+    options: { maxResults?: number; timeoutMs?: number } = {},
+  ): Promise<WorkspaceFilesSearchResultEvent> {
+    return this._quietRequest<WorkspaceFilesSearchResultEvent>(
+      "searchWorkspaceFiles",
+      {
+        type: EventTypeValue.WORKSPACE_FILES_SEARCH_REQUEST,
+        query,
+        max_results: options.maxResults ?? 100,
+      },
+      EventTypeValue.WORKSPACE_FILES_SEARCH_RESULT,
+      options.timeoutMs ?? 30_000,
+      MIN_FILE_SEARCH_PROTOCOL,
+      "workspace.files.search (upgrade the daemon to search workspace files)",
+      "fs",
+    );
+  }
+
+  /**
+   * Send one quiet request/result-pair request and resolve with its
+   * correlated answer (#1232's ``_memoryRequest``, generalised for #1294's
+   * diagnostics verb so a second copy of this plumbing does not drift from
+   * the first).
+   *
+   * Refuses a daemon below ``minProtocol``; rejects on timeout and on a
+   * closed connection -- never resolves with a fabricated empty answer,
+   * which for a list would read as "nothing remembered". The answer is
+   * matched on ``request_id`` AND on its result type, so a daemon echo of
+   * the request itself is not mistaken for the answer.
+   */
+  private async _quietRequest<T>(
+    method: string,
+    request: Record<string, unknown>,
+    resultType: string,
+    timeoutMs: number,
+    minProtocol: string,
+    featureLabel: string,
+    idPrefix: string,
+  ): Promise<T> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, minProtocol)
+    ) {
+      throw new Error(
+        `${method}: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `${featureLabel} (needs >= ${minProtocol}).`,
+      );
+    }
+    const requestId = `${idPrefix}-${++this._memorySeq}-${Date.now().toString(36)}`;
+    const answer = new Promise<T>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        unsub();
+        this._closeWaiters.delete(onClose);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error(`${method}: no answer after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onClose = (info: { code: number; reason: string }) => {
+        done();
+        reject(new RequestInterruptedError(method, info.code, info.reason));
+      };
+      this._closeWaiters.add(onClose);
+      const unsub = this.subscribeAll((raw) => {
+        const event = raw as {
+          type?: string;
+          request_id?: string;
+          error?: string;
+          error_type?: string;
+          details?: Record<string, unknown> | null;
+        };
+        if (event.request_id !== requestId) return;
+        if (event.type === EventTypeValue.ERROR) {
+          // A correlated refusal (#1475): the daemon refused the request
+          // before any handler answered it, and echoed its id so the call
+          // fails now instead of waiting out its timeout.
+          done();
+          reject(
+            new RequestRefusedError(method, event.error ?? "", {
+              errorType: event.error_type ?? "",
+              requestId,
+              details: event.details ?? undefined,
+            }),
+          );
+          return;
+        }
+        if (event.type !== resultType) return;
+        done();
+        resolve(raw as unknown as T);
+      });
+    });
+    await this._sendEvent({ ...request, request_id: requestId } as unknown as JaatoEvent);
+    return answer;
+  }
+
+  /**
+   * Inspect a workspace (protocol 1.27, WS only): path, size, session counts
+   * by state (``total`` / ``waiting`` / ``awake`` / ``sleeping``) and, per
+   * git checkout, uncommitted / unpushed counts.  ``ok === false`` (with
+   * ``error``) when the daemon refused -- another user's workspace, a name
+   * that left the root, or no such workspace.
+   */
+  async inspectWorkspace(
+    name: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<WorkspaceInspectEvent> {
+    return this._quietRequest<WorkspaceInspectEvent>(
+      "inspectWorkspace",
+      { type: EventTypeValue.WORKSPACE_INSPECT_REQUEST, name },
+      EventTypeValue.WORKSPACE_INSPECTED,
+      options.timeoutMs ?? 30_000,
+      MIN_WORKSPACE_PICKER_PROTOCOL,
+      "workspace.inspect",
+      "wsi",
+    );
+  }
+
+  /**
+   * Clone repositories into a workspace (protocol 1.27, WS only).
+   *
+   * Sends one ``workspace.clone`` and returns its ``request_id``; progress
+   * arrives as ``workspace.clone_progress`` events carrying that id (every
+   * repo ``queued`` first, then one at a time to ``done`` / ``failed``,
+   * with ``done === total`` on the last).  Subscribe BEFORE calling.  A
+   * retry is a new call naming the one repo.
+   */
+  async cloneIntoWorkspace(
+    name: string,
+    repos: Array<{ repo: string; branch: string; forge?: string }>,
+  ): Promise<string> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_WORKSPACE_PICKER_PROTOCOL)
+    ) {
+      throw new Error(
+        `cloneIntoWorkspace: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.clone (needs >= ${MIN_WORKSPACE_PICKER_PROTOCOL}).`,
+      );
+    }
+    const requestId = `wsc-${++this._memorySeq}-${Date.now().toString(36)}`;
+    await this._sendEvent({
+      type: EventTypeValue.WORKSPACE_CLONE_REQUEST,
+      name,
+      request_id: requestId,
+      repos: repos.map((r) => ({
+        repo: r.repo,
+        branch: r.branch,
+        forge: r.forge ?? "github",
+      })),
+    } as unknown as JaatoEvent);
+    return requestId;
+  }
+
+  /**
+   * List the attached session's memory store, quietly (protocol 1.22).
+   *
+   * Unlike the ``memory list`` command this writes nothing to the
+   * transcript.  ``ok === false`` (with ``error`` and ``category``) means
+   * the store could not be read, never "nothing remembered".  Rows carry
+   * ``tier`` (``workspace`` / ``global``), timestamps, usage, both
+   * provenance stamps and the two this-session flags -- not the content;
+   * see {@link getMemory}.  ``may_curate`` says whether this connection may
+   * change them.
+   */
+  async listMemories(options: { timeoutMs?: number } = {}): Promise<MemoryListEvent> {
+    return this._quietRequest<MemoryListEvent>(
+      "listMemories",
+      { type: EventTypeValue.MEMORY_LIST_REQUEST },
+      EventTypeValue.MEMORY_LIST,
+      options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
+    );
+  }
+
+  /** Fetch one memory WITH its content and evidence (protocol 1.22). */
+  async getMemory(
+    memoryId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryGetResultEvent> {
+    return this._quietRequest<MemoryGetResultEvent>(
+      "getMemory",
+      { type: EventTypeValue.MEMORY_GET_REQUEST, memory_id: memoryId },
+      EventTypeValue.MEMORY_GET_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
+    );
+  }
+
+  /**
+   * Edit a memory, or move its maturity (protocol 1.22).
+   *
+   * The structured replacement for ``memory edit`` (which opens
+   * ``$EDITOR`` on the runner's host).  An omitted field is left alone.  A
+   * maturity change is recorded in ``curated_by`` with this connection's
+   * authenticated identity.  Limited to the workspace owner: a refusal
+   * resolves with ``ok === false, category === "not_owner"``.
+   */
+  async updateMemory(
+    memoryId: string,
+    fields: { description?: string; content?: string; tags?: string[]; maturity?: string },
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryUpdateResultEvent> {
+    const request: Record<string, unknown> = {
+      type: EventTypeValue.MEMORY_UPDATE_REQUEST,
+      memory_id: memoryId,
+    };
+    for (const key of ["description", "content", "tags", "maturity"] as const) {
+      if (fields[key] !== undefined) request[key] = fields[key];
+    }
+    return this._quietRequest<MemoryUpdateResultEvent>(
+      "updateMemory",
+      request,
+      EventTypeValue.MEMORY_UPDATE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
+    );
+  }
+
+  /** Approve a memory: ``updateMemory(id, { maturity: "validated" })``. */
+  async approveMemory(memoryId: string, options: { timeoutMs?: number } = {}): Promise<MemoryUpdateResultEvent> {
+    return this.updateMemory(memoryId, { maturity: "validated" }, options);
+  }
+
+  /**
+   * Dismiss a memory: ``updateMemory(id, { maturity: "dismissed" })``.  The
+   * store keeps no dismissed trace, so it is gone from the next list.
+   */
+  async dismissMemory(memoryId: string, options: { timeoutMs?: number } = {}): Promise<MemoryUpdateResultEvent> {
+    return this.updateMemory(memoryId, { maturity: "dismissed" }, options);
+  }
+
+  /** Remove a memory through the plugin's own delete path (protocol 1.22). */
+  async deleteMemory(
+    memoryId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryDeleteResultEvent> {
+    return this._quietRequest<MemoryDeleteResultEvent>(
+      "deleteMemory",
+      { type: EventTypeValue.MEMORY_DELETE_REQUEST, memory_id: memoryId },
+      EventTypeValue.MEMORY_DELETE_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
+    );
+  }
+
+  /**
+   * Self-diagnose the attached session's confinement and runtime facts
+   * (#1294): cached record fields (``runner_identity``, ``confinement_id``,
+   * ``sandbox_mode``, ``consumption``, ``notebook_boundary_kind``,
+   * ``protocol_version``, ``server_version``) plus ``probe`` -- a LIVE
+   * re-check of whether the runner's threads are genuinely confined right
+   * now, measured fresh on every call and never merged into the cached
+   * fields. Always about the caller's OWN attached session -- there is no
+   * way to name a different one. ``ok === false`` (with ``error`` and
+   * ``category``) means nothing could be reported at all (no session
+   * attached, or the workspace owner gate refused the caller); even then
+   * ``probe`` may independently be ``null`` while the cached fields are
+   * populated, which is what a runner that did not answer looks like.
+   */
+  async getDiagnostics(options: { timeoutMs?: number } = {}): Promise<DiagnosticsResultEvent> {
+    return this._quietRequest<DiagnosticsResultEvent>(
+      "getDiagnostics",
+      { type: EventTypeValue.DIAGNOSTICS_REQUEST },
+      EventTypeValue.DIAGNOSTICS_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_DIAGNOSTICS_PROTOCOL,
+      "the diagnostics verb",
+      "diag",
+    );
   }
 
   /**
@@ -929,6 +2077,41 @@ export class JaatoClient {
     } as HistoryRequest);
   }
 
+  /**
+   * Fetch one page of the RENDERED transcript, newest first (protocol 1.28).
+   *
+   * Call with no ``before`` for the most recent page, then pass each
+   * answer's ``before`` to walk older -- a chat client's scroll-up.  Units
+   * are never split across pages (a fenced block, a table, one message's
+   * tool calls), so ``maxLines`` is a target; ``model`` text arrives
+   * formatted by the output pipeline, as it did live.  Consecutive units
+   * sharing a ``group`` are one text part.  ``stale`` means the cursor no
+   * longer names anything: re-request the latest page.
+   */
+  async requestHistoryPage(
+    options: {
+      agentId?: string;
+      before?: string;
+      maxLines?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<HistoryPageEvent> {
+    return this._quietRequest<HistoryPageEvent>(
+      "requestHistoryPage",
+      {
+        type: EventTypeValue.HISTORY_PAGE_REQUEST,
+        agent_id: options.agentId ?? "main",
+        before: options.before ?? "",
+        max_lines: options.maxLines ?? 0,
+      },
+      EventTypeValue.HISTORY_PAGE,
+      options.timeoutMs ?? 30_000,
+      MIN_HISTORY_PAGE_PROTOCOL,
+      "paged history (upgrade the daemon, or use requestHistory)",
+      "hist",
+    );
+  }
+
   async registerClientTools(
     tools: Array<Record<string, unknown>>,
     categories?: Record<string, string>,
@@ -1014,6 +2197,68 @@ export class JaatoClient {
       payload.attachments = attachments;
     }
     await this.executeCommand("session.wake", [], payload);
+  }
+
+  /**
+   * Publish an external event onto the session's `EventBus`.
+   *
+   * The host's way of telling a running session that something happened
+   * outside it — `order.placed`, `build.finished`, `ticket.assigned`.  It
+   * reaches every agent that called
+   * `subscribeToEvents(event_types: ['external_event'])`, and sinks onward to
+   * the daemon-wide reactor bus, so it is the one verb that can trigger a
+   * reactor from a client.  Mirror of Python
+   * ``IPCClient.send_external_event``.
+   *
+   * `ExternalEventRequest` has existed as a TYPE in both SDKs and as a METHOD
+   * in neither (#1167): the only producer was an out-of-tree web component
+   * hand-rolling the JSON frame.
+   *
+   * **Not** {@link wakeSession}.  A wake drives a USER turn on one session;
+   * this publishes a bus event and drives no turn of its own.  A session with
+   * no `external_event` subscriber receives it and does nothing, which is a
+   * success and the normal state before any agent has subscribed.
+   *
+   * Fire-and-forget.  A refusal arrives on the event stream as an
+   * `ErrorEvent` — `error_type: "ExternalEventError"` when the session has no
+   * bus, `"SessionError"` when the session is gone, and `"RequestError"`
+   * (`Unknown request type: ExternalEventRequest`) from a daemon predating
+   * #1167 on IPC.  That last one is why this method takes no protocol floor:
+   * the refusal is a named error on the stream rather than the silence an
+   * unknown command verb produces, and a floor would ALSO refuse against the
+   * WebSocket daemons where the request has always worked.
+   *
+   * @param name The event name the host chose, e.g. `order.placed`.  This is
+   *   what an agent's `subscribeToEvents(event_names)` filter matches, so it
+   *   must agree with what the persona asked to hear.
+   * @param data Arbitrary JSON-serialisable payload; omitted sends `{}`.
+   * @param options.timestamp ISO 8601, when the thing being reported
+   *   happened.  Omitted lets the daemon stamp arrival time.
+   * @param options.sessionId The target session; omitted means the one this
+   *   client is attached to.
+   * @throws Error if `name` is empty — an unnamed event matches no
+   *   subscriber filter and reaches the model with nothing to say what
+   *   happened.
+   */
+  async sendExternalEvent(
+    name: string,
+    data?: Record<string, unknown>,
+    options?: { timestamp?: string; sessionId?: string },
+  ): Promise<void> {
+    if (!name) {
+      throw new Error(
+        "sendExternalEvent requires a name — an unnamed event matches no " +
+          "subscribeToEvents filter and reaches the model with nothing to " +
+          "say what happened",
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.EVENT_EXTERNAL,
+      name,
+      data: data ?? {},
+      timestamp: options?.timestamp ?? "",
+      session_id: options?.sessionId ?? "",
+    } as ExternalEventRequest);
   }
 
   /**
@@ -1157,8 +2402,13 @@ export class JaatoClient {
    * @param files Each entry needs ``name`` (workspace-relative
    *   path) and ``data`` (the bytes).  ``contentType`` and ``mode``
    *   are optional informational hints.
+   * @param options.timeoutMs How long to wait for the daemon's response
+   *   before rejecting (default {@link STAGE_FILES_TIMEOUT_MS}).  Pass 0 to
+   *   wait indefinitely (the pre-#1248 behaviour).
    * @returns The server's ``StageFilesEvent`` reporting per-file
    *   success / failure.
+   * @throws Error if no ``workspace.files.staged`` response arrives within
+   *   the timeout — so a lost response is a settled rejection, not a hang.
    */
   async stageFiles(
     workspaceId: string,
@@ -1168,6 +2418,7 @@ export class JaatoClient {
       contentType?: string;
       mode?: number;
     }>,
+    options: { timeoutMs?: number } = {},
   ): Promise<StageFilesEvent> {
     if (this._state !== ConnectionState.CONNECTED) {
       throw this._state === ConnectionState.RECONNECTING
@@ -1193,9 +2444,19 @@ export class JaatoClient {
     }) as StagedFileSpec);
 
     // Set up the response waiter BEFORE sending — otherwise the
-    // server's response could race with handler installation.
+    // server's response could race with handler installation.  The wait
+    // is bounded (#1248): a response that never arrives would otherwise
+    // leave this promise unsettled forever, and the caller's status stuck
+    // on "staging".
     const responsePromise = this._waitForNextEvent<StageFilesEvent>(
       (e) => e.type === EventTypeValue.WORKSPACE_FILES_STAGED,
+      {
+        timeoutMs: options.timeoutMs ?? STAGE_FILES_TIMEOUT_MS,
+        label: "stageFiles: no workspace.files.staged response",
+        // The usual reason no response arrives: a file over the daemon's
+        // message limit makes it close the connection (1009) mid-upload.
+        closeLabel: "stageFiles",
+      },
     );
 
     transport.sendEvent({
@@ -1219,17 +2480,52 @@ export class JaatoClient {
    *
    * One-shot subscription used by request/response methods like
    * {@link stageFiles}.  Auto-unsubscribes after the first match.
+   *
+   * With ``options.timeoutMs`` set (> 0), the wait is bounded: if no
+   * matching event arrives in time it **rejects** with an ``Error`` naming
+   * ``options.label`` and the deadline, and unsubscribes — so a request
+   * whose response is lost surfaces as a settled promise the caller can
+   * catch, not a hang (#1248).  Omit ``timeoutMs`` (or pass 0) to keep the
+   * resolve-only behaviour.
+   *
+   * With ``options.closeLabel`` set, the wait also rejects -- at once, with
+   * a {@link RequestInterruptedError} carrying the close code -- when the
+   * connection closes first.  For a request the daemon answers on the same
+   * connection, a close means no answer is coming.
    */
   private _waitForNextEvent<T extends JaatoEvent = JaatoEvent>(
     predicate: (event: JaatoEvent) => boolean,
+    options: { timeoutMs?: number; label?: string; closeLabel?: string } = {},
   ): Promise<T> {
-    return new Promise<T>((resolve) => {
+    return new Promise<T>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let onClose: ((info: { code: number; reason: string }) => void) | null = null;
+      const done = () => {
+        if (timer) clearTimeout(timer);
+        unsub();
+        if (onClose) this._closeWaiters.delete(onClose);
+      };
       const unsub = this.subscribeAll((event) => {
         if (predicate(event)) {
-          unsub();
+          done();
           resolve(event as T);
         }
       });
+      if (options.closeLabel) {
+        const label = options.closeLabel;
+        onClose = (info) => {
+          done();
+          reject(new RequestInterruptedError(label, info.code, info.reason));
+        };
+        this._closeWaiters.add(onClose);
+      }
+      const timeoutMs = options.timeoutMs ?? 0;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          done();
+          reject(new Error(`${options.label ?? "waitForNextEvent: no matching event"} after ${timeoutMs} ms`));
+        }, timeoutMs);
+      }
     });
   }
 
@@ -1248,10 +2544,28 @@ export class JaatoClient {
     this._transport.sendEvent(event);
   }
 
+  /**
+   * Resolve the credential for the attempt about to be made.
+   *
+   * A string option is returned as-is; a {@link TokenProvider} is
+   * called now, so a single-use ticket is minted per attempt rather
+   * than once per client.  Errors propagate to the caller
+   * (``connect()`` or ``_attemptReconnect()``), each of which already
+   * decides what a failed attempt means.
+   */
+  private async _resolveToken(): Promise<string | undefined> {
+    const t = this._options.token;
+    if (typeof t === "function") {
+      return await t();
+    }
+    return t;
+  }
+
   private async _openOnce(): Promise<void> {
+    const token = await this._resolveToken();
     const transport = await openTransport({
       url: this._options.url,
-      token: this._options.token,
+      token,
       headers: this._options.headers,
       openTimeoutMs: this._options.openTimeoutMs,
     });
@@ -1281,6 +2595,7 @@ export class JaatoClient {
     this._serverVersion = (serverInfo.server_version as string) ?? null;
     this._clientId = (serverInfo.client_id as string) ?? null;
     this._serverProtocolVersion = connected.protocol_version ?? null;
+    this._limits = serverLimitsFrom(serverInfo);
 
     // Wire-protocol compat gate.  Compares against
     // ``protocol_version`` (not the daemon package version) — the
@@ -1406,6 +2721,17 @@ export class JaatoClient {
 
   private _handleClose(info: { code: number; reason: string }): void {
     this._transport = null;
+    // Requests in flight on this connection cannot be answered on the
+    // next one; reject them now, naming the close.
+    const waiters = [...this._closeWaiters];
+    this._closeWaiters.clear();
+    for (const w of waiters) {
+      try {
+        w(info);
+      } catch {
+        // A waiter only rejects its own promise.
+      }
+    }
     if (this._explicitClose || this._state === ConnectionState.CLOSED) {
       this._transition(ConnectionState.CLOSED, {
         reason: info.reason || `code ${info.code}`,

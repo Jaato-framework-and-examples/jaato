@@ -607,11 +607,11 @@ jaato daemon starts
 
 | File | Contents |
 |------|----------|
-| `server/session_manager.py` | `create_headless_session()`, `inject_prompt_to_session()` |
-| `server/core.py` | Agent identity propagation (`_main_agent_id`) |
-| `shared/lifecycle_tools.py` | `signal_completion` with typed payload validation |
-| `shared/completion_schema_loader.py` | 3-tier schema path resolution |
-| `shared/script_loader.py` | Script resolution and loading with module prefix |
+| `jaato_server/server/session_manager.py` | `create_headless_session()`, `inject_prompt_to_session()` |
+| `jaato_server/server/core.py` | Agent identity propagation (`_main_agent_id`) |
+| `jaato_server/shared/lifecycle_tools.py` | `signal_completion` with typed payload validation |
+| `jaato_server/shared/completion_schema_loader.py` | 3-tier schema path resolution |
+| `jaato_server/shared/script_loader.py` | Script resolution and loading with module prefix |
 
 ### Related References
 

@@ -203,7 +203,7 @@ if presentation_context is not None:
 
 `_apply_client_config()` and `_apply_client_config_to_server()` construct
 `PresentationContext` from the event's `presentation` dict and call
-`server.set_presentation_context()`.
+`jaato_server.server.set_presentation_context()`.
 
 ---
 

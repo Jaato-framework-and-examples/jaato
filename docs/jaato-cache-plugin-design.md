@@ -16,7 +16,7 @@ The sections below retain the original design rationale and motivation. Where be
 
 ### Original Motivation
 
-Prompt caching for Anthropic was originally implemented **inside `AnthropicProvider`** (`jaato-server/shared/plugins/model_provider/anthropic/provider.py`). The cache logic was tightly coupled to the provider class, creating problems:
+Prompt caching for Anthropic was originally implemented **inside `AnthropicProvider`** (`jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py`). The cache logic was tightly coupled to the provider class, creating problems:
 
 1. **Inheritance coupling**: `ZhipuAIProvider` inherits from `AnthropicProvider` and had to hardcode `self._enable_caching = False` to suppress the parent's Anthropic-specific breakpoint logic. ZhipuAI has its own implicit caching mechanism that's incompatible with Anthropic's explicit breakpoints.
 2. **No budget awareness**: The original Anthropic implementation used `cache_exclude_recent_turns` (a simple turn count) to decide what to cache, rather than consulting the `InstructionBudget`'s GC policy assignments which already know which content is LOCKED, PRESERVABLE, or EPHEMERAL.
@@ -143,9 +143,9 @@ Caching for Anthropic is currently implemented **inside `AnthropicProvider`** ra
 > **Cross-reference:** The [Session-Owned History Impact Analysis](design/session-owned-history-impact-analysis.md) proposes moving history ownership from providers to the session. Under that proposal, the provider would receive messages as a parameter to a stateless `complete()` method rather than maintaining `self._history`. This strengthens the case for extracting cache logic into plugins, since the provider would no longer "own" the data that drives breakpoint decisions. See [Impact on Cache Plugin Integration](#impact-of-session-owned-history) below.
 
 Key files:
-- `jaato-server/shared/plugins/model_provider/anthropic/provider.py` — Cache configuration, breakpoint placement, threshold checking
-- `jaato-server/shared/plugins/model_provider/anthropic/converters.py` — `messages_to_anthropic(cache_breakpoint_index=...)` applies history cache breakpoint
-- `jaato-server/shared/plugins/model_provider/anthropic/env.py` — `resolve_enable_caching()` reads `JAATO_ANTHROPIC_ENABLE_CACHING`
+- `jaato-server/jaato_server/shared/plugins/model_provider/anthropic/provider.py` — Cache configuration, breakpoint placement, threshold checking
+- `jaato-server/jaato_server/shared/plugins/model_provider/anthropic/converters.py` — `messages_to_anthropic(cache_breakpoint_index=...)` applies history cache breakpoint
+- `jaato-server/jaato_server/shared/plugins/model_provider/anthropic/env.py` — `resolve_enable_caching()` reads `JAATO_ANTHROPIC_ENABLE_CACHING`
 - `jaato-sdk/jaato_sdk/plugins/model_provider/types.py` — `TokenUsage` dataclass with `cache_read_tokens` and `cache_creation_tokens` fields
 
 ### The Inheritance Problem
@@ -317,7 +317,7 @@ ProviderResponse.usage.cache_read_tokens / .cache_creation_tokens
 
 The GC system is built on these actual types (not the `GCCategory`/`ContentMap`/`ContentBlock` types from the previous revision, which do not exist):
 
-**`InstructionBudget`** (`shared/instruction_budget.py`) — Tracks token usage by `InstructionSource`:
+**`InstructionBudget`** (`jaato_server/shared/instruction_budget.py`) — Tracks token usage by `InstructionSource`:
 
 ```python
 class InstructionSource(Enum):
@@ -414,10 +414,10 @@ Key observations:
 
 | Plugin | Location | Strategy | Budget-Aware |
 |--------|----------|----------|:------------:|
-| **`gc_budget`** | `shared/plugins/gc_budget/plugin.py` | **Policy-aware phased collection using InstructionBudget** | **Yes** |
-| `gc_truncate` | `shared/plugins/gc_truncate/plugin.py` | Remove oldest turns, keep recent N | No |
-| `gc_summarize` | `shared/plugins/gc_summarize/plugin.py` | Compress old turns into summary | No |
-| `gc_hybrid` | `shared/plugins/gc_hybrid/plugin.py` | Generational: truncate ancient, summarize middle, preserve recent | No |
+| **`gc_budget`** | `jaato_server/shared/plugins/gc_budget/plugin.py` | **Policy-aware phased collection using InstructionBudget** | **Yes** |
+| `gc_truncate` | `jaato_server/shared/plugins/gc_truncate/plugin.py` | Remove oldest turns, keep recent N | No |
+| `gc_summarize` | `jaato_server/shared/plugins/gc_summarize/plugin.py` | Compress old turns into summary | No |
+| `gc_hybrid` | `jaato_server/shared/plugins/gc_hybrid/plugin.py` | Generational: truncate ancient, summarize middle, preserve recent | No |
 
 **`gc_budget` is the primary GC plugin** — it is the only one that uses the `InstructionBudget`'s `GCPolicy` assignments to make removal decisions, which makes it the most relevant to cache coordination. The simpler plugins (`gc_truncate`, `gc_summarize`, `gc_hybrid`) use turn-based heuristics without consulting GC policies.
 
@@ -477,7 +477,7 @@ class GCRemovalItem:
 
 ### BudgetGCPlugin — Policy-Aware Collection (`gc_budget`)
 
-The `BudgetGCPlugin` (`shared/plugins/gc_budget/plugin.py`) is the primary GC plugin and the most relevant to cache coordination because it makes removal decisions based on the `InstructionBudget`'s `GCPolicy` assignments.
+The `BudgetGCPlugin` (`jaato_server/shared/plugins/gc_budget/plugin.py`) is the primary GC plugin and the most relevant to cache coordination because it makes removal decisions based on the `InstructionBudget`'s `GCPolicy` assignments.
 
 **Phased removal priority:**
 

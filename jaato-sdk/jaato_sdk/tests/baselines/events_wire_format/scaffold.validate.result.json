@@ -1,0 +1,15 @@
+{
+  "type": "scaffold.validate.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "ok": true,
+  "workspace": "",
+  "profile_set": "",
+  "profile": "",
+  "scope": "",
+  "findings": [],
+  "errors": 0,
+  "warnings": 0,
+  "error": "",
+  "server_version": ""
+}

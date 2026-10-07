@@ -1,0 +1,631 @@
+"""Daemon-side fork+exec of the per-session runner subprocess.
+
+Implements the spawn half of §4.6 ("Spawn:") in
+``docs/design/per_session_confined_runner.md``.
+
+The session manager calls :meth:`RunnerSpawner.spawn` AFTER
+``_run_pre_initialize_hooks`` provisions the AppArmor profile and
+BEFORE ``JaatoServer.initialize()`` configures plugins.  By that
+point the kernel has the per-session profile loaded, so the runner's
+``aa_change_profile`` (in :mod:`server.runner.bootstrap`) finds it.
+
+The spawner enforces the §6.1 "fork-inherits-apparmor" risk
+mitigation: it reads ``/proc/self/attr/current`` immediately before
+``os.fork()`` and refuses to spawn if the daemon thread is confined
+to anything other than ``unconfined`` (Phase 5 default; Phase 6 may
+swap in a daemon-side narrow profile that grants
+``change_profile -> jaato-ws-*`` for every loaded session profile,
+in which case this check broadens to "must permit transition to
+jaato-ws-*").
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import socket
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+# Imported at module scope, never in the forked child: an import after
+# fork() in a threaded daemon can block on a lock another thread held.
+from jaato_server.shared.private_tmp import PrivateTmpError, enter_private_tmp
+from jaato_server.shared.privilege_drop import (
+    PrivilegeDropError, RunnerUser, drop_to,
+)
+from jaato_server.server.confinement_id import (
+    confinement_id_from_profile_name, session_tmpdir,
+)
+
+
+from jaato_server.server.confinement.base import is_selinux
+
+logger = logging.getLogger(__name__)
+
+
+_PROC_ATTR_PATH = "/proc/self/attr/current"
+
+
+class DaemonConfinementError(RuntimeError):
+    """Raised when the daemon is confined at the moment of fork.
+
+    Phase 2 task 2.1 removed all daemon-side confinement, so reaching
+    this error means a regression somewhere — almost certainly a
+    re-introduced ``set_apparmor_confinement(...)`` or a
+    ``apparmor_confine`` context manager wrapping fork-spawn-and-confine
+    (see §4.6 daemon apparmor-state constraint).  Loud-fail rather
+    than silently spawning a runner that can't self-confine.
+    """
+
+
+@dataclass
+class SpawnedRunner:
+    """Daemon-side handle for a spawned runner subprocess.
+
+    Owned by the session's :class:`server.core.JaatoServer`; closed
+    via :meth:`server.runner_rpc_client.RunnerRPCClient.close` at session
+    end (which closes the parent socket end, waits for the runner
+    to exit, then SIGTERM/SIGKILL escalates per §4.6 "Death — daemon
+    shutdown").
+
+    ``pool_slot`` (Phase 2) is the :class:`~server.runner_pool.PoolSlot`
+    handle when this runner was served from the pool — ``None`` for
+    cold-spawned runners.  Carried so the session-teardown path can
+    return the slot to the pool after a successful ``session_end``
+    RPC.  Forward-typed as ``Any`` to avoid an import cycle (the pool
+    module imports nothing from this one, but the runtime path
+    imports both).
+    """
+
+    pid: int
+    parent_socket: socket.socket
+    profile_name: str
+    session_id: str
+    pool_slot: "Any" = None  # Optional[server.runner_pool.PoolSlot]
+
+
+#: Exit status of a forked child that could not set up the private ``/tmp``
+#: its profile expects (#1381).  Distinct from the generic pre-exec 127 so
+#: the cause is attributable from the status alone.
+PRIVATE_TMP_EXIT_CODE = 126
+
+
+def _enter_private_tmp_in_child(private_tmp_dir: Optional[str]) -> None:
+    """Enter the private ``/tmp`` in a forked child, or exit (#1381).
+
+    Runs between ``fork()`` and ``exec()``, where raising would land in the
+    generic ``os._exit(127)``.  A private-``/tmp`` failure is named on the
+    child's stderr first and exits with :data:`PRIVATE_TMP_EXIT_CODE`: the
+    runner must not start without the namespace its profile's ``/tmp``
+    grant assumes.  No-op for ``None``.
+    """
+    try:
+        enter_private_tmp(private_tmp_dir)
+    except PrivateTmpError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to start -- private /tmp "
+                f"({private_tmp_dir}) could not be set up: {exc} (#1381)\n"
+            ).encode())
+        finally:
+            os._exit(PRIVATE_TMP_EXIT_CODE)
+
+
+#: Exit status of a forked child that could not drop to its runner user
+#: (#1168).  Distinct from 126 and the generic 127 so the cause is
+#: attributable from the status alone.  A child that was told to drop and
+#: could not must never exec a root runner instead.
+PRIVILEGE_DROP_EXIT_CODE = 125
+
+
+def _drop_privileges_in_child(runner_user: Optional[RunnerUser]) -> None:
+    """Become the session's user in a forked child, or exit (#1168).
+
+    Runs after the cgroup attach and the private ``/tmp`` (both need root:
+    the delegated cgroup subtree is the service user's, and ``unshare`` /
+    ``mount`` need ``CAP_SYS_ADMIN``) and BEFORE ``exec`` — so before
+    ``runner/__main__`` confines itself.  That is Order A: a transition from
+    ``unconfined`` needs no capability, so the confined runner keeps none
+    and cannot become root again.  No-op for ``None``.
+    """
+    if runner_user is None:
+        return
+    try:
+        drop_to(runner_user)
+    except PrivilegeDropError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to start -- could not drop to "
+                f"{runner_user.describe()}: {exc} (#1168)\n"
+            ).encode())
+        finally:
+            os._exit(PRIVILEGE_DROP_EXIT_CODE)
+
+
+#: Where a task names the context its next ``execve`` enters.
+_ATTR_EXEC = "/proc/self/attr/exec"
+
+
+def _set_exec_context_in_child(context: Optional[str]) -> None:
+    """``setexeccon(context)`` in the forked child; ``None`` does nothing."""
+    if not context:
+        return
+    fd = os.open(_ATTR_EXEC, os.O_WRONLY)
+    try:
+        os.write(fd, context.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+#: Exit status of a pool slot that could not enter its SELinux domain
+#: (phase 4).  Distinct from 125-127 so the cause is attributable from
+#: the status alone.
+SELINUX_ENTRY_EXIT_CODE = 124
+
+#: Where a task sets (and reads) its own context.
+_ATTR_CURRENT = "/proc/self/attr/current"
+
+#: Exit status of a pool slot that could not open its session's runner log
+#: (phase 4).  Fatal there, unlike the cold spawn's best-effort redirect:
+#: a slot that kept the template's fds would enter the domain holding the
+#: daemon's own log, which ``jaato_runner_t`` may not write, and the first
+#: flush at bootstrap would fail the session (phase 4 kernel run 2).
+SLOT_LOG_EXIT_CODE = 123
+
+
+def _redirect_output_in_child(log_path: str) -> None:
+    """Point a freshly forked slot's fds 1 and 2 at *log_path*, or exit.
+
+    What a cold spawn's child does before exec (``_exec_runner``), done
+    before the slot confines itself, so the file is opened while it still
+    may.  Bootstrap step 1a then re-points to the same file, and on a
+    reused slot to the next session's.
+    """
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to serve -- pool slot could not "
+                f"open its runner log {log_path}: {exc}\n"
+            ).encode())
+        finally:
+            os._exit(SLOT_LOG_EXIT_CODE)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+
+
+def _enter_selinux_domain_in_child(context: str) -> None:
+    """``setcon(context)`` in a freshly forked pool slot, or exit (phase 4).
+
+    A forked child has one thread, and SELinux refuses ``setcon`` only in a
+    multi-threaded process (phase 0), so this is the one moment a slot can
+    enter the runner's domain without an exec.  Runs after the private
+    ``/tmp`` and the privilege drop, as the cold spawn's exec transition
+    does (Order A: the runner domain holds neither ``sys_admin`` nor
+    ``setuid``).  The write is read back: a slot that is not in *context*
+    must not serve a session, so a failure is named on stderr and exits
+    with :data:`SELINUX_ENTRY_EXIT_CODE`.
+    """
+    try:
+        fd = os.open(_ATTR_CURRENT, os.O_WRONLY)
+        try:
+            os.write(fd, context.encode("utf-8"))
+        finally:
+            os.close(fd)
+        with open(_ATTR_CURRENT, encoding="utf-8") as fh:
+            actual = fh.read().replace("\x00", "").strip()
+        if actual != context:
+            raise OSError(f"kernel reports {actual!r} after the write")
+    except OSError as exc:
+        try:
+            os.write(2, (
+                f"jaato runner: refusing to serve -- pool slot could not "
+                f"enter {context}: {exc} (selinux-backend.md §7.2)\n"
+            ).encode())
+        finally:
+            os._exit(SELINUX_ENTRY_EXIT_CODE)
+
+
+def enter_slot_boundary_in_child(entry: Dict[str, Any]) -> None:
+    """Put a freshly forked pool slot inside its session's boundary (phase 4).
+
+    *entry* is what :meth:`PoolManager.fork_slot_into` sent with the fork
+    request: ``context`` (required), ``log_path``, ``private_tmp`` and
+    ``runner_user``.  The order is the cold spawn's, before any thread
+    starts: the output onto the session's log (so the slot never holds the
+    daemon's), private ``/tmp``, privilege drop, then the domain.  Each
+    step exits the child on failure (123, 126, 125, 124), so the slot never
+    serves outside the boundary it was forked for.
+    """
+    _redirect_output_in_child(entry["log_path"])
+    _enter_private_tmp_in_child(entry.get("private_tmp") or None)
+    _drop_privileges_in_child(RunnerUser.from_dict(entry.get("runner_user")))
+    _enter_selinux_domain_in_child(entry["context"])
+
+
+class RunnerSpawner:
+    """Forks ``python -m server.runner`` once per top-level session.
+
+    Phase 2 design:
+    - One ``RunnerSpawner`` per daemon (instantiated in
+      ``server/__main__.py`` at startup).
+    - One ``SpawnedRunner`` per top-level session.  Subagent sessions
+      sharing the parent's runner per §4.3 default do NOT trigger
+      another spawn — that's enforced at the call site
+      (``SessionManager.create_session``), not here.
+    """
+
+    def __init__(self) -> None:
+        self._python_executable = sys.executable
+
+    def spawn(
+        self,
+        *,
+        profile_name: str,
+        session_id: str,
+        workspace_path: Optional[str],
+        log_path: Optional[str] = None,
+        max_output_chars: Optional[int] = None,
+        tool_timeout_seconds: Optional[float] = None,
+        disable_confine: bool = False,
+        cgroup_attach: Optional[Callable[[], None]] = None,
+        private_tmp_dir: Optional[str] = None,
+        runner_user: Optional[RunnerUser] = None,
+        confinement: Optional[Any] = None,
+    ) -> SpawnedRunner:
+        """Fork+exec a runner; return the daemon-side handle.
+
+        Args:
+            profile_name: AppArmor profile the runner self-confines
+                to.  Must already be loaded in the kernel.  Required
+                unless *disable_confine* is set.
+            session_id: For env propagation + log attribution.
+            workspace_path: Working directory for cli subprocesses
+                spawned inside the runner.
+            log_path: If set, the runner's stdout/stderr are
+                redirected to this file (per plan §5.1).  When
+                ``None`` the runner inherits the daemon's stdout/
+                stderr; the runner module's logging.basicConfig
+                falls back to inherited stderr.
+            max_output_chars: cli output cap (env passthrough).
+            tool_timeout_seconds: cli wall-clock cap (env passthrough).
+            disable_confine: developer escape hatch matching the
+                runner's ``JAATO_RUNNER_DISABLE_CONFINE`` env;
+                spec §5 — NOT a supported deployment.
+            cgroup_attach: Phase 3 §7d — optional zero-arg callable
+                invoked in the forked child between ``fork()`` and
+                ``exec()`` to migrate the runner's pid into the
+                per-session cgroup.  Caller obtains via
+                ``CgroupsManager.make_attach_callback(session_id)``.
+                The runner subprocess is then in the cgroup at
+                exec time; child processes (cli, interactive_shell
+                PTY children) inherit by default per cgroup-v2
+                kernel contract.  ``None`` means no cgroup attach
+                (the runner inherits the daemon's cgroup) — used
+                for IPC sessions and for hosts without cgroup v2.
+            private_tmp_dir: #1381 -- ``<ws>/.tmp`` to bind over ``/tmp``
+                and ``/var/tmp`` in a new mount namespace, in the forked
+                child before ``exec`` (so before ``runner/__main__``
+                confines).  A child that cannot set it up exits with
+                :data:`PRIVATE_TMP_EXIT_CODE` after writing the reason to
+                its stderr, so the runner never starts under a ``/tmp``
+                grant that would reach the host's ``/tmp``.  ``None`` = no
+                private ``/tmp``.
+            runner_user: #1168 -- the account the runner runs as.  The
+                child drops to it after the cgroup attach and the private
+                ``/tmp`` (both need root) and after opening its log, and
+                before ``exec``; a child that cannot drop exits with
+                :data:`PRIVILEGE_DROP_EXIT_CODE`.  ``None`` = keep the
+                daemon's uid.  Resolved and made fork-safe daemon-side
+                (``server.runner_user``); the child does no NSS lookup.
+            confinement: An SELinux ``ConfinementHandle``, or ``None``.
+                The child writes its label to ``/proc/self/attr/exec``
+                last, after the privilege drop, so the ``execve`` lands
+                the runner in its domain (selinux-backend.md §7.1);
+                *profile_name* is then empty.  An AppArmor session
+                passes only *profile_name*, as before.
+
+        Raises:
+            DaemonConfinementError: daemon thread is confined at the
+                moment of fork (§6.1 mitigation tripped).
+            ValueError: ``profile_name`` is empty and confinement
+                isn't disabled.
+            OSError: socketpair / fork / exec failed.
+        """
+        exec_context = confinement.label if is_selinux(confinement) else None
+        if not profile_name and not disable_confine and exec_context is None:
+            raise ValueError(
+                "RunnerSpawner.spawn: profile_name required (set "
+                "disable_confine=True for the developer escape hatch)"
+            )
+
+        self._assert_daemon_unconfined()
+
+        # Phase 5 — session-scoped TMPDIR.  Must exist before fork
+        # because the confined runner's profile won't let it mkdir
+        # outside the /tmp/jaato-{session_id}/** allow rule.
+        # Daemon side runs unconfined so this mkdir succeeds without
+        # confinement-related checks.  ``exist_ok=True`` handles
+        # the rare case of a stale dir from a prior session with the
+        # same id (e.g., session-restore path).
+        tmpdir = self._session_tmpdir(session_id, profile_name, confinement)
+        try:
+            os.makedirs(tmpdir, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "RunnerSpawner.spawn: failed to create session tmpdir %s "
+                "before fork: %s — runner may EACCES on tempfile probe",
+                tmpdir, exc,
+            )
+
+        parent_sock, child_sock = socket.socketpair(
+            socket.AF_UNIX, socket.SOCK_STREAM,
+        )
+
+        env = self._build_env(
+            profile_name=profile_name,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            log_path=log_path,
+            max_output_chars=max_output_chars,
+            tool_timeout_seconds=tool_timeout_seconds,
+            disable_confine=disable_confine,
+            tmpdir=tmpdir,
+            selinux_label=exec_context,
+        )
+
+        pid = os.fork()
+        if pid == 0:
+            # ----- child -----
+            try:
+                # #284/#280: lead our own session BEFORE exec so the
+                # runner — and every subprocess it spawns thereafter
+                # (jdtls, mcp, cli, interactive_shell PTY) — shares a
+                # process group distinct from the daemon's.  The daemon
+                # SIGKILLs that whole group at slot teardown
+                # (RunnerRPCClient._sweep_slot_group), closing the
+                # orphan-on-teardown leak that OOM'd the daemon.  The
+                # new session (like cgroup membership below) survives
+                # exec().
+                os.setsid()
+                # Phase 3 §7d: migrate the forked child's pid into
+                # the per-session cgroup BEFORE exec.  cgroup
+                # membership survives exec(), so the runner — and
+                # every subprocess it spawns thereafter (cli,
+                # interactive_shell PTY, et al.) — inherits the
+                # cgroup placement.  Inheritance is a cgroup-v2
+                # kernel contract; per the §7d audit, no per-spawn
+                # /proc/<pid>/cgroup verification needed (the
+                # integration tests pin the contract).
+                if cgroup_attach is not None:
+                    cgroup_attach()
+                _enter_private_tmp_in_child(private_tmp_dir)
+                self._exec_runner(
+                    child_sock, parent_sock, log_path, env, runner_user,
+                    exec_context)
+            except BaseException:  # noqa: BLE001 — child must never return
+                # Any failure pre-exec lands us here.  os._exit(127) so
+                # the parent sees a non-zero status it can attribute.
+                os._exit(127)
+            # exec replaces the process; reaching here is impossible.
+            os._exit(127)
+
+        # ----- parent -----
+        child_sock.close()
+        logger.info(
+            "RunnerSpawner: spawned pid=%d for session %s (profile=%s, "
+            "cgroup_attach=%s, runs_as=%s)",
+            pid, session_id, profile_name,
+            "yes" if cgroup_attach is not None else "no",
+            runner_user.describe() if runner_user is not None else "daemon uid",
+        )
+        return SpawnedRunner(
+            pid=pid,
+            parent_socket=parent_sock,
+            profile_name=profile_name,
+            session_id=session_id,
+        )
+
+    # ----------------------------- helpers ------------------------------
+
+    def _assert_daemon_unconfined(self) -> None:
+        """Refuse to spawn if the daemon is confined to a per-session
+        AppArmor profile (the §6.1 silent-failure trap).
+
+        Per §4.6 daemon apparmor-state constraint, the daemon must
+        permit the runner's ``aa_change_profile`` transition.  Any
+        per-session ``jaato-ws-*`` profile lacks
+        ``change_profile -> jaato-ws-*`` rules for OTHER sessions, so
+        a daemon thread confined to one session's profile cannot fork
+        a runner that confines to a different session.
+
+        The check is **specifically** for the ``jaato-ws-*`` prefix
+        (the only known silent-failure pattern after Phase 2 task
+        2.1) rather than "must equal unconfined" — kernel-default
+        placeholders like ``kernel\\x00`` are observed on hosts
+        without an apparmor policy, and a future Phase 6 narrow
+        daemon profile may legitimately confine the daemon to a
+        non-``unconfined`` value that DOES grant the transition.
+
+        The runner's own bootstrap step 3
+        (:func:`server.runner.bootstrap.confine_to_profile`) is the
+        load-bearing assertion — ANY post-fork transition failure
+        surfaces there with a clear
+        :class:`ConfinementMismatchError`.  This pre-fork check is
+        defense in depth for the one case we know presents silently.
+        """
+        try:
+            with open(_PROC_ATTR_PATH, "r") as f:
+                current = f.read().rstrip("\n").rstrip("\x00")
+        except OSError:
+            # Non-Linux or apparmor-less host: nothing to check.
+            return
+
+        if current.startswith("jaato-ws-"):
+            raise DaemonConfinementError(
+                f"daemon thread is confined to {current!r} at the moment "
+                f"of RunnerSpawner.spawn; per design §4.6 daemon "
+                f"apparmor-state constraint, the daemon must NOT be "
+                f"confined to a per-session profile so the runner can "
+                f"transition to ANY per-session profile.  Likely cause: "
+                f"a re-introduced daemon-side set_apparmor_confinement / "
+                f"apparmor_confine call.  See Phase 2 task 2.1."
+            )
+
+    def _build_env(
+        self,
+        *,
+        profile_name: str,
+        session_id: str,
+        workspace_path: Optional[str],
+        log_path: Optional[str],
+        max_output_chars: Optional[int],
+        tool_timeout_seconds: Optional[float],
+        disable_confine: bool,
+        tmpdir: Optional[str] = None,
+        selinux_label: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Compose the env dict the runner reads at startup.
+
+        Also sets ``TMPDIR`` to the session-scoped path
+        ``/tmp/jaato-<session_id>`` so the confined runner's
+        :func:`tempfile.gettempdir` probe lands inside the profile's
+        ``/tmp/jaato-{session_id}/**`` allow rule.  Without this, the
+        runner crashes at plugin-import time with
+        ``FileNotFoundError: No usable temporary directory found``
+        because the profile's narrow ``/tmp/`` rules reject the
+        generic write the tempfile sanity-check performs.  See
+        ``project_backlog_runner_apparmor_tmpdir`` memory.
+
+        The directory itself is created in :meth:`spawn` before fork
+        (the confined child can't ``mkdir`` outside its allow list,
+        and the dir must exist when Python first probes it).
+        """
+        env = os.environ.copy()
+        env["JAATO_RUNNER_PROFILE"] = profile_name
+        env["JAATO_RUNNER_SESSION_ID"] = session_id
+        if workspace_path:
+            env["JAATO_RUNNER_WORKSPACE"] = workspace_path
+        if log_path:
+            env["JAATO_RUNNER_LOG_PATH"] = log_path
+        if max_output_chars is not None:
+            env["JAATO_RUNNER_MAX_OUTPUT_CHARS"] = str(max_output_chars)
+        if tool_timeout_seconds is not None:
+            env["JAATO_RUNNER_TOOL_TIMEOUT_SECONDS"] = str(tool_timeout_seconds)
+        if disable_confine:
+            env["JAATO_RUNNER_DISABLE_CONFINE"] = "1"
+        if selinux_label:
+            # Tells runner/__main__ the exec already entered the domain,
+            # so it confirms rather than calling aa_change_profile.
+            env["JAATO_RUNNER_SELINUX_LABEL"] = selinux_label
+        # Phase 5 — session-scoped TMPDIR.  Profile allow rule:
+        # /tmp/jaato-{session_id}/** rwkl.
+        env["TMPDIR"] = tmpdir or self._session_tmpdir(session_id, profile_name)
+        return env
+
+    @staticmethod
+    def _session_tmpdir(
+        session_id: str, profile_name: str = "", confinement: Optional[Any] = None,
+    ) -> str:
+        """Return the session-scoped tmpdir path used by ``TMPDIR``.
+
+        Keyed on the BOUNDARY, not on the session alone (#1171).  The
+        AppArmor profile is rendered once per confinement id and grants
+        ``/tmp/jaato-<confinement_id>/**``; this path used to be
+        ``/tmp/jaato-<session_id>``, so the two agreed only when the
+        profile happened to be named after the session — which #1037
+        made false for every WS session.  The session keeps a directory
+        of its own, nested inside the confinement's.
+
+        *profile_name* is the name the runner self-confines to, which
+        the caller already has; the id is read back out of it, so
+        nothing new is threaded through.  An empty name is the
+        unconfined opt-out and yields the pre-#1171 path unchanged.
+
+        Static so :meth:`spawn` can mkdir before fork and tests can
+        pin the convention without instantiating a spawner.
+        """
+        if confinement is not None:
+            return session_tmpdir(session_id, confinement.confinement_id)
+        return session_tmpdir(
+            session_id, confinement_id_from_profile_name(profile_name),
+        )
+
+    def _exec_runner(
+        self,
+        child_sock: socket.socket,
+        parent_sock: socket.socket,
+        log_path: Optional[str],
+        env: Dict[str, str],
+        runner_user: Optional[RunnerUser] = None,
+        exec_context: Optional[str] = None,
+    ) -> None:
+        """Child-side: dup socket → fd 3, optionally redirect 1+2 to log,
+        close inherited fds, drop to *runner_user* (#1168), exec the runner.
+
+        The log is opened BEFORE the drop so the runner never loses it to a
+        directory the target cannot enter (the daemon hands a fresh log to
+        the target beforehand, ``runner_user.prepare_runner_owned_paths``;
+        an older root-owned one still opens here, as root).
+
+        Never returns — exec replaces the process.  Any pre-exec
+        failure raises and the caller (``spawn``'s child branch)
+        ``os._exit(127)``s.
+        """
+        # Close the parent end first so an exec failure doesn't leak it.
+        parent_sock.close()
+
+        # dup the child socket end onto fd 3.  ``os.dup2`` clears
+        # CLOEXEC on the target, so the runner inherits fd 3 across
+        # exec.  ``set_inheritable`` is belt-and-braces.
+        os.dup2(child_sock.fileno(), 3)
+        os.set_inheritable(3, True)
+        # Don't close the original fd via the socket object — we've
+        # already moved it to fd 3 and the original may be > 3.
+
+        # Optional fd 1 / fd 2 redirection (per plan §5.1).
+        if log_path:
+            try:
+                Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+                log_fd = os.open(
+                    log_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o600,
+                )
+                os.dup2(log_fd, 1)
+                os.dup2(log_fd, 2)
+                if log_fd > 2:
+                    os.close(log_fd)
+            except OSError:
+                # Logging redirect is best-effort; fall through to
+                # inherited stderr/stdout.  The runner's log says
+                # which mode it's in via _setup_logging.
+                pass
+
+        # Close every other inherited fd (§6.2 fd-inheritance risk).
+        # The runner only needs fd 0 (stdin, normally /dev/null), 1,
+        # 2, and 3.  ``os.closerange`` is fast and stops at the soft
+        # rlimit, which is fine.
+        try:
+            soft_limit = os.sysconf("SC_OPEN_MAX")
+        except (AttributeError, OSError, ValueError):
+            soft_limit = 1024
+        os.closerange(4, max(int(soft_limit), 4))
+
+        # #1168: last thing before exec, after every root-only step above.
+        _drop_privileges_in_child(runner_user)
+        # SELinux (design §7.1): the exec below lands in the runner's
+        # domain.  After the drop, which changes the uid and not the
+        # context; a write that fails raises and the child exits 127,
+        # so no runner starts outside its domain.
+        _set_exec_context_in_child(exec_context)
+
+        os.execvpe(
+            self._python_executable,
+            [self._python_executable, "-m", "jaato_server.server.runner"],
+            env,
+        )

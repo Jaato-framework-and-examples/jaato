@@ -148,7 +148,7 @@ def test_the_server_and_the_sdk_share_one_contextvar():
     detectable, so it is asserted on the objects rather than inferred
     from behaviour.
     """
-    from shared import session_context
+    from jaato_server.shared import session_context
     from jaato_sdk import session_env
 
     assert session_context.get_session_env is session_env.get_session_env
@@ -162,8 +162,8 @@ def test_a_daemon_side_write_is_visible_to_an_sdk_side_read(monkeypatch):
     """The behavioural half of the identity check, in the direction that
     actually occurs: ``_with_session_env`` writes through the server
     module, an out-of-tree plugin reads through the SDK."""
-    from shared.session_context import set_session_env as server_set
-    from shared.session_context import clear_session_env as server_clear
+    from jaato_server.shared.session_context import set_session_env as server_set
+    from jaato_server.shared.session_context import clear_session_env as server_clear
     from jaato_sdk.session_env import get_session_env as plugin_read
 
     monkeypatch.setenv("GRAPH_CLIENT_SECRET", "wrong-tenant")
@@ -177,12 +177,12 @@ def test_a_daemon_side_write_is_visible_to_an_sdk_side_read(monkeypatch):
 
 @pytest.mark.skipif(not _HAS_SERVER, reason="jaato-server not installed")
 def test_in_tree_callers_keep_their_import_path():
-    """Fourteen plugin packages do ``from shared.session_context import
+    """Fourteen plugin packages do ``from jaato_server.shared.session_context import
     get_session_env``.  The move to the SDK is a re-export, not a
     relocation — an in-tree import that breaks would be a migration
     nobody asked for."""
-    from shared.session_context import get_session_env  # noqa: F401
-    from shared.session_context import get_current_session  # noqa: F401
+    from jaato_server.shared.session_context import get_session_env  # noqa: F401
+    from jaato_server.shared.session_context import get_current_session  # noqa: F401
 
 
 def test_get_current_session_is_deliberately_not_exported():

@@ -45,6 +45,34 @@ export class ConnectionClosedError extends Error {
 }
 
 /**
+ * The connection closed while a request was waiting for its answer.
+ *
+ * A request/response call (``stageFiles``, ``fetchWorkspaceFile``) whose
+ * connection drops cannot be answered by the next connection: the daemon
+ * treats a reconnect as a new client, and the request died with the old
+ * one.  Rejecting at once, with the close code, is what separates "the
+ * daemon refused this" from "the daemon is slow".  ``code`` 1009 is the
+ * daemon refusing a message over its ``max_message_size``.
+ */
+export class RequestInterruptedError extends ConnectionError {
+  /** WebSocket close code of the connection that carried the request. */
+  readonly code: number;
+  /** Close reason, when the peer sent one. */
+  readonly reason: string;
+
+  constructor(label: string, code: number, reason: string) {
+    const why =
+      code === 1009
+        ? "the daemon refused a message larger than its limit (1009)"
+        : `connection closed (code ${code}${reason ? `: ${reason}` : ""})`;
+    super(`${label}: ${why}; the request did not complete`);
+    this.name = "RequestInterruptedError";
+    this.code = code;
+    this.reason = reason;
+  }
+}
+
+/**
  * The server's wire-protocol version is incompatible with this SDK.
  *
  * Non-retryable — an old (or wrong-major) daemon will not become
@@ -179,5 +207,43 @@ export class RelativePathAcrossBoundaryError extends Error {
     this.name = "RelativePathAcrossBoundaryError";
     this.field = field;
     this.value = value;
+  }
+}
+
+/**
+ * A correlated request the daemon refused before handling it (#1475).
+ *
+ * Thrown by a correlated call (``listReferenceClaims``,
+ * ``promoteReferenceClaim``, the memory verbs, ...) when the answer echoing
+ * its ``request_id`` is an ``error`` event rather than the request's own
+ * result -- e.g. the IPC gate refusing a request that needs an attached
+ * session.  ``category`` is the machine-readable reason (``no_session``).
+ */
+export class RequestRefusedError extends Error {
+  readonly method: string;
+  readonly error: string;
+  readonly errorType: string;
+  readonly requestId: string;
+  readonly details: Record<string, unknown>;
+  readonly category: string;
+
+  constructor(
+    method: string,
+    error: string,
+    options: {
+      errorType?: string;
+      requestId?: string;
+      details?: Record<string, unknown>;
+    } = {},
+  ) {
+    super(`${method}: refused by the daemon: ${error}`);
+    this.name = "RequestRefusedError";
+    this.method = method;
+    this.error = error;
+    this.errorType = options.errorType ?? "";
+    this.requestId = options.requestId ?? "";
+    this.details = options.details ?? {};
+    const category = this.details.category;
+    this.category = typeof category === "string" ? category : "";
   }
 }

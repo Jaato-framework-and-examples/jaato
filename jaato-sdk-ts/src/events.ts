@@ -24,6 +24,7 @@ export type JaatoEvents =
   | SlotSettledEvent
   | ToolCallStartEvent
   | ToolCallEndEvent
+  | ToolResultEnrichedEvent
   | ToolOutputEvent
   | PermissionRequestedEvent
   | PermissionInputModeEvent
@@ -60,6 +61,10 @@ export type JaatoEvents =
   | GCEvent
   | SessionInfoEvent
   | MemoryListEvent
+  | MemoryGetResultEvent
+  | MemoryUpdateResultEvent
+  | MemoryDeleteResultEvent
+  | DiagnosticsResultEvent
   | SandboxPathsEvent
   | ServiceListEvent
   | SessionDescriptionUpdatedEvent
@@ -72,6 +77,11 @@ export type JaatoEvents =
   | EventsSubscribedEvent
   | CommandRequest
   | GetInstructionBudgetRequest
+  | MemoryListRequest
+  | MemoryGetRequest
+  | MemoryUpdateRequest
+  | MemoryDeleteRequest
+  | DiagnosticsRequest
   | CommandListRequest
   | CommandListEvent
   | CommandListRefreshEvent
@@ -83,24 +93,52 @@ export type JaatoEvents =
   | ToolExecuteResultEvent
   | HistoryRequest
   | HistoryEvent
+  | HistoryPageRequest
+  | HistoryPageEvent
   | ClientConfigRequest
   | MidTurnPromptQueuedEvent
   | MidTurnPromptInjectedEvent
   | BudgetRungFiredEvent
+  | IncidentEvent
   | MidTurnInterruptEvent
   | InterruptedTurnRecoveredEvent
   | WorkspaceListRequest
   | WorkspaceListEvent
   | WorkspaceCreateRequest
   | WorkspaceCreatedEvent
+  | WorkspaceDeleteRequest
+  | WorkspaceDeletedEvent
+  | WorkspaceInspectRequest
+  | WorkspaceInspectEvent
+  | WorkspaceCloneRequest
+  | WorkspaceCloneProgressEvent
   | WorkspaceSelectRequest
   | ConfigStatusEvent
   | ConfigUpdateRequest
   | ConfigUpdatedEvent
   | WorkspaceFilesChangedEvent
   | WorkspaceFilesSnapshotEvent
+  | WorkspaceIgnoreResultEvent
+  | ReferenceCurationResultEvent
+  | ReferenceClaimsEvent
+  | ReferenceClaimsRequest
+  | ReferenceCurationRequest
+  | ReferenceCatalogEvent
+  | ReferenceCatalogRequest
+  | ReferenceLinksUpdateRequest
+  | ReferenceLinksUpdateResultEvent
+  | ReferenceBundleCreateRequest
+  | ReferenceBundleCreateResultEvent
+  | ScaffoldExplainEvent
+  | SessionMessageResultEvent
+  | ScaffoldIntegrationEvent
+  | ScaffoldValidateEvent
   | StageFilesRequest
   | StageFilesEvent
+  | WorkspaceFileFetchRequest
+  | WorkspaceFileContentEvent
+  | WorkspaceFilesSearchRequest
+  | WorkspaceFilesSearchResultEvent
   | PeerHeartbeatEvent
   | PeerSpawnRequestEvent
   | PeerSpawnAcceptedEvent
@@ -126,7 +164,19 @@ export type JaatoEvents =
   | PermissionClearRequest
   | PermissionSetDefaultRequest
   | PermissionPolicySnapshotRequest
-  | PermissionPolicySnapshotEvent;
+  | PermissionPolicySnapshotEvent
+  | TicketBindRequest
+  | TicketBindResultEvent
+  | TicketRevokeRequest
+  | TicketRevokeResultEvent
+  | SecretResolveRequest
+  | SecretResolveResultEvent
+  | SecretReloadRequest
+  | SecretReloadResultEvent
+  | WorkspaceAppWriteRequest
+  | WorkspaceAppWriteResultEvent
+  | PoolStatusRequest
+  | PoolStatusEvent;
 /**
  * All event types in the protocol.
  */
@@ -144,6 +194,7 @@ export type EventType =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -170,6 +221,7 @@ export type EventType =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -182,6 +234,15 @@ export type EventType =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -198,6 +259,8 @@ export type EventType =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -210,14 +273,41 @@ export type EventType =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -234,6 +324,16 @@ export type EventType =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -266,6 +366,7 @@ export type EventType1 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -292,6 +393,7 @@ export type EventType1 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -304,6 +406,15 @@ export type EventType1 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -320,6 +431,8 @@ export type EventType1 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -332,14 +445,41 @@ export type EventType1 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -356,6 +496,16 @@ export type EventType1 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -393,6 +543,7 @@ export type EventType2 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -419,6 +570,7 @@ export type EventType2 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -431,6 +583,15 @@ export type EventType2 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -447,6 +608,8 @@ export type EventType2 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -459,14 +622,41 @@ export type EventType2 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -483,6 +673,16 @@ export type EventType2 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -518,6 +718,7 @@ export type EventType3 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -544,6 +745,7 @@ export type EventType3 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -556,6 +758,15 @@ export type EventType3 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -572,6 +783,8 @@ export type EventType3 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -584,14 +797,41 @@ export type EventType3 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -608,6 +848,16 @@ export type EventType3 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -642,6 +892,7 @@ export type EventType4 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -668,6 +919,7 @@ export type EventType4 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -680,6 +932,15 @@ export type EventType4 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -696,6 +957,8 @@ export type EventType4 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -708,14 +971,41 @@ export type EventType4 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -732,6 +1022,16 @@ export type EventType4 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -774,6 +1074,7 @@ export type EventType5 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -800,6 +1101,7 @@ export type EventType5 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -812,6 +1114,15 @@ export type EventType5 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -828,6 +1139,8 @@ export type EventType5 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -840,14 +1153,41 @@ export type EventType5 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -864,6 +1204,16 @@ export type EventType5 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -903,6 +1253,7 @@ export type EventType6 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -929,6 +1280,7 @@ export type EventType6 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -941,6 +1293,15 @@ export type EventType6 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -957,6 +1318,8 @@ export type EventType6 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -969,14 +1332,41 @@ export type EventType6 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -993,6 +1383,16 @@ export type EventType6 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1031,6 +1431,7 @@ export type EventType7 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1057,6 +1458,7 @@ export type EventType7 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1069,6 +1471,15 @@ export type EventType7 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1085,6 +1496,8 @@ export type EventType7 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1097,14 +1510,41 @@ export type EventType7 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1121,6 +1561,16 @@ export type EventType7 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1153,6 +1603,7 @@ export type EventType8 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1179,6 +1630,7 @@ export type EventType8 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1191,6 +1643,15 @@ export type EventType8 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1207,6 +1668,8 @@ export type EventType8 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1219,14 +1682,41 @@ export type EventType8 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1243,6 +1733,16 @@ export type EventType8 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1279,6 +1779,7 @@ export type EventType9 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1305,6 +1806,7 @@ export type EventType9 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1317,6 +1819,15 @@ export type EventType9 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1333,6 +1844,8 @@ export type EventType9 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1345,14 +1858,41 @@ export type EventType9 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1369,6 +1909,16 @@ export type EventType9 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1386,6 +1936,7 @@ export type SessionId9 = string;
 export type AgentId7 = string;
 export type ToolName = string;
 export type CallId = string | null;
+export type ToolClass = string | null;
 /**
  * All event types in the protocol.
  */
@@ -1403,6 +1954,7 @@ export type EventType10 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1429,6 +1981,7 @@ export type EventType10 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1441,6 +1994,15 @@ export type EventType10 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1457,6 +2019,8 @@ export type EventType10 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1469,14 +2033,41 @@ export type EventType10 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1493,6 +2084,16 @@ export type EventType10 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1519,6 +2120,9 @@ export type Backgrounded = boolean;
 export type ContinuationId = string | null;
 export type ShowOutput = boolean | null;
 export type ShowPopup = boolean | null;
+export type Diff = string | null;
+export type DiffTruncated = boolean | null;
+export type Path = string | null;
 /**
  * All event types in the protocol.
  */
@@ -1536,6 +2140,7 @@ export type EventType11 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1562,6 +2167,7 @@ export type EventType11 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1574,6 +2180,15 @@ export type EventType11 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1590,6 +2205,8 @@ export type EventType11 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1602,14 +2219,41 @@ export type EventType11 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1626,6 +2270,16 @@ export type EventType11 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1641,13 +2295,10 @@ export type EventType11 =
 export type Timestamp11 = string;
 export type SessionId11 = string;
 export type AgentId9 = string;
-export type CallId2 = string;
-export type Chunk = string;
-export type StreamId = string;
-export type Sequence = number | null;
-export type MimeType = string | null;
-export type DataB64 = string | null;
-export type Final = boolean;
+export type CallId2 = string | null;
+export type ToolName2 = string;
+export type Plugin = string;
+export type Kind = string;
 /**
  * All event types in the protocol.
  */
@@ -1665,6 +2316,7 @@ export type EventType12 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1691,6 +2343,7 @@ export type EventType12 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1703,6 +2356,15 @@ export type EventType12 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1719,6 +2381,8 @@ export type EventType12 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1731,14 +2395,41 @@ export type EventType12 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1755,6 +2446,16 @@ export type EventType12 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1770,15 +2471,16 @@ export type EventType12 =
 export type Timestamp12 = string;
 export type SessionId12 = string;
 export type AgentId10 = string;
-export type RequestId1 = string;
-export type ToolName2 = string;
-export type ResponseOptions = {
-  [k: string]: string;
-}[];
-export type PromptLines = string[] | null;
-export type FormatHint = string | null;
-export type Warnings = string | null;
-export type WarningLevel = string | null;
+export type CallId3 = string;
+export type Chunk = string;
+export type StreamId = string;
+export type Sequence = number | null;
+export type MimeType = string | null;
+export type DataB64 = string | null;
+export type Final = boolean;
+export type GeneratedBy = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -1796,6 +2498,7 @@ export type EventType13 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1822,6 +2525,7 @@ export type EventType13 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1834,6 +2538,15 @@ export type EventType13 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1850,6 +2563,8 @@ export type EventType13 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1862,14 +2577,41 @@ export type EventType13 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1886,6 +2628,16 @@ export type EventType13 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -1901,18 +2653,16 @@ export type EventType13 =
 export type Timestamp13 = string;
 export type SessionId13 = string;
 export type AgentId11 = string;
-export type RequestId2 = string;
+export type RequestId1 = string;
 export type ToolName3 = string;
-export type CallId3 = string | null;
-export type ResponseOptions1 = {
+export type ResponseOptions = {
   [k: string]: string;
 }[];
-export type ToolArgs2 = {
-  [k: string]: unknown;
-} | null;
-export type EditableMetadata = {
-  [k: string]: unknown;
-} | null;
+export type PromptLines = string[] | null;
+export type FormatHint = string | null;
+export type Warnings = string | null;
+export type WarningLevel = string | null;
+export type ToolClass1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -1930,6 +2680,7 @@ export type EventType14 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -1956,6 +2707,7 @@ export type EventType14 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1968,6 +2720,15 @@ export type EventType14 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1984,6 +2745,8 @@ export type EventType14 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -1996,14 +2759,41 @@ export type EventType14 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2020,6 +2810,16 @@ export type EventType14 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2035,13 +2835,18 @@ export type EventType14 =
 export type Timestamp14 = string;
 export type SessionId14 = string;
 export type AgentId12 = string;
-export type RequestId3 = string;
+export type RequestId2 = string;
 export type ToolName4 = string;
-export type Granted = boolean;
-export type Method = string;
-export type Comment = string;
-export type UserId = string | null;
-export type Approver = string | null;
+export type CallId4 = string | null;
+export type ResponseOptions1 = {
+  [k: string]: string;
+}[];
+export type ToolArgs2 = {
+  [k: string]: unknown;
+} | null;
+export type EditableMetadata = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -2059,6 +2864,7 @@ export type EventType15 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2085,6 +2891,7 @@ export type EventType15 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2097,6 +2904,15 @@ export type EventType15 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2113,6 +2929,8 @@ export type EventType15 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2125,14 +2943,41 @@ export type EventType15 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2149,6 +2994,16 @@ export type EventType15 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2163,8 +3018,14 @@ export type EventType15 =
   | "gates.snapshot";
 export type Timestamp15 = string;
 export type SessionId15 = string;
-export type EffectiveDefault = string;
-export type SuspensionScope = string | null;
+export type AgentId13 = string;
+export type RequestId3 = string;
+export type ToolName5 = string;
+export type Granted = boolean;
+export type Method = string;
+export type Comment = string;
+export type UserId = string | null;
+export type Approver = string | null;
 /**
  * All event types in the protocol.
  */
@@ -2182,6 +3043,7 @@ export type EventType16 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2208,6 +3070,7 @@ export type EventType16 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2220,6 +3083,15 @@ export type EventType16 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2236,6 +3108,8 @@ export type EventType16 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2248,14 +3122,41 @@ export type EventType16 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2272,6 +3173,16 @@ export type EventType16 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2286,11 +3197,9 @@ export type EventType16 =
   | "gates.snapshot";
 export type Timestamp16 = string;
 export type SessionId16 = string;
-export type AgentId13 = string;
-export type RequestId4 = string;
-export type ToolName5 = string;
-export type ContextLines = string[];
-export type TotalQuestions = number;
+export type EffectiveDefault = string;
+export type SuspensionScope = string | null;
+export type AutoAllowHousekeeping = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -2308,6 +3217,7 @@ export type EventType17 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2334,6 +3244,7 @@ export type EventType17 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2346,6 +3257,15 @@ export type EventType17 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2362,6 +3282,8 @@ export type EventType17 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2374,14 +3296,41 @@ export type EventType17 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2398,6 +3347,16 @@ export type EventType17 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2413,10 +3372,10 @@ export type EventType17 =
 export type Timestamp17 = string;
 export type SessionId17 = string;
 export type AgentId14 = string;
-export type RequestId5 = string;
+export type RequestId4 = string;
 export type ToolName6 = string;
-export type QuestionIndex = number;
-export type TotalQuestions1 = number;
+export type ContextLines = string[];
+export type TotalQuestions = number;
 /**
  * All event types in the protocol.
  */
@@ -2434,6 +3393,7 @@ export type EventType18 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2460,6 +3420,7 @@ export type EventType18 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2472,6 +3433,15 @@ export type EventType18 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2488,6 +3458,8 @@ export type EventType18 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2500,14 +3472,41 @@ export type EventType18 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2524,6 +3523,16 @@ export type EventType18 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2539,16 +3548,10 @@ export type EventType18 =
 export type Timestamp18 = string;
 export type SessionId18 = string;
 export type AgentId15 = string;
-export type RequestId6 = string;
-export type QuestionIndex1 = number;
-export type TotalQuestions2 = number;
-export type QuestionType = string;
-export type QuestionText = string;
-export type Options =
-  | {
-      [k: string]: string;
-    }[]
-  | null;
+export type RequestId5 = string;
+export type ToolName7 = string;
+export type QuestionIndex = number;
+export type TotalQuestions1 = number;
 /**
  * All event types in the protocol.
  */
@@ -2566,6 +3569,7 @@ export type EventType19 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2592,6 +3596,7 @@ export type EventType19 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2604,6 +3609,15 @@ export type EventType19 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2620,6 +3634,8 @@ export type EventType19 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2632,14 +3648,41 @@ export type EventType19 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2656,6 +3699,16 @@ export type EventType19 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2671,9 +3724,16 @@ export type EventType19 =
 export type Timestamp19 = string;
 export type SessionId19 = string;
 export type AgentId16 = string;
-export type RequestId7 = string;
-export type ToolName7 = string;
-export type QaPairs = string[][];
+export type RequestId6 = string;
+export type QuestionIndex1 = number;
+export type TotalQuestions2 = number;
+export type QuestionType = string;
+export type QuestionText = string;
+export type Options =
+  | {
+      [k: string]: string;
+    }[]
+  | null;
 /**
  * All event types in the protocol.
  */
@@ -2691,6 +3751,7 @@ export type EventType20 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2717,6 +3778,7 @@ export type EventType20 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2729,6 +3791,15 @@ export type EventType20 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2745,6 +3816,8 @@ export type EventType20 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2757,14 +3830,41 @@ export type EventType20 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2781,6 +3881,16 @@ export type EventType20 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2796,13 +3906,9 @@ export type EventType20 =
 export type Timestamp20 = string;
 export type SessionId20 = string;
 export type AgentId17 = string;
-export type RequestId8 = string;
+export type RequestId7 = string;
 export type ToolName8 = string;
-export type Context = string;
-export type Questions = {
-  [k: string]: unknown;
-}[];
-export type BatchOnly = boolean;
+export type QaPairs = string[][];
 /**
  * All event types in the protocol.
  */
@@ -2820,6 +3926,7 @@ export type EventType21 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2846,6 +3953,7 @@ export type EventType21 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2858,6 +3966,15 @@ export type EventType21 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2874,6 +3991,8 @@ export type EventType21 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -2886,14 +4005,41 @@ export type EventType21 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2910,6 +4056,16 @@ export type EventType21 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -2924,9 +4080,14 @@ export type EventType21 =
   | "gates.snapshot";
 export type Timestamp21 = string;
 export type SessionId21 = string;
-export type RequestId9 = string;
-export type Answers = string[];
-export type Cancelled = boolean;
+export type AgentId18 = string;
+export type RequestId8 = string;
+export type ToolName9 = string;
+export type Context = string;
+export type Questions = {
+  [k: string]: unknown;
+}[];
+export type BatchOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -2944,6 +4105,7 @@ export type EventType22 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -2970,6 +4132,7 @@ export type EventType22 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2982,6 +4145,15 @@ export type EventType22 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2998,6 +4170,8 @@ export type EventType22 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3010,14 +4184,41 @@ export type EventType22 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3034,6 +4235,16 @@ export type EventType22 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3048,10 +4259,9 @@ export type EventType22 =
   | "gates.snapshot";
 export type Timestamp22 = string;
 export type SessionId22 = string;
-export type AgentId18 = string;
-export type RequestId10 = string;
-export type ToolName9 = string;
-export type PromptLines1 = string[];
+export type RequestId9 = string;
+export type Answers = string[];
+export type Cancelled = boolean;
 /**
  * All event types in the protocol.
  */
@@ -3069,6 +4279,7 @@ export type EventType23 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3095,6 +4306,7 @@ export type EventType23 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3107,6 +4319,15 @@ export type EventType23 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3123,6 +4344,8 @@ export type EventType23 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3135,14 +4358,41 @@ export type EventType23 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3159,6 +4409,16 @@ export type EventType23 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3174,9 +4434,9 @@ export type EventType23 =
 export type Timestamp23 = string;
 export type SessionId23 = string;
 export type AgentId19 = string;
-export type RequestId11 = string;
+export type RequestId10 = string;
 export type ToolName10 = string;
-export type SelectedIds = string[];
+export type PromptLines1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -3194,6 +4454,7 @@ export type EventType24 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3220,6 +4481,7 @@ export type EventType24 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3232,6 +4494,15 @@ export type EventType24 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3248,6 +4519,8 @@ export type EventType24 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3260,14 +4533,41 @@ export type EventType24 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3284,6 +4584,16 @@ export type EventType24 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3298,8 +4608,10 @@ export type EventType24 =
   | "gates.snapshot";
 export type Timestamp24 = string;
 export type SessionId24 = string;
-export type RequestId12 = string;
-export type Response = string;
+export type AgentId20 = string;
+export type RequestId11 = string;
+export type ToolName11 = string;
+export type SelectedIds = string[];
 /**
  * All event types in the protocol.
  */
@@ -3317,6 +4629,7 @@ export type EventType25 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3343,6 +4656,7 @@ export type EventType25 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3355,6 +4669,15 @@ export type EventType25 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3371,6 +4694,8 @@ export type EventType25 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3383,14 +4708,41 @@ export type EventType25 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3407,6 +4759,16 @@ export type EventType25 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3421,13 +4783,8 @@ export type EventType25 =
   | "gates.snapshot";
 export type Timestamp25 = string;
 export type SessionId25 = string;
-export type RequestId13 = string;
-export type SessionWorkspace = string;
-export type ClientWorkspace = string;
-export type ResponseOptions2 = {
-  [k: string]: string;
-}[];
-export type PromptLines2 = string[];
+export type RequestId12 = string;
+export type Response = string;
 /**
  * All event types in the protocol.
  */
@@ -3445,6 +4802,7 @@ export type EventType26 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3471,6 +4829,7 @@ export type EventType26 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3483,6 +4842,15 @@ export type EventType26 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3499,6 +4867,8 @@ export type EventType26 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3511,14 +4881,41 @@ export type EventType26 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3535,6 +4932,16 @@ export type EventType26 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3549,9 +4956,13 @@ export type EventType26 =
   | "gates.snapshot";
 export type Timestamp26 = string;
 export type SessionId26 = string;
-export type RequestId14 = string;
-export type Action = string;
-export type NewSessionId = string | null;
+export type RequestId13 = string;
+export type SessionWorkspace = string;
+export type ClientWorkspace = string;
+export type ResponseOptions2 = {
+  [k: string]: string;
+}[];
+export type PromptLines2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -3569,6 +4980,7 @@ export type EventType27 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3595,6 +5007,7 @@ export type EventType27 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3607,6 +5020,15 @@ export type EventType27 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3623,6 +5045,8 @@ export type EventType27 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3635,14 +5059,41 @@ export type EventType27 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3659,6 +5110,16 @@ export type EventType27 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3673,8 +5134,9 @@ export type EventType27 =
   | "gates.snapshot";
 export type Timestamp27 = string;
 export type SessionId27 = string;
-export type RequestId15 = string;
-export type Response1 = string;
+export type RequestId14 = string;
+export type Action = string;
+export type NewSessionId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -3692,6 +5154,7 @@ export type EventType28 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3718,6 +5181,7 @@ export type EventType28 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3730,6 +5194,15 @@ export type EventType28 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3746,6 +5219,8 @@ export type EventType28 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3758,14 +5233,41 @@ export type EventType28 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3782,6 +5284,16 @@ export type EventType28 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3796,16 +5308,8 @@ export type EventType28 =
   | "gates.snapshot";
 export type Timestamp28 = string;
 export type SessionId28 = string;
-export type RequestId16 = string;
-export type ProviderName = string;
-export type ProviderDisplayName = string;
-export type AvailableModels = {
-  [k: string]: string;
-}[];
-export type HasActiveSession = boolean;
-export type CurrentProvider = string;
-export type CurrentModel = string;
-export type WorkspacePath = string;
+export type RequestId15 = string;
+export type Response1 = string;
 /**
  * All event types in the protocol.
  */
@@ -3823,6 +5327,7 @@ export type EventType29 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3849,6 +5354,7 @@ export type EventType29 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3861,6 +5367,15 @@ export type EventType29 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3877,6 +5392,8 @@ export type EventType29 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -3889,14 +5406,41 @@ export type EventType29 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3913,6 +5457,16 @@ export type EventType29 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -3927,10 +5481,16 @@ export type EventType29 =
   | "gates.snapshot";
 export type Timestamp29 = string;
 export type SessionId29 = string;
-export type RequestId17 = string;
-export type Connect = boolean;
-export type ModelName = string;
-export type PersistEnv = boolean;
+export type RequestId16 = string;
+export type ProviderName = string;
+export type ProviderDisplayName = string;
+export type AvailableModels = {
+  [k: string]: string;
+}[];
+export type HasActiveSession = boolean;
+export type CurrentProvider = string;
+export type CurrentModel = string;
+export type WorkspacePath = string;
 /**
  * All event types in the protocol.
  */
@@ -3948,6 +5508,7 @@ export type EventType30 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -3974,6 +5535,7 @@ export type EventType30 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3986,6 +5548,15 @@ export type EventType30 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4002,6 +5573,8 @@ export type EventType30 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4014,14 +5587,41 @@ export type EventType30 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4038,6 +5638,16 @@ export type EventType30 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4052,11 +5662,10 @@ export type EventType30 =
   | "gates.snapshot";
 export type Timestamp30 = string;
 export type SessionId30 = string;
-export type AgentId20 = string;
-export type PlanName = string;
-export type Steps = {
-  [k: string]: unknown;
-}[];
+export type RequestId17 = string;
+export type Connect = boolean;
+export type ModelName = string;
+export type PersistEnv = boolean;
 /**
  * All event types in the protocol.
  */
@@ -4074,6 +5683,7 @@ export type EventType31 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -4100,6 +5710,7 @@ export type EventType31 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4112,6 +5723,15 @@ export type EventType31 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4128,6 +5748,8 @@ export type EventType31 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4140,14 +5762,41 @@ export type EventType31 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4164,6 +5813,16 @@ export type EventType31 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4179,6 +5838,182 @@ export type EventType31 =
 export type Timestamp31 = string;
 export type SessionId31 = string;
 export type AgentId21 = string;
+export type PlanName = string;
+export type Steps = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType32 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp32 = string;
+export type SessionId32 = string;
+export type AgentId22 = string;
 export type StepId = string;
 export type Sequence1 = number;
 export type Content = string;
@@ -4201,128 +6036,6 @@ export type ReceivedOutputs = {
 /**
  * All event types in the protocol.
  */
-export type EventType32 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp32 = string;
-export type SessionId32 = string;
-export type AgentId22 = string;
-/**
- * All event types in the protocol.
- */
 export type EventType33 =
   | "connected"
   | "disconnected"
@@ -4337,6 +6050,7 @@ export type EventType33 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -4363,6 +6077,7 @@ export type EventType33 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4375,6 +6090,15 @@ export type EventType33 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4391,6 +6115,8 @@ export type EventType33 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4403,14 +6129,41 @@ export type EventType33 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4427,6 +6180,16 @@ export type EventType33 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4442,23 +6205,6 @@ export type EventType33 =
 export type Timestamp33 = string;
 export type SessionId33 = string;
 export type AgentId23 = string;
-export type PromptTokens = number;
-export type OutputTokens = number;
-export type TotalTokens = number;
-export type CacheReadTokens = number | null;
-export type CacheCreationTokens = number | null;
-export type ReasoningTokens = number | null;
-export type ThinkingTokens = number | null;
-export type CostUsd = number | null;
-export type SpendTotalTokens = number | null;
-export type SpendPromptTokens = number | null;
-export type SpendOutputTokens = number | null;
-export type SpendCacheReadTokens = number | null;
-export type SpendCacheCreationTokens = number | null;
-export type ContextLimit = number;
-export type PercentUsed = number;
-export type TokensRemaining = number;
-export type Turns = number;
 /**
  * All event types in the protocol.
  */
@@ -4476,6 +6222,7 @@ export type EventType34 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -4502,6 +6249,7 @@ export type EventType34 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4514,6 +6262,15 @@ export type EventType34 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4530,6 +6287,8 @@ export type EventType34 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4542,14 +6301,41 @@ export type EventType34 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4566,6 +6352,16 @@ export type EventType34 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4581,10 +6377,25 @@ export type EventType34 =
 export type Timestamp34 = string;
 export type SessionId34 = string;
 export type AgentId24 = string;
-export type Threshold = number | null;
-export type Strategy = string | null;
-export type TargetPercent = number | null;
-export type ContinuousMode = boolean;
+export type PromptTokens = number;
+export type OutputTokens = number;
+export type TotalTokens = number;
+export type CacheReadTokens = number | null;
+export type CacheCreationTokens = number | null;
+export type ReasoningTokens = number | null;
+export type ThinkingTokens = number | null;
+export type CostUsd = number | null;
+export type SpendTotalTokens = number | null;
+export type SpendPromptTokens = number | null;
+export type SpendOutputTokens = number | null;
+export type SpendCacheReadTokens = number | null;
+export type SpendCacheCreationTokens = number | null;
+export type ContextLimit = number;
+export type PercentUsed = number;
+export type TokensRemaining = number;
+export type ReservedOutputTokens = number;
+export type Turns = number;
+export type Source1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -4602,6 +6413,7 @@ export type EventType35 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -4628,6 +6440,7 @@ export type EventType35 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4640,6 +6453,15 @@ export type EventType35 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4656,6 +6478,8 @@ export type EventType35 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4668,14 +6492,41 @@ export type EventType35 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4692,6 +6543,16 @@ export type EventType35 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4707,6 +6568,10 @@ export type EventType35 =
 export type Timestamp35 = string;
 export type SessionId35 = string;
 export type AgentId25 = string;
+export type Threshold = number | null;
+export type Strategy = string | null;
+export type TargetPercent = number | null;
+export type ContinuousMode = boolean;
 /**
  * All event types in the protocol.
  */
@@ -4724,6 +6589,7 @@ export type EventType36 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -4750,6 +6616,7 @@ export type EventType36 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4762,6 +6629,15 @@ export type EventType36 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4778,6 +6654,8 @@ export type EventType36 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4790,14 +6668,41 @@ export type EventType36 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4814,6 +6719,16 @@ export type EventType36 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4829,14 +6744,6 @@ export type EventType36 =
 export type Timestamp36 = string;
 export type SessionId36 = string;
 export type AgentId26 = string;
-export type TurnNumber = number;
-export type CompletionGap = string | null;
-export type DurationSeconds1 = number;
-export type FunctionCalls = {
-  [k: string]: unknown;
-}[];
-export type FormattedText = string | null;
-export type FinishReason = string;
 /**
  * All event types in the protocol.
  */
@@ -4854,6 +6761,7 @@ export type EventType37 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -4880,6 +6788,7 @@ export type EventType37 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4892,6 +6801,15 @@ export type EventType37 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4908,6 +6826,8 @@ export type EventType37 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -4920,14 +6840,41 @@ export type EventType37 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4944,6 +6891,16 @@ export type EventType37 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -4959,10 +6916,14 @@ export type EventType37 =
 export type Timestamp37 = string;
 export type SessionId37 = string;
 export type AgentId27 = string;
-export type ContextLimit1 = number;
-export type PercentUsed1 = number;
-export type TokensRemaining1 = number;
-export type PendingToolCalls = number;
+export type TurnNumber = number;
+export type CompletionGap = string | null;
+export type DurationSeconds1 = number;
+export type FunctionCalls = {
+  [k: string]: unknown;
+}[];
+export type FormattedText = string | null;
+export type FinishReason = string;
 /**
  * All event types in the protocol.
  */
@@ -4980,6 +6941,7 @@ export type EventType38 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5006,6 +6968,7 @@ export type EventType38 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5018,6 +6981,15 @@ export type EventType38 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5034,6 +7006,8 @@ export type EventType38 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5046,14 +7020,41 @@ export type EventType38 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5070,6 +7071,16 @@ export type EventType38 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5084,8 +7095,11 @@ export type EventType38 =
   | "gates.snapshot";
 export type Timestamp38 = string;
 export type SessionId38 = string;
-export type Message = string;
-export type Style = string;
+export type AgentId28 = string;
+export type ContextLimit1 = number;
+export type PercentUsed1 = number;
+export type TokensRemaining1 = number;
+export type PendingToolCalls = number;
 /**
  * All event types in the protocol.
  */
@@ -5103,6 +7117,7 @@ export type EventType39 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5129,6 +7144,7 @@ export type EventType39 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5141,6 +7157,15 @@ export type EventType39 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5157,6 +7182,8 @@ export type EventType39 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5169,14 +7196,41 @@ export type EventType39 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5193,6 +7247,16 @@ export type EventType39 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5207,7 +7271,8 @@ export type EventType39 =
   | "gates.snapshot";
 export type Timestamp39 = string;
 export type SessionId39 = string;
-export type Lines = unknown[][];
+export type Message = string;
+export type Style = string;
 /**
  * All event types in the protocol.
  */
@@ -5225,6 +7290,7 @@ export type EventType40 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5251,6 +7317,7 @@ export type EventType40 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5263,6 +7330,15 @@ export type EventType40 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5279,6 +7355,8 @@ export type EventType40 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5291,14 +7369,41 @@ export type EventType40 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5315,6 +7420,16 @@ export type EventType40 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5329,11 +7444,7 @@ export type EventType40 =
   | "gates.snapshot";
 export type Timestamp40 = string;
 export type SessionId40 = string;
-export type Step = string;
-export type Status2 = string;
-export type Message1 = string;
-export type StepNumber = number;
-export type TotalSteps = number;
+export type Lines = unknown[][];
 /**
  * All event types in the protocol.
  */
@@ -5351,6 +7462,7 @@ export type EventType41 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5377,6 +7489,7 @@ export type EventType41 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5389,6 +7502,15 @@ export type EventType41 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5405,6 +7527,8 @@ export type EventType41 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5417,14 +7541,41 @@ export type EventType41 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5441,6 +7592,16 @@ export type EventType41 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5455,13 +7616,11 @@ export type EventType41 =
   | "gates.snapshot";
 export type Timestamp41 = string;
 export type SessionId41 = string;
-export type Error3 = string;
-export type ErrorType2 = string;
-export type Recoverable = boolean;
-export type Details1 = {
-  [k: string]: unknown;
-} | null;
-export type RequestId18 = string | null;
+export type Step = string;
+export type Status2 = string;
+export type Message1 = string;
+export type StepNumber = number;
+export type TotalSteps = number;
 /**
  * All event types in the protocol.
  */
@@ -5479,6 +7638,7 @@ export type EventType42 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5505,6 +7665,7 @@ export type EventType42 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5517,6 +7678,15 @@ export type EventType42 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5533,6 +7703,8 @@ export type EventType42 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5545,14 +7717,41 @@ export type EventType42 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5569,6 +7768,16 @@ export type EventType42 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5583,11 +7792,13 @@ export type EventType42 =
   | "gates.snapshot";
 export type Timestamp42 = string;
 export type SessionId42 = string;
-export type Message2 = string;
-export type Attempt1 = number;
-export type MaxAttempts = number;
-export type Delay = number;
-export type ErrorType3 = string;
+export type Error3 = string;
+export type ErrorType2 = string;
+export type Recoverable = boolean;
+export type Details1 = {
+  [k: string]: unknown;
+} | null;
+export type RequestId18 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -5605,6 +7816,7 @@ export type EventType43 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5631,6 +7843,7 @@ export type EventType43 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5643,6 +7856,15 @@ export type EventType43 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5659,6 +7881,8 @@ export type EventType43 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5671,14 +7895,41 @@ export type EventType43 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5695,6 +7946,16 @@ export type EventType43 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5709,9 +7970,11 @@ export type EventType43 =
   | "gates.snapshot";
 export type Timestamp43 = string;
 export type SessionId43 = string;
-export type Sessions = {
-  [k: string]: unknown;
-}[];
+export type Message2 = string;
+export type Attempt1 = number;
+export type MaxAttempts = number;
+export type Delay = number;
+export type ErrorType3 = string;
 /**
  * All event types in the protocol.
  */
@@ -5729,6 +7992,7 @@ export type EventType44 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5755,6 +8019,7 @@ export type EventType44 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5767,6 +8032,15 @@ export type EventType44 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5783,6 +8057,8 @@ export type EventType44 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5795,14 +8071,41 @@ export type EventType44 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5819,6 +8122,16 @@ export type EventType44 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5833,19 +8146,9 @@ export type EventType44 =
   | "gates.snapshot";
 export type Timestamp44 = string;
 export type SessionId44 = string;
-export type AgentId28 = string;
-export type Phase = string;
-export type TriggerReason = string | null;
-export type Strategy1 = string | null;
-export type PercentUsed2 = number | null;
-export type Threshold1 = number | null;
-export type ContextLimit2 = number | null;
-export type Success2 = boolean | null;
-export type ItemsCollected = number | null;
-export type TokensBefore = number | null;
-export type TokensAfter = number | null;
-export type TokensFreed = number | null;
-export type Error4 = string | null;
+export type Sessions = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -5863,6 +8166,7 @@ export type EventType45 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -5889,6 +8193,7 @@ export type EventType45 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5901,6 +8206,15 @@ export type EventType45 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5917,6 +8231,8 @@ export type EventType45 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -5929,14 +8245,41 @@ export type EventType45 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5953,6 +8296,16 @@ export type EventType45 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -5967,6 +8320,190 @@ export type EventType45 =
   | "gates.snapshot";
 export type Timestamp45 = string;
 export type SessionId45 = string;
+export type AgentId29 = string;
+export type Phase = string;
+export type TriggerReason = string | null;
+export type Strategy1 = string | null;
+export type PercentUsed2 = number | null;
+export type Threshold1 = number | null;
+export type ContextLimit2 = number | null;
+export type Success2 = boolean | null;
+export type ItemsCollected = number | null;
+export type TokensBefore = number | null;
+export type TokensAfter = number | null;
+export type TokensFreed = number | null;
+export type Error4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType46 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp46 = string;
+export type SessionId46 = string;
 export type RequestId19 = string | null;
 export type SessionName = string;
 export type ModelProvider = string;
@@ -5989,130 +8526,7 @@ export type SandboxPaths = {
 export type Services = {
   [k: string]: unknown;
 }[];
-/**
- * All event types in the protocol.
- */
-export type EventType46 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp46 = string;
-export type SessionId46 = string;
-export type Memories1 = {
-  [k: string]: unknown;
-}[];
+export type DisclosureAnnouncement = string | null;
 /**
  * All event types in the protocol.
  */
@@ -6130,6 +8544,7 @@ export type EventType47 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -6156,6 +8571,7 @@ export type EventType47 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6168,6 +8584,15 @@ export type EventType47 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6184,6 +8609,8 @@ export type EventType47 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -6196,14 +8623,41 @@ export type EventType47 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6220,6 +8674,16 @@ export type EventType47 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -6234,9 +8698,15 @@ export type EventType47 =
   | "gates.snapshot";
 export type Timestamp47 = string;
 export type SessionId47 = string;
-export type Paths = {
-  [k: string]: string;
+export type Memories1 = {
+  [k: string]: unknown;
 }[];
+export type RequestId20 = string;
+export type Ok = boolean;
+export type Error5 = string;
+export type Category = string;
+export type Source2 = string;
+export type MayCurate = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -6254,6 +8724,7 @@ export type EventType48 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -6280,6 +8751,7 @@ export type EventType48 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6292,6 +8764,15 @@ export type EventType48 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6308,6 +8789,8 @@ export type EventType48 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -6320,14 +8803,41 @@ export type EventType48 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6344,6 +8854,16 @@ export type EventType48 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -6358,9 +8878,15 @@ export type EventType48 =
   | "gates.snapshot";
 export type Timestamp48 = string;
 export type SessionId48 = string;
-export type Services1 = {
+export type RequestId21 = string;
+export type MemoryId = string;
+export type Ok1 = boolean;
+export type Error6 = string;
+export type Category1 = string;
+export type Source3 = string;
+export type Memory = {
   [k: string]: unknown;
-}[];
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -6378,6 +8904,7 @@ export type EventType49 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -6404,6 +8931,7 @@ export type EventType49 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6416,6 +8944,15 @@ export type EventType49 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6432,6 +8969,8 @@ export type EventType49 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -6444,14 +8983,41 @@ export type EventType49 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6468,6 +9034,16 @@ export type EventType49 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -6482,7 +9058,15 @@ export type EventType49 =
   | "gates.snapshot";
 export type Timestamp49 = string;
 export type SessionId49 = string;
-export type Description = string;
+export type RequestId22 = string;
+export type MemoryId1 = string;
+export type Ok2 = boolean;
+export type Error7 = string;
+export type Category2 = string;
+export type Source4 = string;
+export type Memory1 = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -6500,6 +9084,7 @@ export type EventType50 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -6526,6 +9111,7 @@ export type EventType50 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6538,6 +9124,15 @@ export type EventType50 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6554,6 +9149,8 @@ export type EventType50 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -6566,14 +9163,41 @@ export type EventType50 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6590,6 +9214,16 @@ export type EventType50 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -6604,6 +9238,898 @@ export type EventType50 =
   | "gates.snapshot";
 export type Timestamp50 = string;
 export type SessionId50 = string;
+export type RequestId23 = string;
+export type MemoryId2 = string;
+export type Ok3 = boolean;
+export type Error8 = string;
+export type Category3 = string;
+export type Source5 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType51 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp51 = string;
+export type SessionId51 = string;
+export type RequestId24 = string;
+export type Ok4 = boolean;
+export type Error9 = string;
+export type Category4 = string;
+export type RunnerIdentity = {
+  [k: string]: unknown;
+} | null;
+export type ConfinementId = string;
+export type SandboxMode = string | null;
+export type Consumption = {
+  [k: string]: unknown;
+} | null;
+export type NotebookBoundaryKind = string | null;
+export type ProtocolVersion1 = string;
+export type ServerVersion = string;
+export type Probe = {
+  [k: string]: unknown;
+} | null;
+export type ApparmorGrants = {
+  [k: string]: unknown;
+} | null;
+export type Seccomp = {
+  [k: string]: unknown;
+} | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType52 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp52 = string;
+export type SessionId52 = string;
+export type Paths = {
+  [k: string]: string;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType53 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp53 = string;
+export type SessionId53 = string;
+export type Services1 = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType54 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp54 = string;
+export type SessionId54 = string;
+export type Description = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType55 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp55 = string;
+export type SessionId55 = string;
 export type Name = string;
 export type Description1 = string;
 export type Plugins = string[];
@@ -6628,628 +10154,8 @@ export type CompletionPayloadSchema =
 export type EnvVarNames = string[];
 export type Profiles = ProfileSummary[];
 export type Name1 = string;
-export type Error5 = string;
+export type Error10 = string;
 export type ParseErrors = ProfileParseError[];
-/**
- * All event types in the protocol.
- */
-export type EventType51 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp51 = string;
-export type SessionId51 = string;
-export type Text1 = string;
-export type Attachments = {
-  [k: string]: unknown;
-}[];
-export type ParallelTools = boolean | null;
-/**
- * All event types in the protocol.
- */
-export type EventType52 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp52 = string;
-export type SessionId52 = string;
-export type RequestId20 = string;
-export type Response2 = string;
-export type EditedArguments = {
-  [k: string]: unknown;
-} | null;
-/**
- * All event types in the protocol.
- */
-export type EventType53 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp53 = string;
-export type SessionId53 = string;
-export type RequestId21 = string;
-export type QuestionIndex2 = number;
-export type Response3 = string;
-/**
- * All event types in the protocol.
- */
-export type EventType54 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp54 = string;
-export type SessionId54 = string;
-export type AgentId29 = string | null;
-/**
- * All event types in the protocol.
- */
-export type EventType55 =
-  | "connected"
-  | "disconnected"
-  | "agent.created"
-  | "agent.output"
-  | "agent.status_changed"
-  | "agent.completed"
-  | "agent.error"
-  | "session.terminated"
-  | "slot.settled"
-  | "session.restored"
-  | "tool.call_start"
-  | "tool.call_end"
-  | "tool.output"
-  | "permission.requested"
-  | "permission.input_mode"
-  | "permission.resolved"
-  | "permission.response"
-  | "permission.status"
-  | "clarification.requested"
-  | "clarification.input_mode"
-  | "clarification.question"
-  | "clarification.resolved"
-  | "clarification.response"
-  | "clarification.batch"
-  | "clarification.batch_response"
-  | "reference_selection.requested"
-  | "reference_selection.resolved"
-  | "reference_selection.response"
-  | "workspace_mismatch.requested"
-  | "workspace_mismatch.resolved"
-  | "workspace_mismatch.response"
-  | "plan.updated"
-  | "plan.step_updated"
-  | "plan.cleared"
-  | "context.updated"
-  | "turn.completed"
-  | "turn.progress"
-  | "instruction_budget.updated"
-  | "budget.rung_fired"
-  | "gc.config"
-  | "gc"
-  | "instruction_budget.request"
-  | "system.message"
-  | "help.text"
-  | "error"
-  | "init.progress"
-  | "retry"
-  | "session.list"
-  | "session.info"
-  | "session.description_updated"
-  | "memory.list"
-  | "sandbox.paths"
-  | "service.list"
-  | "message.send"
-  | "session.stop"
-  | "command.execute"
-  | "command.list_request"
-  | "command.list"
-  | "command.list_refresh"
-  | "tools.status"
-  | "tools.id_registry"
-  | "tools.disable"
-  | "tools.register_client"
-  | "tool.execute_request"
-  | "tool.execute_result"
-  | "history.request"
-  | "history"
-  | "client.config"
-  | "mid_turn_prompt.queued"
-  | "mid_turn_prompt.injected"
-  | "mid_turn_prompt.interrupt"
-  | "session.interrupted_turn_recovered"
-  | "auth.setup"
-  | "auth.setup_response"
-  | "workspace.list"
-  | "workspace.list_response"
-  | "workspace.create"
-  | "workspace.created"
-  | "workspace.select"
-  | "config.status"
-  | "config.update"
-  | "config.updated"
-  | "workspace.files.stage_request"
-  | "workspace.files.staged"
-  | "session.profiles"
-  | "workspace.files_changed"
-  | "workspace.files_snapshot"
-  | "event.external"
-  | "inject_prompt.request"
-  | "inject_prompt.result"
-  | "replay_messages.request"
-  | "replay_messages.result"
-  | "resolve_fork_point.request"
-  | "resolve_fork_point.result"
-  | "session.wake_bind_result"
-  | "session.woken"
-  | "permission.add_whitelist"
-  | "permission.add_blacklist"
-  | "permission.remove"
-  | "permission.clear"
-  | "permission.set_default"
-  | "permission.policy_snapshot.request"
-  | "permission.policy_snapshot"
-  | "events.subscribed"
-  | "peer.heartbeat"
-  | "peer.spawn_request"
-  | "peer.spawn_accepted"
-  | "peer.spawn_rejected"
-  | "peer.agent_output"
-  | "peer.agent_completed"
-  | "peer.stop_request"
-  | "peer.stop_acknowledged"
-  | "gate.announced"
-  | "gate.released"
-  | "gates.snapshot";
-export type Timestamp55 = string;
-export type SessionId55 = string;
-export type Name2 = string;
 /**
  * All event types in the protocol.
  */
@@ -7267,6 +10173,7 @@ export type EventType56 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -7293,6 +10200,7 @@ export type EventType56 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7305,6 +10213,15 @@ export type EventType56 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7321,6 +10238,8 @@ export type EventType56 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -7333,14 +10252,41 @@ export type EventType56 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7357,6 +10303,16 @@ export type EventType56 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -7371,8 +10327,11 @@ export type EventType56 =
   | "gates.snapshot";
 export type Timestamp56 = string;
 export type SessionId56 = string;
-export type AgentId30 = string;
-export type EventNames = string[];
+export type Text1 = string;
+export type Attachments = {
+  [k: string]: unknown;
+}[];
+export type ParallelTools = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -7390,6 +10349,7 @@ export type EventType57 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -7416,6 +10376,7 @@ export type EventType57 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7428,6 +10389,15 @@ export type EventType57 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7444,6 +10414,8 @@ export type EventType57 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -7456,14 +10428,41 @@ export type EventType57 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7480,6 +10479,16 @@ export type EventType57 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -7494,9 +10503,9 @@ export type EventType57 =
   | "gates.snapshot";
 export type Timestamp57 = string;
 export type SessionId57 = string;
-export type Command = string;
-export type Args = string[];
-export type Payload1 = {
+export type RequestId25 = string;
+export type Response2 = string;
+export type EditedArguments = {
   [k: string]: unknown;
 } | null;
 /**
@@ -7516,6 +10525,7 @@ export type EventType58 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -7542,6 +10552,7 @@ export type EventType58 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7554,6 +10565,15 @@ export type EventType58 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7570,6 +10590,8 @@ export type EventType58 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -7582,14 +10604,41 @@ export type EventType58 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7606,6 +10655,16 @@ export type EventType58 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -7620,7 +10679,9 @@ export type EventType58 =
   | "gates.snapshot";
 export type Timestamp58 = string;
 export type SessionId58 = string;
-export type AgentId31 = string | null;
+export type RequestId26 = string;
+export type QuestionIndex2 = number;
+export type Response3 = string;
 /**
  * All event types in the protocol.
  */
@@ -7638,6 +10699,7 @@ export type EventType59 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -7664,6 +10726,7 @@ export type EventType59 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7676,6 +10739,15 @@ export type EventType59 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7692,6 +10764,8 @@ export type EventType59 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -7704,14 +10778,41 @@ export type EventType59 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7728,6 +10829,16 @@ export type EventType59 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -7742,6 +10853,7 @@ export type EventType59 =
   | "gates.snapshot";
 export type Timestamp59 = string;
 export type SessionId59 = string;
+export type AgentId30 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -7759,6 +10871,7 @@ export type EventType60 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -7785,6 +10898,7 @@ export type EventType60 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7797,6 +10911,15 @@ export type EventType60 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7813,6 +10936,8 @@ export type EventType60 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -7825,14 +10950,41 @@ export type EventType60 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7849,6 +11001,16 @@ export type EventType60 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -7863,9 +11025,7 @@ export type EventType60 =
   | "gates.snapshot";
 export type Timestamp60 = string;
 export type SessionId60 = string;
-export type Commands = {
-  [k: string]: string;
-}[];
+export type Name2 = string;
 /**
  * All event types in the protocol.
  */
@@ -7883,6 +11043,7 @@ export type EventType61 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -7909,6 +11070,7 @@ export type EventType61 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7921,6 +11083,15 @@ export type EventType61 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7937,6 +11108,8 @@ export type EventType61 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -7949,14 +11122,41 @@ export type EventType61 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7973,6 +11173,16 @@ export type EventType61 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -7987,6 +11197,8 @@ export type EventType61 =
   | "gates.snapshot";
 export type Timestamp61 = string;
 export type SessionId61 = string;
+export type AgentId31 = string;
+export type EventNames = string[];
 /**
  * All event types in the protocol.
  */
@@ -8004,6 +11216,7 @@ export type EventType62 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8030,6 +11243,7 @@ export type EventType62 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8042,6 +11256,15 @@ export type EventType62 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8058,6 +11281,8 @@ export type EventType62 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8070,14 +11295,41 @@ export type EventType62 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8094,6 +11346,16 @@ export type EventType62 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8108,10 +11370,11 @@ export type EventType62 =
   | "gates.snapshot";
 export type Timestamp62 = string;
 export type SessionId62 = string;
-export type Tools1 = {
+export type Command = string;
+export type Args = string[];
+export type Payload1 = {
   [k: string]: unknown;
-}[];
-export type Message3 = string;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -8129,6 +11392,7 @@ export type EventType63 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8155,6 +11419,7 @@ export type EventType63 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8167,6 +11432,15 @@ export type EventType63 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8183,6 +11457,8 @@ export type EventType63 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8195,14 +11471,41 @@ export type EventType63 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8219,6 +11522,16 @@ export type EventType63 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8233,6 +11546,7 @@ export type EventType63 =
   | "gates.snapshot";
 export type Timestamp63 = string;
 export type SessionId63 = string;
+export type AgentId32 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -8250,6 +11564,7 @@ export type EventType64 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8276,6 +11591,7 @@ export type EventType64 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8288,6 +11604,15 @@ export type EventType64 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8304,6 +11629,8 @@ export type EventType64 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8316,14 +11643,41 @@ export type EventType64 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8340,6 +11694,16 @@ export type EventType64 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8354,7 +11718,7 @@ export type EventType64 =
   | "gates.snapshot";
 export type Timestamp64 = string;
 export type SessionId64 = string;
-export type ToolName11 = string;
+export type RequestId27 = string;
 /**
  * All event types in the protocol.
  */
@@ -8372,6 +11736,7 @@ export type EventType65 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8398,6 +11763,7 @@ export type EventType65 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8410,6 +11776,15 @@ export type EventType65 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8426,6 +11801,8 @@ export type EventType65 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8438,14 +11815,41 @@ export type EventType65 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8462,6 +11866,16 @@ export type EventType65 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8476,9 +11890,8 @@ export type EventType65 =
   | "gates.snapshot";
 export type Timestamp65 = string;
 export type SessionId65 = string;
-export type Tools2 = {
-  [k: string]: unknown;
-}[];
+export type RequestId28 = string;
+export type MemoryId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -8496,6 +11909,7 @@ export type EventType66 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8522,6 +11936,7 @@ export type EventType66 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8534,6 +11949,15 @@ export type EventType66 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8550,6 +11974,8 @@ export type EventType66 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8562,14 +11988,41 @@ export type EventType66 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8586,6 +12039,16 @@ export type EventType66 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8600,9 +12063,12 @@ export type EventType66 =
   | "gates.snapshot";
 export type Timestamp66 = string;
 export type SessionId66 = string;
-export type CallId4 = string;
-export type AgentId32 = string;
-export type ToolName12 = string;
+export type RequestId29 = string;
+export type MemoryId4 = string;
+export type Description2 = string | null;
+export type Content1 = string | null;
+export type Tags = string[] | null;
+export type Maturity = string | null;
 /**
  * All event types in the protocol.
  */
@@ -8620,6 +12086,7 @@ export type EventType67 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8646,6 +12113,7 @@ export type EventType67 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8658,6 +12126,15 @@ export type EventType67 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8674,6 +12151,8 @@ export type EventType67 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8686,14 +12165,41 @@ export type EventType67 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8710,6 +12216,16 @@ export type EventType67 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8724,9 +12240,8 @@ export type EventType67 =
   | "gates.snapshot";
 export type Timestamp67 = string;
 export type SessionId67 = string;
-export type CallId5 = string;
-export type Result1 = string;
-export type Error6 = string;
+export type RequestId30 = string;
+export type MemoryId5 = string;
 /**
  * All event types in the protocol.
  */
@@ -8744,6 +12259,7 @@ export type EventType68 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8770,6 +12286,7 @@ export type EventType68 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8782,6 +12299,15 @@ export type EventType68 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8798,6 +12324,8 @@ export type EventType68 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8810,14 +12338,41 @@ export type EventType68 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8834,6 +12389,16 @@ export type EventType68 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8848,7 +12413,7 @@ export type EventType68 =
   | "gates.snapshot";
 export type Timestamp68 = string;
 export type SessionId68 = string;
-export type AgentId33 = string;
+export type RequestId31 = string;
 /**
  * All event types in the protocol.
  */
@@ -8866,6 +12431,7 @@ export type EventType69 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -8892,6 +12458,7 @@ export type EventType69 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8904,6 +12471,15 @@ export type EventType69 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8920,6 +12496,8 @@ export type EventType69 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -8932,14 +12510,41 @@ export type EventType69 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8956,6 +12561,16 @@ export type EventType69 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -8970,13 +12585,6 @@ export type EventType69 =
   | "gates.snapshot";
 export type Timestamp69 = string;
 export type SessionId69 = string;
-export type AgentId34 = string;
-export type History = {
-  [k: string]: unknown;
-}[];
-export type TurnAccounting = {
-  [k: string]: unknown;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -8994,6 +12602,7 @@ export type EventType70 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9020,6 +12629,7 @@ export type EventType70 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9032,6 +12642,15 @@ export type EventType70 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9048,6 +12667,8 @@ export type EventType70 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9060,14 +12681,41 @@ export type EventType70 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9084,6 +12732,16 @@ export type EventType70 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9098,16 +12756,9 @@ export type EventType70 =
   | "gates.snapshot";
 export type Timestamp70 = string;
 export type SessionId70 = string;
-export type TraceLogPath = string | null;
-export type ProviderTraceLog = string | null;
-export type WorkingDir = string | null;
-export type ConfigRoot = string | null;
-export type EnvFile = string | null;
-export type Presentation = {
-  [k: string]: unknown;
-} | null;
-export type PermissionTimeout = number | null;
-export type Apparmor = boolean;
+export type Commands = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -9125,6 +12776,7 @@ export type EventType71 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9151,6 +12803,7 @@ export type EventType71 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9163,6 +12816,15 @@ export type EventType71 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9179,6 +12841,8 @@ export type EventType71 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9191,14 +12855,41 @@ export type EventType71 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9215,6 +12906,16 @@ export type EventType71 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9229,8 +12930,6 @@ export type EventType71 =
   | "gates.snapshot";
 export type Timestamp71 = string;
 export type SessionId71 = string;
-export type Text2 = string;
-export type PositionInQueue = number;
 /**
  * All event types in the protocol.
  */
@@ -9248,6 +12947,7 @@ export type EventType72 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9274,6 +12974,7 @@ export type EventType72 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9286,6 +12987,15 @@ export type EventType72 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9302,6 +13012,8 @@ export type EventType72 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9314,14 +13026,41 @@ export type EventType72 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9338,6 +13077,16 @@ export type EventType72 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9352,7 +13101,10 @@ export type EventType72 =
   | "gates.snapshot";
 export type Timestamp72 = string;
 export type SessionId72 = string;
-export type Text3 = string;
+export type Tools1 = {
+  [k: string]: unknown;
+}[];
+export type Message3 = string;
 /**
  * All event types in the protocol.
  */
@@ -9370,6 +13122,7 @@ export type EventType73 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9396,6 +13149,7 @@ export type EventType73 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9408,6 +13162,15 @@ export type EventType73 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9424,6 +13187,8 @@ export type EventType73 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9436,14 +13201,41 @@ export type EventType73 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9460,6 +13252,16 @@ export type EventType73 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9474,14 +13276,6 @@ export type EventType73 =
   | "gates.snapshot";
 export type Timestamp73 = string;
 export type SessionId73 = string;
-export type AtPercent = number;
-export type Action1 = string | null;
-export type Origin = string;
-export type Pressure = string;
-export type Usage = {
-  [k: string]: number;
-} | null;
-export type DrivingDimension = string | null;
 /**
  * All event types in the protocol.
  */
@@ -9499,6 +13293,7 @@ export type EventType74 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9525,6 +13320,7 @@ export type EventType74 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9537,6 +13333,15 @@ export type EventType74 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9553,6 +13358,8 @@ export type EventType74 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9565,14 +13372,41 @@ export type EventType74 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9589,6 +13423,16 @@ export type EventType74 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9603,8 +13447,7 @@ export type EventType74 =
   | "gates.snapshot";
 export type Timestamp74 = string;
 export type SessionId74 = string;
-export type PartialResponseChars = number;
-export type UserPromptPreview = string;
+export type ToolName12 = string;
 /**
  * All event types in the protocol.
  */
@@ -9622,6 +13465,7 @@ export type EventType75 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9648,6 +13492,7 @@ export type EventType75 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9660,6 +13505,15 @@ export type EventType75 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9676,6 +13530,8 @@ export type EventType75 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9688,14 +13544,41 @@ export type EventType75 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9712,6 +13595,16 @@ export type EventType75 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9726,9 +13619,9 @@ export type EventType75 =
   | "gates.snapshot";
 export type Timestamp75 = string;
 export type SessionId75 = string;
-export type AgentId35 = string;
-export type RecoveredCalls = number;
-export type ActionTaken = string;
+export type Tools2 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -9746,6 +13639,7 @@ export type EventType76 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9772,6 +13666,7 @@ export type EventType76 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9784,6 +13679,15 @@ export type EventType76 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9800,6 +13704,8 @@ export type EventType76 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9812,14 +13718,41 @@ export type EventType76 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9836,6 +13769,16 @@ export type EventType76 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9850,6 +13793,9 @@ export type EventType76 =
   | "gates.snapshot";
 export type Timestamp76 = string;
 export type SessionId76 = string;
+export type CallId5 = string;
+export type AgentId33 = string;
+export type ToolName13 = string;
 /**
  * All event types in the protocol.
  */
@@ -9867,6 +13813,7 @@ export type EventType77 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -9893,6 +13840,7 @@ export type EventType77 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9905,6 +13853,15 @@ export type EventType77 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9921,6 +13878,8 @@ export type EventType77 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -9933,14 +13892,41 @@ export type EventType77 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9957,6 +13943,16 @@ export type EventType77 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -9971,10 +13967,9 @@ export type EventType77 =
   | "gates.snapshot";
 export type Timestamp77 = string;
 export type SessionId77 = string;
-export type Root = string;
-export type Workspaces = {
-  [k: string]: unknown;
-}[];
+export type CallId6 = string;
+export type Result1 = string;
+export type Error11 = string;
 /**
  * All event types in the protocol.
  */
@@ -9992,6 +13987,7 @@ export type EventType78 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10018,6 +14014,7 @@ export type EventType78 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10030,6 +14027,15 @@ export type EventType78 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10046,6 +14052,8 @@ export type EventType78 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10058,14 +14066,41 @@ export type EventType78 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10082,6 +14117,16 @@ export type EventType78 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10096,7 +14141,7 @@ export type EventType78 =
   | "gates.snapshot";
 export type Timestamp78 = string;
 export type SessionId78 = string;
-export type Name3 = string;
+export type AgentId34 = string;
 /**
  * All event types in the protocol.
  */
@@ -10114,6 +14159,7 @@ export type EventType79 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10140,6 +14186,7 @@ export type EventType79 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10152,6 +14199,15 @@ export type EventType79 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10168,6 +14224,8 @@ export type EventType79 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10180,14 +14238,41 @@ export type EventType79 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10204,6 +14289,16 @@ export type EventType79 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10218,8 +14313,13 @@ export type EventType79 =
   | "gates.snapshot";
 export type Timestamp79 = string;
 export type SessionId79 = string;
-export type Name4 = string;
-export type Path = string;
+export type AgentId35 = string;
+export type History = {
+  [k: string]: unknown;
+}[];
+export type TurnAccounting = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -10237,6 +14337,7 @@ export type EventType80 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10263,6 +14364,7 @@ export type EventType80 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10275,6 +14377,15 @@ export type EventType80 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10291,6 +14402,8 @@ export type EventType80 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10303,14 +14416,41 @@ export type EventType80 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10327,6 +14467,16 @@ export type EventType80 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10341,7 +14491,10 @@ export type EventType80 =
   | "gates.snapshot";
 export type Timestamp80 = string;
 export type SessionId80 = string;
-export type Name5 = string;
+export type AgentId36 = string;
+export type Before = string;
+export type MaxLines = number;
+export type RequestId32 = string;
 /**
  * All event types in the protocol.
  */
@@ -10359,6 +14512,7 @@ export type EventType81 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10385,6 +14539,7 @@ export type EventType81 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10397,6 +14552,15 @@ export type EventType81 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10413,6 +14577,8 @@ export type EventType81 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10425,14 +14591,41 @@ export type EventType81 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10449,6 +14642,16 @@ export type EventType81 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10463,12 +14666,17 @@ export type EventType81 =
   | "gates.snapshot";
 export type Timestamp81 = string;
 export type SessionId81 = string;
-export type Workspace = string;
-export type Configured = boolean;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type AgentId37 = string;
+export type RequestId33 = string;
+export type Units = {
+  [k: string]: unknown;
+}[];
+export type Before1 = string;
+export type HasMore = boolean;
+export type TotalUnits = number;
+export type Stale = boolean;
+export type Ok5 = boolean;
+export type Error12 = string;
 /**
  * All event types in the protocol.
  */
@@ -10486,6 +14694,7 @@ export type EventType82 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10512,6 +14721,7 @@ export type EventType82 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10524,6 +14734,15 @@ export type EventType82 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10540,6 +14759,8 @@ export type EventType82 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10552,14 +14773,41 @@ export type EventType82 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10576,6 +14824,16 @@ export type EventType82 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10590,9 +14848,16 @@ export type EventType82 =
   | "gates.snapshot";
 export type Timestamp82 = string;
 export type SessionId82 = string;
-export type Provider2 = string;
-export type Model2 = string | null;
-export type ApiKey = string | null;
+export type TraceLogPath = string | null;
+export type ProviderTraceLog = string | null;
+export type WorkingDir = string | null;
+export type ConfigRoot = string | null;
+export type EnvFile = string | null;
+export type Presentation = {
+  [k: string]: unknown;
+} | null;
+export type PermissionTimeout = number | null;
+export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -10610,6 +14875,7 @@ export type EventType83 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10636,6 +14902,7 @@ export type EventType83 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10648,6 +14915,15 @@ export type EventType83 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10664,6 +14940,8 @@ export type EventType83 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10676,14 +14954,41 @@ export type EventType83 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10700,6 +15005,16 @@ export type EventType83 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10714,11 +15029,8 @@ export type EventType83 =
   | "gates.snapshot";
 export type Timestamp83 = string;
 export type SessionId83 = string;
-export type Workspace1 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type Success3 = boolean;
-export type Error7 = string | null;
+export type Text2 = string;
+export type PositionInQueue = number;
 /**
  * All event types in the protocol.
  */
@@ -10736,6 +15048,7 @@ export type EventType84 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10762,6 +15075,7 @@ export type EventType84 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10774,6 +15088,15 @@ export type EventType84 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10790,6 +15113,8 @@ export type EventType84 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10802,14 +15127,41 @@ export type EventType84 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10826,6 +15178,16 @@ export type EventType84 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10840,9 +15202,7 @@ export type EventType84 =
   | "gates.snapshot";
 export type Timestamp84 = string;
 export type SessionId84 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
+export type Text3 = string;
 /**
  * All event types in the protocol.
  */
@@ -10860,6 +15220,7 @@ export type EventType85 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -10886,6 +15247,7 @@ export type EventType85 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10898,6 +15260,15 @@ export type EventType85 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10914,6 +15285,8 @@ export type EventType85 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -10926,14 +15299,41 @@ export type EventType85 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10950,6 +15350,16 @@ export type EventType85 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -10964,10 +15374,14 @@ export type EventType85 =
   | "gates.snapshot";
 export type Timestamp85 = string;
 export type SessionId85 = string;
-export type Files = {
-  [k: string]: string;
-}[];
-export type Total = number;
+export type AtPercent = number;
+export type Action1 = string | null;
+export type Origin = string;
+export type Pressure = string;
+export type Usage = {
+  [k: string]: number;
+} | null;
+export type DrivingDimension = string | null;
 /**
  * All event types in the protocol.
  */
@@ -10985,6 +15399,7 @@ export type EventType86 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11011,6 +15426,7 @@ export type EventType86 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11023,6 +15439,15 @@ export type EventType86 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11039,6 +15464,8 @@ export type EventType86 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11051,14 +15478,41 @@ export type EventType86 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11075,6 +15529,16 @@ export type EventType86 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11089,12 +15553,13 @@ export type EventType86 =
   | "gates.snapshot";
 export type Timestamp86 = string;
 export type SessionId86 = string;
-export type WorkspaceId = string;
-export type Name6 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Kind1 = string;
+export type At = number;
+export type Cause = string;
+export type Site = string | null;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type Tier = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11112,6 +15577,7 @@ export type EventType87 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11138,6 +15604,7 @@ export type EventType87 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11150,6 +15617,15 @@ export type EventType87 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11166,6 +15642,8 @@ export type EventType87 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11178,14 +15656,41 @@ export type EventType87 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11202,6 +15707,16 @@ export type EventType87 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11216,11 +15731,8 @@ export type EventType87 =
   | "gates.snapshot";
 export type Timestamp87 = string;
 export type SessionId87 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type PartialResponseChars = number;
+export type UserPromptPreview = string;
 /**
  * All event types in the protocol.
  */
@@ -11238,6 +15750,7 @@ export type EventType88 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11264,6 +15777,7 @@ export type EventType88 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11276,6 +15790,15 @@ export type EventType88 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11292,6 +15815,8 @@ export type EventType88 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11304,14 +15829,41 @@ export type EventType88 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11328,6 +15880,16 @@ export type EventType88 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11342,20 +15904,9 @@ export type EventType88 =
   | "gates.snapshot";
 export type Timestamp88 = string;
 export type SessionId88 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type AgentId38 = string;
+export type RecoveredCalls = number;
+export type ActionTaken = string;
 /**
  * All event types in the protocol.
  */
@@ -11373,6 +15924,7 @@ export type EventType89 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11399,6 +15951,7 @@ export type EventType89 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11411,6 +15964,15 @@ export type EventType89 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11427,6 +15989,8 @@ export type EventType89 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11439,14 +16003,41 @@ export type EventType89 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11463,6 +16054,16 @@ export type EventType89 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11477,17 +16078,6 @@ export type EventType89 =
   | "gates.snapshot";
 export type Timestamp89 = string;
 export type SessionId89 = string;
-export type RequestId22 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -11505,6 +16095,7 @@ export type EventType90 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11531,6 +16122,7 @@ export type EventType90 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11543,6 +16135,15 @@ export type EventType90 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11559,6 +16160,8 @@ export type EventType90 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11571,14 +16174,41 @@ export type EventType90 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11595,6 +16225,16 @@ export type EventType90 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11609,8 +16249,10 @@ export type EventType90 =
   | "gates.snapshot";
 export type Timestamp90 = string;
 export type SessionId90 = string;
-export type RequestId23 = string;
-export type RemoteAgentId = string;
+export type Root = string;
+export type Workspaces = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -11628,6 +16270,7 @@ export type EventType91 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11654,6 +16297,7 @@ export type EventType91 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11666,6 +16310,15 @@ export type EventType91 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11682,6 +16335,8 @@ export type EventType91 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11694,14 +16349,41 @@ export type EventType91 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11718,6 +16400,16 @@ export type EventType91 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11732,8 +16424,7 @@ export type EventType91 =
   | "gates.snapshot";
 export type Timestamp91 = string;
 export type SessionId91 = string;
-export type RequestId24 = string;
-export type Reason1 = string;
+export type Name3 = string;
 /**
  * All event types in the protocol.
  */
@@ -11751,6 +16442,7 @@ export type EventType92 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11777,6 +16469,7 @@ export type EventType92 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11789,6 +16482,15 @@ export type EventType92 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11805,6 +16507,8 @@ export type EventType92 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11817,14 +16521,41 @@ export type EventType92 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11841,6 +16572,16 @@ export type EventType92 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11855,10 +16596,8 @@ export type EventType92 =
   | "gates.snapshot";
 export type Timestamp92 = string;
 export type SessionId92 = string;
-export type RequestId25 = string;
-export type RemoteAgentId1 = string;
-export type Text4 = string;
-export type Source1 = string;
+export type Name4 = string;
+export type Path1 = string;
 /**
  * All event types in the protocol.
  */
@@ -11876,6 +16615,7 @@ export type EventType93 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -11902,6 +16642,7 @@ export type EventType93 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11914,6 +16655,15 @@ export type EventType93 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11930,6 +16680,8 @@ export type EventType93 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -11942,14 +16694,41 @@ export type EventType93 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11966,6 +16745,16 @@ export type EventType93 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -11980,12 +16769,8 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type RequestId26 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error8 = string;
-export type WorkspaceModified = boolean;
+export type Name5 = string;
+export type StopSessions = boolean;
 /**
  * All event types in the protocol.
  */
@@ -12003,6 +16788,7 @@ export type EventType94 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12029,6 +16815,7 @@ export type EventType94 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12041,6 +16828,15 @@ export type EventType94 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12057,6 +16853,8 @@ export type EventType94 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12069,14 +16867,41 @@ export type EventType94 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12093,6 +16918,16 @@ export type EventType94 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12107,8 +16942,9 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type RequestId27 = string;
-export type RemoteAgentId3 = string;
+export type Name6 = string;
+export type Ok6 = boolean;
+export type Error13 = string;
 /**
  * All event types in the protocol.
  */
@@ -12126,6 +16962,7 @@ export type EventType95 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12152,6 +16989,7 @@ export type EventType95 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12164,6 +17002,15 @@ export type EventType95 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12180,6 +17027,8 @@ export type EventType95 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12192,14 +17041,41 @@ export type EventType95 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12216,6 +17092,16 @@ export type EventType95 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12230,8 +17116,8 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type RequestId28 = string;
-export type RemoteAgentId4 = string;
+export type Name7 = string;
+export type RequestId34 = string;
 /**
  * All event types in the protocol.
  */
@@ -12249,6 +17135,7 @@ export type EventType96 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12275,6 +17162,7 @@ export type EventType96 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12287,6 +17175,15 @@ export type EventType96 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12303,6 +17200,8 @@ export type EventType96 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12315,14 +17214,41 @@ export type EventType96 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12339,6 +17265,16 @@ export type EventType96 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12353,10 +17289,15 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type Name8 = string;
+export type RequestId35 = string;
+export type Ok7 = boolean;
+export type Error14 = string;
+export type Path2 = string;
+export type SizeBytes = number | null;
+export type Repos = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -12374,6 +17315,7 @@ export type EventType97 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12400,6 +17342,7 @@ export type EventType97 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12412,6 +17355,15 @@ export type EventType97 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12428,6 +17380,8 @@ export type EventType97 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12440,14 +17394,41 @@ export type EventType97 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12464,6 +17445,16 @@ export type EventType97 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12478,14 +17469,11 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type Name9 = string;
+export type RequestId36 = string;
+export type Repos1 = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -12503,6 +17491,7 @@ export type EventType98 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12529,6 +17518,7 @@ export type EventType98 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12541,6 +17531,15 @@ export type EventType98 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12557,6 +17556,8 @@ export type EventType98 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12569,14 +17570,41 @@ export type EventType98 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12593,6 +17621,16 @@ export type EventType98 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12607,17 +17645,15 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
+export type Name10 = string;
+export type RequestId37 = string;
+export type Repo = string;
+export type Branch = string;
 export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type Percent = number;
+export type Error15 = string;
+export type Done = number;
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -12635,6 +17671,7 @@ export type EventType99 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12661,6 +17698,7 @@ export type EventType99 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12673,6 +17711,15 @@ export type EventType99 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12689,6 +17736,8 @@ export type EventType99 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12701,14 +17750,41 @@ export type EventType99 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12725,6 +17801,16 @@ export type EventType99 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12739,13 +17825,7 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type Text5 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId29 = string | null;
+export type Name11 = string;
 /**
  * All event types in the protocol.
  */
@@ -12763,6 +17843,7 @@ export type EventType100 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12789,6 +17870,7 @@ export type EventType100 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12801,6 +17883,15 @@ export type EventType100 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12817,6 +17908,8 @@ export type EventType100 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12829,14 +17922,41 @@ export type EventType100 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12853,6 +17973,16 @@ export type EventType100 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12867,9 +17997,12 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type RequestId30 = string;
-export type Status3 = string;
-export type Detail = string | null;
+export type Workspace1 = string;
+export type Configured = boolean;
+export type Provider2 = string | null;
+export type Model2 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -12887,6 +18020,7 @@ export type EventType101 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -12913,6 +18047,7 @@ export type EventType101 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12925,6 +18060,15 @@ export type EventType101 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12941,6 +18085,8 @@ export type EventType101 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -12953,14 +18099,41 @@ export type EventType101 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12977,6 +18150,16 @@ export type EventType101 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -12991,13 +18174,10 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type RequestId31 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type Provider3 = string;
+export type Model3 = string | null;
+export type ApiKey = string | null;
+export type KeyOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13015,6 +18195,7 @@ export type EventType102 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13041,6 +18222,7 @@ export type EventType102 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13053,6 +18235,15 @@ export type EventType102 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13069,6 +18260,8 @@ export type EventType102 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13081,14 +18274,41 @@ export type EventType102 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13105,6 +18325,16 @@ export type EventType102 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13119,9 +18349,11 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type RequestId32 = string;
-export type ResponseText = string;
-export type Error9 = string;
+export type Workspace2 = string;
+export type Provider4 = string;
+export type Model4 = string | null;
+export type Success3 = boolean;
+export type Error16 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13139,6 +18371,7 @@ export type EventType103 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13165,6 +18398,7 @@ export type EventType103 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13177,6 +18411,15 @@ export type EventType103 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13193,6 +18436,8 @@ export type EventType103 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13205,14 +18450,41 @@ export type EventType103 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13229,6 +18501,16 @@ export type EventType103 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13243,10 +18525,11 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type RequestId33 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Changes = {
+  [k: string]: string;
+}[];
+export type Seq = number | null;
+export type Epoch = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13264,6 +18547,7 @@ export type EventType104 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13290,6 +18574,7 @@ export type EventType104 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13302,6 +18587,15 @@ export type EventType104 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13318,6 +18612,8 @@ export type EventType104 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13330,14 +18626,41 @@ export type EventType104 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13354,6 +18677,16 @@ export type EventType104 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13368,9 +18701,12 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type RequestId34 = string;
-export type ForkIndex = number;
-export type Error10 = string;
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total1 = number;
+export type Seq1 = number | null;
+export type Epoch1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13388,6 +18724,7 @@ export type EventType105 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13414,6 +18751,7 @@ export type EventType105 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13426,6 +18764,15 @@ export type EventType105 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13442,6 +18789,8 @@ export type EventType105 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13454,14 +18803,41 @@ export type EventType105 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13478,6 +18854,16 @@ export type EventType105 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13492,11 +18878,11 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type Path3 = string;
+export type Ignored = boolean;
+export type Ok8 = boolean;
+export type Error17 = string;
+export type GitignorePath = string;
 /**
  * All event types in the protocol.
  */
@@ -13514,6 +18900,7 @@ export type EventType106 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13540,6 +18927,7 @@ export type EventType106 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13552,6 +18940,15 @@ export type EventType106 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13568,6 +18965,8 @@ export type EventType106 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13580,14 +18979,41 @@ export type EventType106 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13604,6 +19030,16 @@ export type EventType106 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13618,8 +19054,19 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type RequestId38 = string;
+export type Action2 = string;
+export type ClaimId = string;
+export type Ok9 = boolean;
+export type Category5 = string;
+export type Error18 = string;
+export type ReferenceId = string;
+export type ReferenceFile = string;
+export type Warnings1 = string[];
+export type Bundle = string;
+export type Reconcile = string;
+export type ReconcileDetail = string;
+export type Revised = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13637,6 +19084,7 @@ export type EventType107 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13663,6 +19111,7 @@ export type EventType107 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13675,6 +19124,15 @@ export type EventType107 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13691,6 +19149,8 @@ export type EventType107 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13703,14 +19163,41 @@ export type EventType107 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13727,6 +19214,16 @@ export type EventType107 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13741,8 +19238,18 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId39 = string;
+export type Ok10 = boolean;
+export type Category6 = string;
+export type Error19 = string;
+export type Claims = {
+  [k: string]: unknown;
+}[];
+export type Unreadable = string[];
+export type MayCurate1 = boolean;
+export type Bundles = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -13760,6 +19267,7 @@ export type EventType108 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13786,6 +19294,7 @@ export type EventType108 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13798,6 +19307,15 @@ export type EventType108 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13814,6 +19332,8 @@ export type EventType108 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13826,14 +19346,41 @@ export type EventType108 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13850,6 +19397,16 @@ export type EventType108 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13864,8 +19421,7 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId40 = string;
 /**
  * All event types in the protocol.
  */
@@ -13883,6 +19439,7 @@ export type EventType109 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -13909,6 +19466,7 @@ export type EventType109 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13921,6 +19479,15 @@ export type EventType109 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13937,6 +19504,8 @@ export type EventType109 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -13949,14 +19518,41 @@ export type EventType109 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13973,6 +19569,16 @@ export type EventType109 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -13987,9 +19593,10 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type RequestId41 = string;
+export type Action3 = string;
+export type ClaimId1 = string;
+export type Bundle1 = string;
 /**
  * All event types in the protocol.
  */
@@ -14007,6 +19614,7 @@ export type EventType110 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -14033,6 +19641,7 @@ export type EventType110 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14045,6 +19654,15 @@ export type EventType110 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14061,6 +19679,8 @@ export type EventType110 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -14073,14 +19693,41 @@ export type EventType110 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14097,6 +19744,16 @@ export type EventType110 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -14111,7 +19768,15 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type Target1 = string;
+export type RequestId42 = string;
+export type Ok11 = boolean;
+export type Category7 = string;
+export type Error20 = string;
+export type References = {
+  [k: string]: unknown;
+}[];
+export type Unreadable1 = string[];
+export type MayCurate2 = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14129,6 +19794,7 @@ export type EventType111 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -14155,6 +19821,7 @@ export type EventType111 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14167,6 +19834,15 @@ export type EventType111 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14183,6 +19859,8 @@ export type EventType111 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -14195,14 +19873,41 @@ export type EventType111 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14219,6 +19924,16 @@ export type EventType111 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -14233,7 +19948,7 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type Policy = string;
+export type RequestId43 = string;
 /**
  * All event types in the protocol.
  */
@@ -14251,6 +19966,7 @@ export type EventType112 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -14277,6 +19993,7 @@ export type EventType112 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14289,6 +20006,15 @@ export type EventType112 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14305,6 +20031,8 @@ export type EventType112 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -14317,14 +20045,41 @@ export type EventType112 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14341,6 +20096,16 @@ export type EventType112 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -14355,7 +20120,11 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type RequestId35 = string;
+export type RequestId44 = string;
+export type ReferenceId1 = string;
+export type Links = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -14373,6 +20142,7 @@ export type EventType113 =
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
+  | "tool.result_enriched"
   | "permission.requested"
   | "permission.input_mode"
   | "permission.resolved"
@@ -14399,6 +20169,7 @@ export type EventType113 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14411,6 +20182,15 @@ export type EventType113 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14427,6 +20207,8 @@ export type EventType113 =
   | "tool.execute_result"
   | "history.request"
   | "history"
+  | "history.page.request"
+  | "history.page"
   | "client.config"
   | "mid_turn_prompt.queued"
   | "mid_turn_prompt.injected"
@@ -14439,14 +20221,41 @@ export type EventType113 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14463,6 +20272,16 @@ export type EventType113 =
   | "permission.set_default"
   | "permission.policy_snapshot.request"
   | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
   | "events.subscribed"
   | "peer.heartbeat"
   | "peer.spawn_request"
@@ -14477,7 +20296,6719 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type RequestId36 = string;
+export type RequestId45 = string;
+export type ReferenceId2 = string;
+export type Ok12 = boolean;
+export type Category8 = string;
+export type Error21 = string;
+export type ReferenceFile1 = string;
+export type Links1 = {
+  [k: string]: unknown;
+}[];
+export type Warnings2 = string[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType114 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp114 = string;
+export type SessionId114 = string;
+export type RequestId46 = string;
+export type Name12 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType115 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp115 = string;
+export type SessionId115 = string;
+export type RequestId47 = string;
+export type Ok13 = boolean;
+export type Category9 = string;
+export type Error22 = string;
+export type Bundle2 = string;
+export type Indexed = boolean;
+export type Bundles1 = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType116 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp116 = string;
+export type SessionId116 = string;
+export type Topic = string;
+export type Ok14 = boolean;
+export type Text4 = string;
+export type Topics = {
+  [k: string]: unknown;
+}[];
+export type Error23 = string;
+export type ServerVersion1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType117 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp117 = string;
+export type SessionId117 = string;
+export type RequestId48 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok15 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
+}[];
+export type Error24 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType118 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp118 = string;
+export type SessionId118 = string;
+export type Integration = string;
+export type Ok16 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error25 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType119 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp119 = string;
+export type SessionId119 = string;
+export type Ok17 = boolean;
+export type Workspace3 = string;
+export type ProfileSet = string;
+export type Profile = string;
+export type Scope = string;
+export type Findings = {
+  [k: string]: unknown;
+}[];
+export type Errors = number;
+export type Warnings3 = number;
+export type Error26 = string;
+export type ServerVersion3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType120 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp120 = string;
+export type SessionId120 = string;
+export type WorkspaceId = string;
+export type Name13 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType121 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp121 = string;
+export type SessionId121 = string;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType122 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp122 = string;
+export type SessionId122 = string;
+export type RequestId49 = string;
+export type Path4 = string;
+export type MetadataOnly = boolean;
+/**
+ * All event types in the protocol.
+ */
+export type EventType123 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp123 = string;
+export type SessionId123 = string;
+export type RequestId50 = string;
+export type Ok18 = boolean;
+export type Path5 = string;
+export type Name14 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category10 = string;
+export type Error27 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType124 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp124 = string;
+export type SessionId124 = string;
+export type RequestId51 = string;
+export type Query = string;
+export type MaxResults = number;
+/**
+ * All event types in the protocol.
+ */
+export type EventType125 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp125 = string;
+export type SessionId125 = string;
+export type RequestId52 = string;
+export type Ok19 = boolean;
+export type Query1 = string;
+export type Matches = {
+  [k: string]: unknown;
+}[];
+export type Total2 = number;
+export type Truncated = boolean;
+export type Category11 = string;
+export type Error28 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType126 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp126 = string;
+export type SessionId126 = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion4 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
+/**
+ * All event types in the protocol.
+ */
+export type EventType127 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp127 = string;
+export type SessionId127 = string;
+export type RequestId53 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType128 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp128 = string;
+export type SessionId128 = string;
+export type RequestId54 = string;
+export type RemoteAgentId = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType129 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp129 = string;
+export type SessionId129 = string;
+export type RequestId55 = string;
+export type Reason1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType130 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp130 = string;
+export type SessionId130 = string;
+export type RequestId56 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source6 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType131 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp131 = string;
+export type SessionId131 = string;
+export type RequestId57 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error29 = string;
+export type WorkspaceModified = boolean;
+/**
+ * All event types in the protocol.
+ */
+export type EventType132 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp132 = string;
+export type SessionId132 = string;
+export type RequestId58 = string;
+export type RemoteAgentId3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType133 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp133 = string;
+export type SessionId133 = string;
+export type RequestId59 = string;
+export type RemoteAgentId4 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType134 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp134 = string;
+export type SessionId134 = string;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType135 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp135 = string;
+export type SessionId135 = string;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
+/**
+ * All event types in the protocol.
+ */
+export type EventType136 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp136 = string;
+export type SessionId136 = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType137 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp137 = string;
+export type SessionId137 = string;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId60 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType138 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp138 = string;
+export type SessionId138 = string;
+export type RequestId61 = string;
+export type Status4 = string;
+export type Detail = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType139 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp139 = string;
+export type SessionId139 = string;
+export type RequestId62 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
+/**
+ * All event types in the protocol.
+ */
+export type EventType140 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp140 = string;
+export type SessionId140 = string;
+export type RequestId63 = string;
+export type ResponseText = string;
+export type Error30 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType141 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp141 = string;
+export type SessionId141 = string;
+export type RequestId64 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType142 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp142 = string;
+export type SessionId142 = string;
+export type RequestId65 = string;
+export type ForkIndex = number;
+export type Error31 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType143 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp143 = string;
+export type SessionId143 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType144 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp144 = string;
+export type SessionId144 = string;
+export type WakeRef1 = string;
+export type Source7 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType145 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp145 = string;
+export type SessionId145 = string;
+export type Tools3 = string[];
+export type Patterns = string[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType146 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp146 = string;
+export type SessionId146 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType147 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp147 = string;
+export type SessionId147 = string;
+export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType148 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp148 = string;
+export type SessionId148 = string;
+export type Target3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType149 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp149 = string;
+export type SessionId149 = string;
+export type Policy = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType150 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp150 = string;
+export type SessionId150 = string;
+export type RequestId66 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType151 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp151 = string;
+export type SessionId151 = string;
+export type RequestId67 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
 export type WhitelistTools = string[];
@@ -14486,6 +27017,2124 @@ export type BlacklistTools = string[];
 export type BlacklistPatterns = string[];
 export type SessionWhitelist = string[];
 export type SessionBlacklist = string[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType152 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp152 = string;
+export type SessionId152 = string;
+export type RequestId68 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
+/**
+ * All event types in the protocol.
+ */
+export type EventType153 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp153 = string;
+export type SessionId153 = string;
+export type RequestId69 = string;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType154 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp154 = string;
+export type SessionId154 = string;
+export type RequestId70 = string;
+export type Ticket1 = string;
+export type User1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType155 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp155 = string;
+export type SessionId155 = string;
+export type RequestId71 = string;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType156 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp156 = string;
+export type SessionId156 = string;
+export type RequestId72 = string;
+export type User2 = string;
+export type Workspace4 = string;
+export type Name15 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType157 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp157 = string;
+export type SessionId157 = string;
+export type RequestId73 = string;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType158 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp158 = string;
+export type SessionId158 = string;
+export type RequestId74 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType159 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp159 = string;
+export type SessionId159 = string;
+export type RequestId75 = string;
+export type Status8 = string;
+export type Reloaded = number;
+export type Detail5 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType160 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp160 = string;
+export type SessionId160 = string;
+export type RequestId76 = string;
+export type User4 = string;
+export type Workspace5 = string;
+export type Files3 = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType161 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp161 = string;
+export type SessionId161 = string;
+export type RequestId77 = string;
+export type Status9 = string;
+export type Files4 = {
+  [k: string]: unknown;
+}[];
+export type Detail6 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType162 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp162 = string;
+export type SessionId162 = string;
+export type RequestId78 = string;
+export type TargetSize = number | null;
+export type MaxSize = number | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType163 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp163 = string;
+export type SessionId163 = string;
+export type RequestId79 = string;
+export type Ok20 = boolean;
+export type Category12 = string;
+export type Error32 = string;
+export type Changed1 = boolean;
+export type PreviousTargetSize = number | null;
+export type PreviousMaxSize = number | null;
+export type TargetSize1 = number;
+export type MaxSize1 = number;
+export type MaxSizeExplicit = boolean;
+export type Idle = number;
+export type Unreserved = number;
+export type Reserved = number;
+export type PendingTeardown = number;
+export type Replenishing = boolean;
+export type TemplateAlive = boolean;
+export type RoutingEnabled = boolean;
+export type Persisted = boolean;
 
 /**
  * Sent when client connects successfully.
@@ -14775,6 +29424,7 @@ export interface ToolCallStartEvent {
   tool_name?: ToolName;
   tool_args?: ToolArgs;
   call_id?: CallId;
+  tool_class?: ToolClass;
 }
 export interface ToolArgs {
   [k: string]: unknown;
@@ -14798,6 +29448,36 @@ export interface ToolCallEndEvent {
   continuation_id?: ContinuationId;
   show_output?: ShowOutput;
   show_popup?: ShowPopup;
+  diff?: Diff;
+  diff_truncated?: DiffTruncated;
+  path?: Path;
+}
+/**
+ * An enrichment plugin's structured notice about one tool result (1.31).
+ *
+ * Tool-result enrichment rewrites what the MODEL reads.  A plugin that also
+ * has something to tell the CLIENT returns it in its enrichment metadata as
+ * ``{"client_notice": {"kind": ..., "data": {...}}}``, and the daemon emits
+ * it here once the result is built, so a client acts on the plugin's finding
+ * instead of re-deriving it.  The framework does not interpret ``kind`` or
+ * ``data``: a client matches the kinds it knows and ignores the rest.
+ *
+ * Emitted after the call's ``tool.call_end``.  ``data`` is a JSON object of
+ * at most 4 KiB; a notice that is not is dropped daemon-side with a WARNING.
+ */
+export interface ToolResultEnrichedEvent {
+  type?: EventType11;
+  timestamp?: Timestamp11;
+  session_id?: SessionId11;
+  agent_id?: AgentId9;
+  call_id?: CallId2;
+  tool_name?: ToolName2;
+  plugin?: Plugin;
+  kind?: Kind;
+  data?: Data;
+}
+export interface Data {
+  [k: string]: unknown;
 }
 /**
  * Live output chunk from a running tool (tail -f style).
@@ -14833,6 +29513,17 @@ export interface ToolCallEndEvent {
  *     final: Last chunk of this stream, so a client can close its
  *         playback buffer or finish writing the file without waiting
  *         on a separate completion event.
+ *     generated_by: Provenance of the bytes, for the Art. 50(2) marking
+ *         (protocol 1.14).  The model's own media carries
+ *         :func:`ai_generated_by` -- ``{"kind": "ai", "provider",
+ *         "model", "session_id", "agent_id"}`` -- stamped at delivery by
+ *         the session that knows which binding produced it; a
+ *         tool-result attachment carries what its producer put on
+ *         ``Attachment.generated_by``; ``None`` means nothing is CLAIMED
+ *         about the bytes, which is what a tool that merely relayed a
+ *         file must say.  Machine-readable half of the marking; the
+ *         client-facing half (a visible label, a manifest sidecar) is
+ *         the consumer's, and this is what it reads.
  *
  * Note:
  *     When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
@@ -14840,17 +29531,18 @@ export interface ToolCallEndEvent {
  *     A formatter that reflows text corrupts bytes.
  */
 export interface ToolOutputEvent {
-  type?: EventType11;
-  timestamp?: Timestamp11;
-  session_id?: SessionId11;
-  agent_id?: AgentId9;
-  call_id?: CallId2;
+  type?: EventType12;
+  timestamp?: Timestamp12;
+  session_id?: SessionId12;
+  agent_id?: AgentId10;
+  call_id?: CallId3;
   chunk?: Chunk;
   stream_id?: StreamId;
   sequence?: Sequence;
   mime_type?: MimeType;
   data_b64?: DataB64;
   final?: Final;
+  generated_by?: GeneratedBy;
 }
 /**
  * Permission is requested for a tool execution.
@@ -14858,18 +29550,19 @@ export interface ToolOutputEvent {
  * Includes pre-formatted prompt lines (with diff for file edits) when available.
  */
 export interface PermissionRequestedEvent {
-  type?: EventType12;
-  timestamp?: Timestamp12;
-  session_id?: SessionId12;
-  agent_id?: AgentId10;
+  type?: EventType13;
+  timestamp?: Timestamp13;
+  session_id?: SessionId13;
+  agent_id?: AgentId11;
   request_id?: RequestId1;
-  tool_name?: ToolName2;
+  tool_name?: ToolName3;
   tool_args?: ToolArgs1;
   response_options?: ResponseOptions;
   prompt_lines?: PromptLines;
   format_hint?: FormatHint;
   warnings?: Warnings;
   warning_level?: WarningLevel;
+  tool_class?: ToolClass1;
 }
 export interface ToolArgs1 {
   [k: string]: unknown;
@@ -14881,13 +29574,13 @@ export interface ToolArgs1 {
  * This lightweight control event separates content delivery from input control.
  */
 export interface PermissionInputModeEvent {
-  type?: EventType13;
-  timestamp?: Timestamp13;
-  session_id?: SessionId13;
-  agent_id?: AgentId11;
+  type?: EventType14;
+  timestamp?: Timestamp14;
+  session_id?: SessionId14;
+  agent_id?: AgentId12;
   request_id?: RequestId2;
-  tool_name?: ToolName3;
-  call_id?: CallId3;
+  tool_name?: ToolName4;
+  call_id?: CallId4;
   response_options?: ResponseOptions1;
   tool_args?: ToolArgs2;
   editable_metadata?: EditableMetadata;
@@ -14914,12 +29607,12 @@ export interface PermissionInputModeEvent {
  *   approved.
  */
 export interface PermissionResolvedEvent {
-  type?: EventType14;
-  timestamp?: Timestamp14;
-  session_id?: SessionId14;
-  agent_id?: AgentId12;
+  type?: EventType15;
+  timestamp?: Timestamp15;
+  session_id?: SessionId15;
+  agent_id?: AgentId13;
   request_id?: RequestId3;
-  tool_name?: ToolName4;
+  tool_name?: ToolName5;
   granted?: Granted;
   method?: Method;
   comment?: Comment;
@@ -14933,22 +29626,23 @@ export interface PermissionResolvedEvent {
  * permission resolutions that change the effective policy.
  */
 export interface PermissionStatusEvent {
-  type?: EventType15;
-  timestamp?: Timestamp15;
-  session_id?: SessionId15;
+  type?: EventType16;
+  timestamp?: Timestamp16;
+  session_id?: SessionId16;
   effective_default?: EffectiveDefault;
   suspension_scope?: SuspensionScope;
+  auto_allow_housekeeping?: AutoAllowHousekeeping;
 }
 /**
  * Clarification session has started.
  */
 export interface ClarificationRequestedEvent {
-  type?: EventType16;
-  timestamp?: Timestamp16;
-  session_id?: SessionId16;
-  agent_id?: AgentId13;
+  type?: EventType17;
+  timestamp?: Timestamp17;
+  session_id?: SessionId17;
+  agent_id?: AgentId14;
   request_id?: RequestId4;
-  tool_name?: ToolName5;
+  tool_name?: ToolName6;
   context_lines?: ContextLines;
   total_questions?: TotalQuestions;
 }
@@ -14959,12 +29653,12 @@ export interface ClarificationRequestedEvent {
  * This lightweight control event separates content delivery from input control.
  */
 export interface ClarificationInputModeEvent {
-  type?: EventType17;
-  timestamp?: Timestamp17;
-  session_id?: SessionId17;
-  agent_id?: AgentId14;
+  type?: EventType18;
+  timestamp?: Timestamp18;
+  session_id?: SessionId18;
+  agent_id?: AgentId15;
   request_id?: RequestId5;
-  tool_name?: ToolName6;
+  tool_name?: ToolName7;
   question_index?: QuestionIndex;
   total_questions?: TotalQuestions1;
 }
@@ -14972,10 +29666,10 @@ export interface ClarificationInputModeEvent {
  * A single clarification question to answer.
  */
 export interface ClarificationQuestionEvent {
-  type?: EventType18;
-  timestamp?: Timestamp18;
-  session_id?: SessionId18;
-  agent_id?: AgentId15;
+  type?: EventType19;
+  timestamp?: Timestamp19;
+  session_id?: SessionId19;
+  agent_id?: AgentId16;
   request_id?: RequestId6;
   question_index?: QuestionIndex1;
   total_questions?: TotalQuestions2;
@@ -14987,12 +29681,12 @@ export interface ClarificationQuestionEvent {
  * All clarification questions have been answered.
  */
 export interface ClarificationResolvedEvent {
-  type?: EventType19;
-  timestamp?: Timestamp19;
-  session_id?: SessionId19;
-  agent_id?: AgentId16;
+  type?: EventType20;
+  timestamp?: Timestamp20;
+  session_id?: SessionId20;
+  agent_id?: AgentId17;
   request_id?: RequestId7;
-  tool_name?: ToolName7;
+  tool_name?: ToolName8;
   qa_pairs?: QaPairs;
 }
 /**
@@ -15018,12 +29712,12 @@ export interface ClarificationResolvedEvent {
  * Either way the reply is a single :class:`ClarificationBatchResponseEvent`.
  */
 export interface ClarificationBatchEvent {
-  type?: EventType20;
-  timestamp?: Timestamp20;
-  session_id?: SessionId20;
-  agent_id?: AgentId17;
+  type?: EventType21;
+  timestamp?: Timestamp21;
+  session_id?: SessionId21;
+  agent_id?: AgentId18;
   request_id?: RequestId8;
-  tool_name?: ToolName8;
+  tool_name?: ToolName9;
   context?: Context;
   questions?: Questions;
   batch_only?: BatchOnly;
@@ -15039,9 +29733,9 @@ export interface ClarificationBatchEvent {
  * ``cancelled`` is set.
  */
 export interface ClarificationBatchResponseEvent {
-  type?: EventType21;
-  timestamp?: Timestamp21;
-  session_id?: SessionId21;
+  type?: EventType22;
+  timestamp?: Timestamp22;
+  session_id?: SessionId22;
   request_id?: RequestId9;
   answers?: Answers;
   cancelled?: Cancelled;
@@ -15059,33 +29753,33 @@ export interface AnswerAttachments {
  * which references to include.
  */
 export interface ReferenceSelectionRequestedEvent {
-  type?: EventType22;
-  timestamp?: Timestamp22;
-  session_id?: SessionId22;
-  agent_id?: AgentId18;
+  type?: EventType23;
+  timestamp?: Timestamp23;
+  session_id?: SessionId23;
+  agent_id?: AgentId19;
   request_id?: RequestId10;
-  tool_name?: ToolName9;
+  tool_name?: ToolName10;
   prompt_lines?: PromptLines1;
 }
 /**
  * Reference selection has been completed.
  */
 export interface ReferenceSelectionResolvedEvent {
-  type?: EventType23;
-  timestamp?: Timestamp23;
-  session_id?: SessionId23;
-  agent_id?: AgentId19;
+  type?: EventType24;
+  timestamp?: Timestamp24;
+  session_id?: SessionId24;
+  agent_id?: AgentId20;
   request_id?: RequestId11;
-  tool_name?: ToolName10;
+  tool_name?: ToolName11;
   selected_ids?: SelectedIds;
 }
 /**
  * Respond to a reference selection request.
  */
 export interface ReferenceSelectionResponseRequest {
-  type?: EventType24;
-  timestamp?: Timestamp24;
-  session_id?: SessionId24;
+  type?: EventType25;
+  timestamp?: Timestamp25;
+  session_id?: SessionId25;
   request_id?: RequestId12;
   response?: Response;
 }
@@ -15097,9 +29791,9 @@ export interface ReferenceSelectionResponseRequest {
  * switch to the session's workspace or create a new session.
  */
 export interface WorkspaceMismatchRequestedEvent {
-  type?: EventType25;
-  timestamp?: Timestamp25;
-  session_id?: SessionId25;
+  type?: EventType26;
+  timestamp?: Timestamp26;
+  session_id?: SessionId26;
   request_id?: RequestId13;
   session_workspace?: SessionWorkspace;
   client_workspace?: ClientWorkspace;
@@ -15110,9 +29804,9 @@ export interface WorkspaceMismatchRequestedEvent {
  * Workspace mismatch has been resolved.
  */
 export interface WorkspaceMismatchResolvedEvent {
-  type?: EventType26;
-  timestamp?: Timestamp26;
-  session_id?: SessionId26;
+  type?: EventType27;
+  timestamp?: Timestamp27;
+  session_id?: SessionId27;
   request_id?: RequestId14;
   action?: Action;
   new_session_id?: NewSessionId;
@@ -15121,9 +29815,9 @@ export interface WorkspaceMismatchResolvedEvent {
  * Respond to a workspace mismatch request.
  */
 export interface WorkspaceMismatchResponseRequest {
-  type?: EventType27;
-  timestamp?: Timestamp27;
-  session_id?: SessionId27;
+  type?: EventType28;
+  timestamp?: Timestamp28;
+  session_id?: SessionId28;
   request_id?: RequestId15;
   response?: Response1;
 }
@@ -15134,9 +29828,9 @@ export interface WorkspaceMismatchResponseRequest {
  * multi-step wizard and sends back a single PostAuthSetupResponse.
  */
 export interface PostAuthSetupEvent {
-  type?: EventType28;
-  timestamp?: Timestamp28;
-  session_id?: SessionId28;
+  type?: EventType29;
+  timestamp?: Timestamp29;
+  session_id?: SessionId29;
   request_id?: RequestId16;
   provider_name?: ProviderName;
   provider_display_name?: ProviderDisplayName;
@@ -15150,9 +29844,9 @@ export interface PostAuthSetupEvent {
  * User's response to post-auth session setup prompt.
  */
 export interface PostAuthSetupResponse {
-  type?: EventType29;
-  timestamp?: Timestamp29;
-  session_id?: SessionId29;
+  type?: EventType30;
+  timestamp?: Timestamp30;
+  session_id?: SessionId30;
   request_id?: RequestId17;
   connect?: Connect;
   model_name?: ModelName;
@@ -15162,10 +29856,10 @@ export interface PostAuthSetupResponse {
  * Plan has been created or updated.
  */
 export interface PlanUpdatedEvent {
-  type?: EventType30;
-  timestamp?: Timestamp30;
-  session_id?: SessionId30;
-  agent_id?: AgentId20;
+  type?: EventType31;
+  timestamp?: Timestamp31;
+  session_id?: SessionId31;
+  agent_id?: AgentId21;
   plan_name?: PlanName;
   steps?: Steps;
 }
@@ -15181,10 +29875,10 @@ export interface PlanUpdatedEvent {
  * plan completed) use ``PlanUpdatedEvent`` with the full snapshot.
  */
 export interface PlanStepUpdatedEvent {
-  type?: EventType31;
-  timestamp?: Timestamp31;
-  session_id?: SessionId31;
-  agent_id?: AgentId21;
+  type?: EventType32;
+  timestamp?: Timestamp32;
+  session_id?: SessionId32;
+  agent_id?: AgentId22;
   step_id?: StepId;
   sequence?: Sequence1;
   content?: Content;
@@ -15199,10 +29893,10 @@ export interface PlanStepUpdatedEvent {
  * Plan has been cleared/completed.
  */
 export interface PlanClearedEvent {
-  type?: EventType32;
-  timestamp?: Timestamp32;
-  session_id?: SessionId32;
-  agent_id?: AgentId22;
+  type?: EventType33;
+  timestamp?: Timestamp33;
+  session_id?: SessionId33;
+  agent_id?: AgentId23;
 }
 /**
  * Context window usage has changed.
@@ -15216,17 +29910,27 @@ export interface PlanClearedEvent {
  *
  * GC configuration moved to ``GCConfigEvent`` in v1.0 — query that
  * event (or read it from session init) for status-bar display.
+ *
+ * ``reserved_output_tokens`` is the output cap every request carries
+ * (the provider's ``get_max_output_tokens()``; 0 when none is sent or
+ * the vendor does not count it).  A vendor that counts it refuses a
+ * prompt over ``context_limit - reserved_output_tokens``, so
+ * ``percent_used`` and ``tokens_remaining`` are measured against that
+ * effective input limit (#1444).  Additive: an older daemon omits it
+ * and a client reads 0, which is what every figure meant before.
  */
 export interface ContextUpdatedEvent {
-  type?: EventType33;
-  timestamp?: Timestamp33;
-  session_id?: SessionId33;
-  agent_id?: AgentId23;
+  type?: EventType34;
+  timestamp?: Timestamp34;
+  session_id?: SessionId34;
+  agent_id?: AgentId24;
   usage?: UsageBreakdown;
   context_limit?: ContextLimit;
   percent_used?: PercentUsed;
   tokens_remaining?: TokensRemaining;
+  reserved_output_tokens?: ReservedOutputTokens;
   turns?: Turns;
+  source?: Source1;
 }
 /**
  * Provider-agnostic per-turn usage shape carried by Context/Turn events.
@@ -15272,10 +29976,10 @@ export interface UsageBreakdown {
  * config carrier.
  */
 export interface GCConfigEvent {
-  type?: EventType34;
-  timestamp?: Timestamp34;
-  session_id?: SessionId34;
-  agent_id?: AgentId24;
+  type?: EventType35;
+  timestamp?: Timestamp35;
+  session_id?: SessionId35;
+  agent_id?: AgentId25;
   threshold?: Threshold;
   strategy?: Strategy;
   target_percent?: TargetPercent;
@@ -15292,12 +29996,17 @@ export interface GCConfigEvent {
  * - context_limit, total_tokens, utilization_percent: Overall usage
  * - gc_eligible_tokens, locked_tokens, preservable_tokens: GC info
  * - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
+ * - effective_total_tokens, total_source, calibration_factor,
+ *   provider_prompt_tokens (#1440): the total GC is judged on, whether it
+ *   is the estimate (``"estimate"``) or the estimate scaled to the
+ *   provider's last reported prompt (``"calibrated"``), the scale, and
+ *   that reported prompt (``None`` until one was reported)
  */
 export interface InstructionBudgetEvent {
-  type?: EventType35;
-  timestamp?: Timestamp35;
-  session_id?: SessionId35;
-  agent_id?: AgentId25;
+  type?: EventType36;
+  timestamp?: Timestamp36;
+  session_id?: SessionId36;
+  agent_id?: AgentId26;
   budget_snapshot?: BudgetSnapshot;
 }
 export interface BudgetSnapshot {
@@ -15313,10 +30022,10 @@ export interface BudgetSnapshot {
  * ``ContextUpdatedEvent`` use.
  */
 export interface TurnCompletedEvent {
-  type?: EventType36;
-  timestamp?: Timestamp36;
-  session_id?: SessionId36;
-  agent_id?: AgentId26;
+  type?: EventType37;
+  timestamp?: Timestamp37;
+  session_id?: SessionId37;
+  agent_id?: AgentId27;
   turn_number?: TurnNumber;
   usage?: UsageBreakdown;
   completion_gap?: CompletionGap;
@@ -15334,10 +30043,10 @@ export interface TurnCompletedEvent {
  * ``TurnCompletedEvent`` and ``ContextUpdatedEvent``.
  */
 export interface TurnProgressEvent {
-  type?: EventType37;
-  timestamp?: Timestamp37;
-  session_id?: SessionId37;
-  agent_id?: AgentId27;
+  type?: EventType38;
+  timestamp?: Timestamp38;
+  session_id?: SessionId38;
+  agent_id?: AgentId28;
   usage?: UsageBreakdown;
   context_limit?: ContextLimit1;
   percent_used?: PercentUsed1;
@@ -15348,9 +30057,9 @@ export interface TurnProgressEvent {
  * System message (info, warning, status).
  */
 export interface SystemMessageEvent {
-  type?: EventType38;
-  timestamp?: Timestamp38;
-  session_id?: SessionId38;
+  type?: EventType39;
+  timestamp?: Timestamp39;
+  session_id?: SessionId39;
   message?: Message;
   style?: Style;
 }
@@ -15361,9 +30070,9 @@ export interface SystemMessageEvent {
  * using the pager. Each line is a (text, style) tuple.
  */
 export interface HelpTextEvent {
-  type?: EventType39;
-  timestamp?: Timestamp39;
-  session_id?: SessionId39;
+  type?: EventType40;
+  timestamp?: Timestamp40;
+  session_id?: SessionId40;
   lines?: Lines;
 }
 /**
@@ -15373,9 +30082,9 @@ export interface HelpTextEvent {
  * Steps are shown in sequence with their status.
  */
 export interface InitProgressEvent {
-  type?: EventType40;
-  timestamp?: Timestamp40;
-  session_id?: SessionId40;
+  type?: EventType41;
+  timestamp?: Timestamp41;
+  session_id?: SessionId41;
   step?: Step;
   status?: Status2;
   message?: Message1;
@@ -15386,9 +30095,9 @@ export interface InitProgressEvent {
  * Error occurred.
  */
 export interface ErrorEvent {
-  type?: EventType41;
-  timestamp?: Timestamp41;
-  session_id?: SessionId41;
+  type?: EventType42;
+  timestamp?: Timestamp42;
+  session_id?: SessionId42;
   error?: Error3;
   error_type?: ErrorType2;
   recoverable?: Recoverable;
@@ -15402,9 +30111,9 @@ export interface ErrorEvent {
  * and the system is retrying the request.
  */
 export interface RetryEvent {
-  type?: EventType42;
-  timestamp?: Timestamp42;
-  session_id?: SessionId42;
+  type?: EventType43;
+  timestamp?: Timestamp43;
+  session_id?: SessionId43;
   message?: Message2;
   attempt?: Attempt1;
   max_attempts?: MaxAttempts;
@@ -15413,11 +30122,38 @@ export interface RetryEvent {
 }
 /**
  * List of available sessions - for user display.
+ *
+ * Each row is a free-form dict.  Two of its keys are worth naming here
+ * because a client BRANCHES on them rather than displaying them:
+ *
+ * ``awaiting`` (protocol 1.17)
+ *     ``"permission"`` / ``"clarification"`` when that session is blocked
+ *     on an unanswered human prompt, absent otherwise.  It is the only
+ *     way a client attached to session A learns that session B wants it:
+ *     prompt events go to ``session.attached_clients``, and a client is
+ *     attached to one session at a time.  Absent on a row that is not
+ *     loaded, and on any daemon below 1.17 -- so absent means "nothing
+ *     is waiting, as far as this daemon says", never a positive "no".
+ *
+ * ``awaiting_since`` (protocol 1.17)
+ *     When that prompt was raised, ISO-8601 UTC, so a client can render
+ *     "waiting 4 min" instead of "waiting".  A separate key rather than
+ *     a widening of ``awaiting``, which stays a scalar an older client
+ *     can ignore.  Absent means NOT MEASURED, never "just now".
+ *
+ * ``inbox_pending`` (session group messaging, phase 2)
+ *     How many messages wait in that session's durable inbox -- spooled
+ *     by ``send_to_session`` / ``session.message`` because the target was
+ *     mid-turn with a payload it could not queue, or cold and not yet
+ *     revived.  Counted for cold rows too: a cold session with a pending
+ *     message is the one the daemon's watchdog is about to revive.  A
+ *     diagnostic a human reads (the #812 shape), additive and unbumped;
+ *     absent on a daemon that predates it.
  */
 export interface SessionListEvent {
-  type?: EventType43;
-  timestamp?: Timestamp43;
-  session_id?: SessionId43;
+  type?: EventType44;
+  timestamp?: Timestamp44;
+  session_id?: SessionId44;
   sessions?: Sessions;
 }
 /**
@@ -15459,10 +30195,10 @@ export interface SessionListEvent {
  * context-limit recovery) have no advance warning by nature.
  */
 export interface GCEvent {
-  type?: EventType44;
-  timestamp?: Timestamp44;
-  session_id?: SessionId44;
-  agent_id?: AgentId28;
+  type?: EventType45;
+  timestamp?: Timestamp45;
+  session_id?: SessionId45;
+  agent_id?: AgentId29;
   phase?: Phase;
   trigger_reason?: TriggerReason;
   strategy?: Strategy1;
@@ -15488,9 +30224,9 @@ export interface GCEvent {
  * Server pushes updates when state changes.
  */
 export interface SessionInfoEvent {
-  type?: EventType45;
-  timestamp?: Timestamp45;
-  session_id?: SessionId45;
+  type?: EventType46;
+  timestamp?: Timestamp46;
+  session_id?: SessionId46;
   request_id?: RequestId19;
   session_name?: SessionName;
   model_provider?: ModelProvider;
@@ -15504,18 +30240,234 @@ export interface SessionInfoEvent {
   sandbox_paths?: SandboxPaths;
   services?: Services;
   tool_id_mappings?: ToolIdMappings;
+  disclosure_announcement?: DisclosureAnnouncement;
 }
 export interface ToolIdMappings {
   [k: string]: string;
 }
 /**
- * List of available memories - for completion cache and pager display.
+ * The memory store, as the plugin that HOLDS it reports it.
+ *
+ * Two emitters, one shape: the answer to :class:`MemoryListRequest`
+ * (protocol 1.22, ``request_id`` echoed) and the push after a ``memory``
+ * user command (the TUI's completion cache).  ``SessionInfoEvent.memories``
+ * carries the same rows, read the same way.  ``memory`` is
+ * ``PLUGIN_TIER = "runner"``, so on a runner-served session -- the default
+ * -- the rows are read from the RUNNER's plugin over the control lane.
+ * Before 1.22 the command push read the DAEMON's copy while the command
+ * itself ran on the runner (#1232), which on a split host, or wherever the
+ * daemon copy had no storage, answered ``[]``.
+ *
+ * Each row (a dict, so an older client ignores the keys it does not know):
+ *
+ * ``id`` / ``description`` / ``tags`` / ``maturity`` (``raw`` |
+ * ``validated`` | ``escalated`` | ``dismissed``) / ``confidence`` /
+ * ``scope`` (``project`` | ``universal`` -- how broadly it applies)
+ *     What every emitter has always sent.
+ * ``tier`` (1.22)
+ *     ``workspace`` or ``global`` (``~/.jaato/memories``): the rail merges
+ *     both stores, and a row says which one it came from.  Deliberately
+ *     NOT ``scope``, which already means something else on a memory.
+ * ``timestamp`` / ``last_accessed`` / ``usage_count`` / ``generated_by``
+ * / ``curated_by`` / ``source_agent`` / ``source_session`` (1.22)
+ *     Fields that already exist on the stored record, passed through.
+ *     ``curated_by`` is ``None`` on every ``raw`` memory by definition;
+ *     ``generated_by`` is ``None`` on a record written before #1123 --
+ *     *provenance unknown*, never human-authored.  ``content`` is NOT
+ *     listed: :class:`MemoryGetRequest` fetches it per row, so a large
+ *     store does not arrive in one frame.
+ * ``written_this_session`` / ``retrieved_this_session`` (1.22)
+ *     Whether the session the request was served for wrote this memory,
+ *     or retrieved it with ``retrieve_memories``.  Answer-only: the
+ *     command push carries neither.
+ *
+ * Fields (1.22, all additive):
+ *     request_id: The :class:`MemoryListRequest` this answers; ``""`` on
+ *         the command push.
+ *     ok: ``False`` when the store could not be read -- the runner did
+ *         not answer, the session does not enable the memory plugin.
+ *         ``memories`` is then EMPTY AND MEANINGLESS: an empty list is
+ *         never how a failure is spelled, because it reads as "nothing
+ *         remembered".
+ *     error / category: Why not.  ``category`` is one of
+ *         ``no_session``, ``no_plugin``, ``runner_unreachable``,
+ *         ``not_found``, ``invalid``, ``not_owner``, ``unknown_op``,
+ *         ``store_error``.
+ *     source: ``runner`` or ``daemon`` -- which plugin copy answered.
+ *         ``daemon`` only where there is no runner at all (embedded,
+ *         standalone), where the daemon's copy IS the store.
+ *     may_curate: Whether THIS caller may update / delete (the workspace
+ *         owner, or anyone on an unowned workspace), decided daemon-side
+ *         by the same predicate that refuses the verbs.  ``None`` on the
+ *         command push.
  */
 export interface MemoryListEvent {
-  type?: EventType46;
-  timestamp?: Timestamp46;
-  session_id?: SessionId46;
+  type?: EventType47;
+  timestamp?: Timestamp47;
+  session_id?: SessionId47;
   memories?: Memories1;
+  request_id?: RequestId20;
+  ok?: Ok;
+  error?: Error5;
+  category?: Category;
+  source?: Source2;
+  may_curate?: MayCurate;
+}
+/**
+ * Answer to :class:`MemoryGetRequest` (1.22): one memory, with content.
+ *
+ * ``memory`` is the list row plus ``content`` and ``evidence``, or
+ * ``None`` when ``ok`` is ``False`` (``category="not_found"`` for an id
+ * neither tier holds).
+ */
+export interface MemoryGetResultEvent {
+  type?: EventType48;
+  timestamp?: Timestamp48;
+  session_id?: SessionId48;
+  request_id?: RequestId21;
+  memory_id?: MemoryId;
+  ok?: Ok1;
+  error?: Error6;
+  category?: Category1;
+  source?: Source3;
+  memory?: Memory;
+}
+/**
+ * Answer to :class:`MemoryUpdateRequest` (1.22).
+ *
+ * ``memory`` is the row AFTER the update, so a client can replace its
+ * copy without a second list.  ``category="not_owner"`` is the owner gate
+ * refusing; ``invalid`` is the plugin's schema validator refusing (an empty
+ * description, a one-letter tag, a maturity outside the vocabulary).
+ */
+export interface MemoryUpdateResultEvent {
+  type?: EventType49;
+  timestamp?: Timestamp49;
+  session_id?: SessionId49;
+  request_id?: RequestId22;
+  memory_id?: MemoryId1;
+  ok?: Ok2;
+  error?: Error7;
+  category?: Category2;
+  source?: Source4;
+  memory?: Memory1;
+}
+/**
+ * Answer to :class:`MemoryDeleteRequest` (1.22).
+ */
+export interface MemoryDeleteResultEvent {
+  type?: EventType50;
+  timestamp?: Timestamp50;
+  session_id?: SessionId50;
+  request_id?: RequestId23;
+  memory_id?: MemoryId2;
+  ok?: Ok3;
+  error?: Error8;
+  category?: Category3;
+  source?: Source5;
+}
+/**
+ * Answer to :class:`DiagnosticsRequest` (#1294, 1.25): the caller's
+ * own session, self-diagnosed.
+ *
+ * Everything here is about the session the caller is ATTACHED to -- the
+ * request carries no session id, so there is nothing to widen the
+ * answer to another session with.
+ *
+ * Two families of field, and they answer different questions:
+ *
+ * **Cached** (what the daemon already tracked about this session,
+ * stamped at spawn/bootstrap -- never re-measured for this call):
+ *     ``runner_identity``: ``{runner_pid, pool_served, pool_slot_pid,
+ *         cascade_driver_id, apparmor_profile, stale}`` -- the same
+ *         shape :class:`~server.session_identity.RunnerIdentity`
+ *         persists (#812).  ``None`` when this session has no runner
+ *         (in-process).  ``stale`` is ``True`` only for a record
+ *         restored from disk after a daemon restart -- the pid it
+ *         names belongs to a previous process lifetime.
+ *     ``confinement_id``: the AppArmor profile name the session's
+ *         record claims (#1033), or ``""`` when none was requested.
+ *     ``sandbox_mode``: the session record's own value --
+ *         ``"apparmor"`` / ``"apparmor-complain"`` / ``"soft"`` / ``None``
+ *         (#1014's vocabulary).  This is a CACHED claim, exactly the
+ *         kind #1253 was filed about reading as confined when it was
+ *         not; ``probe`` below is the live check that claim can be
+ *         compared against.
+ *     ``consumption``: this session's own spend, as
+ *         :meth:`JaatoSession.get_consumption` already reports it --
+ *         reused, not recomputed.
+ *     ``notebook_boundary_kind``: the active notebook backend's
+ *         execution boundary (#1012's ``kernel_sandbox.BOUNDARY_*``),
+ *         or ``None`` when no notebook plugin is loaded.
+ *     ``protocol_version`` / ``server_version``: what this daemon
+ *         speaks and runs.
+ *     ``apparmor_grants`` (1.26, #1326): what the session's AppArmor
+ *         profile was provisioned with, recorded when it was loaded --
+ *         ``{recorded, template_version, profile_name, exec_scope,
+ *         requested_fragments, declared_by, fragments, missing_fragments,
+ *         unreadable_fragments, plugin_rules, references}``.
+ *         ``exec_scope`` is ``"scoped"`` (``//child`` may exec only what
+ *         the fragments name) or ``"unscoped"`` (the broad in-PATH set).
+ *         Each ``fragments`` row is ``{name, tier, path, rules, shadows}``;
+ *         ``plugin_rules`` rows are ``{plugin, rules}``; ``references``
+ *         (listed live, since ``selectReferences`` adds them mid-session)
+ *         are ``{ref_id, rules}``.  ``declared_by`` names the profile in the
+ *         ``inherits:`` chain that set ``apparmor_fragments`` (``None``
+ *         when none did, ``""`` when a restored session did not record
+ *         it).  ``recorded: False`` when the profile was loaded before
+ *         this daemon started or was never loaded here.  ``None`` (the
+ *         whole field) when the session is not AppArmor-confined.
+ *     ``seccomp`` (#1503, additive): the seccomp-bpf posture the
+ *         session's model-driven subprocesses get, as the runner
+ *         reported it at bootstrap -- ``{posture, allowed_families?,
+ *         reason?, required?, libseccomp?, spawns_refused?}`` where
+ *         ``posture`` is ``filter`` / ``off`` / ``absent`` /
+ *         ``unconfined``.  ``None`` from a daemon or runner that does not
+ *         report it.  The live value rides ``probe["seccomp"]``.
+ *
+ * **Live** (measured fresh, at the moment of this call, on the runner --
+ * never a cached value):
+ *     ``probe``: the on-demand re-probe
+ *     (``server.runner.bootstrap.probe_confinement_now``) --
+ *     ``{ok, error, expected_profile, current_profile, current_mode,
+ *     enforced, confined, scan}`` where ``scan`` is
+ *     ``{scanned, matched, divergent, unreadable, gone, uniform, route,
+ *     divergent_threads, unreadable_threads}`` (thread-level detail,
+ *     tid/name/label, per #1023's ``ThreadProfileScan``) or ``None``
+ *     when the walk itself could not run.  ``ok=False`` means the probe
+ *     could not determine an answer -- absence of evidence, rendered as
+ *     exactly that rather than as a guessed ``True`` or ``False``.
+ *     ``None`` (the whole field) when this session has no runner to
+ *     probe.
+ *
+ * Fields:
+ *     request_id: The :class:`DiagnosticsRequest` this answers.
+ *     ok: ``False`` when nothing could be reported at all (no session,
+ *         or the caller was refused by the owner gate).  Even then a
+ *         live ``probe`` may still be ``None`` while everything else is
+ *         populated -- see ``category``.
+ *     error / category: Why not, when ``ok`` is ``False``.
+ *         ``category`` is one of ``no_session``, ``not_owner``,
+ *         ``runner_unreachable``.
+ */
+export interface DiagnosticsResultEvent {
+  type?: EventType51;
+  timestamp?: Timestamp51;
+  session_id?: SessionId51;
+  request_id?: RequestId24;
+  ok?: Ok4;
+  error?: Error9;
+  category?: Category4;
+  runner_identity?: RunnerIdentity;
+  confinement_id?: ConfinementId;
+  sandbox_mode?: SandboxMode;
+  consumption?: Consumption;
+  notebook_boundary_kind?: NotebookBoundaryKind;
+  protocol_version?: ProtocolVersion1;
+  server_version?: ServerVersion;
+  probe?: Probe;
+  apparmor_grants?: ApparmorGrants;
+  seccomp?: Seccomp;
 }
 /**
  * List of sandbox-allowed paths - for @@ completion cache.
@@ -15524,9 +30476,9 @@ export interface MemoryListEvent {
  * completion list for @@ (sandbox path) references.
  */
 export interface SandboxPathsEvent {
-  type?: EventType47;
-  timestamp?: Timestamp47;
-  session_id?: SessionId47;
+  type?: EventType52;
+  timestamp?: Timestamp52;
+  session_id?: SessionId52;
   paths?: Paths;
 }
 /**
@@ -15536,18 +30488,18 @@ export interface SandboxPathsEvent {
  * completion list for service names and HTTP methods.
  */
 export interface ServiceListEvent {
-  type?: EventType48;
-  timestamp?: Timestamp48;
-  session_id?: SessionId48;
+  type?: EventType53;
+  timestamp?: Timestamp53;
+  session_id?: SessionId53;
   services?: Services1;
 }
 /**
  * Session description was updated (by model calling session_describe).
  */
 export interface SessionDescriptionUpdatedEvent {
-  type?: EventType49;
-  timestamp?: Timestamp49;
-  session_id?: SessionId49;
+  type?: EventType54;
+  timestamp?: Timestamp54;
+  session_id?: SessionId54;
   description?: Description;
 }
 /**
@@ -15568,9 +30520,9 @@ export interface SessionDescriptionUpdatedEvent {
  * removed from this event.
  */
 export interface SessionProfilesEvent {
-  type?: EventType50;
-  timestamp?: Timestamp50;
-  session_id?: SessionId50;
+  type?: EventType55;
+  timestamp?: Timestamp55;
+  session_id?: SessionId55;
   profiles?: Profiles;
   parse_errors?: ParseErrors;
 }
@@ -15625,15 +30577,15 @@ export interface ModelTiers {
  */
 export interface ProfileParseError {
   name: Name1;
-  error: Error5;
+  error: Error10;
 }
 /**
  * Send a message to the model.
  */
 export interface SendMessageRequest {
-  type?: EventType51;
-  timestamp?: Timestamp51;
-  session_id?: SessionId51;
+  type?: EventType56;
+  timestamp?: Timestamp56;
+  session_id?: SessionId56;
   text?: Text1;
   attachments?: Attachments;
   parallel_tools?: ParallelTools;
@@ -15642,10 +30594,10 @@ export interface SendMessageRequest {
  * Respond to a permission request.
  */
 export interface PermissionResponseRequest {
-  type?: EventType52;
-  timestamp?: Timestamp52;
-  session_id?: SessionId52;
-  request_id?: RequestId20;
+  type?: EventType57;
+  timestamp?: Timestamp57;
+  session_id?: SessionId57;
+  request_id?: RequestId25;
   response?: Response2;
   edited_arguments?: EditedArguments;
 }
@@ -15653,10 +30605,10 @@ export interface PermissionResponseRequest {
  * Respond to a clarification question.
  */
 export interface ClarificationResponseRequest {
-  type?: EventType53;
-  timestamp?: Timestamp53;
-  session_id?: SessionId53;
-  request_id?: RequestId21;
+  type?: EventType58;
+  timestamp?: Timestamp58;
+  session_id?: SessionId58;
+  request_id?: RequestId26;
   question_index?: QuestionIndex2;
   response?: Response3;
 }
@@ -15664,10 +30616,10 @@ export interface ClarificationResponseRequest {
  * Stop current operation (cancel generation).
  */
 export interface StopRequest {
-  type?: EventType54;
-  timestamp?: Timestamp54;
-  session_id?: SessionId54;
-  agent_id?: AgentId29;
+  type?: EventType59;
+  timestamp?: Timestamp59;
+  session_id?: SessionId59;
+  agent_id?: AgentId30;
 }
 /**
  * External event injected by the host page via the web component.
@@ -15676,13 +30628,13 @@ export interface StopRequest {
  * so that agents subscribed via ``subscribeToEvents`` are notified.
  */
 export interface ExternalEventRequest {
-  type?: EventType55;
-  timestamp?: Timestamp55;
-  session_id?: SessionId55;
+  type?: EventType60;
+  timestamp?: Timestamp60;
+  session_id?: SessionId60;
   name?: Name2;
-  data?: Data;
+  data?: Data1;
 }
-export interface Data {
+export interface Data1 {
   [k: string]: unknown;
 }
 /**
@@ -15693,10 +30645,10 @@ export interface Data {
  * events.
  */
 export interface EventsSubscribedEvent {
-  type?: EventType56;
-  timestamp?: Timestamp56;
-  session_id?: SessionId56;
-  agent_id?: AgentId30;
+  type?: EventType61;
+  timestamp?: Timestamp61;
+  session_id?: SessionId61;
+  agent_id?: AgentId31;
   event_names?: EventNames;
 }
 /**
@@ -15716,9 +30668,9 @@ export interface EventsSubscribedEvent {
  * construction.
  */
 export interface CommandRequest {
-  type?: EventType57;
-  timestamp?: Timestamp57;
-  session_id?: SessionId57;
+  type?: EventType62;
+  timestamp?: Timestamp62;
+  session_id?: SessionId62;
   command?: Command;
   args?: Args;
   payload?: Payload1;
@@ -15730,26 +30682,106 @@ export interface CommandRequest {
  * If agent_id is None or empty, returns budget for main agent.
  */
 export interface GetInstructionBudgetRequest {
-  type?: EventType58;
-  timestamp?: Timestamp58;
-  session_id?: SessionId58;
-  agent_id?: AgentId31;
+  type?: EventType63;
+  timestamp?: Timestamp63;
+  session_id?: SessionId63;
+  agent_id?: AgentId32;
+}
+/**
+ * List the attached session's memory store, quietly (#1232, 1.22).
+ *
+ * Answered by :class:`MemoryListEvent` carrying this ``request_id``.
+ * Unlike the ``memory list`` user command it prints nothing to the
+ * transcript, so a client may ask as often as it needs.  Session-scoped:
+ * the store is read through the session's own runner.
+ */
+export interface MemoryListRequest {
+  type?: EventType64;
+  timestamp?: Timestamp64;
+  session_id?: SessionId64;
+  request_id?: RequestId27;
+}
+/**
+ * Fetch one memory WITH its content (1.22).
+ *
+ * Answered by :class:`MemoryGetResultEvent`.  Viewing follows the
+ * session's visibility, like the list.
+ */
+export interface MemoryGetRequest {
+  type?: EventType65;
+  timestamp?: Timestamp65;
+  session_id?: SessionId65;
+  request_id?: RequestId28;
+  memory_id?: MemoryId3;
+}
+/**
+ * Edit a memory, or approve / dismiss it (1.22).
+ *
+ * The structured replacement for ``memory edit``, which spawns ``$EDITOR``
+ * on the runner's host and so cannot be driven from a browser.  Every
+ * field is optional; ``None`` leaves it as it is.  ``maturity`` moves the
+ * lifecycle -- ``validated`` approves, ``dismissed`` dismisses -- through
+ * the plugin's one ``curated_by``-stamping helper, which records the
+ * caller as the curator.  Limited to the workspace owner (anyone, on an
+ * unowned workspace); answered by :class:`MemoryUpdateResultEvent`.
+ */
+export interface MemoryUpdateRequest {
+  type?: EventType66;
+  timestamp?: Timestamp66;
+  session_id?: SessionId66;
+  request_id?: RequestId29;
+  memory_id?: MemoryId4;
+  description?: Description2;
+  content?: Content1;
+  tags?: Tags;
+  maturity?: Maturity;
+}
+/**
+ * Remove a memory from whichever tier holds it (1.22).
+ *
+ * Through the plugin's existing delete path (``delete_memory``), not a
+ * second one.  Limited to the workspace owner; answered by
+ * :class:`MemoryDeleteResultEvent`.
+ */
+export interface MemoryDeleteRequest {
+  type?: EventType67;
+  timestamp?: Timestamp67;
+  session_id?: SessionId67;
+  request_id?: RequestId30;
+  memory_id?: MemoryId5;
+}
+/**
+ * Ask for a live self-diagnosis of the caller's OWN session (#1294, 1.25).
+ *
+ * Declares no session-naming field of its own: the inherited
+ * ``Event.session_id`` is stamped by the router on OUTGOING events and
+ * read by nothing on the way in, so the daemon always answers for
+ * whichever session THIS connection is attached to -- never a value
+ * read off the request.  Answered by :class:`DiagnosticsResultEvent`,
+ * which re-probes the runner's confinement fresh rather than reading a
+ * cached claim.
+ */
+export interface DiagnosticsRequest {
+  type?: EventType68;
+  timestamp?: Timestamp68;
+  session_id?: SessionId68;
+  request_id?: RequestId31;
 }
 /**
  * Request list of available commands from server.
  */
 export interface CommandListRequest {
-  type?: EventType59;
-  timestamp?: Timestamp59;
-  session_id?: SessionId59;
+  type?: EventType69;
+  timestamp?: Timestamp69;
+  session_id?: SessionId69;
 }
 /**
  * List of available commands from server/plugins.
  */
 export interface CommandListEvent {
-  type?: EventType60;
-  timestamp?: Timestamp60;
-  session_id?: SessionId60;
+  type?: EventType70;
+  timestamp?: Timestamp70;
+  session_id?: SessionId70;
   commands?: Commands;
 }
 /**
@@ -15760,17 +30792,17 @@ export interface CommandListEvent {
  * by re-requesting the full command list from the daemon.
  */
 export interface CommandListRefreshEvent {
-  type?: EventType61;
-  timestamp?: Timestamp61;
-  session_id?: SessionId61;
+  type?: EventType71;
+  timestamp?: Timestamp71;
+  session_id?: SessionId71;
 }
 /**
  * Tool status information for client display.
  */
 export interface ToolStatusEvent {
-  type?: EventType62;
-  timestamp?: Timestamp62;
-  session_id?: SessionId62;
+  type?: EventType72;
+  timestamp?: Timestamp72;
+  session_id?: SessionId72;
   tools?: Tools1;
   message?: Message3;
 }
@@ -15785,9 +30817,9 @@ export interface ToolStatusEvent {
  * not a delta. Clients should replace their local lookup on each receive.
  */
 export interface ToolIdRegistryEvent {
-  type?: EventType63;
-  timestamp?: Timestamp63;
-  session_id?: SessionId63;
+  type?: EventType73;
+  timestamp?: Timestamp73;
+  session_id?: SessionId73;
   mappings?: Mappings;
 }
 export interface Mappings {
@@ -15800,10 +30832,10 @@ export interface Mappings {
  * Used by headless mode to disable tools before starting event handling.
  */
 export interface ToolDisableRequest {
-  type?: EventType64;
-  timestamp?: Timestamp64;
-  session_id?: SessionId64;
-  tool_name?: ToolName11;
+  type?: EventType74;
+  timestamp?: Timestamp74;
+  session_id?: SessionId74;
+  tool_name?: ToolName12;
 }
 /**
  * Register client-side tools that the browser/frontend can execute.
@@ -15813,9 +30845,9 @@ export interface ToolDisableRequest {
  * ``tool.execute_request`` and waits for ``tool.execute_result``.
  */
 export interface ToolsRegisterClientRequest {
-  type?: EventType65;
-  timestamp?: Timestamp65;
-  session_id?: SessionId65;
+  type?: EventType75;
+  timestamp?: Timestamp75;
+  session_id?: SessionId75;
   tools?: Tools2;
   categories?: Categories;
 }
@@ -15826,12 +30858,12 @@ export interface Categories {
  * Server requests the WS client to execute a client-registered tool.
  */
 export interface ToolExecuteRequestEvent {
-  type?: EventType66;
-  timestamp?: Timestamp66;
-  session_id?: SessionId66;
-  call_id?: CallId4;
-  agent_id?: AgentId32;
-  tool_name?: ToolName12;
+  type?: EventType76;
+  timestamp?: Timestamp76;
+  session_id?: SessionId76;
+  call_id?: CallId5;
+  agent_id?: AgentId33;
+  tool_name?: ToolName13;
   tool_args?: ToolArgs3;
 }
 export interface ToolArgs3 {
@@ -15841,32 +30873,107 @@ export interface ToolArgs3 {
  * Client returns the result of a client-side tool execution.
  */
 export interface ToolExecuteResultEvent {
-  type?: EventType67;
-  timestamp?: Timestamp67;
-  session_id?: SessionId67;
-  call_id?: CallId5;
+  type?: EventType77;
+  timestamp?: Timestamp77;
+  session_id?: SessionId77;
+  call_id?: CallId6;
   result?: Result1;
-  error?: Error6;
+  error?: Error11;
 }
 /**
  * Client request for conversation history.
  */
 export interface HistoryRequest {
-  type?: EventType68;
-  timestamp?: Timestamp68;
-  session_id?: SessionId68;
-  agent_id?: AgentId33;
+  type?: EventType78;
+  timestamp?: Timestamp78;
+  session_id?: SessionId78;
+  agent_id?: AgentId34;
 }
 /**
  * Conversation history from server.
  */
 export interface HistoryEvent {
-  type?: EventType69;
-  timestamp?: Timestamp69;
-  session_id?: SessionId69;
-  agent_id?: AgentId34;
+  type?: EventType79;
+  timestamp?: Timestamp79;
+  session_id?: SessionId79;
+  agent_id?: AgentId35;
   history?: History;
   turn_accounting?: TurnAccounting;
+}
+/**
+ * Ask for one page of the rendered transcript, newest first (1.28).
+ *
+ * Pages are cut from the END of the history: an empty ``before`` asks
+ * for the most recent page, and each answer's ``before`` cursor asks for
+ * the page just older than it.  The daemon never splits a renderable
+ * unit (a fenced block, a table, a notebook cell, one message's tool
+ * calls) across two pages, so ``max_lines`` is a target, not a cap: a
+ * single unit taller than it is a page by itself.
+ *
+ * Attributes:
+ *     agent_id: Whose transcript.
+ *     before: A cursor from a previous :class:`HistoryPageEvent`;
+ *         ``""`` for the latest page.
+ *     max_lines: Page budget in rendered lines; ``0`` = the daemon's
+ *         default (120), capped at 2000.
+ *     request_id: Echoed on the answer.
+ */
+export interface HistoryPageRequest {
+  type?: EventType80;
+  timestamp?: Timestamp80;
+  session_id?: SessionId80;
+  agent_id?: AgentId36;
+  before?: Before;
+  max_lines?: MaxLines;
+  request_id?: RequestId32;
+}
+/**
+ * One page of the transcript as renderable units (1.28).
+ *
+ * The answer to :class:`HistoryPageRequest`, and -- request_id ``""`` --
+ * what an attach sends INSTEAD of the full event replay when the
+ * client's presentation asks for ``history_replay: "paged"``.
+ *
+ * Each entry of ``units`` is, oldest first::
+ *
+ *     {"id": "<cursor>", "kind": "user"|"model"|"thinking"|"tools",
+ *      "group": "<id>", "turn": <int>, "lines": <int>,
+ *      "text": "...",                       # all kinds but tools
+ *      "tools": [{"call_id", "tool_name", "tool_args",
+ *                 "tool_class", "success"}]}  # tools only
+ *
+ * ``model`` text has been through the output formatter pipeline, exactly
+ * as the live stream is (``<j-code>``, ``<j-table>``...).  Consecutive
+ * units sharing a ``group`` are segments of ONE text part -- join them
+ * into one block.  ``success`` is ``null`` for a call no result was
+ * recorded for.
+ *
+ * Attributes:
+ *     agent_id: Whose transcript.
+ *     request_id: The request this answers; ``""`` for the attach page.
+ *     units: The page, oldest first.
+ *     before: Cursor for the next OLDER page; ``""`` when none.
+ *     has_more: ``before`` is non-empty.
+ *     total_units: Units in the whole history.
+ *     stale: The requested cursor no longer names any unit (the history
+ *         was rewritten under it); ``units`` is empty -- re-request the
+ *         latest page.
+ *     ok: ``False`` when no page could be produced; see ``error``.
+ *     error: Why, when ``ok`` is ``False``.
+ */
+export interface HistoryPageEvent {
+  type?: EventType81;
+  timestamp?: Timestamp81;
+  session_id?: SessionId81;
+  agent_id?: AgentId37;
+  request_id?: RequestId33;
+  units?: Units;
+  before?: Before1;
+  has_more?: HasMore;
+  total_units?: TotalUnits;
+  stale?: Stale;
+  ok?: Ok5;
+  error?: Error12;
 }
 /**
  * Client sends its configuration to the server.
@@ -15876,9 +30983,9 @@ export interface HistoryEvent {
  * a ``PresentationContext`` on the server side.
  */
 export interface ClientConfigRequest {
-  type?: EventType70;
-  timestamp?: Timestamp70;
-  session_id?: SessionId70;
+  type?: EventType82;
+  timestamp?: Timestamp82;
+  session_id?: SessionId82;
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
@@ -15896,9 +31003,9 @@ export interface ClientConfigRequest {
  * pause point (between tool executions, after subagent completion, etc.).
  */
 export interface MidTurnPromptQueuedEvent {
-  type?: EventType71;
-  timestamp?: Timestamp71;
-  session_id?: SessionId71;
+  type?: EventType83;
+  timestamp?: Timestamp83;
+  session_id?: SessionId83;
   text?: Text2;
   position_in_queue?: PositionInQueue;
 }
@@ -15909,9 +31016,9 @@ export interface MidTurnPromptQueuedEvent {
  * by the model.
  */
 export interface MidTurnPromptInjectedEvent {
-  type?: EventType72;
-  timestamp?: Timestamp72;
-  session_id?: SessionId72;
+  type?: EventType84;
+  timestamp?: Timestamp84;
+  session_id?: SessionId84;
   text?: Text3;
 }
 /**
@@ -15962,9 +31069,9 @@ export interface MidTurnPromptInjectedEvent {
  *         ``notify`` checkpoint and every action-only rung.
  */
 export interface BudgetRungFiredEvent {
-  type?: EventType73;
-  timestamp?: Timestamp73;
-  session_id?: SessionId73;
+  type?: EventType85;
+  timestamp?: Timestamp85;
+  session_id?: SessionId85;
   at_percent?: AtPercent;
   action?: Action1;
   origin?: Origin;
@@ -15977,6 +31084,48 @@ export interface TierChanges {
   [k: string]: string;
 }
 /**
+ * Something happened that a person should look at (protocol 1.16).
+ *
+ * Article 73 gives a provider 15 days to report a serious incident from
+ * the moment it becomes AWARE of it -- 10 for a death, 2 for a
+ * widespread infringement.  All three clocks start from awareness, and
+ * the framework already knew when the events that could be one
+ * happened; it recorded none of them as such, each being a log line in
+ * a different format with no severity and no clock.
+ *
+ * **This event does not classify.**  Whether an entry IS a serious
+ * incident under Art. 3(49) is a determination about consequences --
+ * harm to a person, disruption of critical infrastructure -- that the
+ * framework cannot see.  It reports the fact and the clock; a person
+ * decides.  The absence of a ``severity`` field is that decision, not
+ * an omission.
+ *
+ * The same record goes to the application trace as an ``INCIDENT:``
+ * line (``shared.incidents``), which is what ``jaato-doctor
+ * --incidents`` reads and what a deployment gets without configuring
+ * anything.
+ *
+ * Attributes:
+ *     kind: One of ``shared.incidents.INCIDENT_KINDS``.
+ *     at: Unix timestamp of when the framework became aware.
+ *     cause: One line saying what happened.
+ *     site: ``file.py::function`` -- what noticed.
+ *     provider / model / tier: The binding that was serving, when
+ *         there was one.  Absent rather than ``null`` when unknown.
+ */
+export interface IncidentEvent {
+  type?: EventType86;
+  timestamp?: Timestamp86;
+  session_id?: SessionId86;
+  kind?: Kind1;
+  at?: At;
+  cause?: Cause;
+  site?: Site;
+  provider?: Provider1;
+  model?: Model1;
+  tier?: Tier;
+}
+/**
  * Sent when streaming is interrupted to process a mid-turn user prompt.
  *
  * This notifies the client that the model's current generation was interrupted
@@ -15984,9 +31133,9 @@ export interface TierChanges {
  * The partial response is preserved and the user's prompt is being processed.
  */
 export interface MidTurnInterruptEvent {
-  type?: EventType74;
-  timestamp?: Timestamp74;
-  session_id?: SessionId74;
+  type?: EventType87;
+  timestamp?: Timestamp87;
+  session_id?: SessionId87;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -15998,10 +31147,10 @@ export interface MidTurnInterruptEvent {
  * for any pending tool calls.
  */
 export interface InterruptedTurnRecoveredEvent {
-  type?: EventType75;
-  timestamp?: Timestamp75;
-  session_id?: SessionId75;
-  agent_id?: AgentId35;
+  type?: EventType88;
+  timestamp?: Timestamp88;
+  session_id?: SessionId88;
+  agent_id?: AgentId38;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
 }
@@ -16009,17 +31158,17 @@ export interface InterruptedTurnRecoveredEvent {
  * Client requests list of available workspaces.
  */
 export interface WorkspaceListRequest {
-  type?: EventType76;
-  timestamp?: Timestamp76;
-  session_id?: SessionId76;
+  type?: EventType89;
+  timestamp?: Timestamp89;
+  session_id?: SessionId89;
 }
 /**
  * Response to workspace.list - list of available workspaces.
  */
 export interface WorkspaceListEvent {
-  type?: EventType77;
-  timestamp?: Timestamp77;
-  session_id?: SessionId77;
+  type?: EventType90;
+  timestamp?: Timestamp90;
+  session_id?: SessionId90;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -16027,41 +31176,173 @@ export interface WorkspaceListEvent {
  * Client requests creation of a new workspace.
  */
 export interface WorkspaceCreateRequest {
-  type?: EventType78;
-  timestamp?: Timestamp78;
-  session_id?: SessionId78;
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  session_id?: SessionId91;
   name?: Name3;
 }
 /**
  * Response to workspace.create - new workspace created.
+ *
+ * ``workspace`` is the created entry as ``workspace.list`` would render it
+ * (name, path, ``configured``, ``owner``, ``last_accessed``), so a client
+ * can add the row without a second listing.  ``name`` and ``path`` repeat
+ * its two identifying fields for readers predating the dict.  The WS
+ * server used to send ONLY ``workspace=`` -- a field this model did not
+ * declare, dropped on ingest by ``extra='ignore'`` -- so every client
+ * learned of a created workspace as one with no name.
  */
 export interface WorkspaceCreatedEvent {
-  type?: EventType79;
-  timestamp?: Timestamp79;
-  session_id?: SessionId79;
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  session_id?: SessionId92;
   name?: Name4;
-  path?: Path;
+  path?: Path1;
+  workspace?: Workspace;
+}
+export interface Workspace {
+  [k: string]: unknown;
+}
+/**
+ * Client asks the daemon to delete a workspace it may see (protocol 1.13).
+ *
+ * Destructive: the client confirms before sending.  Answered by
+ * ``WorkspaceDeletedEvent``.
+ */
+export interface WorkspaceDeleteRequest {
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
+  name?: Name5;
+  stop_sessions?: StopSessions;
+}
+/**
+ * Answer to ``workspace.delete`` (protocol 1.13).
+ *
+ * One event whatever happened, because the client is a list that has to
+ * render *something* for the press: ``ok`` with the name on success;
+ * ``ok=False`` and the reason when the daemon refused -- the workspace
+ * belongs to another user, does not exist, still has loaded sessions or
+ * other clients selecting it, or the name left the root.  On success the
+ * directory and everything under it (persisted sessions included) is
+ * gone and the deleting client's selection of it is cleared.
+ */
+export interface WorkspaceDeletedEvent {
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
+  name?: Name6;
+  ok?: Ok6;
+  error?: Error13;
+}
+/**
+ * Ask for a workspace's details (protocol 1.27, WS only).
+ *
+ * Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
+ */
+export interface WorkspaceInspectRequest {
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
+  name?: Name7;
+  request_id?: RequestId34;
+}
+/**
+ * Answer to ``workspace.inspect`` (protocol 1.27).
+ *
+ * One event whatever happened.  ``ok=False`` with ``error`` when the name
+ * left the root, names no workspace, or belongs to another user -- the
+ * same refusals ``workspace.select`` / ``workspace.delete`` give.
+ *
+ * ``sessions`` counts the sessions in this workspace by state: ``total``,
+ * ``sleeping`` (persisted, not loaded), ``awake`` (loaded, not waiting on
+ * a person) and ``waiting`` (loaded and blocked on a permission or
+ * clarification prompt).  ``repos`` is :attr:`WorkspaceInfo.sources` plus,
+ * per checkout, ``uncommitted`` (lines of ``git status --porcelain``),
+ * ``unpushed`` (commits ahead of the upstream; ``None`` when there is no
+ * upstream) and ``error`` (non-empty when git could not answer; the two
+ * counts are then ``None``).  ``size_bytes`` is the recursive size of the
+ * tree, ``None`` when the walk was too large or too slow to finish.
+ */
+export interface WorkspaceInspectEvent {
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
+  name?: Name8;
+  request_id?: RequestId35;
+  ok?: Ok7;
+  error?: Error14;
+  path?: Path2;
+  size_bytes?: SizeBytes;
+  sessions?: Sessions2;
+  repos?: Repos;
+}
+export interface Sessions2 {
+  [k: string]: number;
+}
+/**
+ * Clone repositories into a workspace (protocol 1.27, WS only).
+ *
+ * ``repos`` entries are ``{"repo": "owner/name", "branch": "main",
+ * "forge": "github"}``; each lands in ``<workspace>/<name>``.  Only the
+ * ``github`` forge is supported.  Credentials are the workspace's own
+ * ``GH_TOKEN``, resolved as a session in that workspace would resolve it,
+ * and never sent on argv or in a URL.  Answered by a stream of
+ * :class:`WorkspaceCloneProgressEvent` echoing ``request_id``.
+ */
+export interface WorkspaceCloneRequest {
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
+  name?: Name9;
+  request_id?: RequestId36;
+  repos?: Repos1;
+}
+/**
+ * One step of a ``workspace.clone`` (protocol 1.27).
+ *
+ * Every requested repo is first announced ``queued``; they are then cloned
+ * one at a time through ``cloning`` (with ``percent`` from git's own
+ * progress) and ``checkout`` to ``done`` or ``failed`` (with ``error``).
+ * ``done`` / ``total`` count finished repos of this request, so the last
+ * event of a request has ``done == total``.  A request refused as a whole
+ * (workspace not visible, left the root) is ONE ``failed`` event with
+ * ``repo == ""``.  A retry is a new request naming the one repo.
+ */
+export interface WorkspaceCloneProgressEvent {
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
+  name?: Name10;
+  request_id?: RequestId37;
+  repo?: Repo;
+  branch?: Branch;
+  state?: State;
+  percent?: Percent;
+  error?: Error15;
+  done?: Done;
+  total?: Total;
 }
 /**
  * Client selects a workspace to use for the session.
  */
 export interface WorkspaceSelectRequest {
-  type?: EventType80;
-  timestamp?: Timestamp80;
-  session_id?: SessionId80;
-  name?: Name5;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
+  name?: Name11;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType81;
-  timestamp?: Timestamp81;
-  session_id?: SessionId81;
-  workspace?: Workspace;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
+  workspace?: Workspace1;
   configured?: Configured;
-  provider?: Provider1;
-  model?: Model1;
+  provider?: Provider2;
+  model?: Model2;
   available_providers?: AvailableProviders;
   missing_fields?: MissingFields;
 }
@@ -16069,25 +31350,26 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType82;
-  timestamp?: Timestamp82;
-  session_id?: SessionId82;
-  provider?: Provider2;
-  model?: Model2;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
+  provider?: Provider3;
+  model?: Model3;
   api_key?: ApiKey;
+  key_only?: KeyOnly;
 }
 /**
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType83;
-  timestamp?: Timestamp83;
-  session_id?: SessionId83;
-  workspace?: Workspace1;
-  provider?: Provider3;
-  model?: Model3;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
+  workspace?: Workspace2;
+  provider?: Provider4;
+  model?: Model4;
   success?: Success3;
-  error?: Error7;
+  error?: Error16;
 }
 /**
  * Incremental workspace file change notification.
@@ -16103,10 +31385,12 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType84;
-  timestamp?: Timestamp84;
-  session_id?: SessionId84;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   changes?: Changes;
+  seq?: Seq;
+  epoch?: Epoch;
 }
 /**
  * Complete workspace file state snapshot.
@@ -16116,11 +31400,589 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType85;
-  timestamp?: Timestamp85;
-  session_id?: SessionId85;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
   files?: Files;
-  total?: Total;
+  total?: Total1;
+  seq?: Seq1;
+  epoch?: Epoch1;
+  seqs?: Seqs;
+}
+export interface Seqs {
+  [k: string]: number;
+}
+/**
+ * Answer to ``workspace.ignore <path>`` (protocol 1.12).
+ *
+ * The TUI's workspace panel adds the entry under the cursor to the
+ * workspace's ``.gitignore`` — and removes it again with the same key —
+ * by writing the file itself, which it can because it runs on the host.
+ * A remote client (the web coding UI) cannot, so the daemon serves the
+ * same toggle as a command and answers with this event.  The edit is
+ * ``jaato_sdk.gitignore_toggle.toggle_gitignore_pattern`` on both routes,
+ * so the two clients cannot disagree about what one press does.
+ *
+ * The daemon's ``WorkspaceMonitor`` watches ``.gitignore`` and reloads its
+ * parser on the write, so the pattern applies to every LATER file event;
+ * an entry the panel already shows is not retroactively removed — that is
+ * what the client-side hide is for.
+ *
+ * Fields:
+ *     path: The entry as the caller sent it (a directory keeps its
+ *         trailing ``/``).
+ *     ignored: The entry's state AFTER the toggle — ``True`` when the line
+ *         was added, ``False`` when it was removed.  Meaningful only when
+ *         ``ok``.
+ *     ok: Whether the file was written.
+ *     error: Why not, when ``ok`` is ``False`` — the pattern was refused
+ *         (empty, absolute, a line break, a leading ``#`` / ``!``), the
+ *         caller has no workspace, or the write failed.
+ *     gitignore_path: The file that was edited, so a client can name it.
+ */
+export interface WorkspaceIgnoreResultEvent {
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
+  path?: Path3;
+  ignored?: Ignored;
+  ok?: Ok8;
+  error?: Error17;
+  gitignore_path?: GitignorePath;
+}
+/**
+ * Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.33).
+ *
+ * An agent PROPOSES a reference with ``proposeReference``; the result is a
+ * claim under ``<workspace>/.jaato/references-claims/``, never a catalog
+ * entry, because a confined runner cannot write the catalog.  A person
+ * promotes the claim (the daemon writes ``.jaato/references/<id>.json``,
+ * stamping ``origin.curated_by`` from this connection's identity) or
+ * dismisses it (the claim file is removed).  Both are gated by the
+ * workspace-owner rule the memory rail uses.
+ *
+ * The daemon answers every request with exactly one of these, refusals
+ * included.
+ *
+ * Fields:
+ *     request_id: Echoed from a :class:`ReferenceCurationRequest`; ``""``
+ *         for the answer to a typed ``reference.promote|dismiss`` command.
+ *     action: ``promote`` or ``dismiss``.
+ *     claim_id: The claim acted on, as the caller named it.
+ *     ok: Whether the verb did what was asked.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``unknown_bundle``,
+ *         ``not_found``, ``invalid_claim``, ``collision``,
+ *         ``stale`` (a revision claim written against a version of the
+ *         reference that has since changed; nothing is written),
+ *         ``ambiguous`` (the revised id is in two catalog files),
+ *         ``unsafe_path`` or ``io_error``.  Branch on this, not on
+ *         ``error``.
+ *     error: The reason, for a person.
+ *     reference_id: The catalog id a promotion wrote.
+ *     reference_file: The workspace-relative catalog file it wrote.
+ *     warnings: Anything that happened beside success -- a promoted claim
+ *         whose file could not be removed afterwards, or a destination
+ *         index that was not updated.
+ *     bundle: The bundle promoted into; ``""`` for the catalog root.
+ *     reconcile: What happened to the destination bundle's vector index
+ *         after a promotion: ``none`` (it has none), ``updated``,
+ *         ``clean``, ``busy``, ``unavailable`` (no session to embed with,
+ *         no provider, a different model, no numpy) or ``error``.  The
+ *         reference is placed whatever this says; until the index holds
+ *         its row, similarity matching cannot find it.
+ *     reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
+ *         ``updated`` / ``clean``.
+ *     revised: ``True`` when the claim was a REVISION of a reference
+ *         already in the catalog (``proposeReference`` with ``revises``):
+ *         the catalog file was replaced in place, its ``origin`` kept and
+ *         a record appended to its ``revisions``.  Additive; an older
+ *         daemon never sends it (and answers a revision ``collision``).
+ */
+export interface ReferenceCurationResultEvent {
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
+  request_id?: RequestId38;
+  action?: Action2;
+  claim_id?: ClaimId;
+  ok?: Ok9;
+  category?: Category5;
+  error?: Error18;
+  reference_id?: ReferenceId;
+  reference_file?: ReferenceFile;
+  warnings?: Warnings1;
+  bundle?: Bundle;
+  reconcile?: Reconcile;
+  reconcile_detail?: ReconcileDetail;
+  revised?: Revised;
+}
+/**
+ * The reference claims agents proposed in the caller's workspace (1.33).
+ *
+ * Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
+ * A claim is what ``proposeReference`` wrote under
+ * ``<workspace>/.jaato/references-claims/``: a proposed catalog entry
+ * nobody has reviewed.  Read by the DAEMON, without following a link out
+ * of the workspace; a file that is not a well-formed claim is named under
+ * ``unreadable`` rather than dropped.
+ *
+ * ``ok`` is ``False`` -- with ``category`` ``no_workspace`` or
+ * ``unsafe_path`` -- when the claims could not be read; ``claims`` is then
+ * meaningless, never "nothing proposed".
+ *
+ * Each row: ``claim_id``, ``id``, ``name``, ``description``, ``tags``,
+ * ``type`` (``local`` / ``inline``), ``path`` (local) or ``content``
+ * (inline), ``origin`` (the claim's recorded origin: ``generated_by``,
+ * ``created_by``, ``witnessed_by``, ``at``) and ``problems`` -- the
+ * reasons a promotion would be refused right now (the id is already in the
+ * catalog, the file is gone), empty when it would pass.  ``name``,
+ * ``description`` and ``content`` were written by a MODEL and reviewed by
+ * nobody: a client shows them as text, never as markup.
+ *
+ * A REVISION claim (``proposeReference`` with ``revises``: a new version
+ * of a reference already in the catalog) also carries ``revises`` (the
+ * id), ``revises_file`` (where it lives), ``current`` (its fields now:
+ * ``name``, ``description``, ``tags``, ``type``, ``path`` or ``content``,
+ * ``links``) for a client to diff against, ``links_replaced`` (whether
+ * the revision sets the edges or keeps them) and ``stale`` with
+ * ``stale_reason`` -- decided now: the reference changed since the claim
+ * was written, so a promotion would be refused ``stale``.  Additive keys
+ * on free-form rows; an older client shows the row as a new page.
+ *
+ * ``may_curate`` says whether THIS connection may promote or dismiss --
+ * the workspace-owner rule the daemon also enforces.
+ *
+ * ``bundles`` are the workspace-tier sub-bundles a promotion may name:
+ * ``[{"name", "indexed", "model"?}]``, ``model`` only for a bundle with a
+ * vector index.  The catalog root is the default destination and is not
+ * listed.
+ */
+export interface ReferenceClaimsEvent {
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
+  request_id?: RequestId39;
+  ok?: Ok10;
+  category?: Category6;
+  error?: Error19;
+  claims?: Claims;
+  unreadable?: Unreadable;
+  may_curate?: MayCurate1;
+  bundles?: Bundles;
+}
+/**
+ * List the reference claims in the caller's workspace (1.33).
+ *
+ * Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
+ * Writes nothing; any connection whose workspace it is may list.
+ */
+export interface ReferenceClaimsRequest {
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
+  request_id?: RequestId40;
+}
+/**
+ * Promote or dismiss one reference claim (1.33).
+ *
+ * The correlated form of the ``reference.promote`` / ``reference.dismiss``
+ * commands: answered by :class:`ReferenceCurationResultEvent` carrying this
+ * ``request_id``.  ``action`` is ``promote`` or ``dismiss``.  ``bundle``
+ * names a workspace-tier sub-bundle to promote into (``""``: the catalog
+ * root); ``dismiss`` ignores it.
+ */
+export interface ReferenceCurationRequest {
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId41;
+  action?: Action3;
+  claim_id?: ClaimId1;
+  bundle?: Bundle1;
+}
+/**
+ * The workspace reference catalog, as a curator sees it (1.33).
+ *
+ * Answer to :class:`ReferenceCatalogRequest`, carrying its ``request_id``.
+ * Read by the DAEMON from ``<workspace>/.jaato/references/`` and its
+ * sub-bundles, without following a link.  Each row: ``id``, ``name``,
+ * ``description``, ``bundle`` (``""`` for the catalog root), ``file``
+ * (workspace-relative), ``links`` (its declared ``{to, rel, note?,
+ * dangling?}`` edges; ``dangling`` when the target is not in this
+ * catalog), ``linked_from`` (``{from, rel}`` edges pointing at it) and
+ * ``duplicate_id`` when another file declares the same id (such a
+ * reference cannot be edited).  ``name``, ``description`` and ``note`` are
+ * catalog text: a client shows them as text.
+ *
+ * ``ok`` is ``False`` (``no_workspace`` / ``unsafe_path``) when the catalog
+ * could not be read; ``references`` is then meaningless.  ``unreadable``
+ * names files under the catalog that are not a reference this view can
+ * show.  ``may_curate`` says whether THIS connection may edit links.
+ */
+export interface ReferenceCatalogEvent {
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId42;
+  ok?: Ok11;
+  category?: Category7;
+  error?: Error20;
+  references?: References;
+  unreadable?: Unreadable1;
+  may_curate?: MayCurate2;
+}
+/**
+ * List the caller's workspace reference catalog (1.33).
+ *
+ * Answered by :class:`ReferenceCatalogEvent` carrying this ``request_id``.
+ * Writes nothing.
+ */
+export interface ReferenceCatalogRequest {
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId43;
+}
+/**
+ * Replace one catalog reference's typed links (1.33).
+ *
+ * ``links`` is the complete new list, ``[{to, rel, note?}]``; ``[]``
+ * removes every declared edge.  Answered by
+ * :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
+ */
+export interface ReferenceLinksUpdateRequest {
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId44;
+  reference_id?: ReferenceId1;
+  links?: Links;
+}
+/**
+ * What one links update did (1.33).
+ *
+ * The daemon writes the reference's JSON, changing only its ``links`` key,
+ * because a confined runner cannot write the catalog.  Gated by the
+ * workspace-owner rule the memory rail and promotion use.
+ *
+ * Fields:
+ *     request_id: Echoed from the request.
+ *     reference_id: The reference, as the caller named it.
+ *     ok: Whether the links were written.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``invalid_links``,
+ *         ``not_found``, ``ambiguous`` (the id is declared in two files),
+ *         ``unsafe_path`` or ``io_error``.
+ *     error: The reason, for a person.
+ *     reference_file: The workspace-relative file written.
+ *     links: The links as written, normalised.
+ *     warnings: What did not block the write: a target this catalog does
+ *         not hold, or a ``supersedes`` another reference also declares.
+ */
+export interface ReferenceLinksUpdateResultEvent {
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
+  request_id?: RequestId45;
+  reference_id?: ReferenceId2;
+  ok?: Ok12;
+  category?: Category8;
+  error?: Error21;
+  reference_file?: ReferenceFile1;
+  links?: Links1;
+  warnings?: Warnings2;
+}
+/**
+ * Create a workspace-tier reference sub-bundle (1.36, #1478).
+ *
+ * Answered by :class:`ReferenceBundleCreateResultEvent` carrying this
+ * ``request_id``.  ``name`` is one id token (the claim/reference id rule);
+ * the bundle is created UNINDEXED -- ``references bundle index <name>``
+ * adds a vector index later, from a session with an embedding provider.
+ */
+export interface ReferenceBundleCreateRequest {
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
+  request_id?: RequestId46;
+  name?: Name12;
+}
+/**
+ * What one bundle create did (1.36, #1478).
+ *
+ * Fields:
+ *     request_id: Echoed from the request (``""`` for the typed command).
+ *     ok: Whether the bundle was created.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``not_owner``, ``collision`` (a bundle, or any
+ *         directory, by that name already exists), ``unsafe_path`` or
+ *         ``io_error``.
+ *     error: The reason, for a person.
+ *     bundle: The bundle name, as created (or as refused).
+ *     indexed: Whether the bundle has a vector index (``False`` for every
+ *         bundle this verb creates).
+ *     bundles: The workspace's sub-bundles after the call, in
+ *         ``ReferenceClaimsEvent.bundles`` shape (``{name, indexed,
+ *         model?}``) -- answered on every outcome, so a ``collision`` also
+ *         says whether the existing one is indexed.
+ */
+export interface ReferenceBundleCreateResultEvent {
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId47;
+  ok?: Ok13;
+  category?: Category9;
+  error?: Error22;
+  bundle?: Bundle2;
+  indexed?: Indexed;
+  bundles?: Bundles1;
+}
+/**
+ * One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
+ *
+ * ``explain`` introspects the framework installed in the CALLING process,
+ * which is right when the CLI and the daemon share a virtualenv and wrong
+ * the moment they do not.  An application that installs ``jaato-sdk`` into
+ * its own venv and drives a daemon owned by another user over IPC has two
+ * installs: the CLI's, and the one actually serving its sessions.  Topics
+ * contributed by an extension that only the DAEMON has — premium's
+ * ``reactors`` is the worked case — were then reported as
+ * ``unknown explain scope``, which is indistinguishable from *no such
+ * topic exists* and sends a reader to look for a feature they have.
+ *
+ * So the daemon answers about itself.  It renders the topic through the
+ * same merged dispatch the CLI uses, including every topic its own
+ * ``jaato.scaffold_topics`` entry points contribute, and the CLI prints
+ * the result marked with where it came from — a reader must never have to
+ * guess which of the two installs an answer describes.
+ *
+ * Fields:
+ *     topic: The topic asked for, echoed so a client can correlate.
+ *     ok: Whether the topic rendered.
+ *     text: The human rendering, as the CLI would print it.
+ *     data: The structured rendering — what ``--json`` prints, VERBATIM.
+ *         Usually an object, and deliberately not typed as one: the
+ *         in-tree ``profile`` topic renders an array of field rows, and
+ *         wrapping it to satisfy a narrower field would make the daemon's
+ *         ``--json`` differ from the same command's local ``--json`` —
+ *         two installs disagreeing about one topic, which is the failure
+ *         this event exists to remove rather than one to introduce.  A
+ *         reader branching on keys must check the shape first.
+ *     topics: Every topic THIS daemon serves, as ``scope_catalog`` rows
+ *         (``scope`` / ``arg`` / ``blurb`` / ``contributed_by`` / ...).
+ *         Always populated, including when ``ok`` is ``False``, because
+ *         "which topics does the daemon have" is exactly the question a
+ *         failed lookup raises.
+ *     error: Why not, when ``ok`` is ``False`` — no such topic on the
+ *         daemon either, a usage error (a topic needing a name, given
+ *         none), or the renderer raised.
+ *     server_version: The daemon's jaato-server version, so a client can
+ *         report WHOSE install answered rather than implying its own.
+ */
+export interface ScaffoldExplainEvent {
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
+  topic?: Topic;
+  ok?: Ok14;
+  text?: Text4;
+  data?: Data2;
+  topics?: Topics;
+  error?: Error23;
+  server_version?: ServerVersion1;
+}
+export interface Data2 {
+  [k: string]: unknown;
+}
+/**
+ * The receipt for one ``session.message`` (protocol 1.22).
+ *
+ * A message from the CALLER'S session to another session in a common
+ * group -- a shared cascade, or a shared authenticated creator -- delivered
+ * by ``SessionManager.deliver_group_message``, the same method the
+ * ``courier`` plugin's ``send_to_session`` tool calls.  A cold target is
+ * woken to process it.  FIRE AND FORGET: ``status`` says what happened to
+ * the message, never what the peer decided, and there is no reply channel.
+ *
+ * Fields:
+ *     request_id: The caller's correlation id, echoed (1.3 rule), so
+ *         several sends on one connection can be told apart.
+ *     target: The address the caller sent -- a session id or a sibling
+ *         name -- echoed.
+ *     status: ``accepted`` (a turn was started on the target; ``woken``
+ *         says whether it was revived to do so), ``queued`` (the target is
+ *         mid-turn and collects the message when the turn ends),
+ *         ``spooled`` (the target could not take the message now -- it is
+ *         mid-turn and the message carries attachments, or it is cold and
+ *         did not revive -- so the message waits in the target's durable
+ *         inbox and is driven at its next turn boundary or when the daemon
+ *         revives it), ``no_such_session``, ``ambiguous`` (a name matching several
+ *         members; ``candidates`` lists their ids), ``session_cold``
+ *         (waking is disabled), ``duplicate`` (``event_id`` already
+ *         actioned -- a benign no-op), ``terminated`` (the target ended
+ *         on an error or an exhausted budget and is never woken), or
+ *         ``refused`` with ``error``.
+ *     ok: Whether the target HOLDS the message (``accepted`` / ``queued``
+ *         / ``spooled``) or it was a benign ``duplicate``.  Everything else
+ *         is ``False``.
+ *     spooled: Whether a copy of the message is in the target's durable
+ *         inbox -- always for ``spooled``, and also for ``queued`` (the
+ *         copy survives an unload between the queue and the turn that
+ *         drains it).  Additive, default ``False``, so an older daemon's
+ *         receipt reads as it did.
+ *     files: One row per ``file_ref`` / ``text_attachment`` the caller
+ *         sent (1.24, additive): ``{name, disposition, ...}`` with
+ *         ``disposition`` one of ``referenced`` (the target shares the
+ *         sender's workspace and reads the file in place; ``path`` is
+ *         workspace-relative, with ``sha256`` and ``size``), ``copied``
+ *         (into the target's inbox, ``path`` in the target's terms),
+ *         ``inlined`` (a text attachment carried in the message body) or
+ *         ``refused`` (with ``reason``: ``outside_sender_workspace``,
+ *         ``not_found``, ``not_a_file``, ``credential``,
+ *         ``file_too_large``, ``message_files_too_large``,
+ *         ``target_workspace_unresolved``, ``copy_failed``,
+ *         ``copy_mismatch``) or ``discarded`` (a copy taken back because
+ *         the message was then refused or not delivered).  A refused file
+ *         refuses the WHOLE message (``status: refused``), never a
+ *         delivery with one file missing.
+ *     message_id: The daemon-minted id of the delivered message; ``""``
+ *         when nothing was delivered.
+ *     target_session_id: The resolved target, when one was resolved.
+ *     sibling_name: The target's cascade-scoped name, when it has one.
+ *     group_key: The group key the delivery was made under.
+ *     woken: Whether the target was revived from disk to receive it.
+ *     headless: Whether the target ran with no attached client.
+ *     candidates: For ``ambiguous``, the session ids the name matched.
+ *     error: Why not, when ``ok`` is ``False``.
+ */
+export interface SessionMessageResultEvent {
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
+  request_id?: RequestId48;
+  target?: Target;
+  status?: Status3;
+  ok?: Ok15;
+  message_id?: MessageId;
+  target_session_id?: TargetSessionId;
+  sibling_name?: SiblingName;
+  group_key?: GroupKey;
+  woken?: Woken;
+  headless?: Headless;
+  spooled?: Spooled;
+  candidates?: Candidates;
+  files?: Files1;
+  error?: Error24;
+}
+/**
+ * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
+ *
+ * The sibling of :class:`ScaffoldExplainEvent`.  ``explain`` renders a topic
+ * from the daemon's install; this RUNS a named integration — the
+ * ``jaato-sdk`` skill is the one that ships — into the caller's own
+ * workspace, on the daemon's install and host.  The point is the same: the
+ * stamp records the version of whichever ``jaato-server`` runs it, and the
+ * workspace directory is on that host, so the install that serves the
+ * session is the one that must write the skill.  An application that carried
+ * its own copy of the payload could drift from the framework; asking the
+ * daemon means it never can.
+ *
+ * The daemon applies the ``--refresh`` contract: it re-applies a copy that
+ * is ``absent`` / ``stale`` / ``outdated`` (nothing local is lost) and
+ * LEAVES an ``edited`` / ``diverged`` / ``unstamped`` copy untouched, saying
+ * which in ``skipped_reason``.  A skipped refresh is correct behaviour, not
+ * a failure — ``ok`` stays ``True`` — so a client reports it in a notice
+ * rather than as an error.
+ *
+ * Fields:
+ *     integration: The integration name asked for, echoed to correlate.
+ *     ok: Whether the verb ran.  ``False`` only for a verb-level refusal —
+ *         an unknown integration, no resolvable workspace, or the daemon
+ *         could not load its own scaffold code.  A refresh the daemon
+ *         declined to apply (an edited copy) is ``ok=True`` with a
+ *         ``skipped_reason``.
+ *     changed: Whether files were written.  ``False`` for a copy already
+ *         current, and for a skipped one.
+ *     state_before: The ``compare()`` state the copy was in — ``absent`` /
+ *         ``current`` / ``stale`` / ``outdated`` / ``edited`` / ``diverged``
+ *         / ``unstamped``.
+ *     state_after: The state after the verb ran.
+ *     skipped_reason: Why the refresh was left alone, with the same detail
+ *         text ``compare()`` produces, or ``""`` when it was applied.
+ *     target: The absolute path the integration installs at, so a client
+ *         can point a reader at the file it wrote.
+ *     text: The human rendering, the lines the CLI would print.
+ *     error: Why not, when ``ok`` is ``False``.
+ *     available: Every integration THIS daemon ships, so a refusal that
+ *         names an unknown one is actionable — the caller's own list is by
+ *         construction the wrong one.
+ *     server_version: The daemon's ``jaato-server`` version — the version
+ *         the stamp records, so a client reports WHOSE install wrote the
+ *         skill.
+ */
+export interface ScaffoldIntegrationEvent {
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
+  integration?: Integration;
+  ok?: Ok16;
+  changed?: Changed;
+  state_before?: StateBefore;
+  state_after?: StateAfter;
+  skipped_reason?: SkippedReason;
+  target?: Target1;
+  text?: Text5;
+  error?: Error25;
+  available?: Available;
+  server_version?: ServerVersion2;
+}
+/**
+ * The daemon's ``jaato-scaffold validate`` of the caller's workspace (1.34).
+ *
+ * ``jaato-scaffold`` ships with jaato-sdk, and ``validate`` cannot run from
+ * the SDK alone: most checks run on a RESOLVED profile (parsed, merged with
+ * its ``inherits:`` and set overlay, constructed), and only jaato-server's
+ * loader builds one.  So an SDK-only install asks the daemon, and the
+ * daemon's full validator answers, contributed validators (#1306)
+ * included.  It checks the workspace this connection is in (selected over
+ * WS, declared at the handshake over IPC); there is no path parameter.
+ *
+ * Fields:
+ *     ok: Whether the validator RAN.  ``False`` only when it could not: no
+ *         workspace for this connection, or the daemon cannot load its own
+ *         validator.  A run that found errors is ``ok=True`` with
+ *         ``errors > 0``; ``ok`` never means "valid".
+ *     workspace: The absolute path validated, on the daemon's host.
+ *     profile_set: The set overlay applied, or ``""``.
+ *     profile: The one profile validated, or ``""`` for all of them.
+ *     scope: How the run names what it validated (``all profiles``,
+ *         ``profile 'x'``), the same words a local run prints.
+ *     findings: Every finding, in ``Diagnostic.as_dict()`` shape
+ *         (``severity`` / ``code`` / ``message`` / ``profile`` / ``where``
+ *         / ``tier``, plus ``source`` on a contributed one).
+ *     errors: How many findings are ``error``, the count a caller's exit
+ *         code follows.
+ *     warnings: How many are ``warn``.
+ *     error: Why the validator did not run, when ``ok`` is ``False``.
+ *     server_version: The daemon's ``jaato-server`` version, so a client
+ *         says whose install produced the findings.
+ */
+export interface ScaffoldValidateEvent {
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  ok?: Ok17;
+  workspace?: Workspace3;
+  profile_set?: ProfileSet;
+  profile?: Profile;
+  scope?: Scope;
+  findings?: Findings;
+  errors?: Errors;
+  warnings?: Warnings3;
+  error?: Error26;
+  server_version?: ServerVersion3;
 }
 /**
  * Stage files into a workspace via a multi-frame WS protocol.
@@ -16162,11 +32024,11 @@ export interface WorkspaceFilesSnapshotEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType86;
-  timestamp?: Timestamp86;
-  session_id?: SessionId86;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   workspace_id?: WorkspaceId;
-  files?: Files1;
+  files?: Files2;
 }
 /**
  * Per-file metadata sent inside a :class:`StageFilesRequest`.
@@ -16185,7 +32047,7 @@ export interface StageFilesRequest {
  * clients don't need a protocol bump later.
  */
 export interface StagedFileSpec {
-  name?: Name6;
+  name?: Name13;
   size?: Size;
   content_type?: ContentType;
   mode?: Mode1;
@@ -16212,12 +32074,121 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
-  session_id?: SessionId87;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
+}
+/**
+ * Download one file from the caller's workspace (WS only, protocol 1.20).
+ *
+ * The reverse of :class:`StageFilesRequest`.  ``path`` is relative to the
+ * workspace root, or absolute when it lies inside it; the daemon resolves
+ * it against the workspace THIS connection is in (the session's, else the
+ * one it selected) and refuses anything that resolves outside it, symlinks
+ * followed first.
+ *
+ * **Wire protocol:** the server answers with one TEXT
+ * :class:`WorkspaceFileContentEvent` carrying the same ``request_id``.
+ * When ``ok`` is true and ``metadata_only`` was false, exactly ONE raw
+ * BINARY frame of ``size`` bytes follows it immediately -- the two are
+ * written back to back under the connection's send lock, so no other
+ * frame can arrive between them.
+ *
+ * ``metadata_only`` asks for the header alone: whether the file exists,
+ * its size and type.  A host tool offering a download asks this first, so
+ * the model is told "no such file" instead of offering a link that fails.
+ */
+export interface WorkspaceFileFetchRequest {
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId49;
+  path?: Path4;
+  metadata_only?: MetadataOnly;
+}
+/**
+ * Server's answer to :class:`WorkspaceFileFetchRequest` (protocol 1.20).
+ *
+ * ``request_id`` echoes the request.  ``path`` is the file's path relative
+ * to the workspace root (normalised, so a client can key on it), ``name``
+ * its basename, ``size`` its length in bytes and ``mime_type`` a guess
+ * from its name (``application/octet-stream`` when there is none).
+ *
+ * On failure ``ok`` is false, no binary frame follows, and ``category``
+ * is one of:
+ *
+ * - ``"workspace_not_found"`` -- this connection is in no workspace.
+ * - ``"unsafe_path"`` -- empty, or resolves outside the workspace.
+ * - ``"not_found"`` -- nothing at that path.
+ * - ``"not_a_file"`` -- a directory or another non-regular file.
+ * - ``"credential"`` -- a file that holds credentials (the workspace
+ *   ``.env``, a stored ``*_auth.json``); refused by name so a download
+ *   link can never carry a key out of the workspace.
+ * - ``"too_large"`` -- over the daemon's download cap.
+ * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
+ */
+export interface WorkspaceFileContentEvent {
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
+  request_id?: RequestId50;
+  ok?: Ok18;
+  path?: Path5;
+  name?: Name14;
+  size?: Size1;
+  mime_type?: MimeType1;
+  metadata_only?: MetadataOnly1;
+  category?: Category10;
+  error?: Error27;
+}
+/**
+ * Find files in the caller's workspace by name (WS only, protocol 1.32).
+ *
+ * ``query`` is split on whitespace and every term must appear, ignoring
+ * case, in a file's workspace-relative path.  The whole tree is searched --
+ * dotfiles, gitignored paths and entries the Files panel hides -- except the
+ * contents of ``.git`` directories.  ``max_results`` caps the answer
+ * (default 100, at most 500).  Answered by one
+ * :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
+ */
+export interface WorkspaceFilesSearchRequest {
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId51;
+  query?: Query;
+  max_results?: MaxResults;
+}
+/**
+ * Server's answer to :class:`WorkspaceFilesSearchRequest` (protocol 1.32).
+ *
+ * ``matches`` is ranked best first (a match in the file NAME before one in
+ * a directory, shallower paths first); each is ``{"path", "size",
+ * "credential"}`` with ``path`` relative to the workspace root, the key
+ * ``workspace.file.fetch`` takes.  ``credential`` marks a file the fetch
+ * verb refuses (a ``.env``, a stored ``*_auth.json``), so a client does not
+ * offer to download it.  ``total`` is how many matched before the cap.
+ * ``truncated`` means the walk stopped at its entry or time bound, so files
+ * beyond it were not looked at.
+ *
+ * On failure ``ok`` is false and ``category`` is ``"workspace_not_found"``
+ * (this connection is in no workspace).
+ */
+export interface WorkspaceFilesSearchResultEvent {
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId52;
+  ok?: Ok19;
+  query?: Query1;
+  matches?: Matches;
+  total?: Total2;
+  truncated?: Truncated;
+  category?: Category11;
+  error?: Error28;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -16227,17 +32198,17 @@ export interface StageFilesEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
-  session_id?: SessionId88;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
   server_id?: ServerId;
   server_name?: ServerName;
-  server_version?: ServerVersion;
+  server_version?: ServerVersion4;
   active_sessions?: ActiveSessions;
   active_agents?: ActiveAgents;
   available_providers?: AvailableProviders1;
   available_models?: AvailableModels1;
-  tags?: Tags;
+  tags?: Tags1;
   cpu_percent?: CpuPercent;
   memory_percent?: MemoryPercent;
   uptime_seconds?: UptimeSeconds;
@@ -16254,10 +32225,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType89;
-  timestamp?: Timestamp89;
-  session_id?: SessionId89;
-  request_id?: RequestId22;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId53;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -16276,10 +32247,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
-  session_id?: SessionId90;
-  request_id?: RequestId23;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId54;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -16289,10 +32260,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
-  session_id?: SessionId91;
-  request_id?: RequestId24;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId55;
   reason?: Reason1;
 }
 /**
@@ -16303,13 +32274,13 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
-  session_id?: SessionId92;
-  request_id?: RequestId25;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId56;
   remote_agent_id?: RemoteAgentId1;
-  text?: Text4;
-  source?: Source1;
+  text?: Text6;
+  source?: Source6;
 }
 /**
  * Signal that a remote subagent has finished execution.
@@ -16319,14 +32290,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
-  request_id?: RequestId26;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
+  request_id?: RequestId57;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error8;
+  error?: Error29;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -16336,20 +32307,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
-  request_id?: RequestId27;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
+  request_id?: RequestId58;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
-  request_id?: RequestId28;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
+  request_id?: RequestId59;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -16361,9 +32332,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -16383,9 +32354,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -16401,9 +32372,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -16422,7 +32393,7 @@ export interface GatesSnapshotEvent {
 export interface GateState {
   gate_name?: GateName2;
   tenant_id?: TenantId2;
-  state?: State;
+  state?: State1;
   owner?: Owner2;
   intent?: Intent1;
   acquired_at?: AcquiredAt;
@@ -16454,14 +32425,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
-  text?: Text5;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
+  text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId29;
+  request_id?: RequestId60;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -16513,11 +32484,11 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
-  request_id?: RequestId30;
-  status?: Status3;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
+  request_id?: RequestId61;
+  status?: Status4;
   detail?: Detail;
 }
 /**
@@ -16535,10 +32506,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
-  request_id?: RequestId31;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
+  request_id?: RequestId62;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -16546,12 +32517,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
-  request_id?: RequestId32;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
+  request_id?: RequestId63;
   response_text?: ResponseText;
-  error?: Error9;
+  error?: Error30;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -16569,10 +32540,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
-  request_id?: RequestId33;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
+  request_id?: RequestId64;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -16581,12 +32552,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
-  request_id?: RequestId34;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
+  request_id?: RequestId65;
   fork_index?: ForkIndex;
-  error?: Error10;
+  error?: Error31;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -16598,9 +32569,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -16627,11 +32598,11 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType144;
+  timestamp?: Timestamp144;
+  session_id?: SessionId144;
   wake_ref?: WakeRef1;
-  source?: Source2;
+  source?: Source7;
 }
 /**
  * Add tools / patterns to the session's permission whitelist.
@@ -16642,9 +32613,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
+  type?: EventType145;
+  timestamp?: Timestamp145;
+  session_id?: SessionId145;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -16656,9 +32627,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
+  type?: EventType146;
+  timestamp?: Timestamp146;
+  session_id?: SessionId146;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -16669,10 +32640,10 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
-  target?: Target;
+  type?: EventType147;
+  timestamp?: Timestamp147;
+  session_id?: SessionId147;
+  target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
 }
@@ -16685,10 +32656,10 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
-  target?: Target1;
+  type?: EventType148;
+  timestamp?: Timestamp148;
+  session_id?: SessionId148;
+  target?: Target3;
 }
 /**
  * Set the session-level default permission policy.
@@ -16698,19 +32669,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
+  type?: EventType149;
+  timestamp?: Timestamp149;
+  session_id?: SessionId149;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
-  request_id?: RequestId35;
+  type?: EventType150;
+  timestamp?: Timestamp150;
+  session_id?: SessionId150;
+  request_id?: RequestId66;
 }
 /**
  * Structured permission policy snapshot.
@@ -16721,10 +32692,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
-  request_id?: RequestId36;
+  type?: EventType151;
+  timestamp?: Timestamp151;
+  session_id?: SessionId151;
+  request_id?: RequestId67;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -16733,6 +32704,482 @@ export interface PermissionPolicySnapshotEvent {
   blacklist_patterns?: BlacklistPatterns;
   session_whitelist?: SessionWhitelist;
   session_blacklist?: SessionBlacklist;
+}
+/**
+ * Ask the daemon to mint a connect ticket for one of this app's users.
+ *
+ * Sent on a connection authenticated by an **application credential**
+ * (``--ws-app-credentials``).  Any other connection — the shared bearer
+ * token, a ticket-authenticated user connection, or an unauthenticated
+ * one under ``--ws-unsafe-no-auth`` — is answered ``status="denied"``:
+ * minting identities is the app credential's one privilege, and holding a
+ * ticket must never let a user mint more.
+ *
+ * There is deliberately **no** ``app_id`` field.  ``preferred_username`` is
+ * unique only within a realm, so two applications each holding an ``alice``
+ * would collide in ``Session.created_by`` and every ownership guard would
+ * silently pass across the application boundary.  The daemon qualifies the
+ * identity itself (``BoundIdentity.qualified``, ``"<app_id>:<user>"``) from
+ * the credential that called this verb, so no integrator can forget to.
+ *
+ * Attributes:
+ *     request_id: Correlates this bind with the
+ *         :class:`TicketBindResultEvent` that answers it.  Required in
+ *         practice — one bind channel serves many concurrent logins, and
+ *         without it a result cannot be attributed to a request.
+ *     user: The identity this application asserts, in whatever spelling its
+ *         own realm uses.  Never validated by the daemon — that is the
+ *         point — but refused when empty (``created_by=""`` is falsy, so
+ *         every ``if user_id and ...`` guard would short-circuit exactly as
+ *         it does for an unauthenticated client), over-long, or carrying
+ *         control characters (the value is logged and persisted).
+ *     ttl_seconds: Ticket lifetime, ``1..3600``.  A value outside the range
+ *         is REFUSED rather than clamped: silently issuing something other
+ *         than what was asked for is how an integrator comes to believe a
+ *         ticket lasts a day.
+ *     single_use: When ``True`` (the default) the first connection that
+ *         presents the ticket consumes it, so a captured ticket cannot open
+ *         a second connection.  ``False`` lets one ticket open several
+ *         connections until it expires — for a client that opens a second
+ *         socket for a side channel, and a weaker posture either way.
+ */
+export interface TicketBindRequest {
+  type?: EventType152;
+  timestamp?: Timestamp152;
+  session_id?: SessionId152;
+  request_id?: RequestId68;
+  user?: User;
+  ttl_seconds?: TtlSeconds;
+  single_use?: SingleUse;
+}
+/**
+ * Server's response to :class:`TicketBindRequest`.
+ *
+ * ``status`` is one of:
+ *
+ * * ``"bound"``    — a ticket was minted; ``ticket``, ``qualified``,
+ *   ``app_id`` and ``expires_at`` are populated.
+ * * ``"denied"``   — this connection may not bind.  It is not an app
+ *   credential connection, or no app credentials are configured on this
+ *   daemon at all (in which case the feature is simply off and the
+ *   deployment behaves exactly as it did before protocol 1.10).
+ * * ``"invalid"``  — the request was malformed: an empty or unusable
+ *   ``user``, or a ``ttl_seconds`` outside ``1..3600``.  Nothing was
+ *   minted.
+ * * ``"capacity"`` — the daemon is holding its ceiling of outstanding
+ *   tickets.  Nothing was minted, and retrying after some expire is the
+ *   remedy.  Refusing beats evicting somebody else's valid ticket, which
+ *   would turn one misbehaving application into failed logins for another.
+ *
+ * Only ``"bound"`` carries a credential.  A caller that branches on
+ * anything else must not read ``ticket``, which is ``""`` in every other
+ * case — never a placeholder, so absence stays checkable.
+ *
+ * Attributes:
+ *     ticket: The plaintext credential to hand to that user's client.  The
+ *         daemon retains only its SHA-256 digest, so this value cannot be
+ *         recovered from the daemon afterwards — losing it means binding
+ *         again.
+ *     qualified: ``"<app_id>:<user>"`` — the identity this connection will
+ *         be attributed to, and the exact string that will appear in
+ *         ``Session.created_by``.  Returned so the application can record
+ *         the attribution it will later have to reconcile against, rather
+ *         than re-deriving a concatenation the daemon owns.
+ *     app_id: The binding application, as the daemon authenticated it.
+ *         Echoed because an application holding several credentials would
+ *         otherwise have to infer which one it used.
+ *     expires_at: ISO-8601 UTC instant the ticket stops resolving.  For the
+ *         binder's own scheduling; the daemon enforces the deadline from a
+ *         monotonic clock, so an NTP step cannot extend or curtail it.
+ *     detail: Human-readable elaboration, omitted when there is nothing to
+ *         say — a reader of ``"unknown"`` is back where they started.
+ */
+export interface TicketBindResultEvent {
+  type?: EventType153;
+  timestamp?: Timestamp153;
+  session_id?: SessionId153;
+  request_id?: RequestId69;
+  status?: Status5;
+  ticket?: Ticket;
+  qualified?: Qualified;
+  app_id?: AppId;
+  expires_at?: ExpiresAt2;
+  detail?: Detail2;
+}
+/**
+ * Revoke one outstanding ticket, or every ticket of one user.
+ *
+ * The logout path: the application ends a session in its own realm and
+ * tells the daemon that anything it minted for that user is void.  Exactly
+ * one of ``ticket`` / ``user`` must be supplied — both, or neither, is
+ * ``status="invalid"``, because a request that names both has two
+ * incompatible readings and guessing between them is how the wrong thing
+ * gets revoked.
+ *
+ * **Scoped to the calling application.**  The daemon knows ``app_id`` from
+ * the bind connection's credential and revokes only tickets bound under it;
+ * one application cannot revoke — or log out — another's ``alice``.  A
+ * ticket belonging to another application answers ``"not_found"``, the same
+ * answer an unknown ticket gives, so this verb is not an existence oracle
+ * across the application boundary.
+ *
+ * Revoking an already-consumed ticket is the ordinary case for a logout
+ * that follows a completed login, and is reported honestly as
+ * ``"not_found"`` with ``revoked=0`` rather than as a failure.
+ *
+ * Attributes:
+ *     request_id: Correlates with :class:`TicketRevokeResultEvent`.
+ *     ticket: The plaintext ticket to revoke, as returned by
+ *         :class:`TicketBindResultEvent`.
+ *     user: Revoke every outstanding ticket for this user of this
+ *         application instead.
+ */
+export interface TicketRevokeRequest {
+  type?: EventType154;
+  timestamp?: Timestamp154;
+  session_id?: SessionId154;
+  request_id?: RequestId70;
+  ticket?: Ticket1;
+  user?: User1;
+}
+/**
+ * Server's response to :class:`TicketRevokeRequest`.
+ *
+ * ``status`` is one of:
+ *
+ * * ``"revoked"``   — at least one ticket was removed; ``revoked`` says how
+ *   many.
+ * * ``"not_found"`` — nothing matched.  Covers an unknown ticket, one
+ *   already consumed or expired, and one belonging to a different
+ *   application: deliberately indistinguishable, so the verb reveals
+ *   nothing about tickets the caller did not mint.
+ * * ``"denied"``    — this connection may not revoke (not an app
+ *   credential connection).
+ * * ``"invalid"``   — neither or both of ``ticket`` / ``user`` supplied.
+ *
+ * Attributes:
+ *     revoked: How many tickets were removed.  ``0`` whenever ``status`` is
+ *         not ``"revoked"``.
+ *     detail: Human-readable elaboration, omitted when there is nothing to
+ *         say.
+ */
+export interface TicketRevokeResultEvent {
+  type?: EventType155;
+  timestamp?: Timestamp155;
+  session_id?: SessionId155;
+  request_id?: RequestId71;
+  status?: Status6;
+  revoked?: Revoked;
+  detail?: Detail3;
+}
+/**
+ * Ask the owning application to resolve an ``app://`` secret reference (#1226).
+ *
+ * The ONE request direction that runs **daemon -> application**.  Every other
+ * verb on the #1074 bind channel is application -> daemon (``ticket.bind`` /
+ * ``ticket.revoke``); this rides the same authenticated connection in the
+ * opposite direction, correlated by ``request_id``, with a daemon-side
+ * deadline.  It is sent when ``JaatoServer._resolve_session_env`` meets a
+ * value like ``GH_TOKEN=app://github`` in a workspace owned by ``app:user``:
+ * the daemon identifies the application from the qualified owner and asks
+ * *that* application, and only that one, to mint the secret for *that* user.
+ *
+ * The application is free not to answer (an older SDK, no handler wired): the
+ * daemon's deadline then elapses and the reference is dropped with a WARNING
+ * (or, for the strict form ``app://github?required``, the bootstrap is
+ * refused).  So there is no SDK minimum to negotiate — a request that goes
+ * unanswered degrades exactly as a refusal does.
+ *
+ * Attributes:
+ *     request_id: Correlates this request with the
+ *         :class:`SecretResolveResultEvent` that answers it.  One bind
+ *         channel serves every workspace of every user the application owns,
+ *         so a result that cannot be attributed to a request is useless.
+ *     user: The **unqualified** identity to resolve for — the ``user`` half
+ *         of the workspace owner ``app:user``.  The application already knows
+ *         which ``app_id`` it is (the credential it authenticated the bind
+ *         channel with), so it is never sent: the daemon has resolved the
+ *         application from the owner precisely so it can pick the connection
+ *         to ask, and echoing the app id would let a request name an
+ *         application other than the one it reaches.
+ *     workspace: The absolute workspace path the session runs in, so the
+ *         application can key a per-workspace binding (``(sub, workspace) ->
+ *         credential`` in the design's picture).
+ *     name: The reference name — ``github`` in ``app://github`` — naming
+ *         which of that user's secrets to mint.
+ */
+export interface SecretResolveRequest {
+  type?: EventType156;
+  timestamp?: Timestamp156;
+  session_id?: SessionId156;
+  request_id?: RequestId72;
+  user?: User2;
+  workspace?: Workspace4;
+  name?: Name15;
+}
+/**
+ * The application's answer to :class:`SecretResolveRequest` (#1226).
+ *
+ * ``status`` is one of:
+ *
+ * * ``"ok"``        — the secret was resolved; ``value`` carries it and
+ *   ``expires_at`` MAY carry an ISO-8601 UTC instant it stops being valid.
+ * * ``"not_found"`` — the application has no binding for this
+ *   ``(user, workspace, name)``.  The reference is dropped.
+ * * ``"denied"``    — the application refuses to resolve it.  Dropped.
+ * * ``"error"``     — the application tried and failed; ``detail`` says why.
+ *   Dropped.
+ *
+ * Only ``"ok"`` carries a ``value``.  Every other status drops the reference
+ * from the session's environment — a literal ``app://github`` reaching a
+ * subprocess is a token that fails with a confusing 401, so the daemon never
+ * forwards the unresolved form (#1226 §6.1).
+ *
+ * Attributes:
+ *     value: The resolved secret, present only when ``status == "ok"``.  It
+ *         reaches the bootstrap envelope's env dict and **nowhere else** — not
+ *         the session record, not the snapshot, not the workspace ``.env``,
+ *         all of which keep ``app://<name>`` so a revived session resolves
+ *         afresh (which is also what lets revocation take effect).
+ *     expires_at: ISO-8601 UTC instant the value stops being valid, when the
+ *         application knows one (a GitHub App user token lasts ~8h).  The
+ *         daemon schedules a ``session.reload_env`` a margin before it
+ *         (``JAATO_OAUTH_REFRESH_MARGIN``) so the session never holds a dead
+ *         token.  Absent means "no expiry known": the value is used until the
+ *         session is next re-resolved for another reason.
+ *     detail: Human-readable elaboration, omitted when there is nothing to
+ *         say.  Never the secret.
+ */
+export interface SecretResolveResultEvent {
+  type?: EventType157;
+  timestamp?: Timestamp157;
+  session_id?: SessionId157;
+  request_id?: RequestId73;
+  status?: Status7;
+  value?: Value;
+  expires_at?: ExpiresAt3;
+  detail?: Detail4;
+}
+/**
+ * The application asks the daemon to re-resolve a user's loaded sessions (#1226 §6.4).
+ *
+ * The revocation path: the application deletes a binding (a *Disconnect
+ * GitHub*, a *workspace -> none*) and tells the daemon to
+ * ``session.reload_env`` every LOADED session the affected user owns, so the
+ * now-revoked ``app://`` reference drops out of the environment rather than
+ * lingering until the process ends.  Sent application -> daemon on the bind
+ * channel, like ``ticket.revoke``, and **scoped to the calling application**:
+ * the daemon qualifies ``user`` with the ``app_id`` the bind connection
+ * authenticated as, so one application can never reload another's ``alice``.
+ *
+ * Attributes:
+ *     request_id: Correlates with :class:`SecretReloadResultEvent`.
+ *     user: The **unqualified** identity whose sessions to reload.  The
+ *         daemon qualifies it itself (``f"{app_id}:{user}"``) exactly as
+ *         ``ticket.bind`` does, so the app id is never a request field.
+ */
+export interface SecretReloadRequest {
+  type?: EventType158;
+  timestamp?: Timestamp158;
+  session_id?: SessionId158;
+  request_id?: RequestId74;
+  user?: User3;
+}
+/**
+ * The daemon's answer to :class:`SecretReloadRequest` (#1226 §6.4).
+ *
+ * ``status`` is one of:
+ *
+ * * ``"ok"``      — the owner's loaded sessions were re-resolved; ``reloaded``
+ *   says how many.  ``0`` is the ordinary answer when the user has no session
+ *   loaded, and is not a failure.
+ * * ``"denied"``  — this connection may not ask (not an app-credential
+ *   connection, or no app credentials configured on this daemon).
+ *
+ * Attributes:
+ *     reloaded: How many loaded sessions were re-resolved.  ``0`` whenever
+ *         ``status`` is not ``"ok"``, and the ordinary answer for a user with
+ *         nothing loaded.
+ *     detail: Human-readable elaboration, omitted when there is nothing to say.
+ */
+export interface SecretReloadResultEvent {
+  type?: EventType159;
+  timestamp?: Timestamp159;
+  session_id?: SessionId159;
+  request_id?: RequestId75;
+  status?: Status8;
+  reloaded?: Reloaded;
+  detail?: Detail5;
+}
+/**
+ * The application asks the daemon to write a binding's files into a workspace (1.30).
+ *
+ * A workspace bound to an application-held secret needs its ``.env`` to carry
+ * the REFERENCE (``GH_TOKEN=app://github``): the daemon resolves only
+ * references it finds there, and a binding with no line is inert.  The
+ * application normally writes that line itself, and cannot when it runs as a
+ * user that has no access to the daemon's workspace root (a BFF running as an
+ * ordinary account beside a root daemon).  This verb has the daemon, which
+ * owns the workspaces, do the write instead.
+ *
+ * Sent application -> daemon on the bind channel, like ``secret.reload``, and
+ * refused on any other connection.  The daemon enforces what may be written,
+ * so the request cannot be used to plant a secret or reach outside the
+ * workspace:
+ *
+ * * ``workspace`` must be a known workspace OWNED by ``app_id:user`` (the
+ *   ownership ``app://`` resolution itself uses).  Anything else answers
+ *   ``not_found``, the same words an unknown path gets.
+ * * every ``env`` value is an ``app://`` reference or ``None`` (remove).  A
+ *   literal value is refused, so no secret is ever written to disk.  Removal
+ *   leaves a line whose current value is not an ``app://`` reference alone.
+ * * ``files`` paths are an allow-list: ``.home/.gitconfig``, and one
+ *   ``.md`` file directly under ``.jaato/instructions/``.  A path is resolved
+ *   with symlinks followed and must stay inside the workspace.
+ *
+ * Attributes:
+ *     request_id: Correlates with :class:`WorkspaceAppWriteResultEvent`.
+ *     user: The **unqualified** identity; the daemon qualifies it with the
+ *         connection's app id, so one application cannot write into
+ *         another's workspace.
+ *     workspace: The absolute workspace path.
+ *     env: ``{NAME: "app://<name>" | None}``.
+ *     files: ``[{"path": str, "content": str | None, "managed_by": str |
+ *         None}]``.  ``content`` ``None`` removes.  ``managed_by`` makes the
+ *         write conditional on ownership: the file is written when absent or
+ *         when its first line is a ``jaato-managed: <managed_by>`` marker,
+ *         and left alone (``skipped-user-file``) otherwise, which is how a
+ *         copy the user made their own survives.  A removal requires it.
+ */
+export interface WorkspaceAppWriteRequest {
+  type?: EventType160;
+  timestamp?: Timestamp160;
+  session_id?: SessionId160;
+  request_id?: RequestId76;
+  user?: User4;
+  workspace?: Workspace5;
+  env?: Env;
+  files?: Files3;
+}
+export interface Env {
+  [k: string]: string | null;
+}
+/**
+ * The daemon's answer to :class:`WorkspaceAppWriteRequest` (1.30).
+ *
+ * ``status`` is one of ``"ok"`` (the request was valid and applied; each
+ * item's own outcome is in ``env`` / ``files``), ``"not_found"`` (the
+ * workspace is unknown or not owned by this application's ``user``),
+ * ``"denied"`` (not an app-credential connection, or a value or path the
+ * rules refuse; nothing was written) or ``"error"``.
+ *
+ * Attributes:
+ *     env: ``{NAME: action}``, action one of ``written``, ``unchanged``,
+ *         ``removed``, ``absent``, ``kept-literal`` (a removal that found a
+ *         non-reference value and left it), ``error``.
+ *     files: ``[{"path", "action", "detail"}]``, action one of ``written``,
+ *         ``unchanged``, ``removed``, ``absent``, ``skipped-user-file``,
+ *         ``error``.
+ *     detail: Human-readable elaboration.
+ */
+export interface WorkspaceAppWriteResultEvent {
+  type?: EventType161;
+  timestamp?: Timestamp161;
+  session_id?: SessionId161;
+  request_id?: RequestId77;
+  status?: Status9;
+  env?: Env1;
+  files?: Files4;
+  detail?: Detail6;
+}
+export interface Env1 {
+  [k: string]: string;
+}
+/**
+ * Read the daemon's pre-warm runner pool, or resize it (1.35).
+ *
+ * Answered by one :class:`PoolStatusEvent` carrying this ``request_id``.
+ * With both sizes ``None`` it only reads.  ``target_size`` is the floor
+ * on UNRESERVED idle slots (0 disables the pool); ``max_size`` the
+ * ceiling on all idle slots, reservations included.  ``max_size`` alone,
+ * with no ``target_size``, keeps the current floor.
+ *
+ * Only an IPC connection whose kernel-reported uid is the daemon's own,
+ * or root, is answered with the pool: the pool is a property of the
+ * daemon process, never of a session or a remote client.
+ */
+export interface PoolStatusRequest {
+  type?: EventType162;
+  timestamp?: Timestamp162;
+  session_id?: SessionId162;
+  request_id?: RequestId78;
+  target_size?: TargetSize;
+  max_size?: MaxSize;
+}
+/**
+ * The daemon's pre-warm runner pool, after a read or a resize (1.35).
+ *
+ * Fields:
+ *     request_id: The request's id, echoed; ``""`` for the typed
+ *         ``pool.status`` / ``pool.resize`` commands.
+ *     ok: Whether the request was carried out.  ``False`` with
+ *         ``category`` and ``error`` otherwise; the sizing fields are
+ *         then meaningless.
+ *     category: ``""`` on success, else ``not_authorized`` (the
+ *         connection is not the daemon's own account or root),
+ *         ``invalid_request`` (a size that is not a non-negative
+ *         integer) or ``no_pool`` (this daemon runs without a pool
+ *         manager).
+ *     error: Why not, when ``ok`` is ``False``.
+ *     changed: Whether this request resized the pool.
+ *     previous_target_size / previous_max_size: The sizes before a
+ *         resize; ``None`` on a read.
+ *     target_size / max_size: The sizes now.
+ *     max_size_explicit: Whether the ceiling was chosen (by the env var
+ *         or a resize) rather than derived as ``2 * target_size``.
+ *     idle / unreserved / reserved: Idle slots right now -- all of them,
+ *         those any session may take, and those held for one cascade.
+ *         A larger ``target_size`` fills in over the next moments, one
+ *         fork at a time; read again to watch it.
+ *     pending_teardown: Idle slots dropped (by a shrink, the ceiling or
+ *         a dead channel) not yet reaped.
+ *     replenishing: Whether the thread that forks and reaps slots runs.
+ *     template_alive: Whether the template slots are forked from is up.
+ *     routing_enabled: Whether sessions are routed to the pool at all
+ *         (``JAATO_RUNNER_POOL_ENABLED``); a pool that is filled but
+ *         not routed to serves nobody.
+ *     persisted: Whether ``--restart`` will start the daemon with these
+ *         sizes.  ``False`` when the daemon could not write its restart
+ *         config, which is then the one place the sizes are not kept.
+ *     telemetry: The pool's counters (``pool_acquire_miss_total`` and
+ *         friends), the numbers a resize is decided from.
+ */
+export interface PoolStatusEvent {
+  type?: EventType163;
+  timestamp?: Timestamp163;
+  session_id?: SessionId163;
+  request_id?: RequestId79;
+  ok?: Ok20;
+  category?: Category12;
+  error?: Error32;
+  changed?: Changed1;
+  previous_target_size?: PreviousTargetSize;
+  previous_max_size?: PreviousMaxSize;
+  target_size?: TargetSize1;
+  max_size?: MaxSize1;
+  max_size_explicit?: MaxSizeExplicit;
+  idle?: Idle;
+  unreserved?: Unreserved;
+  reserved?: Reserved;
+  pending_teardown?: PendingTeardown;
+  replenishing?: Replenishing;
+  template_alive?: TemplateAlive;
+  routing_enabled?: RoutingEnabled;
+  persisted?: Persisted;
+  telemetry?: Telemetry;
+}
+export interface Telemetry {
+  [k: string]: number;
 }
 
 /**
@@ -16768,6 +33215,7 @@ export const EventTypeValue = {
   TOOL_CALL_START: "tool.call_start",
   TOOL_CALL_END: "tool.call_end",
   TOOL_OUTPUT: "tool.output",
+  TOOL_RESULT_ENRICHED: "tool.result_enriched",
   PERMISSION_REQUESTED: "permission.requested",
   PERMISSION_INPUT_MODE: "permission.input_mode",
   PERMISSION_RESOLVED: "permission.resolved",
@@ -16794,6 +33242,7 @@ export const EventTypeValue = {
   TURN_PROGRESS: "turn.progress",
   INSTRUCTION_BUDGET_UPDATED: "instruction_budget.updated",
   BUDGET_RUNG_FIRED: "budget.rung_fired",
+  INCIDENT_RAISED: "incident.raised",
   GC_CONFIG: "gc.config",
   GC: "gc",
   INSTRUCTION_BUDGET_REQUEST: "instruction_budget.request",
@@ -16806,6 +33255,15 @@ export const EventTypeValue = {
   SESSION_INFO: "session.info",
   SESSION_DESCRIPTION_UPDATED: "session.description_updated",
   MEMORY_LIST: "memory.list",
+  MEMORY_LIST_REQUEST: "memory.list.request",
+  MEMORY_GET_REQUEST: "memory.get.request",
+  MEMORY_GET_RESULT: "memory.get.result",
+  MEMORY_UPDATE_REQUEST: "memory.update.request",
+  MEMORY_UPDATE_RESULT: "memory.update.result",
+  MEMORY_DELETE_REQUEST: "memory.delete.request",
+  MEMORY_DELETE_RESULT: "memory.delete.result",
+  DIAGNOSTICS_REQUEST: "session.diagnostics.request",
+  DIAGNOSTICS_RESULT: "session.diagnostics.result",
   SANDBOX_PATHS: "sandbox.paths",
   SERVICE_LIST: "service.list",
   SEND_MESSAGE: "message.send",
@@ -16822,6 +33280,8 @@ export const EventTypeValue = {
   TOOL_EXECUTE_RESULT: "tool.execute_result",
   HISTORY_REQUEST: "history.request",
   HISTORY: "history",
+  HISTORY_PAGE_REQUEST: "history.page.request",
+  HISTORY_PAGE: "history.page",
   CLIENT_CONFIG: "client.config",
   MID_TURN_PROMPT_QUEUED: "mid_turn_prompt.queued",
   MID_TURN_PROMPT_INJECTED: "mid_turn_prompt.injected",
@@ -16834,14 +33294,41 @@ export const EventTypeValue = {
   WORKSPACE_CREATE_REQUEST: "workspace.create",
   WORKSPACE_CREATED: "workspace.created",
   WORKSPACE_SELECT_REQUEST: "workspace.select",
+  WORKSPACE_DELETE_REQUEST: "workspace.delete",
+  WORKSPACE_DELETED: "workspace.deleted",
+  WORKSPACE_INSPECT_REQUEST: "workspace.inspect",
+  WORKSPACE_INSPECTED: "workspace.inspected",
+  WORKSPACE_CLONE_REQUEST: "workspace.clone",
+  WORKSPACE_CLONE_PROGRESS: "workspace.clone_progress",
   CONFIG_STATUS: "config.status",
   CONFIG_UPDATE_REQUEST: "config.update",
   CONFIG_UPDATED: "config.updated",
   WORKSPACE_FILES_STAGE_REQUEST: "workspace.files.stage_request",
   WORKSPACE_FILES_STAGED: "workspace.files.staged",
+  WORKSPACE_FILE_FETCH_REQUEST: "workspace.file.fetch",
+  WORKSPACE_FILE_CONTENT: "workspace.file.content",
+  WORKSPACE_FILES_SEARCH_REQUEST: "workspace.files.search",
+  WORKSPACE_FILES_SEARCH_RESULT: "workspace.files.search_result",
   SESSION_PROFILES: "session.profiles",
   WORKSPACE_FILES_CHANGED: "workspace.files_changed",
   WORKSPACE_FILES_SNAPSHOT: "workspace.files_snapshot",
+  WORKSPACE_IGNORE_RESULT: "workspace.ignore.result",
+  REFERENCE_CURATION_RESULT: "reference.curation.result",
+  REFERENCE_CLAIMS: "reference.claims",
+  REFERENCE_CLAIMS_REQUEST: "reference.claims.request",
+  REFERENCE_CURATION_REQUEST: "reference.curation.request",
+  REFERENCE_CATALOG: "reference.catalog",
+  REFERENCE_CATALOG_REQUEST: "reference.catalog.request",
+  REFERENCE_LINKS_UPDATE_REQUEST: "reference.links.request",
+  REFERENCE_LINKS_UPDATE_RESULT: "reference.links.result",
+  REFERENCE_BUNDLE_CREATE_REQUEST: "reference.bundle.create.request",
+  REFERENCE_BUNDLE_CREATE_RESULT: "reference.bundle.create.result",
+  SCAFFOLD_EXPLAIN_RESULT: "scaffold.explain.result",
+  SESSION_MESSAGE_RESULT: "session.message.result",
+  SCAFFOLD_INTEGRATION_RESULT: "scaffold.integration.result",
+  SCAFFOLD_VALIDATE_RESULT: "scaffold.validate.result",
+  POOL_STATUS_REQUEST: "pool.status.request",
+  POOL_STATUS: "pool.status",
   EVENT_EXTERNAL: "event.external",
   INJECT_PROMPT_REQUEST: "inject_prompt.request",
   INJECT_PROMPT_RESULT: "inject_prompt.result",
@@ -16858,6 +33345,16 @@ export const EventTypeValue = {
   PERMISSION_SET_DEFAULT_REQUEST: "permission.set_default",
   PERMISSION_POLICY_SNAPSHOT_REQUEST: "permission.policy_snapshot.request",
   PERMISSION_POLICY_SNAPSHOT: "permission.policy_snapshot",
+  TICKET_BIND_REQUEST: "ticket.bind",
+  TICKET_BIND_RESULT: "ticket.bind.result",
+  TICKET_REVOKE_REQUEST: "ticket.revoke",
+  TICKET_REVOKE_RESULT: "ticket.revoke.result",
+  SECRET_RESOLVE_REQUEST: "secret.resolve",
+  SECRET_RESOLVE_RESULT: "secret.resolve.result",
+  SECRET_RELOAD_REQUEST: "secret.reload",
+  SECRET_RELOAD_RESULT: "secret.reload.result",
+  WORKSPACE_APP_WRITE_REQUEST: "workspace.app_write",
+  WORKSPACE_APP_WRITE_RESULT: "workspace.app_write.result",
   EVENTS_SUBSCRIBED: "events.subscribed",
   PEER_HEARTBEAT: "peer.heartbeat",
   PEER_SPAWN_REQUEST: "peer.spawn_request",

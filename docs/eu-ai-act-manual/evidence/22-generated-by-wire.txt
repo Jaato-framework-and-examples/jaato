@@ -1,0 +1,20 @@
+$ python -c 'from jaato_sdk.events import ToolOutputEvent, ai_generated_by; ...'
+{
+  "type": "tool.output",
+  "session_id": "20260918_212513",
+  "agent_id": "main",
+  "call_id": "model-output",
+  "chunk": "",
+  "stream_id": "s1",
+  "sequence": 0,
+  "mime_type": "audio/pcm;rate=24000",
+  "data_b64": "...",
+  "final": true,
+  "generated_by": {
+    "kind": "ai",
+    "provider": "openrouter",
+    "model": "openai/gpt-audio",
+    "session_id": "20260918_212513",
+    "agent_id": "main"
+  }
+}

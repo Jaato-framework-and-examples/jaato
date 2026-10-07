@@ -729,11 +729,11 @@ Span: "jaato.turn"
 
 | File | Change |
 |------|--------|
-| `shared/plugins/telemetry/otel_plugin.py` | Replace attribute schema with OI conventions, add message/metadata methods, remove `_get_agent_attrs()`, add OI constants |
-| `shared/plugins/telemetry/plugin.py` | Add `set_input_messages()`, `set_output_messages()`, `set_metadata()` to `SpanContext` protocol; add `parent_session_id` to `turn_span()` |
-| `shared/plugins/telemetry/null_plugin.py` | Add no-op `set_input_messages()`, `set_output_messages()`, `set_metadata()` |
-| `shared/plugins/telemetry/tests/test_plugin.py` | Rewrite tests for OI attributes, message flattening, redaction, metadata packing |
-| `shared/jaato_session.py` | Replace `gen_ai.usage.*` with `llm.token_count.*`, add message capture calls, pass `parent_session_id`, replace `jaato.tool.*` with OI equivalents |
+| `jaato_server/shared/plugins/telemetry/otel_plugin.py` | Replace attribute schema with OI conventions, add message/metadata methods, remove `_get_agent_attrs()`, add OI constants |
+| `jaato_server/shared/plugins/telemetry/plugin.py` | Add `set_input_messages()`, `set_output_messages()`, `set_metadata()` to `SpanContext` protocol; add `parent_session_id` to `turn_span()` |
+| `jaato_server/shared/plugins/telemetry/null_plugin.py` | Add no-op `set_input_messages()`, `set_output_messages()`, `set_metadata()` |
+| `jaato_server/shared/plugins/telemetry/tests/test_plugin.py` | Rewrite tests for OI attributes, message flattening, redaction, metadata packing |
+| `jaato_server/shared/jaato_session.py` | Replace `gen_ai.usage.*` with `llm.token_count.*`, add message capture calls, pass `parent_session_id`, replace `jaato.tool.*` with OI equivalents |
 | `docs/opentelemetry-design.md` | Update attribute reference section |
 | `CLAUDE.md` | Update telemetry attribute list |
 

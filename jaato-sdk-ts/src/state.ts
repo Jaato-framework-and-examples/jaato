@@ -63,9 +63,9 @@ export interface RecoveryConfig {
    * After a successful reconnect, automatically call
    * ``attachSession(sessionId)`` if the client knows a sessionId
    * (from a prior ``SessionInfoEvent`` or explicit
-   * ``attachSession``).  The server then replays buffered events
-   * from the session journal so the consumer picks up where it
-   * left off.  Default: ``false`` — the consumer wires re-attach
+   * ``attachSession``).  The server then answers with the session's
+   * state and conversation so far, as {@link JaatoClient.attachSession}
+   * describes.  Default: ``false`` — the consumer wires re-attach
    * via an ``onStatus`` handler.
    */
   autoReattachSessionId: boolean;

@@ -1,8 +1,8 @@
 # Env vars vs profile keys — which knobs earned a typed key
 
 *Issue [#775](https://github.com/Jaato-framework-and-examples/jaato/issues/775).
-The assessment lives in code (`jaato-server/shared/env_scope.py`) and is
-enforced by `jaato-server/shared/tests/test_env_scope_catalog.py`; this document
+The assessment lives in code (`jaato-server/jaato_server/shared/env_scope.py`) and is
+enforced by `jaato-server/jaato_server/shared/tests/test_env_scope_catalog.py`; this document
 is the argument behind it.*
 
 ## The question, and the question it is not
@@ -109,7 +109,7 @@ key, because **both decide whether the profile is read at all** — a key
 inside the file would require loading the file to learn whether loading it
 is allowed. They are also per-invocation operator choices (run the
 interrogation harness against a finished session), not properties of an
-agent. See `server/revive_policy.py` for the matrix of which combination
+agent. See `jaato_server/server/revive_policy.py` for the matrix of which combination
 each workflow needs; the useful one for interrogation is neither knob's
 default.
 
@@ -291,7 +291,7 @@ three providers and four plugins, and it should be adopted deliberately.
 
 ## What shipped with this assessment
 
-1. **The tagged catalog** — `shared/env_scope.py`, all 186 vars with scope,
+1. **The tagged catalog** — `jaato_server/shared/env_scope.py`, all 186 vars with scope,
    typed key and reason. Surfaced by `jaato-scaffold explain env`: every row
    carries its scope glyph and its typed key, a summary block heads the
    listing, and `explain env untyped` lists exactly the 38, each with its proposed key. `explain env host`

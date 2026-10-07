@@ -6,8 +6,8 @@ The framework uses a **channel abstraction** to handle both user-facing and inte
 
 Two plugins use the channel pattern for interactive communication:
 
-- **Permission plugin** (`shared/plugins/permission/`) — intercepts tool execution and requests approval
-- **Clarification plugin** (`shared/plugins/clarification/`) — lets the model ask the user structured questions
+- **Permission plugin** (`jaato_server/shared/plugins/permission/`) — intercepts tool execution and requests approval
+- **Clarification plugin** (`jaato_server/shared/plugins/clarification/`) — lets the model ask the user structured questions
 
 Both plugins are **singletons** shared across all sessions. Thread-local storage isolates per-session channel state so subagent threads don't interfere with the main agent.
 
@@ -324,9 +324,9 @@ An alternative design would store the channel directly on `JaatoSession` and hav
 
 | File | Contents |
 |------|----------|
-| `shared/plugins/permission/channels.py` | Permission channel hierarchy (Console, Queue, Webhook, File, ParentBridged) |
-| `shared/plugins/permission/plugin.py` | Permission plugin with thread-local pattern, `is_subagent_mode` checks |
-| `shared/plugins/clarification/channels.py` | Clarification channel hierarchy (Console, Queue, Auto, ParentBridged) |
-| `shared/plugins/clarification/plugin.py` | Clarification plugin with thread-local pattern, `is_subagent_mode` checks |
-| `shared/jaato_session.py` | `inject_prompt()`, `_forward_to_parent()`, `_injection_queue`, `_capture_interactive_channels()`, `_restore_interactive_channels()` |
-| `shared/message_queue.py` | `SourceType` enum (PARENT, CHILD, USER, SYSTEM) |
+| `jaato_server/shared/plugins/permission/channels.py` | Permission channel hierarchy (Console, Queue, Webhook, File, ParentBridged) |
+| `jaato_server/shared/plugins/permission/plugin.py` | Permission plugin with thread-local pattern, `is_subagent_mode` checks |
+| `jaato_server/shared/plugins/clarification/channels.py` | Clarification channel hierarchy (Console, Queue, Auto, ParentBridged) |
+| `jaato_server/shared/plugins/clarification/plugin.py` | Clarification plugin with thread-local pattern, `is_subagent_mode` checks |
+| `jaato_server/shared/jaato_session.py` | `inject_prompt()`, `_forward_to_parent()`, `_injection_queue`, `_capture_interactive_channels()`, `_restore_interactive_channels()` |
+| `jaato_server/shared/message_queue.py` | `SourceType` enum (PARENT, CHILD, USER, SYSTEM) |

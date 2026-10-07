@@ -829,7 +829,7 @@ This activates tier mode for the main session even without a profile declaring `
 
 ### 5.12 ModelTierConfig Data Model
 
-The resolved tier config is represented by `ModelTierConfig` (frozen dataclass in `shared/model_tiers.py`):
+The resolved tier config is represented by `ModelTierConfig` (frozen dataclass in `jaato_server/shared/model_tiers.py`):
 
 ```python
 @dataclass(frozen=True)
@@ -904,7 +904,7 @@ Profile values support two-phase expansion:
 | `${ANY_ENV_VAR}` | `os.environ` lookup | (any env var) |
 
 The framework-supplied names are declared in
-`shared.plugins.subagent.config.EXPANSION_CONTEXT_VARS` and rendered by
+`jaato_server.shared.plugins.subagent.config.EXPANSION_CONTEXT_VARS` and rendered by
 `jaato-scaffold explain profile` / `explain env`, which is the copy that
 cannot go stale — this table can, and did (it was missing `jdtlsStateRoot`).
 
@@ -1036,7 +1036,7 @@ runner, while `.lsp.json` at the workspace root is writable by model-driven
 tools — and each server's `command` becomes an `ix` exec grant in the
 per-session AppArmor profile. Same trust boundary that makes
 `apparmor_extra_rules` profile-only. See
-`jaato-server/shared/plugins/lsp/README.md`.
+`jaato-server/jaato_server/shared/plugins/lsp/README.md`.
 
 ### Provider-Specific Knobs via `plugin_configs`
 
@@ -1110,16 +1110,50 @@ delegate(
 )
 ```
 
+### Inherit (frozen parent snapshot, #1198)
+
+```python
+delegate(profile="inherit", task="Draft the section while I keep reviewing")
+```
+
+`inherit` is a **reserved value** of the `profile` argument, not a discovered
+profile. It spawns a subagent from a frozen snapshot of the **parent's**
+profile at the moment of the call — the parent's plugin set and the parent's
+system instructions — so a "spawn a child like me" helper is expressible
+**without** `allow_inline` (which stays off by default). It succeeds even when
+`profile` is otherwise required.
+
+Two deliberate departures from "identical to the parent":
+
+- **The `subagent` plugin is stripped**, so an `inherit` child can neither
+  spawn nor message siblings. Its snapshot includes the persona that makes the
+  parent delegate, and there is no spawn-depth bound (#680), so leaving it in
+  would make unbounded self-replication the path of least resistance. This is
+  the smaller, local mitigation the triage chose over a general depth bound. A
+  caller that needs a spawning child names a real profile.
+- **The parent's whole system instruction is applied as an override** (not a
+  persona layer), so the child runs the parent's exact framing rather than
+  re-assembling its own — `agent=` / `default_agent` are ignored for `inherit`.
+
+"Frozen" is a deep copy: later mutation of the parent's profile or instructions
+does not reach an already-spawned child. `inherit` is refused with a clear
+message on the remote (`server=`) path — the snapshot is local, a peer cannot
+see it — and when there is no parent session to snapshot. A profile **file**
+named `inherit` is rejected at discovery so it cannot shadow the reserved value.
+
 ### Comparison
 
-| Aspect | Profile-Based | Inline |
-|---|---|---|
-| Configuration | Pre-defined, version-controlled | Ad-hoc per request |
-| Tools available | Profile's `plugins` list | `inline_allowed_plugins` whitelist |
-| Model override | Per-profile `model`/`provider` | Inherits parent's model |
-| Tier switching | Per-profile `model_tiers` | Not available (no profile) |
-| GC strategy | Per-profile `gc` config | Parent's default |
-| Inheritance | Supported | Not applicable |
+| Aspect | Profile-Based | Inline | `inherit` (#1198) |
+|---|---|---|---|
+| Configuration | Pre-defined, version-controlled | Ad-hoc per request | Frozen snapshot of the parent |
+| Tools available | Profile's `plugins` list | `inline_allowed_plugins` whitelist | Parent's plugins **minus `subagent`** |
+| Model override | Per-profile `model`/`provider` | Inherits parent's model | Inherits parent's model |
+| Tier switching | Per-profile `model_tiers` | Not available (no profile) | Not available |
+| GC strategy | Per-profile `gc` config | Parent's default | Parent's default |
+| Instructions | Agent / profile persona | `system_instructions` arg | Parent's assembled prompt (override) |
+| Needs `allow_inline` | No | **Yes** (off by default) | **No** |
+| Can itself spawn | Per its plugins | Per `inline_allowed_plugins` | **No** (subagent stripped) |
+| Inheritance | Supported | Not applicable | Not applicable |
 
 ---
 
@@ -1261,18 +1295,18 @@ References are catalog entries validated by `validateReference(path="...")`. See
 
 | File | Contents |
 |---|---|
-| `jaato-server/shared/plugins/subagent/config.py` | `SubagentProfile`, `GCProfileConfig`, `SubagentConfig`, `SubagentResult` dataclasses; `validate_profile()`, `discover_profiles()`, `resolve_profiles()`, `_merge_profiles()`, `expand_variables()`, `gc_profile_to_plugin_config()` |
-| `jaato-server/shared/model_tiers.py` | `ModelTierConfig`, `TierEntry`, `ModelTierConfigError`; `from_unified_dict()`, `from_env()`, `resolve()`, `model_for()`, `ordered_tier_names()`, `describe_tier()`; `tier_name_error()` / `is_canonical_tier_name()`; `CANONICAL_TIER_NAMES` / `TIER_NAME_PATTERN` / `MAX_DECLARED_TIERS` / `TIER_ORDER` / `DEFAULT_TIER_DESCRIPTIONS` |
-| `jaato-server/shared/plugins/subagent/plugin.py` | `_execute_spawn_subagent()`, `_execute_validate_profile()`, tool registration, UI hooks |
-| `jaato-server/shared/lifecycle_tools.py` | `LifecycleTools` — `enter_tier` tool schema/executor, `signal_completion` rewrite, `get_tool_schemas()`, `get_auto_approved_tools()` |
-| `jaato-server/shared/jaato_session.py` | `JaatoSession` — `configure(tier_config=...)`, `switch_tier()`, `_get_effective_system_instruction()` (dynamic tier line) |
-| `jaato-server/shared/jaato_runtime.py` | `JaatoRuntime.create_session(tier_config=...)` |
-| `jaato-server/server/core.py` | `_build_profile_session_kwargs()` — resolves `ModelTierConfig.resolve()` for main sessions |
-| `jaato-server/shared/runtime_limits.py` | `RuntimeLimits` frozen dataclass |
-| `jaato-server/shared/completion_schema_loader.py` | `resolve_completion_schema()` |
-| `jaato-server/shared/plugins/subagent/tests/test_profile_inheritance.py` | Inheritance merge semantics tests |
-| `jaato-server/shared/plugins/subagent/tests/test_validate_profile.py` | Validation rule tests |
-| `jaato-server/shared/tests/test_model_tiers.py` | `ModelTierConfig` validation, resolution, `JaatoSession` tier mode, `LifecycleTools.enter_tier` tests |
+| `jaato-server/jaato_server/shared/plugins/subagent/config.py` | `SubagentProfile`, `GCProfileConfig`, `SubagentConfig`, `SubagentResult` dataclasses; `validate_profile()`, `discover_profiles()`, `resolve_profiles()`, `_merge_profiles()`, `expand_variables()`, `gc_profile_to_plugin_config()` |
+| `jaato-server/jaato_server/shared/model_tiers.py` | `ModelTierConfig`, `TierEntry`, `ModelTierConfigError`; `from_unified_dict()`, `from_env()`, `resolve()`, `model_for()`, `ordered_tier_names()`, `describe_tier()`; `tier_name_error()` / `is_canonical_tier_name()`; `CANONICAL_TIER_NAMES` / `TIER_NAME_PATTERN` / `MAX_DECLARED_TIERS` / `TIER_ORDER` / `DEFAULT_TIER_DESCRIPTIONS` |
+| `jaato-server/jaato_server/shared/plugins/subagent/plugin.py` | `_execute_spawn_subagent()`, `_execute_validate_profile()`, tool registration, UI hooks |
+| `jaato-server/jaato_server/shared/lifecycle_tools.py` | `LifecycleTools` — `enter_tier` tool schema/executor, `signal_completion` rewrite, `get_tool_schemas()`, `get_auto_approved_tools()` |
+| `jaato-server/jaato_server/shared/jaato_session.py` | `JaatoSession` — `configure(tier_config=...)`, `switch_tier()`, `_get_effective_system_instruction()` (dynamic tier line) |
+| `jaato-server/jaato_server/shared/jaato_runtime.py` | `JaatoRuntime.create_session(tier_config=...)` |
+| `jaato-server/jaato_server/server/core.py` | `_build_profile_session_kwargs()` — resolves `ModelTierConfig.resolve()` for main sessions |
+| `jaato-server/jaato_server/shared/runtime_limits.py` | `RuntimeLimits` frozen dataclass |
+| `jaato-server/jaato_server/shared/completion_schema_loader.py` | `resolve_completion_schema()` |
+| `jaato-server/jaato_server/shared/plugins/subagent/tests/test_profile_inheritance.py` | Inheritance merge semantics tests |
+| `jaato-server/jaato_server/shared/plugins/subagent/tests/test_validate_profile.py` | Validation rule tests |
+| `jaato-server/jaato_server/shared/tests/test_model_tiers.py` | `ModelTierConfig` validation, resolution, `JaatoSession` tier mode, `LifecycleTools.enter_tier` tests |
 
 ---
 

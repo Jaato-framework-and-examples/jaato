@@ -21,7 +21,7 @@ hermetic workspace, graded by pluggable adapters, written to JSONL as it goes.
 The design premise was **extract, don't build** — 14 of the 18 concepts such a
 harness needs already existed in jaato, and three org repos had each privately
 rebuilt a piece of it. One constraint was imposed as discipline: import
-`jaato_sdk` only, never `shared.*`. Where the SDK could not do something, that
+`jaato_sdk` only, never `jaato_server.shared.*`. Where the SDK could not do something, that
 was treated as an SDK defect rather than something to work around.
 
 That constraint paid for itself repeatedly — see [Upstream](#what-went-upstream).

@@ -29,7 +29,7 @@ entry-point lookup:
   instead of referencing module constants
 
 **Files:**
-- `jaato-server/shared/jaato_runtime.py` — lines 26-68 (constants), lines
+- `jaato-server/jaato_server/shared/jaato_runtime.py` — lines 26-68 (constants), lines
   1066-1076 (usage in `get_system_instructions()`)
 
 ### Task 1.3 — Make gossip initialization pluggable in `__main__.py`
@@ -48,9 +48,9 @@ The current wiring flow stays the same — `set_gossip_context()`,
 as public hook points.
 
 **Files:**
-- `jaato-server/server/__main__.py` — `_init_gossip()` (lines 915-1029),
+- `jaato-server/jaato_server/server/__main__.py` — `_init_gossip()` (lines 915-1029),
   `set_gossip_context()` call (lines 1056-1062)
-- `jaato-server/server/session_manager.py` — `set_gossip_context()` (lines
+- `jaato-server/jaato_server/server/session_manager.py` — `set_gossip_context()` (lines
   222-245), `_configure_gossip_context()` (lines 247-277)
 
 ### Task 1.4 — Verify standalone mode
@@ -121,7 +121,7 @@ The premium package can provide **enhanced versions** via the
 - `.jaato/references/*.json` → `jaato_premium/references/`
 - `.jaato/prompts/*.md` (premium prompts) → `jaato_premium/prompts/`
 - `knowledge/` → `jaato_premium/knowledge/`
-- `shared/prompt_templates/` → `jaato_premium/prompt_templates/`
+- `jaato_server/shared/prompt_templates/` → `jaato_premium/prompt_templates/`
 - `modlog-training-set-test/`, `cli_vs_mcp/` → `jaato_premium/`
 
 ### Task 3.3 — Wire content loading
@@ -140,13 +140,13 @@ Premium needs to register paths so the framework discovers the content:
 
 ### Task 4.1 — Move gossip code to premium
 
-- `server/peers.py` → `jaato_premium/gossip/peers.py`
-- `server/remote_spawn.py` → `jaato_premium/gossip/remote_spawn.py`
-- `server/workspace_sync.py` → `jaato_premium/gossip/workspace_sync.py`
-- `server/server_reliability.py` → `jaato_premium/gossip/server_reliability.py`
-- `server/health.py` → `jaato_premium/gossip/health.py`
-- `server/health_http.py` → `jaato_premium/gossip/health_http.py`
-- `server/dashboard/` → `jaato_premium/gossip/dashboard/`
+- `jaato_server/server/peers.py` → `jaato_premium/gossip/peers.py`
+- `jaato_server/server/remote_spawn.py` → `jaato_premium/gossip/remote_spawn.py`
+- `jaato_server/server/workspace_sync.py` → `jaato_premium/gossip/workspace_sync.py`
+- `jaato_server/server/server_reliability.py` → `jaato_premium/gossip/server_reliability.py`
+- `jaato_server/server/health.py` → `jaato_premium/gossip/health.py`
+- `jaato_server/server/health_http.py` → `jaato_premium/gossip/health_http.py`
+- `jaato_server/server/dashboard/` → `jaato_premium/gossip/dashboard/`
 
 ### Task 4.2 — Implement `init_gossip()` entry point
 

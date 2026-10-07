@@ -1,0 +1,16 @@
+# worker — openrouter set: openai/gpt-5-mini.
+name: worker
+inherits: [_base_worker]
+plugins: []  # empty keeps the inherited _base surface
+model: openai/gpt-5-mini
+provider: openrouter
+plugin_configs:
+  openrouter:
+    # Secret URI, resolved daemon-side.  Never substitute the literal key
+    # here — the task definition is committed.  For a DRIVER task this is
+    # not merely good practice: the arm's fixture `.env` carries only
+    # JAATO_PROFILE_SET, so a profile expecting JAATO_OPENROUTER_API_KEY
+    # to be there finds nothing.  `pass://`, or the daemon's environment.
+    api_key: "pass://jaato/openrouter/api-key"
+    api_params:
+      temperature: 0.0  # determinism knob

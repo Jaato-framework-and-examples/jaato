@@ -130,6 +130,14 @@ class WorkspacePanel:
         # File state: {relative_path: status_string}
         self._files: Dict[str, str] = {}
 
+        # #1189: the daemon's change numbering, so ``clear()`` survives a
+        # reattach.  ``_epoch`` names the monitor instance, ``_seq`` is the
+        # highest batch number seen, and ``_clear_mark`` is (epoch, seq) at
+        # the last clear -- ``None`` when the panel has not been cleared.
+        self._epoch: Optional[str] = None
+        self._seq: int = 0
+        self._clear_mark: Optional[Tuple[Optional[str], int]] = None
+
         # Tree built from _files for rendering
         self._root = _TreeNode("")
 
@@ -189,24 +197,61 @@ class WorkspacePanel:
     # Data API (called from rich_client.py event handler)
     # ------------------------------------------------------------------
 
-    def apply_snapshot(self, files: List[Dict[str, str]]) -> None:
+    def apply_snapshot(
+        self,
+        files: List[Dict[str, str]],
+        seq: Optional[int] = None,
+        epoch: Optional[str] = None,
+        seqs: Optional[Dict[str, int]] = None,
+    ) -> None:
         """Replace the entire file state from a snapshot event.
+
+        A reattach sends one, and it used to undo ``clear()``: the snapshot
+        is the whole delta since session start.  With the daemon's numbering
+        (protocol 1.19, #1189) a cleared panel keeps only the entries that
+        changed after the clear.  A mark from a different ``epoch`` -- the
+        daemon reloaded the session and renumbered -- is dropped rather than
+        compared, and so is any mark when the daemon sends no numbering: the
+        panel then shows the full snapshot, as it always did.
 
         Args:
             files: List of ``{"path": str, "status": str}`` dicts.
+            seq: The monitor's latest batch number (1.19+).
+            epoch: The monitor instance (1.19+).
+            seqs: Path -> the number of its latest change (1.19+); a path
+                with none reads as 0.
         """
+        mark = self._clear_mark
+        if mark is not None and (epoch is None or seqs is None or mark[0] != epoch):
+            mark = self._clear_mark = None
         self._files.clear()
         self._highlights.clear()
         for entry in files:
-            self._files[entry["path"]] = entry["status"]
+            path = entry["path"]
+            if mark is not None and (seqs or {}).get(path, 0) <= mark[1]:
+                continue
+            self._files[path] = entry["status"]
+        self._epoch = epoch
+        self._seq = seq or 0
         self._tree_dirty = True
 
-    def apply_changes(self, changes: List[Dict[str, str]]) -> None:
+    def apply_changes(
+        self,
+        changes: List[Dict[str, str]],
+        seq: Optional[int] = None,
+        epoch: Optional[str] = None,
+    ) -> None:
         """Apply incremental changes from a changed event.
 
         Args:
             changes: List of ``{"path": str, "status": str}`` dicts.
+            seq: This batch's number (protocol 1.19+), kept so a later
+                ``clear()`` can record where it happened.
+            epoch: The monitor instance that numbered it.
         """
+        if seq is not None:
+            self._seq = max(self._seq, seq) if epoch == self._epoch else seq
+            self._epoch = epoch
         now = time.monotonic()
         for entry in changes:
             path = entry["path"]
@@ -227,8 +272,12 @@ class WorkspacePanel:
     def clear(self) -> None:
         """Clear all tracked files, resetting the panel to its initial state.
 
-        After clearing, only new filesystem changes will appear.
+        After clearing, only new filesystem changes will appear -- including
+        a file that was listed before, if it changes again.  The point of the
+        clear is recorded against the daemon's numbering (#1189) so a
+        reattach's snapshot does not bring the cleared entries back.
         """
+        self._clear_mark = (self._epoch, self._seq)
         self._files.clear()
         self._highlights.clear()
         self._collapsed_dirs.clear()

@@ -62,9 +62,9 @@ Already has a hand-rolled mini-facade (`orchestrator/sdk_harness.py`) — the fa
 
 ## Tier 3 — `jaato` framework: scaffold + docs (highest leverage; teaches everyone)
 
-- **`jaato-server/shared/scaffold/_client_templates.py`** — the generator behind `jaato-scaffold new`. `CLIENT_TEMPLATE` **SIMPLIFY** → `session()`+`ask()` (its docstring documents the very hang the facade kills). `FIRE`/`CASCADE`/`HOST_TOOLS` **PARTIAL**; `OBSERVER` **KEEP**. **L** (update golden tests `test_client_template_completion_wait.py` in lockstep). Note: keep a commented low-level variant since scaffold output is teaching material. *(Whether to convert scaffolds to the facade is itself a decision — they're deliberately explicit.)*
+- **`jaato-server/jaato_server/shared/scaffold/_client_templates.py`** — the generator behind `jaato-scaffold new`. `CLIENT_TEMPLATE` **SIMPLIFY** → `session()`+`ask()` (its docstring documents the very hang the facade kills). `FIRE`/`CASCADE`/`HOST_TOOLS` **PARTIAL**; `OBSERVER` **KEEP**. **L** (update golden tests `test_client_template_completion_wait.py` in lockstep). Note: keep a commented low-level variant since scaffold output is teaching material. *(Whether to convert scaffolds to the facade is itself a decision — they're deliberately explicit.)*
 - **Docs to make facade-first:** `docs/jaato-ipc-ws-transport-clients.md`, `docs/client-sdk-reference.md` (add `.session/.ask/.complete/.stream` rows), `CLAUDE.md` "Tool Execution Flow". **S each.**
-- **Provider smoke harnesses** (`shared/plugins/model_provider/<P>/smoke/smoke_chat.py` ×~12): **PARTIAL/optional** — `smoke_chat`→`ask`, `smoke_signal_completion`→`complete`, but they're deliberate low-level conformance probes (explicit ErrorEvent assertions); converting changes the test surface. **Optional.**
+- **Provider smoke harnesses** (`jaato_server/shared/plugins/model_provider/<P>/smoke/smoke_chat.py` ×~12): **PARTIAL/optional** — `smoke_chat`→`ask`, `smoke_signal_completion`→`complete`, but they're deliberate low-level conformance probes (explicit ErrorEvent assertions); converting changes the test surface. **Optional.**
 
 ---
 
@@ -73,7 +73,7 @@ Already has a hand-rolled mini-facade (`orchestrator/sdk_harness.py`) — the fa
 | Repo | Why |
 |---|---|
 | **jaato-client-telegram** | WebSocket client (`WSTransport` + `jaato_sdk.events` wire types only) — **zero `IPCClient`**; facade is IPC-only (G4). Long-lived per-chat session pool + reconnect + host-tool dispatch + binary staging + rich multi-EventType rendering — all genuinely low-level. 0 LOC. |
-| **jaato-premium** | **Zero IPCClient consumers.** All `create_session`/`subscribe`/`send_message` are server-side (reactors/gates/gossip/runtime). The "send+wait" code (`gc_benchmark`, `modlog_training_pipeline`, `cli_mcp_harness`) is the **wrong client** — direct Vertex `shared.jaato_client.JaatoClient`, not the daemon SDK. |
+| **jaato-premium** | **Zero IPCClient consumers.** All `create_session`/`subscribe`/`send_message` are server-side (reactors/gates/gossip/runtime). The "send+wait" code (`gc_benchmark`, `modlog_training_pipeline`, `cli_mcp_harness`) is the **wrong client** — direct Vertex `jaato_server.shared.jaato_client.JaatoClient`, not the daemon SDK. |
 | **jaato-tui-driven-tests** | `harness/walker.py` — 1 long-lived `IPCRecoveryClient` → N sessions, rebuild-on-CLOSED recovery, completion on `AgentCompletedEvent(agent_id=="documenter")` + retry/error routing. Justified advanced low-level consumer. |
 | **kb-stage-agent-LoRA-training** | No `jaato_sdk` import — drives a vLLM `/chat/completions` endpoint via raw `urllib` (STaR loop). N/A by design. |
 | **jaato-based-symphony-spec-implementation** | No SDK client code found. |

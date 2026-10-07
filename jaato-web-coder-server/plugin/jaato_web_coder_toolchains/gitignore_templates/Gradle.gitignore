@@ -1,0 +1,24 @@
+# Vendored from github/gitignore (CC0-1.0)
+# https://github.com/github/gitignore/blob/62f3997f1917b30f6eaee0c53ac2d791426513f2/Gradle.gitignore
+# Do not edit by hand; refresh with scripts and re-run the checksum test.
+.gradle
+**/build/
+!**/src/**/build/
+
+# Ignore Gradle GUI config
+gradle-app.setting
+
+# Avoid ignoring Gradle wrapper jar file (.jar files are usually ignored)
+!gradle-wrapper.jar
+
+# Avoid ignore Gradle wrapper properties
+!gradle-wrapper.properties
+
+# Cache of project
+.gradletasknamecache
+
+# Eclipse Gradle plugin generated files
+# Eclipse Core
+.project
+# JDT-specific (Eclipse Java Development Tools)
+.classpath

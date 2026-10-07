@@ -1,0 +1,77 @@
+$ jaato-scaffold explain oversight
+human oversight  (Regulation (EU) 2024/1689, Art. 14 -- what the
+framework provides, in the Article's own vocabulary)
+  ----------------------------------------------------------------
+STOP  (14(4)(e): intervene, or interrupt through a stop button)
+  jaato-server --stop    the whole deployment
+      where: the host shell; needs no client and no session id
+      run:   jaato-server --stop --pid-file /tmp/jaato.pid --ipc-socket /tmp/jaato.sock
+      then: every loaded session is saved to disk, then each is cancelled and
+      shut down and its runner returned or reaped; the pidfile is the handle,
+      the socket the fallback when the pidfile is stale
+  session.stop <id>      one loaded session, whoever created it
+      where: any attached client (TUI: `session stop <id>`; SDK:
+      IPCClient.stop_session); daemon protocol >= 1.7, refused below it
+      run:   session stop <id>
+      then: cancellation, not a kill: the session's cancel token is tripped
+      (the same path budget_control's abort rung uses), a mid-turn session
+      stops at its next check point, and it is then unloaded, which saves it
+
+WHO IS RUNNING
+    session.orphans (TUI: `session orphans`) lists every LOADED session with
+    no client attached, how long it has been orphaned, whether it is spending
+    right now, and the runner executing it
+
+DECIDE / OVERRIDE  (14(4)(d) -- decide not to use, or override, an output)
+    the permission plugin (plugin_configs.permission.policy)
+    approval_channels          console | webhook | queue | file
+    policy.defaultPolicy       allow | deny | ask
+    policy.cwd                 string
+    policy.sanitization        object
+    policy.blacklist           object
+    policy.whitelist           object
+
+BUILT-IN CONSTRAINTS  (14(3)(a): the ones the system cannot override)
+  budget_control degrade ladder
+      limits on usd, tokens, seconds, tool_calls, turns; of the terminal
+      actions (abort, escalate, finalize) only 'abort' stops the run -- limits
+      alone are observed, never enforced
+  session-lifetime watchdog (runtime_limits)
+      daemon-side, so it applies when the client died: max_orphan_seconds
+      defaults to 900s, max_session_seconds is opt-in; 0 disables either
+  completion gate (completion_processors)
+      a validate() script refuses signal_completion until its checks pass;
+      max_refusals bounds how often, budget_control bounds the retries
+
+REVERSIBLE / NOT
+  + file_edit: every write is backed up under
+    <config_root>/sessions/<session_id>/backups/ before it lands
+  - anything a subprocess or a remote call did -- cli, interactive_shell, mcp,
+    service_connector, web_fetch POSTs; the permission gate is the measure
+    that stands in front of them
+
+MARKING GENERATED OUTPUT  (Art. 50(2), 50(4))
+  media
+        the model's own audio and images carry `generated_by` on the wire
+        (protocol 1.17): kind, provider, model, session_id, agent_id.  That
+        field travels with the DELIVERY EVENT and stops there -- a client that
+        saves the bytes keeps no record of it
+  files
+        a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or beside
+        the payload, so it survives leaving jaato.  Installed here:
+        output_marker
+  text
+        NOT marked.  AgentOutputEvent.source attributes it at the event layer
+        (agent / system / permission / user) and that is all; no text
+        watermark ships until the Art. 50(7) code of practice or a harmonised
+        standard names one, because a prefix a client strips is a marking that
+        certifies what it did not find
+  publishing
+        Art. 50(4) -- disclosing that text published to inform the public on
+        matters of public interest was AI-generated -- is a PUBLISHING
+        decision.  The framework cannot see that a transcript was published,
+        and does not attempt to
+
+  `explain oversight <profile> --workspace DIR` shows which of these a
+  named profile has ARMED; `jaato-doctor` prints the exact --stop
+  invocation for the daemon that is running.

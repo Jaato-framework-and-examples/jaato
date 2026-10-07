@@ -1,0 +1,29 @@
+# systemd unit for jaato-web-coder-server (sign-in + ticket custody).
+#
+# Reads /etc/jaato-web-coder/server.yaml and the 0600 secret files beside
+# it (written by `jaato-web-coder-server init --dir /etc/jaato-web-coder`).
+# Listens on loopback; the reverse proxy fronts it at /.
+#
+# Until @jaato/web-coder-server is on npm, install from a checkout:
+#   cd jaato-web-coder-server && npm ci && npm run build
+# and point ExecStart at that checkout's bin/.
+[Unit]
+Description=jaato-web-coder-server (browser sign-in and ticket custody)
+After=network-online.target jaato-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jaato-web-coder
+Group=jaato-web-coder
+ExecStart=/usr/bin/node /opt/jaato-web-coder-server/bin/jaato-web-coder-server.js serve --config /etc/jaato-web-coder/server.yaml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/jaato-web-coder
+
+[Install]
+WantedBy=multi-user.target

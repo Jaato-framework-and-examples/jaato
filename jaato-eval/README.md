@@ -28,12 +28,14 @@ what an arm *is*, not which cell of the matrix it occupies.
 
 ```bash
 pip install jaato-eval
+# or:  uv pip install jaato-eval
 ```
 
 Or, from a checkout of the framework repo:
 
 ```bash
 pip install -e jaato-eval/
+# or:  uv pip install -e jaato-eval/
 ```
 
 `jaato-sdk` is a hard dependency now. It was an optional extra while the
@@ -115,6 +117,160 @@ repeats: 3
 Nothing here invents a grading language. Every `kind` names something the
 framework or the surrounding repos already execute.
 
+## A driver arm
+
+An arm was always one session. Some units of work are not: a backtest
+cell is a **driver process** orchestrating about ten sessions in a fixed
+order, with market data reaching the model as host tools in the driver's
+own process. `harness.kind: driver` makes that process the arm — graded,
+pooled, repeated and reported like any other (jaato #1110):
+
+```yaml
+harness:
+  kind: driver                      # today's form is kind: session, the default
+  run: python -m ta_cascade analyze "$JAATO_EVAL_PARAM_TICKER" "$JAATO_EVAL_PARAM_TRADE_DATE"
+  profile_set: openrouter_sonnet
+input:
+  params: {TICKER: NVDA, TRADE_DATE: "2026-08-28"}
+graders:
+  - kind: script
+    run: python scripts/score_backtest.py     # reads the same two variables
+repeats: 5
+```
+
+`kind: session` keeps `profile` and `input.prompt` required; `kind: driver`
+requires `run`, refuses `profile` and `prompt` (a key nothing reads is the
+silent-ignore shape the parser exists to prevent — the error names the
+variant), and makes `input.params` the input. The command runs through the
+shell with the arm's workspace as its working directory.
+
+### The contract
+
+The driver is handed the arm as environment, versioned by name so a driver
+can refuse a table it does not understand:
+
+| variable | value |
+|---|---|
+| `JAATO_EVAL_CONTRACT` | `1` |
+| `JAATO_EVAL_WORKSPACE` | the materialised fixture, carrying the `.env` the engine already writes (`JAATO_PROFILE_SET`) |
+| `JAATO_EVAL_CONFIG_ROOT` | the task's read-only `.jaato/` |
+| `JAATO_EVAL_SOCKET` | the daemon the arm runs on — same rule as `GraderContext.socket_path`, so **absent** when the sweep uses the SDK default |
+| `JAATO_EVAL_CASCADE_ID` | **the arm's cid; every session the driver opens must be stamped with it** — this is what makes the pool, the observer and the per-stage records work |
+| `JAATO_EVAL_PYTHON` | the interpreter jaato-eval itself runs under, and therefore the one that **has `jaato_sdk`**. Absent only where an embedded interpreter cannot name itself |
+| `JAATO_EVAL_PARAM_<KEY>`, `JAATO_EVAL_PARAMS` | one variable per `input.params` entry, and the whole mapping as JSON — the encoding a `script` grader already receives, under the same names, because the driver and its scorer are talking about one arm |
+
+A new variable is additive and does not bump `JAATO_EVAL_CONTRACT`: a
+driver that has never heard of one behaves exactly as it did.
+
+**A `script` grader is handed the same table, from the same builder.** So
+a driver task scores itself with the package that drove it:
+
+```yaml
+harness:
+  kind: driver
+  run: '"$JAATO_EVAL_PYTHON" -m ta_cascade.analyze'
+graders:
+  - kind: script
+    run: '"$JAATO_EVAL_PYTHON" -m ta_cascade.score'
+```
+
+Before jaato #1127 only the first line worked. The grader built its own
+environment out of `os.environ` plus the params, so `$JAATO_EVAL_PYTHON`
+expanded to nothing, the shell reported exit 127, and the adapter read
+that — correctly, for what it could see — as a missing toolchain and
+**BLOCKED every arm**, while every arm's driver exited 0 with its
+workspace on disk. There was no way round it in a manifest: `python` is
+the `PATH` bet this table exists to remove, and an absolute path is a
+per-host constant in a committed file.
+
+The rows a grader is handed differ only in what it has: its
+`JAATO_EVAL_PARAM_*` are the arm's `input.params` on a driver arm and its
+`agent_params` on a session arm — the mapping the arm ran with, either
+way — and `JAATO_EVAL_CASCADE_ID` is absent on a session arm whose task
+declared no pool, since such an arm runs un-cid'd. Reaching a second
+consumer is additive, so this did not bump `JAATO_EVAL_CONTRACT` either.
+
+The driver opens its sessions with `workspace_path=$JAATO_EVAL_WORKSPACE`,
+`config_root=$JAATO_EVAL_CONFIG_ROOT`, `env_file=".env"` and
+`cascade_driver_id=$JAATO_EVAL_CASCADE_ID`. `tasks/driver-probe` is a
+complete one.
+
+**Write `run` against `$JAATO_EVAL_PYTHON`, not `python`.** The command
+inherits the engine's `PATH` and nothing else, so `run: python driver.py`
+is a bet on what `python` means on that host — on a venv install it is
+`/bin/sh: 1: python: not found`, and the driver never runs at all. Say
+`run: '"$JAATO_EVAL_PYTHON" driver.py'` instead.
+
+**Credentials are not in the contract, and are not in the fixture.** The
+`.env` the engine writes into the arm's workspace carries
+`JAATO_PROFILE_SET` and nothing else, by design — the sweep's model axis is
+the only thing the engine has to say there. So a driver task's profiles
+must resolve their credential from a `pass://` / `vault://` URI in the
+profile's `env:` or `plugin_configs`, or from the **daemon's** own
+environment; a profile that expects `JAATO_<PROVIDER>_API_KEY` in the
+workspace `.env` finds none. It is the first thing a real driver hits.
+
+### The exit-code vocabulary
+
+Mirrors the one rule in `jaato_eval/sign_off.py`:
+
+| exit | means | recorded as |
+|---|---|---|
+| `0` | ran to its end; the tree is gradeable | graded |
+| `75` (`EX_TEMPFAIL`) | environment fault — daemon unreachable, fixture unusable | BLOCKED, "we learned nothing" |
+| anything else | ran and stopped short | an **unsigned** arm: script graders run, payload-reading graders BLOCK naming the driver (`DriverStoppedShort`), the stderr tail becomes `termination_detail` |
+
+That table reads a code **the driver chose**. Three endings are not such a
+code, and each would otherwise put an environment fault into the pass-rate
+denominator as a FAIL:
+
+| ending | recorded as |
+|---|---|
+| `126` / `127` — the shell could not run `harness.run` | BLOCKED: no driver executed. (Measured: `run: python driver.py` on a venv install → exit 127, and the script grader then FAILed an arm in which nothing had happened) |
+| a **negative** return code — killed by a signal nobody here sent (an OOM kill, an operator's `kill`) | BLOCKED, **naming the signal** |
+| the per-arm ceiling (`--arm-timeout`) | BLOCKED, exactly as a session arm is — the engine's own kill leaves no exit code, which is what keeps it out of the vocabulary |
+
+`128+N` — what a shell that did not `exec` returns for a child it saw die
+of signal N — is deliberately read as the driver's own code: it is inside
+the range a driver may choose. A shell that `exec`s its only command is
+itself the signalled process, and that arrives as the negative code above.
+
+The ceiling kill is of the driver's whole process group, SIGTERM first (its
+chance to end its sessions) then SIGKILL, and the engine then sends
+`session.stop` for every session of the arm that has no terminal — a stage
+left behind would otherwise keep spending until the daemon's orphan sweep
+reached it.
+
+### What the engine measures, and how it knows whose it is
+
+Measured live: a cascade observer attached to a driver run's cid sees every
+session the driver opens — the `AgentCreatedEvent`s, each
+`TurnCompletedEvent` with its usage, the terminals — from its own connection.
+So a driver arm is accounted the way a session arm is, one accumulator **per
+session id**, summed at the end; the record carries `session_ids` (every
+session, in creation order) beside `session_id` (the first), because the
+OpenRouter join is per stage. The observer is registered **before** the
+process starts.
+
+The cid is the task pool's when the task declares `budget:` — the daemon
+applies a cid's pool to every session stamped with it, so the pool works
+with no engine work — and one minted per arm otherwise. The pool case has
+a consequence: two arms of one task running concurrently share the cid,
+and the observer sees the sibling's sessions too. So attribution comes from
+the workspace, not the event stream: the daemon persists every session's
+record into the session's own workspace at creation
+(`<workspace>/.jaato/sessions/<sid>.json`, the file the tracker read already
+uses), and the contract puts the driver's sessions in **this** arm's
+workspace. Sessions seen with no record here are a sibling's and are
+dropped; a record here the observer never saw is still the arm's, with its
+spend read from the record.
+
+Two things the wire does not carry for a driver arm, said plainly:
+`model` / `provider` come from the first session's persisted record, since
+`SessionInfoEvent` is answered to the creating client and not routed to
+observers; and `budget_ceiling` is unknown, since the arm binds no profile
+of its own.
+
 ## The three graders
 
 | kind | is | PASS when |
@@ -127,17 +283,28 @@ The `judge` rubric is a completion schema, so the score comes back typed —
 the provider enforces the shape at sampling time. There is no free-text
 score to parse, and changing what "good" means is a schema edit.
 
-### A script grader can see the task's inputs
+### A script grader can see the arm it is grading
 
-`processor` and `judge` graders get a `GraderContext`, which carries
-`agent_params`. A shell command cannot read a Python object, so the
-`script` grader hands the same inputs over as environment variables:
+`processor` and `judge` graders get a `GraderContext`. A shell command
+cannot read a Python object, so the `script` grader hands the arm over as
+environment variables — the **same table a driver arm is handed**, from
+the same builder, so the two cannot disagree about a name or a value:
 
 | variable | is |
 |---|---|
 | `JAATO_EVAL` | `1` — this is a graded run |
-| `JAATO_EVAL_PARAM_<KEY>` | one `agent_params` entry, key upper-cased, non-identifier characters replaced by `_` |
+| `JAATO_EVAL_CONTRACT` | `1` — the version of this table |
+| `JAATO_EVAL_PARAM_<KEY>` | one input entry, key upper-cased, non-identifier characters replaced by `_` |
 | `JAATO_EVAL_PARAMS` | the whole mapping as JSON, under the author's own key spellings |
+| `JAATO_EVAL_PYTHON` | the interpreter jaato-eval runs under, and therefore the one that **has `jaato_sdk`** — write `run: '"$JAATO_EVAL_PYTHON" score.py'`, never `python` |
+| `JAATO_EVAL_WORKSPACE` | the mutated workspace, which is also the working directory |
+| `JAATO_EVAL_CONFIG_ROOT` | the task's read-only `.jaato/` |
+| `JAATO_EVAL_SOCKET` | the daemon the **arm** ran on, for a grader that opens its own session — **absent** when the sweep uses the SDK default |
+| `JAATO_EVAL_CASCADE_ID` | the cid the arm's sessions were stamped with — **absent** for a session arm whose task declared no pool |
+
+The last three follow the absence rule below: a variable the arm has no
+value for is *unset*, so `[ -n "$JAATO_EVAL_SOCKET" ]` is a working test
+rather than one that always passes.
 
 So a check that depends on an input says so in the manifest:
 
@@ -301,7 +468,7 @@ something else.
 | column | source |
 |---|---|
 | model, provider | the daemon's `SessionInfoEvent` — what it actually **bound**, not the profile-set name |
-| **session id** | the runner already knew it and used to discard it |
+| **session id** | the runner already knew it and used to discard it; for a driver arm the first of `session_ids`, and **sessions** says how many |
 | upstream provider, native finish reason | provider-reported; `—` until jaato #766 carries them off the wire |
 | budget | which gate applied, and what the pool had left **on arrival** |
 | nudges | `n/2`, counted from the session's own log |
@@ -617,7 +784,7 @@ blocks every schema-driven arm as truncated.
 
 ## Constraint: SDK only
 
-This package imports `jaato_sdk` and never `shared.*`. If something here
+This package imports `jaato_sdk` and never `jaato_server.shared.*`. If something here
 cannot be built on the SDK, that is an SDK gap to be fixed in the SDK.
 
 That is not hypothetical: building this found the tool-call ledger

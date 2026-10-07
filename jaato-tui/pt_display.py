@@ -1241,9 +1241,13 @@ class PTDisplay:
 
         The server's ``WorkspaceMonitor`` watches ``.gitignore`` and
         reloads its parser on the modification event so the new pattern
-        takes effect on subsequent file events.
+        takes effect on subsequent file events.  The TUI writes the file
+        directly because it runs on the host; a remote client reaches the
+        same edit through the daemon's ``workspace.ignore`` verb.
         """
         import os
+
+        from jaato_sdk.gitignore_toggle import toggle_gitignore_pattern
 
         path = self._workspace_panel.get_selected_path()
         if not path:
@@ -1267,22 +1271,10 @@ class PTDisplay:
             if os.path.exists(gitignore_path):
                 with open(gitignore_path, "r", encoding="utf-8") as fh:
                     existing = fh.read()
-            lines = existing.splitlines()
-            stripped = [ln.strip() for ln in lines]
-
-            if pattern in stripped:
-                # Drop every exact-match occurrence.
-                new_lines = [
-                    ln for ln, s in zip(lines, stripped) if s != pattern
-                ]
-                new_content = "\n".join(new_lines)
-                if new_content and not new_content.endswith("\n"):
-                    new_content += "\n"
-            else:
-                # Append, ensuring the previous content ends with a newline.
-                if existing and not existing.endswith("\n"):
-                    existing += "\n"
-                new_content = existing + pattern + "\n"
+            # The one definition of "toggle this entry", shared with the
+            # daemon's ``workspace.ignore`` verb (protocol 1.12) so a web
+            # client's press and this key make the same edit.
+            new_content, _ignored = toggle_gitignore_pattern(existing, pattern)
 
             with open(gitignore_path, "w", encoding="utf-8") as fh:
                 fh.write(new_content)
@@ -3484,7 +3476,12 @@ class PTDisplay:
             self._plan_panel.update_plan(plan_data)
         self.refresh()
 
-    def update_workspace_files(self, changes: List[Dict[str, str]]) -> None:
+    def update_workspace_files(
+        self,
+        changes: List[Dict[str, str]],
+        seq: Optional[int] = None,
+        epoch: Optional[str] = None,
+    ) -> None:
         """Apply incremental workspace file changes.
 
         Called by the event handler when a ``WorkspaceFilesChangedEvent``
@@ -3492,11 +3489,19 @@ class PTDisplay:
 
         Args:
             changes: List of ``{"path": str, "status": str}`` dicts.
+            seq: The batch's number (protocol 1.19+, #1189).
+            epoch: The monitor instance that numbered it.
         """
-        self._workspace_panel.apply_changes(changes)
+        self._workspace_panel.apply_changes(changes, seq=seq, epoch=epoch)
         self.refresh()
 
-    def set_workspace_snapshot(self, files: List[Dict[str, str]]) -> None:
+    def set_workspace_snapshot(
+        self,
+        files: List[Dict[str, str]],
+        seq: Optional[int] = None,
+        epoch: Optional[str] = None,
+        seqs: Optional[Dict[str, int]] = None,
+    ) -> None:
         """Replace workspace file state from a snapshot event.
 
         Called by the event handler when a ``WorkspaceFilesSnapshotEvent``
@@ -3504,8 +3509,10 @@ class PTDisplay:
 
         Args:
             files: List of ``{"path": str, "status": str}`` dicts.
+            seq, epoch, seqs: The daemon's change numbering (protocol 1.19+,
+                #1189), which lets a cleared panel stay cleared.
         """
-        self._workspace_panel.apply_snapshot(files)
+        self._workspace_panel.apply_snapshot(files, seq=seq, epoch=epoch, seqs=seqs)
         self.refresh()
 
     def clear_plan(self, agent_id: Optional[str] = None) -> None:

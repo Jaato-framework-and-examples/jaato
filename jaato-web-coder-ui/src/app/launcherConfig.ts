@@ -1,0 +1,94 @@
+/**
+ * The bundle's one contact with whatever served it.
+ *
+ * ``bin/jaato-web-coder-ui.js`` (the ``@jaato/web-coder-ui`` launcher) and anyone hosting
+ * ``dist/`` by hand may publish a ``config.json`` next to ``index.html``:
+ *
+ *     {"daemon": "ws://127.0.0.1:8080", "token": "…", "autoConnect": true}
+ *
+ * ``daemon`` pre-fills the WebSocket URL, ``token`` the bearer token, and
+ * ``autoConnect`` makes the connect screen connect without a click.  A
+ * sign-in backend (``jaato-web-coder-server``) writes ``ticketUrl`` instead of
+ * ``token``: the page then asks that URL for a fresh per-user ticket before
+ * every connection attempt (``app/tickets.ts``), and ``loginUrl`` (default
+ * ``./auth/login``) is where a 401 sends the person.  All fields are
+ * optional; ``ticketUrl`` wins over ``token`` when both are present.
+ * ``sessionUrl`` and ``logoutUrl`` name the backend's who-am-I and sign-out
+ * endpoints when they do not sit beside ``ticketUrl``.  The file is fetched relative to the page (so a
+ * bundle served under ``/app/`` looks for ``/app/config.json``), and
+ * anything that is not a JSON document — Vite's dev server answers the
+ * path with ``index.html``, a static host with 404 — means "no launcher
+ * config", never an error.
+ */
+export interface LauncherConfig {
+  daemon?: string;
+  token?: string;
+  ticketUrl?: string;
+  loginUrl?: string;
+  /** Where ``GET`` answers who is signed in; default: ``session`` beside ``ticketUrl`` (``app/backendSession.ts``). */
+  sessionUrl?: string;
+  /** Where a "Sign out" link goes; default: ``logout`` beside ``ticketUrl``. */
+  logoutUrl?: string;
+  /**
+   * Where the backend keeps the signed-in user's provider API keys
+   * (``app/credentials.ts``).  Named only by a backend that has the store;
+   * absent means the configure form shows a plain key field.  Deliberately
+   * NOT derived from ``ticketUrl`` like the two above: those endpoints
+   * always exist beside a ticket URL, this one is opt-in.
+   */
+  credentialsUrl?: string;
+  /**
+   * Where the backend keeps this user's session notes (``app/notes.ts``).
+   * Named only by a backend that has the store; absent means notes are kept
+   * in this browser instead, and the UI says which.  Opt-in for the same
+   * reason ``credentialsUrl`` is, so it is not derived from ``ticketUrl``.
+   */
+  notesUrl?: string;
+  /**
+   * Where the backend keeps this user's connected GitHub accounts and their
+   * per-workspace bindings (``app/github.ts``).  Named only by a backend that
+   * has the ``github:`` block; absent means the "Connect GitHub" settings
+   * entry and the workspace account dropdown do not appear.  Opt-in for the
+   * same reason ``credentialsUrl`` is, so it is not derived from ``ticketUrl``.
+   */
+  githubUrl?: string;
+  /**
+   * Where the server-side GitHub App connect starts (a full-page 302 to
+   * GitHub).  Sent beside ``githubUrl`` by the same backend; the settings
+   * entry navigates here to connect an account.
+   */
+  githubLoginUrl?: string;
+  /** The backend's environment bootstrap API (``app/environment.ts``); absent = no toolchain chips. */
+  environmentUrl?: string;
+  autoConnect?: boolean;
+}
+
+export function parseLauncherConfig(raw: unknown): LauncherConfig {
+  if (!raw || typeof raw !== "object") return {};
+  const o = raw as Record<string, unknown>;
+  const out: LauncherConfig = {};
+  if (typeof o.daemon === "string" && o.daemon) out.daemon = o.daemon;
+  if (typeof o.token === "string" && o.token) out.token = o.token;
+  if (typeof o.ticketUrl === "string" && o.ticketUrl) out.ticketUrl = o.ticketUrl;
+  if (typeof o.loginUrl === "string" && o.loginUrl) out.loginUrl = o.loginUrl;
+  if (typeof o.sessionUrl === "string" && o.sessionUrl) out.sessionUrl = o.sessionUrl;
+  if (typeof o.logoutUrl === "string" && o.logoutUrl) out.logoutUrl = o.logoutUrl;
+  if (typeof o.credentialsUrl === "string" && o.credentialsUrl) out.credentialsUrl = o.credentialsUrl;
+  if (typeof o.notesUrl === "string" && o.notesUrl) out.notesUrl = o.notesUrl;
+  if (typeof o.githubUrl === "string" && o.githubUrl) out.githubUrl = o.githubUrl;
+  if (typeof o.githubLoginUrl === "string" && o.githubLoginUrl) out.githubLoginUrl = o.githubLoginUrl;
+  if (typeof o.environmentUrl === "string" && o.environmentUrl) out.environmentUrl = o.environmentUrl;
+  if (typeof o.autoConnect === "boolean") out.autoConnect = o.autoConnect;
+  return out;
+}
+
+export async function loadLauncherConfig(fetchImpl: typeof fetch = fetch): Promise<LauncherConfig> {
+  try {
+    const res = await fetchImpl("./config.json", { cache: "no-store" });
+    if (!res.ok) return {};
+    if (!(res.headers.get("content-type") ?? "").includes("application/json")) return {};
+    return parseLauncherConfig(await res.json());
+  } catch {
+    return {};
+  }
+}

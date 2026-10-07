@@ -71,6 +71,79 @@ INTENTIONALLY_ABSENT = {
         "METHOD and the inner client raises when the daemon is too old to "
         "carry the bytes -- same reasoning as MIN_ATTACHMENT_RESUME_PROTOCOL "
         "above",
+    "MIN_SESSION_RELOAD_ENV_PROTOCOL":
+        "implementation detail of the INNER IPCClient's session.reload_env "
+        "guard; recovery forwards the METHOD and the inner client raises when "
+        "the daemon is too old to serve the verb -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_WORKSPACE_IGNORE_PROTOCOL":
+        "class constant on IPCClient gating toggle_workspace_ignore; the "
+        "recovery wrapper forwards the METHOD and lets the inner client "
+        "refuse a daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SCAFFOLD_EXPLAIN_PROTOCOL":
+        "class constant on IPCClient gating explain_topic; the recovery "
+        "wrapper forwards the METHOD and lets the inner client refuse a "
+        "daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SCAFFOLD_INTEGRATION_PROTOCOL":
+        "class constant on IPCClient gating run_integration; the recovery "
+        "wrapper forwards the METHOD and lets the inner client refuse a "
+        "daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SCAFFOLD_VALIDATE_PROTOCOL":
+        "class constant on IPCClient gating validate_workspace; the recovery "
+        "wrapper forwards the METHOD and lets the inner client refuse a "
+        "daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_REFERENCE_CURATION_PROTOCOL":
+        "class constant on IPCClient gating list_reference_claims / promote_reference_claim / "
+        "dismiss_reference_claim; the recovery wrapper forwards the METHODS "
+        "and lets the inner client refuse a daemon too old to serve them -- "
+        "same reasoning as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_REFERENCE_BUNDLE_PROTOCOL":
+        "class constant on IPCClient gating create_reference_bundle; the "
+        "recovery wrapper forwards the METHOD and lets the inner client "
+        "refuse a daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_MEMORY_VERBS_PROTOCOL":
+        "class constant on IPCClient gating the memory verbs (#1232); the "
+        "recovery wrapper forwards every METHOD and lets the inner client "
+        "refuse a daemon too old to serve them -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SESSION_MESSAGE_PROTOCOL":
+        "class constant on IPCClient gating send_session_message (session "
+        "group messaging, protocol 1.23); the recovery wrapper forwards the "
+        "METHOD and lets the inner client refuse a daemon too old to serve "
+        "the verb -- same reasoning as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SESSION_MESSAGE_FILES_PROTOCOL":
+        "class constant on IPCClient gating the file_refs / text_attachments "
+        "keys of send_session_message (session group messaging phase 3, "
+        "protocol 1.24); the recovery wrapper forwards the METHOD and lets "
+        "the inner client refuse a daemon that would deliver the text "
+        "without the files -- same reasoning as MIN_SESSION_MESSAGE_PROTOCOL",
+    "MIN_HISTORY_PAGE_PROTOCOL":
+        "class constant on IPCClient gating request_history_page (paged "
+        "rendered history, protocol 1.28); the recovery wrapper forwards the "
+        "METHOD and lets the inner client refuse a daemon too old to serve "
+        "it -- same reasoning as MIN_MEMORY_VERBS_PROTOCOL above",
+    "MIN_DIAGNOSTICS_PROTOCOL":
+        "class constant on IPCClient gating get_diagnostics (#1294, "
+        "protocol 1.25); the recovery wrapper forwards the METHOD via "
+        "_memory_client('get_diagnostics').get_diagnostics(...) and the "
+        "inner client's own _require_diagnostics_protocol raises when the "
+        "daemon is too old to serve session.diagnostics -- same reasoning "
+        "as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_POOL_ADMIN_PROTOCOL":
+        "class constant on IPCClient gating pool_status / resize_pool "
+        "(protocol 1.35); the recovery wrapper forwards both METHODS and "
+        "lets the inner client refuse a daemon too old to serve them -- "
+        "same reasoning as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_MODEL_OVERRIDE_PROTOCOL":
+        "class constant on IPCClient gating create_session(model=...) "
+        "(protocol 1.27); the recovery wrapper forwards model/provider to "
+        "the inner client, whose _require_model_override_protocol refuses a "
+        "daemon that would read --model as the session name",
 }
 
 

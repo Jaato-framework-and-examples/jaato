@@ -1,8 +1,8 @@
-# Web Client Design (`jaato-web/`)
+# Web Client Design (`jaato-web-coder-ui/`)
 
 ## Overview
 
-`jaato-web/` is the browser client for a jaato daemon — the web counterpart
+`jaato-web-coder-ui/` is the browser client for a jaato daemon — the web counterpart
 of `jaato-tui`.  It attaches to a daemon started with `--web-socket` and
 presents the same session a TUI can be attached to at the same time.  This
 document records the stack decision, the architecture, and the one input
@@ -22,12 +22,12 @@ Three facts about the tree shaped every choice below.
    browser-compatible `?token=` form, and its `events.ts` is **generated**
    from the pydantic models in `jaato-sdk/jaato_sdk/events.py` with a CI
    staleness gate.  A client that hand-writes event types — as the PoC did,
-   covering roughly half the protocol — drifts by construction.  `jaato-web`
+   covering roughly half the protocol — drifts by construction.  `jaato-web-coder-ui`
    consumes `@jaato/sdk` and has no event type definitions of its own.
 2. **The server's output is already client-neutral.**  The formatter pipeline
    emits `<j-code language="…">` / `<j-line>` / `<j-tok t="<pygments class>">`
    and `<j-table>` markup plus markdown; every client renders it in its own
-   idiom (`jaato-tui/j_markup_renderer.py` → ANSI, `jaato-web/src/protocol/
+   idiom (`jaato-tui/j_markup_renderer.py` → ANSI, `jaato-web-coder-ui/src/protocol/
    jmarkup.ts` → DOM).  The web client therefore needs **no syntax
    highlighter**: it maps Pygments token classes to theme colours, exactly as
    the TUI feeds them through Rich's Pygments theme.  Code colouring follows
@@ -46,7 +46,7 @@ Three facts about the tree shaped every choice below.
 | Delivery | Static SPA talking WebSocket directly to the daemon | Simplest; matches `--web-socket` + bearer token. A thin BFF (token custody, SSO via `set_client_user()`) or a Tauri shell (local IPC socket, desktop file dialogs) can wrap the same bundle later — the SPA has no Node-only assumptions. | BFF-first; VS Code webview |
 | UI framework | **React 19 + Vite 7** | Largest ecosystem for exactly this client's widgets: virtualised lists (TanStack Virtual, used), VS Code-style docking (dockview, for split panes later), xterm.js (for `interactive_shell` output later). React Compiler removes most memo work. | **Svelte 5** (runes) or **Solid** — fine-grained signals suit token-rate streaming better and ship smaller, but no docking binding and thinner kits. The framework-neutral layers (SDK, parsers, theme) make a later switch cheap. Lit was considered for embeddability; too manual for a whole app. |
 | State | Zustand; one `reduce(state, event)` | The protocol is an event stream, so the store is an event-sourced reducer — testable by replaying recorded events with no DOM. Streaming chunks are batched per animation frame by the SDK adapter: one React commit per frame, not per token. | Jotai/atoms, XState for the connection machine (the SDK already exposes one) |
-| Styling | Tailwind v4 + CSS custom properties | The TUI's six `themes/*.json` are **imported at build time**; their eleven base colours become CSS variables and every rule — Pygments roles included — is written in terms of them. One palette definition for both clients. | shadcn/Radix for later dialog/menu primitives |
+| Styling | Tailwind v4 + CSS custom properties | The TUI's six `themes/*.json` are **imported at build time**; their eleven base colours become CSS variables and every rule — Pygments roles included — is written in terms of them. One palette definition for both clients. The redesign (Claude Design *Jaato Web UI Redesign*, proposal 01c, light face first) adds one derived variable, `--c-steel`, the interface accent, and a small vocabulary of classes over the variables — `.plate` (a square hairline surface with registration marks), `.kicker` / `.chrome` (Barlow Condensed for what the interface says), `.btn`, `.input`, `.kv` — so a theme swap is still a theme swap. Fonts are self-hosted from `@fontsource`. | shadcn/Radix for later dialog/menu primitives |
 | Rendering | Own `<j-*>` and markdown parsers → React elements, never `innerHTML` | Model output cannot inject markup. The markdown reader is deliberately small (paragraphs, headings, lists, quotes, rules, inline code/emphasis/links) because fences and tables are already lifted out by the server. | react-markdown (pulls a full pipeline for a subset the server already handled) |
 | Media | Web Audio for headerless pcm16 (what a speaking model streams), `<audio>`/`<img>` for container formats | `ToolOutputEvent` chunks with `mime_type`/`data_b64`; model speech arrives under the reserved `call_id` `"model-output"` and its `final` chunk closes the block. | |
 | Tests | Vitest for `protocol/` and `store/`; Playwright against a **scripted mock daemon** (`mock/daemon.ts`) that speaks the real wire protocol | The UI is exercised end to end without a model provider or a Python install, so the CI job is cheap and deterministic. | |
@@ -63,7 +63,7 @@ proposes matching commands.  The only prefixed form is `/name`, and that is a
 **user-authored** workspace command under `.jaato/commands/`, expanded
 server-side, so it travels as message text.
 
-`jaato-web` ports that rule verbatim (`src/protocol/commands.ts`, tested
+`jaato-web-coder-ui` ports that rule verbatim (`src/protocol/commands.ts`, tested
 against the TUI's cases) and adds one explicit affordance the terminal
 expresses implicitly:
 
@@ -126,7 +126,7 @@ expresses implicitly:
 
 ## Feature coverage against the TUI
 
-| TUI | jaato-web | Notes |
+| TUI | jaato-web-coder-ui | Notes |
 |---|---|---|
 | Streaming output, j-markup, markdown | ✅ | virtualised; auto-follow with a "follow output" pill when scrolled up |
 | Tool blocks: collapse/expand, status, duration, error | ✅ | failed calls open by default; `show_output` honoured |
@@ -136,7 +136,7 @@ expresses implicitly:
 | Plan panel, budget panel, workspace changed-files tree | ✅ | side panels; `Ctrl+P` / `Ctrl+B` / `Alt+W` |
 | Multi-agent tabs | ✅ | `Ctrl+A` cycles; split panes are a follow-up (dockview) |
 | Bare-word commands with completion; `@`/`@@`/`%`/`/` pass-through | ✅ | see the input model above; `@path` completion needs a server-side listing and is a follow-up |
-| Themes (6 JSON files) | ✅ | `theme <name>`; persisted in `localStorage` |
+| Themes (6 JSON files) | ✅ | `theme <name>`; persisted in `localStorage`; `light` is the default since the redesign |
 | Binary media (images, audio, pcm16 speech) | ✅ | Web Audio queue for pcm16 |
 | Session save/resume/profiles | partial | profile picker on session creation; `save`/`resume`/`sessions` route to the daemon as commands |
 | Client-side edit of tool args (`e`) | ✗ | follow-up: editor dialog fed by `editable_metadata` |
@@ -146,17 +146,51 @@ expresses implicitly:
 ## Development and verification
 
 ```bash
-cd jaato-web
+cd jaato-web-coder-ui
 npm run typecheck   # builds ../jaato-sdk-ts declarations, then tsc (strict, noUncheckedIndexedAccess)
 npm test            # vitest: protocol + store
 npm run build       # production bundle
 npm run e2e         # Playwright: starts mock/daemon.ts + Vite, drives the UI
-npm run dev         # against python -m server --web-socket :8080 (proxied at /ws)
+npm run dev         # against python -m jaato_server --web-socket :8080 (proxied at /ws)
 npm run mock-daemon # ws://127.0.0.1:8090; prompts: code, tool, permit, ask, fail, subagent
 ```
 
 The CI job `web-client` in `.github/workflows/ci-tests.yml` runs all of the
 above on Node 22.
+
+## Distribution
+
+The client is a peer of the TUI, not a feature of the daemon: the server's
+only HTTP route is the task-artifact upload, and a coding UI does not belong
+in it any more than the TUI does. So the bundle ships on its own channel, as
+**`@jaato/web-coder-ui` on npm**, next to `@jaato/sdk`:
+
+* The package is `dist/` (Vite's output, with the SDK compiled in) plus
+  `bin/jaato-web-coder-ui.js`, a launcher written against Node's `http` module and
+  nothing else — so the published package has **no runtime dependencies**;
+  React and the rest are `devDependencies`, being build inputs.
+* `npx @jaato/web-coder-ui` serves the bundle on a loopback port, opens the browser,
+  and tells the page which daemon to use through `GET /config.json`
+  (`{daemon, token, autoConnect}`), which `src/app/launcherConfig.ts` reads
+  relative to the page. The same file is the contract for anyone hosting
+  `dist/` by hand; the Vite dev server answers the path with `index.html`,
+  which the loader treats as "no config".
+* The bearer token grants full control of the agent, so the launcher hands
+  it to the page only on a loopback bind, only with a `Host` header naming
+  the bound address (DNS rebinding), as JSON with `nosniff` (a cross-origin
+  `<script src>` cannot execute it and a cross-origin `fetch` has no CORS
+  grant). The default token file (`~/.jaato/ws.token`) is used only for a
+  loopback daemon, since it is the secret of the daemon on *this* machine.
+* `vite.config.ts` sets `base: "./"` so the bundle can be mounted under any
+  path.
+* `publish-npm-web.yml` mirrors `publish-npm-sdk-ts.yml`: manual dispatch,
+  the `web-client` CI gates, a version-not-on-registry check, then
+  `npm publish --access public`; it also uploads
+  `jaato-web-coder-ui-dist-<version>.tar.gz` as a workflow artifact for self-hosting.
+
+A pip wrapper (the same bundle as package data with a `jaato-web-coder-ui` console
+script, for people who only ever `pip install jaato-tui`) and a container
+image are possible later channels; both would ship the identical `dist/`.
 
 ## Follow-ups
 
@@ -166,7 +200,10 @@ above on Node 22.
 3. `@path` completion: needs a `workspace.files.list`-style verb or reuse of
    `WorkspaceFilesSnapshotEvent`.
 4. Client-side tool-argument editing on permission prompts.
-5. A thin BFF package for token custody and SSO, and a Tauri shell for the
-   local (IPC) use case — both wrap this bundle unchanged.
+5. A thin BFF package for token custody and SSO — designed in
+   [jaato-web-coder-server](design/web-server-bff.md) against the per-user ticket
+   mechanism of #1074 — and a Tauri shell for the local (IPC) use case; both
+   wrap this bundle unchanged (the `config.json` contract above is what they
+   implement).
 6. History replay on attach (`HistoryEvent` → blocks) for reattaching to a
    running session.

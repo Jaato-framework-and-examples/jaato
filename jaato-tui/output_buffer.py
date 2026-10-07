@@ -30,8 +30,7 @@ def _trace(msg: str) -> None:
 def _get_buffer_trace_path() -> Optional[str]:
     """Get the buffer trace file path from environment variable."""
     from jaato_sdk.trace import resolve_trace_path
-    return resolve_trace_path("RICH_BUFFER_TRACE",
-                              default_filename="rich_render_trace.log")
+    return resolve_trace_path("RICH_BUFFER_TRACE")
 
 
 def _buffer_trace(msg: str) -> None:
@@ -4163,10 +4162,12 @@ class OutputBuffer:
         # Append focused options line rendered from structured data.
         # Deliberately OUTSIDE the permission_content branch: the options are
         # built from structured data the client already holds, while
-        # permission_content arrives only via AgentOutputEvent(source=
-        # "permission").  When the server emits no such event the prompt would
-        # otherwise render a bare "Permission required" with no indication of
-        # what the user may type.
+        # permission_content arrives as text -- an AgentOutputEvent(source=
+        # "permission") on a daemon-local session, a PermissionRequestedEvent's
+        # prompt_lines (rendered by ``permission_prompt``) on a runner-served
+        # one.  When neither carries content the prompt would otherwise render
+        # a bare "Permission required" with no indication of what the user may
+        # type.
         if self._permission_response_options:
             output.append("\n")
             output.append(indent, style=self._style("tree_connector", "dim"))
@@ -5230,8 +5231,11 @@ class OutputBuffer:
                     elif j > 0 and line.is_turn_start:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append(wrapped_line, style=self._style("muted", "dim"))
-            elif line.source == "enrichment":
-                # Enrichment notifications - render dimmed with proper wrapping
+            elif line.source in ("enrichment", "child"):
+                # Enrichment notifications - render dimmed with proper wrapping.
+                # ``child`` is a subagent's report to this agent (the server's
+                # ``shared.subagent_report``): the agent's to read, not the
+                # user's turn, so it is dimmed the same way.
                 # The formatter pre-aligns continuation lines, so we wrap each line
                 wrapped = wrap_text(line.text)
                 for j, wrapped_line in enumerate(wrapped):

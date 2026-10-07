@@ -24,8 +24,8 @@ from typing import List
 
 import pytest
 
-from server.runner_rpc_client import RunnerRPCClient
-from server.runner_spawner import RunnerSpawner
+from jaato_server.server.runner_rpc_client import RunnerRPCClient
+from jaato_server.server.runner_spawner import RunnerSpawner
 
 
 PHASE2_RPC_P50_BUDGET_SECONDS = 0.005  # 5 ms

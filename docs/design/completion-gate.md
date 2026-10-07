@@ -8,7 +8,7 @@ so it fixes the underlying problem and signals again.
 
 It is the output-side twin of the `{{!py:...}}` prefetch hook, and it was almost
 undocumented. `jaato-scaffold explain` had a `prefetch` scope and, for this,
-nothing: `grep -rn completion_processor jaato-server/shared/scaffold/` returned zero
+nothing: `grep -rn completion_processor jaato-server/jaato_server/shared/scaffold/` returned zero
 files. So every author of a self-correcting agent rediscovered the shape, and the
 failure modes are not the ones you would guess.
 
@@ -60,7 +60,7 @@ direction (an agent that stops **without** signalling), and was itself unbounded
 #767 — and until #919 it was not a profile knob either, but a function-local
 `MAX_COMPLETION_NUDGES = 2` in three files. It is now `max_completion_nudges:` at the
 profile top level (default 2, unchanged when unset), with one definition in
-`shared/completion_nudge.py`, and it is spent **per turn** — a session-lifetime budget
+`jaato_server/shared/completion_nudge.py`, and it is spent **per turn** — a session-lifetime budget
 became a ceiling on the whole conversation once #913 let a completed session be driven
 again (#934). See the CLAUDE.md section of the same name.
 
@@ -315,13 +315,13 @@ So the claims above are enforced by tests that read the framework:
 
 | guard | what it would catch |
 |---|---|
-| `shared/tests/test_completion_processor_refusal_budget.py` | the ceiling not bounding, a broken gate being waved through, a fault spending a refusal, the load-once caching going away |
-| `shared/tests/test_scaffold_completion_contract.py` | `explain completion` drifting from `CompletionProcessor`, `ProcessorResult` or the parser's vocabularies; the generator regressing to a hand-rolled counter; the generated processor not actually terminating |
-| `shared/tests/test_scaffold_archetype_docs.py` | the `processor` archetype's declared output drifting from what `new` writes |
-| `shared/tests/test_the_refusal_ceiling_bounds_the_session_loop.py` | the ceiling failing to bound the LOOP: an always-refusing gate never accepted, an unbounded one acquiring a ceiling it should not have, `on_exhausted: fail` letting a completion through, a broken gate being waved through by exhaustion, and the load-once caching the counter lives on going away |
-| `shared/tests/test_processor_wiring_survives_the_runner_boundary.py` | §10's defect: any `CompletionProcessor` field that stops crossing into the runner, driven from `dataclasses.fields` so a newly added field is covered without anyone remembering to add it |
+| `jaato_server/shared/tests/test_completion_processor_refusal_budget.py` | the ceiling not bounding, a broken gate being waved through, a fault spending a refusal, the load-once caching going away |
+| `jaato_server/shared/tests/test_scaffold_completion_contract.py` | `explain completion` drifting from `CompletionProcessor`, `ProcessorResult` or the parser's vocabularies; the generator regressing to a hand-rolled counter; the generated processor not actually terminating |
+| `jaato_server/shared/tests/test_scaffold_archetype_docs.py` | the `processor` archetype's declared output drifting from what `new` writes |
+| `jaato_server/shared/tests/test_the_refusal_ceiling_bounds_the_session_loop.py` | the ceiling failing to bound the LOOP: an always-refusing gate never accepted, an unbounded one acquiring a ceiling it should not have, `on_exhausted: fail` letting a completion through, a broken gate being waved through by exhaustion, and the load-once caching the counter lives on going away |
+| `jaato_server/shared/tests/test_processor_wiring_survives_the_runner_boundary.py` | §10's defect: any `CompletionProcessor` field that stops crossing into the runner, driven from `dataclasses.fields` so a newly added field is covered without anyone remembering to add it |
 | `jaato-sdk/jaato_sdk/conformance/test_invariants.py` (`-m conformance`) | the same claim against a REAL daemon and the real chat loop — the only level at which §10's defect was visible |
-| `shared/tests/test_scaffold_sweep_gate_contract.py` | §9 going stale: the schema gate being relaxed, `max_refusals` no longer reaching the framework as a parsed field, the emitted paths no longer resolving through the real loaders, the emitted `acceptance.sh` breaking the `--all` contract, and — the assertion the module exists for — the unconfigured gate accepting a completion instead of refusing it |
+| `jaato_server/shared/tests/test_scaffold_sweep_gate_contract.py` | §9 going stale: the schema gate being relaxed, `max_refusals` no longer reaching the framework as a parsed field, the emitted paths no longer resolving through the real loaders, the emitted `acceptance.sh` breaking the `--all` contract, and — the assertion the module exists for — the unconfigured gate accepting a completion instead of refusing it |
 
 Each of these except the archetype-docs guard also declares a `REVERSIONS` entry, so
 `test_every_guard_detects_its_own_reversion` puts the defect back and checks the guard

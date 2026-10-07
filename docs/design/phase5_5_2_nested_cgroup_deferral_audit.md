@@ -137,7 +137,7 @@ sub-bound is capped; that decision belongs to the Phase 6 audit.
 ## 5. Test plan
 
 Regression pins extend the existing
-`server/tests/test_spawn_isolated_runner_helper.py` (the §4.3.5
+`jaato_server/server/tests/test_spawn_isolated_runner_helper.py` (the §4.3.5
 test file with the cgroup-provision scaffolding the §5.1 tests
 already extend).  Each test names the property it pins:
 

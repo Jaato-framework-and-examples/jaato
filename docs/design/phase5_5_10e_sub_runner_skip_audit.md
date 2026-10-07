@@ -45,7 +45,7 @@ primitive" posture from day one.
 
 ## 2. Latent break introduced by §5.10c
 
-`server/runner/session.py:bootstrap_session` reads
+`jaato_server/server/runner/session.py:bootstrap_session` reads
 `JAATO_RUNNER_PROFILE` and installs the §5.10c transition callback.
 `RunnerSpawner._build_env` sets `JAATO_RUNNER_PROFILE` to the
 profile name for every runner — including sub-runners, where the
@@ -181,7 +181,7 @@ that's already secure.
 
 ### In-scope
 
-- Branch in `server/runner/session.py:bootstrap_session`: when
+- Branch in `jaato_server/server/runner/session.py:bootstrap_session`: when
   `JAATO_RUNNER_PROFILE` contains `//`, skip the install and INFO-
   log the rationale.
 - Regression tests pinning:
@@ -205,7 +205,7 @@ that's already secure.
 ## 6. Test plan
 
 Regression pins extend
-`server/runner/tests/test_runner_session_apparmor_child_install.py`
+`jaato_server/server/runner/tests/test_runner_session_apparmor_child_install.py`
 (the §5.10c install test file):
 
 1. `test_install_skipped_when_runner_profile_is_subprofile` —
@@ -223,7 +223,7 @@ Regression pins extend
 Plus a sub-profile template smoke test:
 
 4. `test_sub_profile_template_drops_escape_rules` (in
-   `shared/tests/test_apparmor_sub_profile.py` if it exists,
+   `jaato_server/shared/tests/test_apparmor_sub_profile.py` if it exists,
    else inline) — pins that the rendered sub-profile body
    does NOT contain uncommented
    `change_profile -> unconfined` or

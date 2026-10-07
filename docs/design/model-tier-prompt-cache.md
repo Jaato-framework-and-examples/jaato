@@ -24,8 +24,8 @@ the whole cost; returning is free.**
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
 **Scope**: the interaction between `model_tiers` / `enter_tier`
-(`shared/model_tiers.py`, `JaatoSession.switch_tier`) and prompt caching
-(`shared/plugins/cache*/`, plus the provider-internal caching in
+(`jaato_server/shared/model_tiers.py`, `JaatoSession.switch_tier`) and prompt caching
+(`jaato_server/shared/plugins/cache*/`, plus the provider-internal caching in
 `openrouter`).
 
 ---
@@ -66,7 +66,7 @@ real.
 
 ## 2. The mechanism under review
 
-A profile declares tiers (`shared/model_tiers.py`):
+A profile declares tiers (`jaato_server/shared/model_tiers.py`):
 
 ```yaml
 model_tiers:
@@ -78,9 +78,9 @@ model_tiers:
 ```
 
 The model calls `enter_tier(name)`
-(`LifecycleTools._enter_tier_schema`, `shared/lifecycle_tools.py:520`),
+(`LifecycleTools._enter_tier_schema`, `jaato_server/shared/lifecycle_tools.py:520`),
 which reaches `JaatoSession.switch_tier`
-(`shared/jaato_session.py:10231`) → `_connect_tier_entry`
+(`jaato_server/shared/jaato_session.py:10231`) → `_connect_tier_entry`
 (`:10205`) → `provider.connect(model, skip_model_test=True)`, or a swap
 to a cached per-provider instance when the tier declares its own
 `provider`.
@@ -143,7 +143,7 @@ only amortised (§6).
 `_wire_cache_plugin` built the cache plugin's config from
 `runtime._provider_config.extra` alone. That object is assigned exactly
 once — `ProviderConfig(project=..., location=...)` in
-`JaatoRuntime.connect` (`shared/jaato_runtime.py:616`) — with an empty
+`JaatoRuntime.connect` (`jaato_server/shared/jaato_runtime.py:616`) — with an empty
 `extra` that nothing ever writes to. The profile's
 `plugin_configs[<provider>]` merge happens inside
 `JaatoRuntime.create_provider` (`:1206-1221`), via `dataclasses.replace`
@@ -161,7 +161,7 @@ Every cache plugin was therefore handed `{}`:
 Belt and braces: neither `anthropic/__init__.py` nor
 `google_genai/__init__.py` declared a cache knob in `PROVIDER_KNOBS`, so
 `scaffold validate` flagged `enable_caching` as `unknown_knob`
-(`shared/scaffold/validate.py:267-277`) — correctly, since the runtime
+(`jaato_server/shared/scaffold/validate.py:267-277`) — correctly, since the runtime
 ignored it too. The validator and the runtime agreed the knob did not
 exist; only the docstrings claimed otherwise.
 
@@ -205,7 +205,7 @@ reports the parent's name.
 
 The cache knobs are now declared in both providers' `PROVIDER_KNOBS`, at
 `top_level` — the position the read sites actually use. Regression
-coverage: `shared/tests/test_cache_plugin_profile_knobs.py`, which
+coverage: `jaato_server/shared/tests/test_cache_plugin_profile_knobs.py`, which
 declares a `REVERSIONS` entry so the meta-guard
 (`test_every_guard_detects_its_own_reversion`, #665) proves the guard
 still notices the defect being put back.
@@ -317,7 +317,7 @@ Three properties worth stating, because each was a decision:
   cache plugin that cannot be attached means running uncached, not
   failing the switch.
 
-Coverage: `shared/tests/test_cache_plugin_follows_tier_switch.py`
+Coverage: `jaato_server/shared/tests/test_cache_plugin_follows_tier_switch.py`
 (with a `REVERSIONS` entry), plus the model-rebinding tests in
 `cache_google_genai/tests/test_plugin.py`.
 
@@ -368,7 +368,7 @@ it.
 
 ### 5.4 The miss is invisible — FIXED
 
-`_accumulate_turn_tokens` (`shared/jaato_session.py:8107-8111`) **sums**
+`_accumulate_turn_tokens` (`jaato_server/shared/jaato_session.py:8107-8111`) **sums**
 prompt and output tokens but **replaces** `cache_read` and
 `cache_creation`. A turn containing a tier switch therefore reports only
 the last leg's cache numbers, in the turn record and in
@@ -474,7 +474,7 @@ against the wrong model. The helper now raises and the caller's block is
 the single place that decides. Two layers of swallowing is one layer of
 hiding.
 
-Coverage: `shared/tests/test_cache_spend_survives_a_tier_switch.py`
+Coverage: `jaato_server/shared/tests/test_cache_spend_survives_a_tier_switch.py`
 (with a `REVERSIONS` entry).
 
 ### 5.5 The other uncalled model setters
@@ -499,7 +499,7 @@ wrong is worse than absent: absent prompts a question, wrong ends one.
 Fixed by making `ReliabilityPlugin.set_model_context` forward to its own
 detector, and having the session call it from the same post-connect point
 as the cache re-wire — so both routes into a tier change are covered.
-Coverage: `shared/tests/test_reliability_model_follows_the_tier.py` (with
+Coverage: `jaato_server/shared/tests/test_reliability_model_follows_the_tier.py` (with
 a `REVERSIONS` entry).
 
 **`PluginRegistry.set_model_name`** (`registry.py:825`) — **not a gap.**
@@ -600,7 +600,7 @@ plus 9 new is exactly the 4,412 reported. The exclusive reading makes
 that same object claim 8,815 tokens of input for a 4,412-token
 prompt.
 
-Coverage: ``shared/tests/test_cache_hit_percent_against_invoice.py``,
+Coverage: ``jaato_server/shared/tests/test_cache_hit_percent_against_invoice.py``,
 which reconciles against **bills** rather than against itself. A test
 that feeds ``cache_read=X, prompt=Y`` and asserts ``X/(X+Y)`` passes
 whether or not ``Y`` contains ``X`` — it restates the formula instead of

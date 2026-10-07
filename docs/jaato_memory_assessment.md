@@ -15,8 +15,8 @@ walks each axis and locates jaato's choices on it.
 
 | # | Mechanism | Role |
 |---|---|---|
-| 1 | `SessionHistory` (`shared/session_history.py`) | Canonical in-session conversation (raw messages) |
-| 2 | `InstructionBudget` (`shared/instruction_budget.py`) | Token accounting + per-source GC policy (`LOCKED` / `PRESERVABLE` / `PARTIAL` / `EPHEMERAL`) |
+| 1 | `SessionHistory` (`jaato_server/shared/session_history.py`) | Canonical in-session conversation (raw messages) |
+| 2 | `InstructionBudget` (`jaato_server/shared/instruction_budget.py`) | Token accounting + per-source GC policy (`LOCKED` / `PRESERVABLE` / `PARTIAL` / `EPHEMERAL`) |
 | 3 | `gc_truncate` / `gc_summarize` / `gc_hybrid` / `gc_budget` | Context-window GC strategies |
 | 4 | `memory` plugin — workspace `<ws>/.jaato/memories/` + global `~/.jaato/memories/` (split: `raw/{id}.json` + `curated.jsonl`) | Agent-curated long-term knowledge |
 | 5 | Memory **curation lifecycle** ("The School": `raw → validated → escalated → dismissed`) — implemented as a queue (raw folder) drained by the `memory-advisor` reactor | Background housekeeping by advisor agent |
@@ -123,7 +123,7 @@ semantic search at conceptual queries.
 Conservative on the memory side, hybrid on references.
 
 - **Memory plugin — sentence-coherence tag matching** (shared
-  `shared/tag_coherence.py` engine):
+  `jaato_server/shared/tag_coherence.py` engine):
   - The retrieval text is segmented on sentence terminators (`.!?\s+`) and
     line breaks, with a 250-char per-segment cap. This stops long structured
     dumps from trivially satisfying multi-component coherence by chance.

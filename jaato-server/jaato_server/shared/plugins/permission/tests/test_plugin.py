@@ -1,0 +1,1334 @@
+"""Tests for the permission plugin integration."""
+
+import json
+import os
+import tempfile
+from unittest.mock import Mock, patch, MagicMock
+
+import pytest
+
+from ..plugin import PermissionPlugin, create_plugin
+from ..channels import ChannelDecision, ChannelResponse, PermissionRequest
+from ..policy import PermissionDecision
+
+
+class TestPermissionPluginInitialization:
+    """Tests for plugin initialization."""
+
+    def test_create_plugin_factory(self):
+        plugin = create_plugin()
+        assert isinstance(plugin, PermissionPlugin)
+
+    def test_plugin_name(self):
+        plugin = PermissionPlugin()
+        assert plugin.name == "permission"
+
+    def test_initialize_without_config(self):
+        plugin = PermissionPlugin()
+        plugin.initialize()
+        assert plugin._initialized is True
+
+    def test_initialize_with_inline_policy(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+                "blacklist": {"tools": ["blocked_tool"]},
+            }
+        })
+        assert plugin._initialized is True
+        assert plugin._policy is not None
+
+    def test_initialize_from_config_file(self):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            config = {
+                "version": "1.0",
+                "defaultPolicy": "deny",
+                "blacklist": {"tools": ["dangerous"]},
+            }
+            json.dump(config, f)
+            f.flush()
+
+            try:
+                plugin = PermissionPlugin()
+                plugin.initialize({"config_path": f.name})
+                assert plugin._initialized is True
+            finally:
+                os.unlink(f.name)
+
+    def test_initialize_with_channel_type(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"channel_type": "console"})
+        assert plugin._channel is not None
+        assert plugin._channel.name == "console"
+
+    def test_initialize_fallback_to_console_channel(self):
+        plugin = PermissionPlugin()
+        # Webhook without endpoint should fail and fall back to console
+        plugin.initialize({"channel_type": "webhook"})
+        assert plugin._channel is not None
+        assert plugin._channel.name == "console"  # Fallback
+
+    def test_shutdown(self):
+        plugin = PermissionPlugin()
+        plugin.initialize()
+        plugin.shutdown()
+
+        assert plugin._initialized is False
+        assert plugin._policy is None
+        assert plugin._channel is None
+
+
+class TestPermissionPluginFunctionDeclarations:
+    """Tests for function declarations.
+
+    Note: askPermission is no longer exposed as a model-callable tool.
+    The model should call tools directly and the permission middleware handles
+    approval prompts. This prevents models from calling askPermission instead
+    of the actual tool they want to execute.
+    """
+
+    def test_get_tool_schemas_returns_empty(self):
+        """Test that get_tool_schemas returns empty list (askPermission not exposed)."""
+        plugin = PermissionPlugin()
+        declarations = plugin.get_tool_schemas()
+
+        # askPermission is no longer exposed to prevent model confusion
+        assert len(declarations) == 0
+
+
+class TestPermissionPluginExecutors:
+    """Tests for executor methods."""
+
+    def test_get_executors(self):
+        plugin = PermissionPlugin()
+        executors = plugin.get_executors()
+
+        assert "askPermission" in executors
+        assert callable(executors["askPermission"])
+        # User command executor
+        assert "permissions" in executors
+        assert callable(executors["permissions"])
+
+    def test_execute_ask_permission_requires_tool_name(self):
+        plugin = PermissionPlugin()
+        plugin.initialize()
+        executors = plugin.get_executors()
+
+        result = executors["askPermission"]({})
+        assert "error" in result
+
+    def test_execute_ask_permission_allowed(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+            }
+        })
+        executors = plugin.get_executors()
+
+        result = executors["askPermission"]({
+            "tool_name": "some_tool",
+            "intent": "exercise the permission path under test",
+            "arguments": {}
+        })
+        assert result["allowed"] is True
+        assert result["tool_name"] == "some_tool"
+
+    def test_execute_ask_permission_denied(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",
+                "blacklist": {"tools": ["blocked_tool"]}
+            }
+        })
+        executors = plugin.get_executors()
+
+        result = executors["askPermission"]({
+            "tool_name": "blocked_tool",
+            "intent": "exercise the permission path under test",
+            "arguments": {}
+        })
+        assert result["allowed"] is False
+
+
+class TestPermissionPluginCheckPermission:
+    """Tests for check_permission method."""
+
+    def test_check_permission_not_initialized(self):
+        plugin = PermissionPlugin()
+        # Don't initialize
+        # check_permission returns (is_allowed, METADATA DICT) -- the second
+        # element carries 'reason' plus a machine-readable 'method', where it
+        # used to be a bare reason string.
+        allowed, meta = plugin.check_permission("any_tool", {})
+        assert allowed is True  # Defaults to allow when not initialized
+        assert "not initialized" in meta["reason"].lower()
+        assert meta["method"] == "not_initialized"
+
+    def test_check_permission_allow_by_default(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        allowed, meta = plugin.check_permission("any_tool", {})
+        assert allowed is True
+
+    def test_check_permission_deny_by_default(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "deny"}
+        })
+
+        allowed, meta = plugin.check_permission("any_tool", {})
+        assert allowed is False
+
+    def test_check_permission_blacklisted_tool(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+                "blacklist": {"tools": ["dangerous_tool"]}
+            }
+        })
+
+        allowed, meta = plugin.check_permission("dangerous_tool", {})
+        assert allowed is False
+
+    def test_check_permission_whitelisted_tool(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",
+                "whitelist": {"tools": ["safe_tool"]}
+            }
+        })
+
+        allowed, meta = plugin.check_permission("safe_tool", {})
+        assert allowed is True
+
+    def test_check_permission_blacklist_pattern(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+                "blacklist": {"patterns": ["rm -rf *"]}
+            }
+        })
+
+        allowed, meta = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "rm -rf /tmp/test"}
+        )
+        assert allowed is False
+
+    def test_check_permission_whitelist_pattern(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",
+                "whitelist": {"patterns": ["git *"]}
+            }
+        })
+
+        allowed, meta = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "git status"}
+        )
+        assert allowed is True
+
+    def test_check_permission_logs_decision(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        plugin.check_permission("test_tool", {"arg": "val"})
+
+        log = plugin.get_execution_log()
+        assert len(log) == 1
+        assert log[0]["tool_name"] == "test_tool"
+        assert log[0]["decision"] == "allow"
+
+
+class TestPermissionPluginChannelInteraction:
+    """Tests for channel interaction when policy returns ASK_CHANNEL."""
+
+    def test_ask_channel_allow(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        # Mock the channel
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW,
+            reason="User approved"
+        )
+        plugin._channel = mock_channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        assert allowed is True
+        # check_permission returns (allowed, METADATA DICT), not a bare string.
+        assert "approved" in meta["reason"].lower()
+
+    def test_ask_channel_deny(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.DENY,
+            reason="User denied"
+        )
+        plugin._channel = mock_channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        assert allowed is False
+
+    def test_ask_channel_allow_session(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW_SESSION,
+            reason="Approved for session",
+            remember_pattern="test_tool"
+        )
+        plugin._channel = mock_channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        assert allowed is True
+
+        # Should be allowed without asking again
+        plugin._channel.request_permission.reset_mock()
+        allowed2, reason2 = plugin.check_permission("test_tool", {})
+        assert allowed2 is True
+        # Channel should not be called again
+        mock_channel.request_permission.assert_not_called()
+
+    def test_ask_channel_deny_session(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.DENY_SESSION,
+            reason="Denied for session",
+            remember_pattern="test_tool"
+        )
+        plugin._channel = mock_channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        assert allowed is False
+
+        # Should be denied without asking again
+        plugin._channel.request_permission.reset_mock()
+        allowed2, reason2 = plugin.check_permission("test_tool", {})
+        assert allowed2 is False
+        mock_channel.request_permission.assert_not_called()
+
+    def test_ask_channel_timeout(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.TIMEOUT,
+            reason="Timeout"
+        )
+        plugin._channel = mock_channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        assert allowed is False
+
+    def test_no_channel_configured(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+        plugin._channel = None  # Remove channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        assert allowed is False
+        # check_permission returns (allowed, METADATA DICT), not a bare string.
+        assert "no channel" in meta["reason"].lower()
+
+
+class TestPermissionPluginExecutionLog:
+    """Tests for execution logging."""
+
+    def test_get_execution_log(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        plugin.check_permission("tool1", {"arg": "val1"})
+        plugin.check_permission("tool2", {"arg": "val2"})
+
+        log = plugin.get_execution_log()
+        assert len(log) == 2
+
+    def test_clear_execution_log(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        plugin.check_permission("tool1", {})
+        assert len(plugin.get_execution_log()) == 1
+
+        plugin.clear_execution_log()
+        assert len(plugin.get_execution_log()) == 0
+
+    def test_log_is_copy(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        plugin.check_permission("tool1", {})
+        log = plugin.get_execution_log()
+        log.clear()
+
+        # Original should be unchanged
+        assert len(plugin.get_execution_log()) == 1
+
+
+class TestPermissionPluginWrapExecutor:
+    """Tests for executor wrapping."""
+
+    def test_wrap_executor(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        original_executor = Mock(return_value={"result": "success"})
+        wrapped = plugin.wrap_executor("test_tool", original_executor)
+
+        result = wrapped({"arg": "val"})
+
+        original_executor.assert_called_once_with({"arg": "val"})
+        # The wrapper now ATTACHES a ``_permission`` provenance dict to a
+        # dict-shaped result (method + reason), so the payload is a superset
+        # of what the executor returned rather than identical to it.  Assert
+        # the original keys survive untouched AND that provenance is stamped
+        # -- exact equality would silently forbid that metadata.
+        assert result["result"] == "success"
+        assert result["_permission"]["method"] == "default"
+
+    def test_wrap_executor_blocks_denied(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",
+                "blacklist": {"tools": ["blocked_tool"]}
+            }
+        })
+
+        original_executor = Mock(return_value={"result": "success"})
+        wrapped = plugin.wrap_executor("blocked_tool", original_executor)
+
+        result = wrapped({"arg": "val"})
+
+        original_executor.assert_not_called()
+        assert "error" in result
+        assert "Permission denied" in result["error"]
+
+    def test_wrap_all_executors(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        executors = {
+            "tool1": Mock(return_value={"r": 1}),
+            "tool2": Mock(return_value={"r": 2}),
+            "askPermission": Mock(return_value={"r": 3}),
+        }
+
+        wrapped = plugin.wrap_all_executors(executors)
+
+        # All should be wrapped except askPermission
+        assert len(wrapped) == 3
+
+        # askPermission should be the original
+        assert wrapped["askPermission"] is executors["askPermission"]
+
+        # Others should be wrapped
+        wrapped["tool1"]({"a": 1})
+        executors["tool1"].assert_called_once()
+
+    def test_wrap_all_executors_blocks_blacklisted(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+                "blacklist": {"tools": ["blocked_tool"]}
+            }
+        })
+
+        executors = {
+            "safe_tool": Mock(return_value={"r": 1}),
+            "blocked_tool": Mock(return_value={"r": 2}),
+        }
+
+        wrapped = plugin.wrap_all_executors(executors)
+
+        # Safe tool should work
+        result1 = wrapped["safe_tool"]({"a": 1})
+        # Superset, not equality -- see test_wrap_executor.
+        assert result1["r"] == 1
+        assert "_permission" in result1
+
+        # Blocked tool should be denied
+        result2 = wrapped["blocked_tool"]({"a": 1})
+        assert "error" in result2
+        executors["blocked_tool"].assert_not_called()
+
+
+class TestPermissionPluginContextPassing:
+    """Tests for context passing to channels."""
+
+    def test_check_permission_passes_context(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._channel = mock_channel
+
+        context = {"session_id": "abc123", "turn": 5}
+        plugin.check_permission("test_tool", {"arg": "val"}, context=context)
+
+        # Check that channel received the context
+        call_args = mock_channel.request_permission.call_args
+        request = call_args[0][0]
+        assert isinstance(request, PermissionRequest)
+        assert request.context == context
+
+
+class TestPermissionPluginConfigOptions:
+    """Tests for various configuration options."""
+
+    def test_channel_timeout_from_config(self):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            config = {
+                "channel": {
+                    "type": "console",
+                    "timeout": 120
+                }
+            }
+            json.dump(config, f)
+            f.flush()
+
+            try:
+                plugin = PermissionPlugin()
+                plugin.initialize({"config_path": f.name})
+                assert plugin._config.channel_timeout == 120
+            finally:
+                os.unlink(f.name)
+
+    def test_channel_config_override(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "channel_type": "console",
+            "channel_config": {"timeout": 60}
+        })
+        # Channel should be initialized with the config
+
+
+class TestPermissionPluginEdgeCases:
+    """Tests for edge cases and error handling."""
+
+    def test_unknown_channel_decision(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"}
+        })
+
+        # Create a response with an unexpected decision value
+        mock_channel = Mock()
+        response = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW,  # Will be modified
+            reason="OK"
+        )
+        # Modify to simulate unknown decision
+        response.decision = Mock()
+        response.decision.name = "UNKNOWN"
+        mock_channel.request_permission.return_value = response
+        plugin._channel = mock_channel
+
+        allowed, meta = plugin.check_permission("test_tool", {})
+        # Should default to deny for unknown decisions
+        assert allowed is False
+
+    def test_empty_arguments(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        allowed, meta = plugin.check_permission("tool", {})
+        assert allowed is True
+
+    def test_complex_arguments(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "allow"}
+        })
+
+        complex_args = {
+            "nested": {"deep": {"value": 123}},
+            "list": [1, 2, 3],
+            "null": None,
+        }
+        allowed, meta = plugin.check_permission("tool", complex_args)
+        assert allowed is True
+
+
+class TestChannelCommunication:
+    """Comprehensive tests for channel communication."""
+
+    def test_request_contains_tool_name(self):
+        """Verify channel receives correct tool_name."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._channel = mock_channel
+
+        plugin.check_permission("my_specific_tool", {"arg": "val"})
+
+        request = mock_channel.request_permission.call_args[0][0]
+        assert request.tool_name == "my_specific_tool"
+
+    def test_request_contains_arguments(self):
+        """Verify channel receives correct arguments."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._channel = mock_channel
+
+        test_args = {"command": "git status", "cwd": "/home/user"}
+        plugin.check_permission("cli_based_tool", test_args)
+
+        request = mock_channel.request_permission.call_args[0][0]
+        assert request.arguments == test_args
+
+    def test_request_contains_timeout(self):
+        """Verify channel receives configured timeout."""
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"},
+            "channel_config": {"timeout": 45}
+        })
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._channel = mock_channel
+
+        plugin.check_permission("test_tool", {})
+
+        request = mock_channel.request_permission.call_args[0][0]
+        # Timeout should come from config
+        assert request.timeout_seconds == plugin._config.channel_timeout
+
+    def test_allow_once_does_not_remember(self):
+        """ALLOW_ONCE should execute but still ask next time."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW_ONCE,
+            reason="Allowed once"
+        )
+        plugin._channel = mock_channel
+
+        # First call - should be allowed
+        allowed1, _ = plugin.check_permission("test_tool", {})
+        assert allowed1 is True
+        assert mock_channel.request_permission.call_count == 1
+
+        # Second call - should ask channel again (not remembered)
+        allowed2, _ = plugin.check_permission("test_tool", {})
+        assert allowed2 is True
+        assert mock_channel.request_permission.call_count == 2
+
+    def test_allow_session_remembers_exact_tool(self):
+        """ALLOW_SESSION with tool name should remember for that tool."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW_SESSION,
+            reason="Approved for session",
+            remember_pattern="specific_tool"
+        )
+        plugin._channel = mock_channel
+
+        # First call - asks channel
+        allowed1, _ = plugin.check_permission("specific_tool", {})
+        assert allowed1 is True
+        assert mock_channel.request_permission.call_count == 1
+
+        # Second call - should NOT ask channel (remembered)
+        allowed2, _ = plugin.check_permission("specific_tool", {})
+        assert allowed2 is True
+        assert mock_channel.request_permission.call_count == 1  # Still 1, not called again
+
+    def test_allow_session_pattern_matching(self):
+        """ALLOW_SESSION with pattern 'git *' should match git commands."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.ALLOW_SESSION,
+            reason="Git commands approved",
+            remember_pattern="git *"
+        )
+        plugin._channel = mock_channel
+
+        # First call with "git status" - asks channel
+        allowed1, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "git status"}
+        )
+        assert allowed1 is True
+        assert mock_channel.request_permission.call_count == 1
+
+        # Second call with "git push" - should NOT ask channel (pattern match)
+        allowed2, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "git push origin main"}
+        )
+        assert allowed2 is True
+        # Pattern should match, so channel not called again
+        assert mock_channel.request_permission.call_count == 1
+
+    def test_deny_session_remembers(self):
+        """DENY_SESSION should block subsequent calls without asking."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.DENY_SESSION,
+            reason="Blocked for session",
+            remember_pattern="dangerous_tool"
+        )
+        plugin._channel = mock_channel
+
+        # First call - asks channel, gets denied
+        allowed1, _ = plugin.check_permission("dangerous_tool", {})
+        assert allowed1 is False
+        assert mock_channel.request_permission.call_count == 1
+
+        # Second call - should NOT ask channel (remembered denial)
+        allowed2, _ = plugin.check_permission("dangerous_tool", {})
+        assert allowed2 is False
+        assert mock_channel.request_permission.call_count == 1  # Not called again
+
+    def test_deny_session_pattern_blocking(self):
+        """DENY_SESSION with pattern should block matching commands."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.DENY_SESSION,
+            reason="rm commands blocked",
+            remember_pattern="rm *"
+        )
+        plugin._channel = mock_channel
+
+        # First call with "rm -rf" - asks channel
+        allowed1, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "rm -rf /tmp/test"}
+        )
+        assert allowed1 is False
+        assert mock_channel.request_permission.call_count == 1
+
+        # Second call with "rm file.txt" - should NOT ask (pattern blocks)
+        allowed2, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "rm file.txt"}
+        )
+        assert allowed2 is False
+        assert mock_channel.request_permission.call_count == 1
+
+    def test_different_tool_still_asks(self):
+        """Session rule for one tool should not affect different tools."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        # Set up channel to return ALLOW_SESSION for first tool
+        call_count = [0]
+
+        def mock_request_permission(request):
+            call_count[0] += 1
+            return ChannelResponse(
+                request_id="test",
+                decision=ChannelDecision.ALLOW_SESSION,
+                reason="Approved",
+                remember_pattern="tool_a"
+            )
+
+        mock_channel = Mock()
+        mock_channel.request_permission = mock_request_permission
+        plugin._channel = mock_channel
+
+        # Call tool_a - gets remembered
+        plugin.check_permission("tool_a", {})
+        assert call_count[0] == 1
+
+        # Call tool_a again - not asked (remembered)
+        plugin.check_permission("tool_a", {})
+        assert call_count[0] == 1
+
+        # Call tool_b - should ask channel (different tool)
+        plugin.check_permission("tool_b", {})
+        assert call_count[0] == 2
+
+    def test_request_has_unique_id(self):
+        """Each request should have a unique ID."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        request_ids = []
+
+        def capture_request(request):
+            request_ids.append(request.request_id)
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.ALLOW,
+                reason="OK"
+            )
+
+        mock_channel = Mock()
+        mock_channel.request_permission = capture_request
+        plugin._channel = mock_channel
+
+        # Make multiple requests
+        plugin.check_permission("tool1", {})
+        plugin.check_permission("tool2", {})
+        plugin.check_permission("tool3", {})
+
+        # All IDs should be unique
+        assert len(request_ids) == 3
+        assert len(set(request_ids)) == 3  # All unique
+
+    def test_request_has_timestamp(self):
+        """Request should have a timestamp."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        captured_request = [None]
+
+        def capture_request(request):
+            captured_request[0] = request
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.ALLOW,
+                reason="OK"
+            )
+
+        mock_channel = Mock()
+        mock_channel.request_permission = capture_request
+        plugin._channel = mock_channel
+
+        plugin.check_permission("test_tool", {})
+
+        assert captured_request[0] is not None
+        assert captured_request[0].timestamp is not None
+        assert len(captured_request[0].timestamp) > 0
+
+
+class TestPermissionPluginUserCommands:
+    """Tests for the permissions user command."""
+
+    def test_get_user_commands_returns_permissions(self):
+        plugin = PermissionPlugin()
+        commands = plugin.get_user_commands()
+
+        assert len(commands) == 1
+        assert commands[0].name == "permissions"
+        assert commands[0].share_with_model is False
+
+    def test_permissions_show_without_init(self):
+        plugin = PermissionPlugin()
+        result = plugin.execute_permissions({"args": ["show"]})
+
+        assert "not initialized" in result.lower()
+
+    def test_permissions_show_basic(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "ask",
+                "whitelist": {"tools": ["git"], "patterns": ["npm *"]},
+                "blacklist": {"patterns": ["rm -rf *"]}
+            }
+        })
+
+        result = plugin.execute_permissions({"args": ["show"]})
+
+        assert "Effective Permission Policy" in result
+        assert "Default Policy: ask" in result
+        assert "git" in result
+        assert "npm *" in result
+        assert "rm -rf *" in result
+
+    def test_permissions_show_no_args_defaults_to_show(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": []})
+
+        assert "Effective Permission Policy" in result
+
+    def test_permissions_allow(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["allow", "docker", "*"]})
+
+        assert "+ Added to session whitelist: docker *" in result
+        assert "docker *" in plugin._policy.session_whitelist
+
+    def test_permissions_allow_missing_pattern(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["allow"]})
+
+        assert "Usage:" in result
+
+    def test_permissions_deny(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": ["deny", "cli_based_tool"]})
+
+        assert "- Added to session blacklist: cli_based_tool" in result
+        assert "cli_based_tool" in plugin._policy.session_blacklist
+
+    def test_permissions_deny_missing_pattern(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": ["deny"]})
+
+        assert "Usage:" in result
+
+    def test_permissions_default_allow(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["default", "allow"]})
+
+        assert "Session default policy: allow" in result
+        assert "was: ask" in result
+        assert plugin._policy.session_default_policy == "allow"
+
+    def test_permissions_default_deny(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": ["default", "deny"]})
+
+        assert "Session default policy: deny" in result
+        assert plugin._policy.session_default_policy == "deny"
+
+    def test_permissions_default_ask(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["default", "ask"]})
+
+        assert "Session default policy: ask" in result
+        assert plugin._policy.session_default_policy == "ask"
+
+    def test_permissions_default_invalid(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["default", "invalid"]})
+
+        assert "Invalid policy" in result
+        assert plugin._policy.session_default_policy is None
+
+    def test_permissions_default_missing_policy(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["default"]})
+
+        assert "Usage:" in result
+
+    def test_permissions_clear(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        # Add some session rules
+        plugin._policy.add_session_whitelist("docker *")
+        plugin._policy.add_session_blacklist("dangerous_tool")
+        plugin._policy.set_session_default_policy("allow")
+
+        result = plugin.execute_permissions({"args": ["clear"]})
+
+        assert "Session rules cleared" in result
+        assert len(plugin._policy.session_whitelist) == 0
+        assert len(plugin._policy.session_blacklist) == 0
+        assert plugin._policy.session_default_policy is None
+
+    def test_permissions_unknown_subcommand(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["unknown"]})
+
+        assert "Unknown subcommand" in result
+        assert "show" in result
+        assert "allow" in result
+        assert "deny" in result
+        assert "default" in result
+        assert "clear" in result
+
+    def test_permissions_show_with_session_rules(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        plugin._policy.add_session_whitelist("docker *")
+        plugin._policy.add_session_blacklist("dangerous_tool")
+        plugin._policy.set_session_default_policy("allow")
+
+        result = plugin.execute_permissions({"args": ["show"]})
+
+        assert "Default Policy: allow (session override, was: ask)" in result
+        assert "+ allow: docker *" in result
+        assert "- deny:  dangerous_tool" in result
+
+    def test_permissions_check_basic(self):
+        """Test permissions check shows correct decision for a tool."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["check", "some_tool"]})
+
+        assert "some_tool" in result
+        assert "DENY" in result
+        assert "default" in result.lower()
+
+    def test_permissions_check_whitelist(self):
+        """Test permissions check shows ALLOW for whitelisted tool."""
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",
+                "whitelist": {"tools": ["allowed_tool"]}
+            }
+        })
+
+        result = plugin.execute_permissions({"args": ["check", "allowed_tool"]})
+
+        assert "allowed_tool" in result
+        assert "ALLOW" in result
+        assert "whitelist" in result.lower()
+
+    def test_permissions_check_session_override(self):
+        """Test permissions check reflects session whitelist overriding blacklist pattern."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        # Add pattern deny and explicit allow
+        plugin._policy.add_session_blacklist("create*")
+        plugin._policy.add_session_whitelist("createPlan")
+
+        # createPlan should be ALLOWED (explicit override)
+        result = plugin.execute_permissions({"args": ["check", "createPlan"]})
+        assert "ALLOW" in result
+        assert "session_whitelist" in result
+
+        # createIssue should be DENIED (no explicit override)
+        result = plugin.execute_permissions({"args": ["check", "createIssue"]})
+        assert "DENY" in result
+        assert "session_blacklist" in result
+
+    def test_permissions_check_missing_tool(self):
+        """Test permissions check requires a tool name."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["check"]})
+
+        assert "Usage" in result
+        assert "check" in result
+
+    def test_permissions_check_without_init(self):
+        """Test permissions check handles uninitialized plugin."""
+        plugin = PermissionPlugin()
+
+        result = plugin.execute_permissions({"args": ["check", "some_tool"]})
+
+        assert "not initialized" in result.lower()
+
+    def test_session_default_affects_permission_check(self):
+        """Verify session default policy actually affects permission checks."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        # Default deny - should be denied
+        allowed, _ = plugin.check_permission("unknown_tool", {})
+        assert allowed is False
+
+        # Set session default to allow
+        plugin.execute_permissions({"args": ["default", "allow"]})
+
+        # Now should be allowed
+        allowed, _ = plugin.check_permission("another_tool", {})
+        assert allowed is True
+
+    def test_session_allow_affects_permission_check(self):
+        """Verify session whitelist actually affects permission checks."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        # Should be denied by default
+        allowed, _ = plugin.check_permission("my_tool", {})
+        assert allowed is False
+
+        # Add to session whitelist
+        plugin.execute_permissions({"args": ["allow", "my_tool"]})
+
+        # Now should be allowed
+        allowed, _ = plugin.check_permission("my_tool", {})
+        assert allowed is True
+
+    def test_session_deny_affects_permission_check(self):
+        """Verify session blacklist actually affects permission checks."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        # Should be allowed by default
+        allowed, _ = plugin.check_permission("some_tool", {})
+        assert allowed is True
+
+        # Add to session blacklist
+        plugin.execute_permissions({"args": ["deny", "some_tool"]})
+
+        # Now should be denied
+        allowed, _ = plugin.check_permission("some_tool", {})
+        assert allowed is False
+
+
+class TestPermissionPluginTrustedBridgeContext:
+    """Tests for the trusted-bridge behavior in check_permission.
+
+    When a plugin-provided interpreter (notebook's Python tool bindings)
+    wraps inner dispatch in trusted_bridge_context(), the bridge suppresses
+    the redundant interactive PROMPT for each inner ``tools.X(...)`` call —
+    the user already approved the outer cell.  It does NOT bypass the
+    operator's hard boundaries: a blacklisted / evaluator-denied /
+    default-denied tool is still refused inside the bridge (a user approving
+    a cell cannot override the operator's policy).
+    """
+
+    @staticmethod
+    def _deny_channel():
+        """A channel that auto-denies, so an ASK resolves without touching
+        stdin — lets a test assert the non-bridge baseline deterministically."""
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.DENY,
+            reason="denied by test channel",
+        )
+        return mock_channel
+
+    def test_bridge_suppresses_prompt_for_ask_default(self):
+        """A tool that would only ASK (rule-miss under defaultPolicy=ask) is
+        allowed inside the bridge without prompting — the legitimate case."""
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+        plugin._channel = self._deny_channel()
+
+        # Outside: the channel is consulted and denies → not allowed.
+        allowed, _ = plugin.check_permission("writeNewFile", {"path": "x"})
+        assert allowed is False
+
+        # Inside: the redundant prompt is suppressed → allow.
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("writeNewFile", {"path": "x"})
+        assert allowed is True
+        assert info["method"] == "trusted_bridge"
+
+    def test_bridge_does_not_override_default_deny(self):
+        """defaultPolicy=deny is a hard boundary the bridge must not override."""
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("writeNewFile", {"path": "x"})
+        assert allowed is False
+        assert info["method"] != "trusted_bridge"
+
+    def test_bridge_does_not_skip_blacklist(self):
+        """A blacklisted tool is refused even inside a trusted bridge (the fix
+        for the trusted_bridge bypass finding)."""
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+                "blacklist": {"tools": ["dangerous_tool"]},
+            },
+        })
+
+        # Outside: blacklisted tool denied.
+        allowed, _ = plugin.check_permission("dangerous_tool", {})
+        assert allowed is False
+
+        # Inside the bridge: STILL denied — the operator's blacklist wins.
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("dangerous_tool", {})
+        assert allowed is False
+        assert info["method"] != "trusted_bridge"
+
+    def test_bridge_does_not_skip_evaluator_deny(self):
+        """A deterministic evaluator's DENY is honored even inside the bridge."""
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+        from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        def deny_evaluator(tool_name, args, context):
+            return PolicyDecision.DENY
+
+        plugin._policy.set_evaluators({"guarded_tool": deny_evaluator})
+
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("guarded_tool", {})
+        assert allowed is False
+        assert info["method"] != "trusted_bridge"
+
+    def test_context_is_balanced(self):
+        """Nested contexts balance correctly; prompt-suppression restored on exit."""
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+        plugin._channel = self._deny_channel()
+
+        with trusted_bridge_context():
+            allowed, _ = plugin.check_permission("x", {})
+            assert allowed is True
+            with trusted_bridge_context():
+                allowed, _ = plugin.check_permission("x", {})
+                assert allowed is True
+            # Still inside outer → still allowed
+            allowed, _ = plugin.check_permission("x", {})
+            assert allowed is True
+
+        # Fully exited → no bridge → ask resolves via channel → denied
+        allowed, _ = plugin.check_permission("x", {})
+        assert allowed is False
+
+    def test_context_is_thread_local(self):
+        """Other threads are unaffected by one thread's trusted context."""
+        import threading
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+        plugin._channel = self._deny_channel()
+
+        results = {}
+
+        def worker():
+            # Worker thread has no trusted context; channel denies → not allowed.
+            allowed, _ = plugin.check_permission("x", {})
+            results["worker"] = allowed
+
+        with trusted_bridge_context():
+            # Main thread is inside the context; prompt suppressed → allow.
+            allowed, _ = plugin.check_permission("x", {})
+            assert allowed is True
+
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join()
+
+        assert results["worker"] is False, (
+            "worker thread must not inherit main thread's trusted context"
+        )
+
+    def test_trusted_bridge_method_label(self):
+        """The decision metadata identifies the prompt-suppression path."""
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("x", {})
+
+        assert allowed is True
+        assert info["method"] == "trusted_bridge"
+        assert "trusted bridge" in info["reason"].lower()

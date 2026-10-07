@@ -197,6 +197,12 @@ SERVER_COMMAND_PREFIXES = {
 }
 
 
+#: Commands whose first argument names the verb, and the verb used when
+#: none is given: ``session`` -> ``session.list``, ``pool`` ->
+#: ``pool.status``.
+NAMESPACED_COMMANDS = {"session": "list", "pool": "status"}
+
+
 def parse_user_input(
     text: str,
     server_commands: Optional[List[dict]] = None,
@@ -261,12 +267,17 @@ def parse_user_input(
             args=subargs,
         )
 
-    if cmd == "session":
-        subcmd = args[0] if args else "list"
+    if cmd in NAMESPACED_COMMANDS:
+        # ``session`` and ``pool``: the first word after the command picks
+        # the verb (``session list``, ``pool resize 6``), with a default
+        # when none is given.  ``pool`` is the daemon's runner pool (1.35);
+        # parsing it here is what keeps ``pool resize 6`` from falling
+        # through to SEND_MESSAGE and reaching the model as a request.
+        subcmd = args[0] if args else NAMESPACED_COMMANDS[cmd]
         subargs = args[1:] if len(args) > 1 else []
         return ParsedCommand(
             action=CommandAction.SERVER_COMMAND,
-            command=f"session.{subcmd}",
+            command=f"{cmd}.{subcmd}",
             args=subargs,
         )
 

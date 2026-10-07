@@ -1,0 +1,6 @@
+$ sed -i '2s/"output_tokens": 7/"output_tokens": 700/' ledger.jsonl && jaato-doctor --audit-verify ledger.jsonl
+jaato SDK doctor
+────────────────────────────────────────────────────────────
+▲ WARN  audit chain ledger-edited.jsonl  line 2: digest 27a7f20211f3... does not match the record's own content (recomputed 549b3f24bc71...) -- THIS record was edited in place
+────────────────────────────────────────────────────────────
+WARN: 0 fail, 1 warn, 1 checks

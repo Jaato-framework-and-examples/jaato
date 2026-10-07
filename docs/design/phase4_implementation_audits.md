@@ -38,13 +38,13 @@ runner-side plugins with `tier_filter="runner"`.
 
 Today's state (verified via grep at audit time):
 
-1. `shared/plugins/session/__init__.py:35` declares
+1. `jaato_server/shared/plugins/session/__init__.py:35` declares
    `PLUGIN_TIER = "daemon"`.
-2. Path D's runner discover (`server/runner/session.py:_configure_runtime_plugins`)
+2. Path D's runner discover (`jaato_server/server/runner/session.py:_configure_runtime_plugins`)
    filters via `tier_filter="runner"` — daemon-tier plugins are
    excluded from the runner registry.
 3. `grep "session_describe\|set_description\b"
-   jaato-server/server/runner/` returns ZERO non-test hits.
+   jaato-server/jaato_server/server/runner/` returns ZERO non-test hits.
 
 Consequence: **`session_describe` is unreachable** from the model
 post-§7c.  The model never receives the tool schema; even if it did,
@@ -71,7 +71,7 @@ Daemon-side state at audit time:
 §4.4 closes the gap in 4 sub-actions (still single commit, but the
 "mechanical Path F extension" framing was too narrow):
 
-A. **Tier-flip** `shared/plugins/session/__init__.py`:
+A. **Tier-flip** `jaato_server/shared/plugins/session/__init__.py`:
    `PLUGIN_TIER = "daemon"` → `"runner"`.
    - Path D's runner discover now loads the plugin.
    - Daemon-side discover (no filter) still loads it too (it's a
@@ -84,7 +84,7 @@ A. **Tier-flip** `shared/plugins/session/__init__.py`:
 
 B. **NotificationFrame extension** (the original plan's mechanical
    change, now with a valid premise):
-   - `server/runner/rpc.py` — add
+   - `jaato_server/server/runner/rpc.py` — add
      `_NOTIF_DESCRIPTION_UPDATED = "description_updated"` constant.
    - Extend `_install_session_notification_callbacks` to install a
      description-callback shim on the runner-side session plugin
@@ -142,7 +142,7 @@ first per discipline #2; code commit follows immediately.
 
 7 regression-pin tests:
 
-1. `PLUGIN_TIER` is `"runner"` in `shared/plugins/session/__init__.py`
+1. `PLUGIN_TIER` is `"runner"` in `jaato_server/shared/plugins/session/__init__.py`
    (AST/import pin).
 2. Runner-side discover with `tier_filter="runner"` loads the session
    plugin (integration with `_configure_runtime_plugins`).
@@ -187,7 +187,7 @@ B. Is there a residual gap that needs §4.8?
 
 Grep of `PermissionRequestedEvent(` across the entire server
 codebase (excluding tests) returns exactly ONE producer:
-`server/runner_rpc_handlers/prompt_operator.py:138`.  Each call to
+`jaato_server/server/runner_rpc_handlers/prompt_operator.py:138`.  Each call to
 `PromptOperatorHandler.handle()` produces exactly one
 `PermissionRequestedEvent` (plus one companion
 `PermissionInputModeEvent` per Path J).
@@ -330,13 +330,13 @@ would call `permission_plugin._get_tool_schema(tool_name)` to look
 up the editable schema.  Verification shows **the lookup is
 already done** by the time the channel sees the request:
 
-1. `shared/plugins/permission/plugin.py:1411-1412`:
+1. `jaato_server/shared/plugins/permission/plugin.py:1411-1412`:
    ```python
    tool_schema = self._get_tool_schema(tool_name)
    editable = tool_schema.editable if tool_schema else None
    ```
 
-2. `shared/plugins/permission/plugin.py:1461`:
+2. `jaato_server/shared/plugins/permission/plugin.py:1461`:
    ```python
    request = PermissionRequest.create(
        ...,
@@ -344,7 +344,7 @@ already done** by the time the channel sees the request:
    )
    ```
 
-3. `shared/plugins/permission/channels.py:198`:
+3. `jaato_server/shared/plugins/permission/channels.py:198`:
    ```python
    class PermissionRequest:
        ...
@@ -391,18 +391,18 @@ consumers expecting the pre-§7c contract.
 
 ### Corrected scope (4 hops, parallel to §4.1)
 
-A. **`shared/plugins/permission/runner_rpc_channel.py`** — read
+A. **`jaato_server/shared/plugins/permission/runner_rpc_channel.py`** — read
    `request.editable` (Optional[EditableContent]); convert to dict
    shape `{"parameters": list, "format": str}`; thread to
    `PromptPayload`.  Defensive: when `request.editable` is None,
    `editable_metadata=None`.
 
-B. **`shared/plugins/permission/types.py`** — add
+B. **`jaato_server/shared/plugins/permission/types.py`** — add
    `editable_metadata: Optional[Dict[str, Any]] = None` field to
    `PromptPayload` + to_dict/from_dict.  Backward-compat: legacy
    wire dicts (without the field) deserialize to None.
 
-C. **`server/runner_rpc_handlers/prompt_operator.py`** — thread
+C. **`jaato_server/server/runner_rpc_handlers/prompt_operator.py`** — thread
    `payload.editable_metadata` through to
    `PermissionInputModeEvent.editable_metadata` (currently
    hardcoded `None` per Path J.B backlog note).
@@ -432,7 +432,7 @@ D. **No daemon-side dead-code removal in scope** — the daemon-side
 ### Rejected: Option B (handler reference)
 
 Option B would have given `PromptOperatorHandler` a reference to
-`server.permission_plugin` for a daemon-side schema lookup.
+`jaato_server.server.permission_plugin` for a daemon-side schema lookup.
 Rejected because:
 
 - Adds daemon-side coupling that Phase 3 explicitly avoided
@@ -485,7 +485,7 @@ which explicitly punted §3.11 isolated-subagent opt-in as
 
 Verification of the current subagent-spawn path:
 
-- `shared/plugins/subagent/plugin.py:2674`: subagent creates its
+- `jaato_server/shared/plugins/subagent/plugin.py:2674`: subagent creates its
   session via `self._runtime.create_session(...)` (the parent
   runner's runtime).  In-runtime, in-process — same Python process
   as the parent runner, same AppArmor profile, same cgroup.
@@ -514,7 +514,7 @@ The plan says:
 
 **This isn't directly callable.**  Verification:
 
-- `shared/plugins/subagent/__init__.py:42` declares
+- `jaato_server/shared/plugins/subagent/__init__.py:42` declares
   `PLUGIN_TIER = "runner"`.
 - Path D's `_configure_runtime_plugins` loads the subagent plugin
   into the runner registry.
@@ -556,7 +556,7 @@ None of this exists today.  Each is a non-trivial design point.
 
 ### Audit finding 4 — AppArmor sub-profile generation: only `change_profile` hat exists
 
-Verification of `server/apparmor.py`:
+Verification of `jaato_server/server/apparmor.py`:
 
 - Line 184-205: `tool_hat` sub-profile exists for **in-runner**
   `change_profile` transitions (executor enters hat for tool
@@ -755,10 +755,10 @@ serves as the template for the §4.3.2 primitive:
 
 | Component | Location | Role |
 |---|---|---|
-| Daemon-side handler module | `server/runner_rpc_handlers/<name>.py` | One file per RPC method; exports a `*Handler` class + a `register(rpc_server, handler)` convenience |
+| Daemon-side handler module | `jaato_server/server/runner_rpc_handlers/<name>.py` | One file per RPC method; exports a `*Handler` class + a `register(rpc_server, handler)` convenience |
 | Handler class | e.g., `PromptOperatorHandler` (prompt_operator.py:60) | Holds per-session state, has `async def handle(args) → dict`, registered by the convenience fn |
-| Handler instantiation site | `server/core.py:set_runner_rpc()` (~L4595-4617) | Per-`JaatoServer` (per-session) at runner-spawn time; binds to `self.emit` and `rpc_client.rpc_server` |
-| Runner-side wrapper | `server/runner/rpc_client.py:RunnerRPCClient` | One method per RPC; routes through `RunnerRPC.outgoing_call(method, args, timeout)`; raises `RunnerRPCError` on transport failure |
+| Handler instantiation site | `jaato_server/server/core.py:set_runner_rpc()` (~L4595-4617) | Per-`JaatoServer` (per-session) at runner-spawn time; binds to `self.emit` and `rpc_client.rpc_server` |
+| Runner-side wrapper | `jaato_server/server/runner/rpc_client.py:RunnerRPCClient` | One method per RPC; routes through `RunnerRPC.outgoing_call(method, args, timeout)`; raises `RunnerRPCError` on transport failure |
 | Wrapper consumption | `registry.runner_rpc_client` (attached by registry-attribute pattern) | Runner-side plugins pull the client off the registry — same pattern as `add_reference_fragment` consumed by references plugin |
 
 This audit follows the exact same pattern.  No new infrastructure
@@ -850,7 +850,7 @@ Each downstream sub-commit fills in its corresponding stage; the
 
 What lands in the code commit (one commit, audit + 1):
 
-1. **New handler module** `server/runner_rpc_handlers/spawn_isolated_runner.py`:
+1. **New handler module** `jaato_server/server/runner_rpc_handlers/spawn_isolated_runner.py`:
    - `SpawnIsolatedRunnerHandler` class with `__init__(session_manager, parent_session_id)`,
      `async def handle(args)`, `shutdown()`.
    - Args validation (required keys present, types match,
@@ -860,14 +860,14 @@ What lands in the code commit (one commit, audit + 1):
      "stage": "spawn"}` for now.
    - `register(rpc_server, handler)` convenience.
 
-2. **Runner-side wrapper** in `server/runner/rpc_client.py`:
+2. **Runner-side wrapper** in `jaato_server/server/runner/rpc_client.py`:
    - New method `spawn_isolated_runner(...)` on `RunnerRPCClient`.
    - Builds args dict, routes through `outgoing_call`, parses
      envelope, returns the response dict.
    - Raises `RunnerRPCError` on transport failure; returns
      dict for domain failures (caller branches on `ok`).
 
-3. **Registration site** in `server/core.py:set_runner_rpc()`:
+3. **Registration site** in `jaato_server/server/core.py:set_runner_rpc()`:
    - Instantiate `SpawnIsolatedRunnerHandler(self._session_manager,
      parent_session_id=self.session_id)` alongside the existing
      `PromptOperatorHandler`.
@@ -876,10 +876,10 @@ What lands in the code commit (one commit, audit + 1):
      so `shutdown()` can call its `shutdown()`.
 
 4. **Tests** (three files mirroring Phase 3 §3.2 test patterns):
-   - `server/runner_rpc_handlers/tests/test_spawn_isolated_runner.py`:
+   - `jaato_server/server/runner_rpc_handlers/tests/test_spawn_isolated_runner.py`:
      handler unit tests (args validation, stub return, confused-
      deputy check, shutdown).
-   - `server/runner/tests/test_rpc_client_spawn_isolated_runner.py`:
+   - `jaato_server/server/runner/tests/test_rpc_client_spawn_isolated_runner.py`:
      wrapper unit tests (named-method routing, envelope parsing,
      error translation).
    - Optional: smoke test asserting that
@@ -1218,7 +1218,7 @@ three subsystems.
 §4.3.5 needs the same validation for cgroup directory names —
 strict allow-list `[A-Za-z0-9_-]`, 64-char cap, non-empty.
 
-**Refactor:** hoist to module `server/subagent_id.py` (public
+**Refactor:** hoist to module `jaato_server/server/subagent_id.py` (public
 utility, not `_private`).  Both managers + the SessionManager
 helper delegate to it.  Pure function — no state, no class.
 
@@ -1297,7 +1297,7 @@ errors stop at `stage=sub_cgroup`.
 ### §4.3.5 commit scope
 
 1. **Hoist `_validate_subagent_id`** from `AppArmorManager` to
-   `server/subagent_id.py`.  Pure-function module.  Update
+   `jaato_server/server/subagent_id.py`.  Pure-function module.  Update
    `AppArmorManager._validate_subagent_id` to delegate (preserves
    classmethod API for backwards compat with §4.3.4 tests).
 
@@ -1397,7 +1397,7 @@ discipline matters MOST here.
 
 Tracing the existing default-share path
 (`SubagentPlugin._run_subagent_async` in
-`shared/plugins/subagent/plugin.py`) shows what cross-runner
+`jaato_server/shared/plugins/subagent/plugin.py`) shows what cross-runner
 forwarding needs to preserve.  The supervisor/subagent paradigm
 relies on:
 
@@ -1694,11 +1694,11 @@ shipped as gaps in §4.3.  Phase 5 should pick them up:
     `tool_timeout_seconds` kwargs and forwards them as
     `JAATO_RUNNER_*` env vars; the runner-side cli plugin reads
     those at startup.  Pre-§5.1b
-    `server/runner_spawn.py:spawn_session_runner` (the mainline
+    `jaato_server/server/runner_spawn.py:spawn_session_runner` (the mainline
     IPC / WS spawn path) didn't pass them — so a main-session
     profile that set `runtime_limits.tool_timeout_seconds` or
     `max_output_bytes` silently no-op'd on the runner subprocess.
-    §5.1b reads `server._profile.runtime_limits` (same field the WS
+    §5.1b reads `jaato_server.server._profile.runtime_limits` (same field the WS
     path consults for cgroup provision) and forwards the app-layer
     values.  No mainline defaulting — wiring-only.  Audit:
     `docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md`.
@@ -1707,9 +1707,9 @@ shipped as gaps in §4.3.  Phase 5 should pick them up:
 
 Net test additions across the sub-track: **~150 new tests**
 (spread across 9 test files in
-`server/runner_rpc_handlers/tests/`, `server/runner/tests/`,
-`server/tests/`, `shared/tests/`, and
-`shared/plugins/subagent/tests/`).
+`jaato_server/server/runner_rpc_handlers/tests/`, `jaato_server/server/runner/tests/`,
+`jaato_server/server/tests/`, `jaato_server/shared/tests/`, and
+`jaato_server/shared/plugins/subagent/tests/`).
 
 All §4.3 commits maintain the **zero new regression failures**
 contract — the only failing tests are pre-existing failures from

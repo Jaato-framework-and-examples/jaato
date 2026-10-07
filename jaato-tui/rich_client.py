@@ -18,7 +18,7 @@ import sys
 import pathlib
 import tempfile
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 #: Module logger.  ``handle_input`` reported a failed ``session.delete``
 #: through a name nothing bound: the except handler raised NameError
@@ -74,6 +74,9 @@ from clarification_batch import (
     enter_clarification_input_mode,
     submit_clarification_answer,
 )
+# A PermissionRequestedEvent's content -- diff, warnings -- rendered the way
+# the daemon-local AgentOutputEvent(source="permission") already is.
+from permission_prompt import maybe_render_permission_requested
 
 # Backend abstraction for mode-agnostic operation
 from backend import Backend, IPCBackend
@@ -428,6 +431,151 @@ def _pop_ipc_system_hints(display) -> list:
     hints = display._pending_system_hints
     display._pending_system_hints = []
     return hints
+
+
+def _diagnostics_refusal_text(category: str, error: str) -> str:
+    """The human-readable reason a ``session.diagnostics`` request was
+    refused (#1294) -- split out of :func:`handle_diagnostics_command` so
+    that function stays a thin orchestrator (cyclomatic-complexity ratchet,
+    ``jaato-server/jaato_server/shared/tests/test_cyclomatic_complexity_audit.py``).
+    """
+    if category == "not_owner":
+        return "Only the owner of this workspace can view its diagnostics."
+    if category == "no_session":
+        return "No session is attached."
+    if category == "runner_unreachable":
+        return f"The session's runner did not answer{': ' + error if error else '.'}"
+    return error or "The daemon refused the request."
+
+
+def _diagnostics_record_lines(answer: Any) -> List[Tuple[str, str]]:
+    """The session RECORD half of the diagnostics view (#1294) -- the
+    CACHED facts the daemon already tracked, never re-measured for this
+    call.  Split out of :func:`handle_diagnostics_command` for the same
+    complexity-ratchet reason as :func:`_diagnostics_refusal_text`.
+    """
+    lines: List[Tuple[str, str]] = [
+        ("Session record (as tracked by the daemon)", "bold"),
+    ]
+    identity = getattr(answer, "runner_identity", None) or {}
+    if identity:
+        pool = "pool-served" if identity.get("pool_served") else "cold-spawned"
+        stale = " (stale record)" if identity.get("stale") else ""
+        cascade = f", cascade {identity.get('cascade_driver_id')}" if identity.get("cascade_driver_id") else ""
+        lines.append((f"  runner:       pid {identity.get('runner_pid', '?')}, {pool}{cascade}{stale}", "dim"))
+    else:
+        lines.append(("  runner:       (none -- in-process)", "dim"))
+    lines.append((f"  confinement:  {getattr(answer, 'confinement_id', '') or '(none requested)'}", "dim"))
+    lines.append((f"  sandbox mode: {getattr(answer, 'sandbox_mode', None) or '(none)'}", "dim"))
+    lines.append((f"  notebook:     {getattr(answer, 'notebook_boundary_kind', None) or '(no notebook plugin)'}", "dim"))
+    lines.append((f"  protocol:     {getattr(answer, 'protocol_version', '')}", "dim"))
+    lines.append((f"  server:       {getattr(answer, 'server_version', '')}", "dim"))
+    return lines
+
+
+def _diagnostics_scan_lines(scan: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Per-thread AppArmor-label scan detail, when the live probe measured
+    one (#1294) -- split out of :func:`_diagnostics_probe_lines` for the
+    same complexity-ratchet reason as its siblings above.
+    """
+    lines: List[Tuple[str, str]] = [(
+        f"  threads: {scan.get('scanned')} scanned, {scan.get('matched')} matched, "
+        f"{scan.get('divergent')} divergent, {scan.get('unreadable')} unreadable, "
+        f"{scan.get('gone')} gone", "dim",
+    )]
+    uniform = "" if scan.get("uniform") else " -- NOT uniform"
+    lines.append((f"  route: {scan.get('route')}{uniform}", "dim"))
+    for t in scan.get("divergent_threads") or []:
+        lines.append((f"    divergent tid={t.get('tid')} name={t.get('name') or '(unknown)'} label={t.get('label')}", "system_error"))
+    for t in scan.get("unreadable_threads") or []:
+        lines.append((f"    unreadable tid={t.get('tid')} name={t.get('name') or '(unknown)'} ({t.get('reason')})", "system_warning"))
+    return lines
+
+
+def _diagnostics_probe_lines(probe: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """The LIVE re-probe half of the diagnostics view (#1294) -- measured
+    fresh on the runner at the moment of the call, never merged with the
+    cached record (:func:`_diagnostics_record_lines`): a cached
+    ``sandbox_mode`` reading "confined" when it is not is exactly the
+    #1253 shape this view exists to catch.  Split out of
+    :func:`handle_diagnostics_command` for the same complexity-ratchet
+    reason as its siblings above.
+    """
+    if probe is None:
+        return [
+            ("  This session has no runner subprocess to probe -- it runs", "dim"),
+            ("  in-process, which is not the confined-runner posture this", "dim"),
+            ("  check reports on.", "dim"),
+        ]
+    if not probe.get("ok"):
+        return [(
+            f"  Could not determine confinement: "
+            f"{probe.get('error') or 'the probe did not answer.'}",
+            "system_warning",
+        )]
+
+    if probe.get("enforced"):
+        verdict, style = "Enforced", "system_success"
+    elif probe.get("confined"):
+        verdict, style = "Confined, not enforced (complain mode)", "system_warning"
+    else:
+        verdict, style = "Not confined", "system_error"
+    lines: List[Tuple[str, str]] = [(f"  {verdict}", style)]
+    lines.append((f"  expected profile: {probe.get('expected_profile') or '(none declared)'}", "dim"))
+    current = probe.get("current_profile") or "(unlabelled)"
+    mode = f" ({probe.get('current_mode')})" if probe.get("current_mode") else ""
+    lines.append((f"  kernel reports:   {current}{mode}", "dim"))
+    scan = probe.get("scan")
+    if scan:
+        lines.extend(_diagnostics_scan_lines(scan))
+    return lines
+
+
+async def handle_diagnostics_command(client, display) -> None:
+    """Self-diagnose THIS session's confinement and runtime facts (#1294).
+
+    Calls the daemon's quiet ``session.diagnostics`` verb (protocol 1.25)
+    and prints exactly two things it answers with, kept apart on purpose:
+    the session RECORD (cached facts the daemon already tracked -- a
+    runner identity, the AppArmor profile the record claims,
+    ``sandbox_mode``, spend, the notebook boundary, the protocol/build),
+    and a LIVE re-probe measured fresh on the runner at the moment of this
+    call.  A cached ``sandbox_mode`` reading "confined" when it is not is
+    exactly the #1253 shape this exists to catch, so the two are never
+    merged into one verdict here.
+
+    Nothing is written to disk and nothing offered for export -- this is
+    a live-view print, the same scope the web client's Diagnostics rail
+    section has.
+
+    Thin orchestrator by design (gate, then hand off to the three helpers
+    above): everything that decides what a LINE says lives in one of
+    them, so this function stays well under the cyclomatic-complexity
+    ratchet rather than growing one branch per new field.
+    """
+    try:
+        answer = await client.get_diagnostics()
+    except Exception as exc:  # noqa: BLE001 -- report, never crash the session
+        display.add_system_message(f"diagnostics: {exc}", style="system_error")
+        return
+
+    if not getattr(answer, "ok", False):
+        text = _diagnostics_refusal_text(
+            getattr(answer, "category", "") or "",
+            getattr(answer, "error", "") or "",
+        )
+        display.add_system_message(f"diagnostics: {text}", style="system_error")
+        return
+
+    lines: List[Tuple[str, str]] = [
+        ("Session Diagnostics (#1294)", "bold"),
+        ("", ""),
+    ]
+    lines.extend(_diagnostics_record_lines(answer))
+    lines.append(("", ""))
+    lines.append(("Live re-check (just measured)", "bold"))
+    lines.extend(_diagnostics_probe_lines(getattr(answer, "probe", None)))
+    display.show_lines(lines)
 
 
 async def handle_screenshot_command_ipc(user_input: str, display, agent_registry, ipc_client) -> None:
@@ -1040,7 +1188,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     # Set up prompt provider for %prompt completion (local prompt discovery)
     try:
-        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        from jaato_server.shared.plugins.prompt_library.plugin import PromptLibraryPlugin
         _prompt_lib = PromptLibraryPlugin()
         _prompt_lib.set_workspace_path(str(workspace_path))
 
@@ -1236,6 +1384,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ipc_trace("  should_exit=True, breaking")
                 break
 
+            # Runner-tier sessions (the default) deliver a permission prompt's
+            # CONTENT -- summary, diff, warnings -- on PermissionRequestedEvent
+            # and emit no AgentOutputEvent(source="permission") at all; the
+            # daemon-local path emits the output event and never this one.
+            # Rendered under the same ``permission`` source, so the input-mode
+            # branch below attaches it to the tool either way.  An unconditional
+            # call rather than a branch of the chain: this handler is frozen at
+            # the top of the complexity ratchet.
+            maybe_render_permission_requested(event, agent_registry, display, ipc_trace)
+
             if isinstance(event, InitProgressEvent):
                 # Suppress init progress messages during reconnection
                 # The session is being restored, not created fresh - don't spam the output
@@ -1375,8 +1533,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, PermissionInputModeEvent):
-                # New unified flow: content already emitted via AgentOutputEvent,
-                # this event just signals input mode and updates tool tree status
+                # Control event only: the content arrived just before it, as an
+                # AgentOutputEvent (daemon-local) or a PermissionRequestedEvent
+                # (runner-tier); this event signals input mode and updates the
+                # tool tree status.
                 ipc_trace(f"  PermissionInputModeEvent: tool={event.tool_name}, id={event.request_id}, call_id={event.call_id}")
                 pending_permission_request = {
                     "request_id": event.request_id,
@@ -1607,10 +1767,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.clear_plan(agent_id)
 
             elif isinstance(event, WorkspaceFilesChangedEvent):
-                display.update_workspace_files(event.changes)
+                display.update_workspace_files(
+                    event.changes,
+                    seq=getattr(event, "seq", None),
+                    epoch=getattr(event, "epoch", None),
+                )
 
             elif isinstance(event, WorkspaceFilesSnapshotEvent):
-                display.set_workspace_snapshot(event.files)
+                display.set_workspace_snapshot(
+                    event.files,
+                    seq=getattr(event, "seq", None),
+                    epoch=getattr(event, "epoch", None),
+                    seqs=getattr(event, "seqs", None),
+                )
 
             elif isinstance(event, ToolCallStartEvent):
                 # Use tool tree visualization (same as direct mode)
@@ -2467,15 +2636,31 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         continue
 
                 # ==================== TUI-specific commands (not in shared parser) ====================
-                # Keybindings command - handle locally using shared function
-                if cmd == "keybindings":
+                # Simple TUI commands that are one call with no further
+                # inline parsing of their own are dispatched through ONE
+                # table lookup rather than one ``elif`` apiece.  This
+                # function is already well past the complexity ceiling and
+                # baselined (#1294 was refused by the ratchet for adding
+                # ``diagnostics`` as a fourth ``elif`` here, +1 on an
+                # already-frozen function) -- a table lookup is a single
+                # decision point however many entries it holds, so a new
+                # command lands here for free instead of costing +1 per
+                # addition the way another ``elif`` branch would.
+                # ``theme`` stays its own ``elif`` below: it has substantial
+                # inline sub-command parsing of its own and does not fit
+                # this "one call, no further parsing" shape.
+                async def _dispatch_keybindings_command() -> None:
                     from ui_utils import handle_keybindings_command
                     handle_keybindings_command(text, display)
-                    continue
 
-                # Screenshot command - handle locally (client-side only)
-                elif cmd == "screenshot":
-                    await handle_screenshot_command_ipc(text, display, agent_registry, client)
+                simple_tui_commands: Dict[str, Callable[[], Awaitable[None]]] = {
+                    "keybindings": _dispatch_keybindings_command,
+                    "diagnostics": lambda: handle_diagnostics_command(client, display),
+                    "screenshot": lambda: handle_screenshot_command_ipc(
+                        text, display, agent_registry, client),
+                }
+                if cmd in simple_tui_commands:
+                    await simple_tui_commands[cmd]()
                     continue
 
                 # Theme command - handle locally
@@ -2770,7 +2955,7 @@ def main():
         allow_abbrev=False,
         epilog="""
 The client auto-starts the server daemon if not already running.
-To run the server separately: python -m server --ipc-socket /tmp/jaato.sock
+To run the server separately: python -m jaato_server --ipc-socket /tmp/jaato.sock
 To connect to a specific server: jaato --connect /path/to/socket
         """,
     )
@@ -2852,7 +3037,8 @@ To connect to a specific server: jaato --connect /path/to/socket
         type=str,
         metavar="COMMAND",
         help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
-             "Requires --session."
+             "With --session it goes to that session; without it, only a daemon-level command "
+             "is sent (e.g., 'pool resize 6', 'session list') and no daemon is auto-started."
     )
     parser.add_argument(
         "--init",
@@ -2873,10 +3059,9 @@ To connect to a specific server: jaato --connect /path/to/socket
     from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH
     socket_path = args.connect or DEFAULT_SOCKET_PATH
 
-    # Validate --cmd requirements
-    if args.cmd:
-        if not args.session:
-            sys.exit("Error: --cmd requires --session to specify which session to send the command to")
+    # --cmd without --session sends a DAEMON-level command (e.g.
+    # 'pool resize 6', 'session list'); command_mode refuses anything that
+    # needs a session.
 
     # Validate headless mode requirements
     if args.headless:

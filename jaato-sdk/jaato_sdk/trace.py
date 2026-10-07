@@ -4,7 +4,7 @@ Provides a single place for trace file writing with automatic parent
 directory creation. Replaces the duplicated _trace() pattern across
 36+ files.
 
-Two trace channels:
+Two trace channels, both OFF unless their variable names a file:
 - Application trace: JAATO_TRACE_LOG (plugins, client, session)
 - Provider trace: JAATO_PROVIDER_TRACE (model provider SDKs)
 
@@ -41,8 +41,7 @@ Usage:
     provider_trace("google_genai", "streaming chunk received")
 
     # Custom path resolution (e.g. jaato_client checks both env vars):
-    path = resolve_trace_path("JAATO_TRACE_LOG", "JAATO_PROVIDER_TRACE",
-                              default_filename="provider_trace.log")
+    path = resolve_trace_path("JAATO_TRACE_LOG", "JAATO_PROVIDER_TRACE")
     trace_write("jaato_client", msg, path)
 """
 
@@ -262,6 +261,45 @@ def _substitute_agent_placeholders(path: Optional[str]) -> Optional[str]:
     return _KNOWN_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], path)
 
 
+def resolve_agent_trace_path(
+    path: Optional[str],
+    workspace_root: Optional[str] = None,
+) -> Optional[str]:
+    """A trace path made absolute and agent-substituted, for a caller
+    that is OUTSIDE the session environment.
+
+    Everything else here reads ``os.environ``, which is correct while a
+    session's env overlay is applied and wrong the moment it is not.
+    The daemon raises an incident from the ``finally`` of its model
+    thread -- after the overlay has been popped -- so it holds the two
+    values itself and passes them in rather than reading an environment
+    that has already reverted to the daemon's own.
+
+    Without this the line went to the daemon's process-wide trace (or
+    ``/tmp``), so ``jaato-doctor --incidents <workspace>/.jaato/logs/...``
+    reported "none recorded" for exactly the kinds the daemon raises; and
+    a path naming ``{agent}`` created a literal ``{agent}`` directory,
+    the #775 shape.
+
+    Args:
+        path: The configured trace path, or ``None``/`""` for disabled.
+        workspace_root: What a RELATIVE path resolves against.  Falls
+            back to the ambient variable, then to the process cwd.
+
+    Returns:
+        An absolute path, or ``None`` when tracing is disabled.
+    """
+    if not path:
+        return None
+    substituted = _substitute_agent_placeholders(path)
+    if not substituted:
+        return None
+    if os.path.isabs(substituted):
+        return substituted
+    root = workspace_root or os.environ.get("JAATO_WORKSPACE_ROOT")
+    return os.path.join(root, substituted) if root else os.path.abspath(substituted)
+
+
 def _resolve_trace_file(file_path: str) -> str:
     """Resolve a trace file path, using JAATO_WORKSPACE_ROOT for relative paths.
 
@@ -287,30 +325,36 @@ def _ensure_parent_dirs(file_path: str) -> None:
 
 def resolve_trace_path(
     *env_vars: str,
-    default_filename: str = "rich_client_trace.log",
+    default_filename: Optional[str] = None,
 ) -> Optional[str]:
     """Resolve trace file path from environment variables.
 
-    Checks env vars in order. An empty string value means tracing is
-    explicitly disabled. If no env var is set, falls back to a file
-    in the system temp directory.
+    Checks env vars in order and returns the first one set to a path.
+    Tracing is OFF unless one is: an unset variable, or one set to the
+    empty string, means no trace.
+
+    It used to fall back to ``<tempdir>/<default_filename>``, so every
+    daemon, runner and client traced by default, opening, appending to
+    and closing that file for every line.  On a fan-out of 16 sessions
+    that was about 11% of the daemon's CPU (and every runner left a
+    per-session trace in its temp directory), for output nobody had
+    asked for.  Set ``JAATO_TRACE_LOG`` / ``JAATO_PROVIDER_TRACE`` to
+    trace.
 
     Args:
         *env_vars: Environment variable names to check, in priority order.
-        default_filename: Fallback filename in temp directory.
+        default_filename: Accepted for compatibility and ignored; there
+            is no default file any more.
 
     Returns:
-        Resolved file path, or None if tracing is disabled.
+        The trace file path, or None when tracing is off.
     """
+    del default_filename  # no implicit default: tracing is opt-in
     for var in env_vars:
         value = os.environ.get(var)
-        if value == "":
-            return None  # Explicitly disabled
         if value:
             return value
-
-    # No env var set - use default in temp directory
-    return os.path.join(tempfile.gettempdir(), default_filename)
+    return None
 
 
 def trace_write(
@@ -356,8 +400,7 @@ def trace(
 ) -> None:
     """Write a trace message to the application trace log.
 
-    Resolves path from JAATO_TRACE_LOG env var.
-    Fallback: rich_client_trace.log in temp directory.
+    Resolves path from the JAATO_TRACE_LOG env var; unset means no trace.
 
     Placeholders from :data:`TRACE_PATH_PLACEHOLDERS` are substituted, so a
     session trace can be split per agent the same way a provider trace can.
@@ -371,9 +414,7 @@ def trace(
         msg: Message to write.
         include_traceback: If True, append the current exception traceback.
     """
-    path = _substitute_agent_placeholders(
-        resolve_trace_path("JAATO_TRACE_LOG",
-                           default_filename="rich_client_trace.log"))
+    path = _substitute_agent_placeholders(resolve_trace_path("JAATO_TRACE_LOG"))
     trace_write(component, msg, path, include_traceback=include_traceback)
 
 
@@ -395,7 +436,6 @@ def provider_trace(
         msg: Message to write.
         include_traceback: If True, append the current exception traceback.
     """
-    base_path = resolve_trace_path("JAATO_PROVIDER_TRACE",
-                                   default_filename="provider_trace.log")
+    base_path = resolve_trace_path("JAATO_PROVIDER_TRACE")
     path = _agent_trace_path(base_path)
     trace_write(component, msg, path, include_traceback=include_traceback)

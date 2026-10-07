@@ -55,11 +55,11 @@ This audit makes the fork-and-inherit approach viable across the whole runner-ti
 Daemon spawns a **dedicated** "template runner" subprocess at startup:
 
 ```
-python3 -m server.runner --template-mode
+python3 -m jaato_server.runner --template-mode
 ```
 
 The template:
-- Imports `server.runner` and transitively the runner-tier plugin modules
+- Imports `jaato_server.server.runner` and transitively the runner-tier plugin modules
 - Walks `PluginRegistry._discover_via_directory()` so the registry is populated
 - Does **NOT** call `plugin.initialize(config)` for any plugin (no per-session state yet, no network, no thread spawns)
 - Does **NOT** call any provider INIT
@@ -122,9 +122,9 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 - Tests pin: configure() doesn't call provider.initialize; first send_message does
 
 **Touchpoints:**
-- `jaato-server/shared/jaato_session.py:1647-1663` — remove eager provider create, add `_ensure_provider`
-- `jaato-server/shared/jaato_session.py:_wire_cache_plugin` — call site relocates
-- `jaato-server/shared/jaato_runtime.py:create_session` — pass provider config through, don't create yet
+- `jaato-server/jaato_server/shared/jaato_session.py:1647-1663` — remove eager provider create, add `_ensure_provider`
+- `jaato-server/jaato_server/shared/jaato_session.py:_wire_cache_plugin` — call site relocates
+- `jaato-server/jaato_server/shared/jaato_runtime.py:create_session` — pass provider config through, don't create yet
 
 **Effort:** ~150 LoC + tests. ~3-4 hours.
 
@@ -137,17 +137,17 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 ### PR 2 — Template subprocess — **SHIPPED 0.6.75 → PR #87**
 
 **Scope:**
-- New entry point: `python -m server.runner --template-mode`
+- New entry point: `python -m jaato_server.runner --template-mode`
 - Template subprocess imports runner-tier plugins + walks plugin discovery + sits idle on a control pipe
 - Daemon spawns template at daemon startup
 - Daemon manages template lifecycle (restart if template dies, etc.)
 - No pool slots yet — pool work is PR 3
 
 **Touchpoints:**
-- `jaato-server/server/runner/__main__.py` — add `--template-mode` flag + idle loop
-- `jaato-server/server/runner_spawner.py` — new `spawn_template()` method
-- `jaato-server/server/__main__.py` — daemon startup spawns template
-- New `jaato-server/server/runner_template.py` — template lifecycle manager
+- `jaato-server/jaato_server/server/runner/__main__.py` — add `--template-mode` flag + idle loop
+- `jaato-server/jaato_server/server/runner_spawner.py` — new `spawn_template()` method
+- `jaato-server/jaato_server/server/__main__.py` — daemon startup spawns template
+- New `jaato-server/jaato_server/server/runner_template.py` — template lifecycle manager
 
 **Effort:** ~300 LoC + tests. ~1-2 days.
 
@@ -166,9 +166,9 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 - Background thread keeps pool replenished
 
 **Touchpoints:**
-- New `jaato-server/server/runner_pool.py` — pool manager
-- `jaato-server/server/__main__.py` — daemon startup creates pool
-- `jaato-server/server/runner_template.py` — extend to support `fork-slot` request
+- New `jaato-server/jaato_server/server/runner_pool.py` — pool manager
+- `jaato-server/jaato_server/server/__main__.py` — daemon startup creates pool
+- `jaato-server/jaato_server/server/runner_template.py` — extend to support `fork-slot` request
 
 **Effort:** ~400 LoC + tests. ~2-3 days.
 
@@ -185,12 +185,12 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 - Feature flag default stays **opt-in (`false`)** — PR 5 flips after soak.
 
 **Touchpoints (actual):**
-- `jaato-server/server/runner/__main__.py` — `_run_slot_mode` replaced command loop with `RunnerRPC.serve()`
-- `jaato-server/server/runner_spawn.py` — `_pool_enabled()` env reader + four-gate routing in `spawn_session_runner`
-- `jaato-server/server/runner_pool.py` — `start_replenishment` / `stop_replenishment` / `_replenish_loop`
-- `jaato-server/server/session_manager.py` — `set_apparmor_dependencies(pool_manager=...)`; threaded into `_spawn_session_runner_unconditional`
-- `jaato-server/server/websocket.py` — apparmor pre-init hook reads `getattr(ws_server, "_pool_manager_ref", None)`
-- `jaato-server/server/__main__.py` — sets `ws_server._pool_manager_ref` + calls `pool_manager.start_replenishment()`
+- `jaato-server/jaato_server/server/runner/__main__.py` — `_run_slot_mode` replaced command loop with `RunnerRPC.serve()`
+- `jaato-server/jaato_server/server/runner_spawn.py` — `_pool_enabled()` env reader + four-gate routing in `spawn_session_runner`
+- `jaato-server/jaato_server/server/runner_pool.py` — `start_replenishment` / `stop_replenishment` / `_replenish_loop`
+- `jaato-server/jaato_server/server/session_manager.py` — `set_apparmor_dependencies(pool_manager=...)`; threaded into `_spawn_session_runner_unconditional`
+- `jaato-server/jaato_server/server/websocket.py` — apparmor pre-init hook reads `getattr(ws_server, "_pool_manager_ref", None)`
+- `jaato-server/jaato_server/server/__main__.py` — sets `ws_server._pool_manager_ref` + calls `pool_manager.start_replenishment()`
 
 **Tests shipped:** 5 new template/pool cases (slot serves echo-RPC + 4 replenishment cases) + 6 routing-gate cases (one per branch).  411 server tests + 604 runner tests green.
 

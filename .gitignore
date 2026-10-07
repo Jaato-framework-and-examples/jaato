@@ -73,7 +73,8 @@ tests_enablement_2.0/
 # Generated output
 generated-tests/
 src/
-!jaato-web/src/
+!jaato-web-coder-ui/src/
+!jaato-web-coder-server/src/
 !jaato-sdk-ts/src/
 **/target/
 
@@ -100,6 +101,14 @@ knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01
 !jaato-eval/tasks/*/.jaato/
 !jaato-eval/tasks/*/.jaato/**
 
+# ...and an example workspace's config root, for the same reason: the
+# profiles + personas under jaato-web-coder-server/examples/*/.jaato/ are
+# authored reference material (e.g. the #1228 `gh` example), not a
+# developer's local settings, and must travel with the repository.  The
+# directory is un-ignored first so the negation on its contents can apply.
+!jaato-web-coder-server/examples/*/.jaato/
+!jaato-web-coder-server/examples/*/.jaato/**
+
 # Eval scratch workspaces.  ``jaato_eval run --workspaces`` materialises one
 # fixture copy (and one git worktree) per arm here; a sweep leaves hundreds
 # of megabytes behind when run with --keep-workspaces.  Ignored under any
@@ -107,3 +116,7 @@ knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01
 # 341 MB of worktrees into the framework repo — is never one ``git add -A``
 # from being committed.
 .jaato-eval-workspaces/
+
+# Playwright run artifacts (jaato-web-coder-ui e2e)
+jaato-web-coder-ui/test-results/
+jaato-web-coder-ui/playwright-report/

@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # =============================================================================
@@ -150,7 +150,476 @@ from pydantic import BaseModel, ConfigDict, Field
 # one -- which an older client genuinely cannot fill -- is a MAJOR.  What
 # does break here is source-level, for code that reads
 # ``summary.max_turns``, and what it read was a number enforcing nothing.
-PROTOCOL_VERSION = "1.9"
+#
+# 1.10 -- the ticket bind channel: ``ticket.bind`` / ``ticket.bind.result``
+# and ``ticket.revoke`` / ``ticket.revoke.result`` (#1074).  An application
+# that has already authenticated a user in its own realm binds a short-lived,
+# single-use ticket to that user; the user's client presents it where the
+# shared bearer token is presented today, and the daemon resolves it AT
+# CONNECTION ESTABLISHMENT and stamps the identity on the connection.  Before
+# it, identity arrived as a MESSAGE after the handshake -- so a client could
+# decline to present one, and ownership guards written ``if user_id and ...``
+# short-circuited for exactly the client that never said who it was.
+#
+# Four new EVENTS, the shape 1.8 established, but arriving in BOTH directions
+# rather than only server -> client, so the degradation argument runs twice:
+#
+#   - a NEW client against an OLD daemon: the daemon does not recognise
+#     ``ticket.bind``, answers ``ErrorEvent("Unknown message type")`` and the
+#     bind is a visible failure rather than a silent one.  So there is no SDK
+#     minimum to refuse below -- unlike 1.5 / 1.6, where the old daemon
+#     ACCEPTED the call and dropped the payload that WAS the message.  The
+#     application learns it cannot bind before it has issued any ticket, and
+#     the remedy (upgrade the daemon, or keep using the shared token) is the
+#     one it would have been told anyway.
+#   - an OLD client against a NEW daemon: unaffected.  These verbs are
+#     client-initiated, so a client that never sends them never receives the
+#     results, and ``deserialize_event``'s raise-on-unknown-type is never
+#     reached.  This is the inverse of 1.8, where the daemon emitted
+#     unprompted.
+#
+# The whole mechanism is OPT-IN and adds nothing to a daemon that configures
+# no application credentials: with none configured, connection auth is
+# byte-identical to 1.9 (one shared digest compared with
+# ``hmac.compare_digest``, or ``--ws-unsafe-no-auth``), no connection can
+# ever be an app-credential connection, and both verbs answer ``"denied"``.
+# 1.11 -- ``session.reload_env``: re-resolve a LIVE session's environment
+# (workspace ``.env``, profile ``env:``, post-auth overrides) and have its
+# runner re-apply it and rebuild the provider.  A session resolved both once,
+# at bootstrap; a credential stored with ``<provider>-auth key`` or a ``.env``
+# line written while the session was open was invisible to it until a new
+# session was created, and the open one kept failing on the stale value.
+# The daemon also fires it on its own after a successful auth command when
+# the caller's live session is on that provider.
+#
+# A missing VERB again (the 1.7 rule): an older daemon ignores the command,
+# and "reloaded" would be reported about a session still on its old
+# credential.  The SDKs refuse below ``MIN_SESSION_RELOAD_ENV_PROTOCOL``.
+#
+# 1.12 -- ``workspace.ignore <path>`` / ``workspace.ignore.result``: toggle
+# one exact entry in the caller's workspace ``.gitignore``, daemon-side.  The
+# TUI's workspace panel has done this with its ``i`` key by writing the file
+# itself; a remote client has no file to write, so the same edit (one shared
+# text transform, ``jaato_sdk.gitignore_toggle``) becomes a verb.  The
+# daemon's ``WorkspaceMonitor`` already reloads its parser on that write.
+#
+# A missing VERB (the 1.7 rule): an older daemon ignores the command, and a
+# client that then reported "ignored" would be describing a file it did not
+# change.  The SDKs refuse below ``MIN_WORKSPACE_IGNORE_PROTOCOL``.  The
+# result event is client-initiated (the 1.10 shape), so an old client never
+# receives it unprompted.
+#
+# 1.13 -- ``workspace.delete`` / ``workspace.deleted``, and workspace
+# OWNERSHIP.  ``WorkspaceInfo`` gains ``owner`` (the authenticated user who
+# created it; absent = unowned) and ``path``; ``workspace.list`` shows a user
+# their own and the unowned workspaces, ``workspace.select`` / ``.delete``
+# refuse another user's, and ``session.list`` / ``session.attach`` are
+# scoped to the sessions running in visible workspaces or created by the
+# user.  A connection with no identity sees what it always saw.  Additive
+# fields and a client-initiated request/result pair (the 1.10 shape): an
+# older client ignores the fields and never sends the verb; an older daemon
+# answers the verb with ``ErrorEvent("Unknown message type")``, a visible
+# failure, so there is no SDK minimum to refuse below.
+#
+# 1.14 -- ``ToolOutputEvent.generated_by``: provenance on model-generated
+# media (Regulation (EU) 2024/1689, Art. 50(2): the output of an AI system
+# must be marked in a machine-readable format as artificially generated).
+# The model's own speech and images, delivered under ``MODEL_MEDIA_CALL_ID``,
+# now carry ``{"kind": "ai", "provider", "model", "session_id", "agent_id"}``,
+# and a tool-result attachment carries whatever its producer stamped
+# (``Attachment.generated_by``); a chunk a tool merely relayed carries
+# nothing, because a fetched image is not AI-generated because an agent
+# fetched it.  Additive optional field: an older client ignores it.
+#
+# 1.15 -- the FIRST-INTERACTION announcement (Art. 50(1)), and the client's
+# way of declining it.  ``SessionInfoEvent.disclosure_announcement`` carries
+# the text a profile declaring ``regulatory.interacts_with_persons: true``
+# owes the person, on the shape a client can read BEFORE any turn -- so a
+# voice client renders it in the medium the person is using rather than
+# after the first reply.  The same text also goes out as
+# ``AgentOutputEvent(source="system")``, which every client already renders.
+# ``PresentationContext.client_discloses_ai`` is the suppression: a client
+# that already shows an "AI assistant" badge asserts the Act's "unless this
+# is obvious" clause, which only the party that can see the screen is in a
+# position to assert.
+#
+# Additive optional fields in both directions: an older client ignores the
+# announcement (and is then a client that does not disclose, which is the
+# state it was already in), and an older daemon never reads the flag (and
+# then announces, which is the safe direction).  No SDK minimum.
+#
+# 1.16 -- ``IncidentEvent`` (``incident.raised``).  Art. 73 gives a provider
+# 15 days to report a serious incident from becoming AWARE of it (10 for a
+# death, 2 for a widespread infringement), and the framework already knew
+# when the events that could be one happened -- it recorded none of them as
+# such, each being a log line in a different format with no severity and no
+# clock.  The event carries ``kind``, ``at``, the binding, a one-line
+# ``cause`` and the ``site`` that raised it.
+#
+# It does NOT say whether the entry IS a serious incident under Art. 3(49):
+# that is a human determination about consequences the framework cannot
+# see.  A new EVENT degrades the way 1.8's did -- ``deserialize_event``
+# raises on an unrecognised type and the SDK reader logs and continues --
+# so an older client on a 1.16 daemon loses the event and logs a line.  No
+# SDK minimum: the direction is a NEW daemon emitting to an OLD client,
+# which cannot opt out, so a minimum would fail the wrong party.
+#
+# 1.17 -- ``awaiting`` / ``awaiting_since`` on a ``session.list`` row.  A
+# session that raises a permission ASK or a ``request_clarification`` is
+# BLOCKED until a human answers, and that fact reached only the clients
+# attached to THAT session: events go to ``session.attached_clients`` and
+# ``_client_to_session`` is 1:1, so a browser working in session A never
+# learned that session B wanted it.  ``SessionManager.broadcast_event`` is
+# not the answer either -- its docstring reserves it for events that are
+# not tied to a specific session.  So the fact rides the listing every
+# client already polls: ``awaiting`` is ``"permission"`` /
+# ``"clarification"`` / absent, and ``awaiting_since`` is when the prompt
+# was raised, ISO-8601 UTC.
+#
+# ``is_processing`` could not carry it.  A session blocked on a prompt is
+# still processing; telling WORKING from WAITING ON YOU is the whole point
+# and one boolean cannot.
+#
+# TWO fields rather than ``awaiting`` widening into ``{kind, since}``: the
+# degradation argument depends on ``awaiting`` staying a scalar, so a
+# reader doing ``typeof row.awaiting === "string"`` keeps working and a
+# reader that wants the clock opts into one more key.  The clock is not a
+# nicety -- the listing is a POLL, so without it a client can only date the
+# wait from when IT first saw the flag, which under-reports every wait that
+# predates the client and resets to zero on every reconnect.
+#
+# Additive optional fields on an already free-form row, both directions: an
+# older client ignores two keys; a newer client against an older daemon
+# reads absent, which is "nothing is waiting" -- today's behaviour, and
+# visibly no worse than today.  So no SDK minimum to refuse below.
+#
+# WHY A BUMP HERE WHEN #812's ``orphaned`` / ``runner`` TOOK NONE, on this
+# very dict: what a client DOES with the field.  Those two are diagnostics
+# a human reads.  This one gates whether a client interrupts a person, so
+# "can this daemon tell me?" is a question a client will actually ask, and
+# ``ConnectedEvent.protocol_version`` is the only way to ask it.  A client
+# that cannot distinguish "no session is waiting" from "this daemon never
+# says" reports the first when the truth is the second -- the
+# absence-of-evidence rule this tree applies everywhere else.
+#
+# 1.18 -- ``scaffold.explain`` + ``ScaffoldExplainEvent``.  A new VERB, so
+# the 1.7 rule applies: an older daemon ignores an unknown command
+# silently, and silence here is indistinguishable from "that topic does
+# not exist", which is the exact confusion the verb exists to remove.  The
+# SDK therefore refuses below ``MIN_SCAFFOLD_EXPLAIN_PROTOCOL`` rather than
+# waiting out a reply nobody will send.
+#
+# ``jaato-scaffold explain`` introspects the framework installed in the
+# CALLING process.  That is right whenever the CLI and the daemon share a
+# virtualenv, and silently wrong the moment they do not -- an application
+# with ``jaato-sdk`` in its own venv, driving a daemon owned by another
+# user over IPC, has TWO installs and the CLI was answering about the one
+# that is not serving its sessions.  Topics an extension contributes to the
+# DAEMON's venv (premium's ``reactors``) came back as ``unknown explain
+# scope``, which reads as "no such topic" and sends a reader looking for a
+# feature they already have.
+#
+# The daemon answers about ITSELF -- the same merged dispatch, including
+# its own ``jaato.scaffold_topics`` entry points -- and the answer carries
+# ``server_version`` so a client reports WHOSE install spoke.  The CLI asks
+# only when it cannot answer locally, or when told to with ``--connect``:
+# a topic the caller's own venv serves is still answered with no socket
+# touched, because quietly giving an offline introspection an egress would
+# change what running it means (the argument ``explain releases`` already
+# makes about being its own topic).
+#
+# 1.19 -- ``seq`` / ``epoch`` on ``WorkspaceFilesChangedEvent`` and
+# ``seq`` / ``epoch`` / ``seqs`` on ``WorkspaceFilesSnapshotEvent`` (#1189).
+# A client can reset its Files panel to "only what changes from now on" --
+# the TUI's ``workspace_clear`` -- and have that survive a reconnect.
+# Without numbering it could not: a reconnect sends a snapshot that the
+# client applies wholesale, and ``{path, status}`` does not say WHEN a file
+# changed, so the reset was undone by the next reattach -- rare in a
+# terminal, routine in a browser that sleeps.  The monitor stamps each
+# flushed batch with a counter (not a clock: nothing to skew between daemon
+# and browser) and names itself with an ``epoch`` that is NOT persisted, so
+# a mark taken before a session reload is recognisably void rather than
+# compared against a counter that restarted, which would empty the panel
+# silently.
+#
+# Additive optional fields in both directions.  ``seqs`` is a separate map
+# because the entries of ``files`` are ``Dict[str, str]`` and an older
+# client validates them as such.  A client against an older daemon sees no
+# epoch and falls back to "reset until the next snapshot" -- the TUI's
+# behaviour before this, and no worse than it.  No SDK minimum.
+#
+# 1.20 -- ``workspace.file.fetch`` / ``workspace.file.content``: DOWNLOAD a
+# file from the caller's workspace (WS only).  The reverse of
+# ``StageFilesRequest``: a remote client could put bytes into a workspace
+# and had no way to take any out, so an asset the agent produced was
+# reachable only through somebody with a shell on the host.  The answer is
+# one TEXT header followed, on success, by ONE raw BINARY frame of exactly
+# ``size`` bytes -- sent back to back under the connection's send lock, so
+# nothing interleaves between the two.  ``metadata_only`` asks for the
+# header alone (does the file exist, how big, what type), which is what a
+# host tool offering a download checks before it offers one.
+#
+# A missing VERB (the 1.7 rule): an older daemon answers ``ErrorEvent
+# ("Unknown message type")`` and never the content event a caller is
+# waiting on, so the TS SDK refuses below ``MIN_FILE_FETCH_PROTOCOL`` rather
+# than wait.  The result is client-initiated (the 1.10 shape), so an old
+# client never receives it unprompted.
+#
+# 1.20 -- ``secret.resolve`` / ``secret.resolve.result`` and ``secret.reload``
+# / ``secret.reload.result`` (#1226), the keystone of the per-user-GitHub
+# epic.  A workspace ``.env`` (or profile ``env:``) carries a REFERENCE, not a
+# secret -- ``GH_TOKEN=app://github`` -- and the daemon resolves it at every
+# session spawn by asking the application that OWNS the workspace, over the
+# same #1074 bind channel the ticket verbs ride.  This is the first
+# daemon -> application request direction on that channel; ``secret.reload`` is
+# the application -> daemon revocation counterpart (§6.4).  Landed in the same
+# 1.20 as ``workspace.file.fetch`` above (two PRs, one version); its verbs and
+# events are disjoint, so the two share the number without collision.
+#
+# A NEW verb (the 1.7 rule) would ordinarily force an SDK minimum, and here it
+# deliberately does NOT, because the party that would refuse is the wrong one:
+# the DAEMON sends ``secret.resolve`` and an application that does not answer
+# (an older SDK, no handler wired) is handled by the daemon's own deadline --
+# the reference is dropped exactly as a refusal drops it (or, for
+# ``app://name?required``, the bootstrap is refused).  So an unanswered request
+# degrades identically to a ``denied`` result, and there is nothing to
+# negotiate.  ``secret.reload`` from an application predating 1.20 is a verb
+# that application never sends.  The new EVENTS degrade the 1.8 way: a client
+# that receives one it does not know logs and continues.
+#
+# 1.21 -- ``scaffold.integration`` + ``ScaffoldIntegrationEvent``.  The
+# sibling of ``scaffold.explain`` (1.18): where that renders a topic on the
+# DAEMON's install, this RUNS a named ``jaato-scaffold integration`` into the
+# caller's OWN workspace on the daemon's install and host.  The application
+# holds no copy of the payload (the ``jaato-sdk`` skill) and cannot drift from
+# the framework; it asks the daemon to keep the copy current with the same
+# ``--refresh`` contract the CLI has (apply on absent / stale / outdated, skip
+# edited / diverged / unstamped), and the event reports ``state_before`` /
+# ``state_after`` / ``changed`` / ``skipped_reason`` so a client can say a
+# refresh was left alone rather than silently failing.  It resolves the
+# workspace daemon-side (the ``scaffold.explain`` / ``workspace.file.fetch``
+# entitlement path), so there is no path parameter to check.
+#
+# A NEW verb (the 1.7 rule): an older daemon ignores the command silently,
+# and silence there is indistinguishable from "the skill was installed", so a
+# client that reported an install would be reporting one that never happened.
+# Both SDKs therefore refuse below ``MIN_SCAFFOLD_INTEGRATION_PROTOCOL`` rather
+# than wait out a reply nobody will send.  The result event degrades the 1.8
+# way: an older client that somehow receives one it does not know logs and
+# continues.
+#
+# 1.22 -- the memory verbs (#1232): ``memory.list.request`` /
+# ``memory.get.request`` / ``memory.update.request`` /
+# ``memory.delete.request``, answered by ``MemoryListEvent`` (widened) and
+# ``memory.get.result`` / ``memory.update.result`` / ``memory.delete.result``,
+# each echoing the caller's ``request_id``.  A QUIET list: unlike the
+# ``memory list`` user command it prints nothing to the transcript, so a
+# client's side rail may ask as often as it needs.
+#
+# The rows come from the plugin copy that HOLDS the store.  ``memory`` is
+# ``PLUGIN_TIER = "runner"``, and the command path used to fill
+# ``MemoryListEvent`` from the DAEMON's copy of the plugin while the command
+# itself ran on the runner -- the #1179 defect class.  The answer is now read
+# from the runner over the control lane, carries ``source`` (``runner`` /
+# ``daemon``, the latter only where there is no runner at all), and a failed
+# ask answers ``ok=False`` with ``error`` / ``category`` -- never an empty
+# list, which reads as "nothing remembered".
+#
+# The rows widen with fields that already exist on ``Memory``
+# (``timestamp``, ``last_accessed``, ``usage_count``, ``generated_by``,
+# ``curated_by``, ``source_agent``, ``source_session``) plus ``tier``
+# (``workspace`` / ``global`` -- the two stores are merged) and two
+# per-session flags.  Content is NOT listed; ``memory.get.request`` fetches
+# it per row.  ``memory.update.request`` edits description / tags / content
+# and moves maturity (approve = ``validated``, dismiss = ``dismissed``)
+# through the one helper that stamps ``curated_by``; update and delete are
+# limited to the workspace OWNER, decided daemon-side.
+#
+# New VERBS (the 1.7 rule): an older daemon answers ``ErrorEvent("Unknown
+# request type")`` with no ``request_id`` and never the result a caller
+# waits on, so both SDKs refuse below ``MIN_MEMORY_VERBS_PROTOCOL``.  The
+# widened ``MemoryListEvent`` is additive -- an older client ignores the new
+# keys -- and the result events degrade the 1.8 way.
+# 1.23 -- ``session.message`` + ``SessionMessageResultEvent``.  Any-to-any
+# messaging between sessions that share a GROUP -- a cascade, or an
+# authenticated creator (``server.session_groups``) -- with a COLD target
+# woken to process the message.  The client-tier form of the ``courier``
+# plugin's ``send_to_session``: the same daemon method
+# (``SessionManager.deliver_group_message``), the sender being the caller's
+# own session, answered by one typed result event carrying the receipt rather
+# than a ``SystemMessageEvent`` string, because a driver branches on the
+# receipt (``accepted`` / ``queued`` / ``no_such_session`` / ``ambiguous`` /
+# ``session_cold`` / ``duplicate`` / ``terminated`` / ``refused``) and must
+# not parse prose to do it.  It carries the caller's ``request_id`` (the 1.3
+# rule) so several sends on one connection can be told apart.
+#
+# A NEW verb (the 1.7 rule): an older daemon ignores the command silently,
+# and "delivered" would then describe a message nobody carried, so both SDKs
+# refuse below ``MIN_SESSION_MESSAGE_PROTOCOL``.  The result event degrades
+# the 1.8 way.
+# 1.24 -- ``session.message`` carries FILES (session group messaging phase
+# 3, design §4.5): ``file_refs`` (paths in the sender's workspace, verified
+# daemon-side and referenced in place when the target shares the workspace,
+# COPIED into the target's inbox when it does not) and ``text_attachments``
+# (inlined into the wrapper up to 32 KiB, stored as files beyond it), with
+# ``SessionMessageResultEvent.files`` saying per file what became of it
+# (``referenced`` / ``copied`` / ``inlined`` / ``refused`` with a reason).
+# The two payload keys are NEW on an existing verb, and an older daemon
+# ignores keys it does not read -- so a message sent with files to a 1.23
+# daemon would be delivered WITHOUT them and answered ``accepted``: the
+# #845 shape, a degraded call that reads as success.  Both SDKs therefore
+# refuse a call that CARRIES either key below
+# ``MIN_SESSION_MESSAGE_FILES_PROTOCOL``, and leave a text-only call at the
+# 1.23 floor.  ``files`` on the result event is additive (default empty).
+# 1.25 -- ``session.diagnostics`` (#1294): a self-service, per-session
+# diagnostics REQUEST/RESULT pair, quiet like the memory verbs.  Answers
+# for the CALLER'S OWN attached session only: the request declares no
+# session-naming field of its own (the inherited ``Event.session_id`` is
+# stamped by the router on OUTGOING events and read by nothing on the way
+# in), and the daemon resolves "this session" from the connection's own
+# attachment before this verb is reached, never from the request body.
+# The result
+# carries two kinds of field, kept apart on purpose: cached facts the
+# daemon already tracked about the session (``runner_identity``,
+# ``confinement_id``, the record's own ``sandbox_mode``), and a LIVE
+# re-probe (``probe``) run fresh on the runner at the moment of the call.
+# A cached ``sandbox_mode`` field reading "confined" is exactly what #1253
+# was filed about, so the two are never merged into one verdict. Missing
+# on an older daemon degrades to the 1.7 rule: the SDK refuses below
+# ``MIN_DIAGNOSTICS_PROTOCOL`` rather than waiting out a request an old
+# daemon answers "Unknown request type" to.
+# 1.26 -- ``DiagnosticsResultEvent.apparmor_grants`` (#1326): what the
+# session's AppArmor profile was provisioned with -- exec scope, the
+# extension fragments inlined (tier, path, rules), fragments requested and
+# not found, rules per contributing plugin, the reference grants added
+# since, and which profile declared ``apparmor_fragments``.  Additive: an
+# older client ignores the key, an older daemon omits it and the client
+# reads that as "not recorded".  No SDK minimum, because nothing a client
+# sends changes.
+# 1.27 -- the workspace and session pickers.  ``workspace.inspect`` +
+# ``WorkspaceInspectEvent`` (path, size, session counts by state, and per
+# git checkout its uncommitted / unpushed counts), ``workspace.clone`` +
+# ``WorkspaceCloneProgressEvent`` (sequential ``git clone`` of GitHub repos
+# into a workspace, streamed per repo), and ``WorkspaceDeleteRequest.
+# stop_sessions`` (delete the workspace's LOADED sessions first instead of
+# refusing).  ``WorkspaceInfo.sources`` (the git checkouts in a workspace)
+# and the session rows' ``profile`` / ``last_activity`` / ``is_processing``
+# / ``created_at`` keys are additive.  ``session.new`` accepts ``--model``
+# / ``--provider``, which an older daemon would read as the session NAME --
+# so a client gates the override on 1.27, and the two new verbs follow the
+# 1.7 rule (an older daemon answers "Unknown message type", never the
+# result).  ``stop_sessions`` on an older daemon is ignored and the delete
+# is REFUSED for the loaded sessions -- the safe direction.
+# ``ConfigUpdateRequest.key_only`` (also 1.27) writes ONLY the provider's
+# API-key variable to the workspace ``.env`` -- no ``JAATO_PROVIDER`` /
+# ``MODEL_NAME``, no server bootstrap -- so the session picker can hand a
+# key to the session it is about to start.  An older daemon ignores the
+# field and rewrites the provider binding, so a client gates it on 1.27.
+# 1.28 -- paged, rendered history (``history.page.request`` +
+# ``HistoryPageEvent``).  The transcript as renderable UNITS -- a user
+# prompt, a segment of model text formatted by the output pipeline, a
+# reasoning part, one message's tool calls -- cut into pages from the END,
+# never splitting a fenced block, a table or a notebook cell.  A cursor
+# (``"<index>:<digest>"``) walks older; a cursor the history no longer
+# contains answers ``stale`` rather than some other page.
+# ``PresentationContext.history_replay`` (``full`` / ``paged`` / ``none``)
+# picks what an ATTACH sends; ``paged`` replaces the full event replay with
+# the latest page.  The full replay now goes through the formatter pipeline
+# too.  A NEW verb (the 1.7 rule): both SDKs refuse below
+# ``MIN_HISTORY_PAGE_PROTOCOL``.  ``history_replay`` sent to an older daemon
+# is ignored and it replays the old way -- safe, merely unpaged.
+# 1.29 -- FINISHED sessions.  A session the person ended (``session.end``),
+# whose agent completed (``natural``) or whose budget stopped it
+# (``budget_exhausted``) is marked on its record (2.11) and the session rows
+# of ``session.list`` and the ``SessionInfoEvent`` snapshot carry
+# ``ended_at`` (ISO-8601 UTC) and ``end_reason``, both ``null`` for a session
+# that has not finished.  The mark is cleared when a turn starts in the
+# session again.  Additive keys on a free-form dict: an older client ignores
+# them.  What changes is what a client may do with ``session.end``: against a
+# 1.29 daemon it leaves the session listed as finished, so a client that used
+# ``session.delete`` to END a session (the web client did) switches to
+# ``session.end`` there and keeps ``session.delete`` for "remove it".  Below
+# 1.29 ``session.end`` marks nothing, so such a client keeps deleting.
+# 1.30 -- ``workspace.app_write`` on the bind channel: an application asks the
+# daemon to write the ``app://`` reference line into a workspace ``.env`` (and
+# a small allow-list of home / instruction files) when the application cannot
+# reach the workspace itself.  A NEW verb: an older daemon answers it with an
+# error frame and never the result, so an application checks the daemon's
+# protocol before relying on it.
+# 1.31 -- ``tool.result_enriched`` (``ToolResultEnrichedEvent``): a structured
+# notice an enrichment plugin attached to a tool result, for the CLIENT.
+# Enrichment changes the result the MODEL reads; before this nothing of it
+# reached a client but a formatted ``source="enrichment"`` line, so a client
+# that wanted to act on what a plugin found (a missing toolchain, say) had to
+# detect it again on its own.  A plugin returns ``metadata["client_notice"] =
+# {"kind", "data"}``; the daemon emits one event per notice after the result
+# is built, on the runner path as a ``tool_result_enriched`` notification.
+# A NEW event type: an older client does not know it, logs it and continues
+# (the 1.8 shape), so nothing is refused.
+#
+# 1.32 -- ``workspace.files.search`` / ``workspace.files.search_result``
+# (WS only): find files in the caller's workspace by name.  The Files panel
+# lists what CHANGED; a file nobody touched, one the user hid or one git
+# ignores had no way to be reached.  The daemon walks the workspace this
+# connection is in (the ``workspace.file.fetch`` resolution) and answers
+# with ranked relative paths, a ``total`` before the cap and ``truncated``
+# when the walk stopped at its bound, so a partial search never reads as
+# "no such file".  A missing VERB (the 1.7 rule): an older daemon never
+# answers, so the TS SDK refuses below ``MIN_FILE_SEARCH_PROTOCOL``.
+#
+# 1.33 -- reference claims, the curator's half of the agent write path.
+# ``ReferenceClaimsRequest`` -> ``ReferenceClaimsEvent`` lists the agent
+# proposals (``proposeReference`` claims) in the caller's workspace, with
+# ``may_curate``; ``ReferenceCurationRequest`` (or the typable
+# ``reference.promote <claim_id> [--bundle <name>]`` / ``reference.dismiss``
+# commands) -> ``ReferenceCurationResultEvent`` turns one into a catalog
+# entry or drops it.  The daemon does the write, because a confined runner
+# is write-denied on the catalog.  Gated by the memory rail's owner rule.
+# NEW verbs: an older daemon ignores them silently, and "promoted" would
+# describe a catalog nobody changed, so the SDKs refuse below
+# ``MIN_REFERENCE_CURATION_PROTOCOL``.  The same version carries the
+# curator's view of the CATALOG: ``ReferenceCatalogRequest`` ->
+# ``ReferenceCatalogEvent`` lists every reference with its typed links both
+# ways, and ``ReferenceLinksUpdateRequest`` ->
+# ``ReferenceLinksUpdateResultEvent`` replaces one reference's links, again
+# written by the daemon under the owner rule.
+#
+# 1.34 -- ``scaffold.validate [set] [profile]`` -> ``ScaffoldValidateEvent``
+# (#1267, tier 3).  ``jaato-scaffold`` ships with jaato-sdk, and ``validate``
+# needs jaato-server's loader: a profile is checked only once it is parsed,
+# merged with its ``inherits:`` and set overlay, and constructed, which is
+# behaviour no snapshot carries.  So an SDK-only install asks the daemon,
+# whose full validator (contributed validators included, #1306) checks the
+# caller's OWN workspace: the one the connection selected (WS) or declared
+# at the handshake (IPC, peer-checked).  There is no path parameter.  The
+# findings come back in ``Diagnostic.as_dict()`` shape with the daemon's
+# ``server_version``, so a client prints them as a local run would and
+# says whose install answered.  A NEW verb (the 1.7 rule): an older daemon
+# ignores it silently, and an empty answer would read as "no findings", so
+# both SDKs refuse below ``MIN_SCAFFOLD_VALIDATE_PROTOCOL``.
+#
+# 1.35 -- ``PoolStatusRequest`` -> ``PoolStatusEvent``: read, and resize, the
+# daemon's pre-warm runner pool while it runs.  The pool's floor
+# (``JAATO_RUNNER_POOL_SIZE``) and ceiling (``JAATO_RUNNER_POOL_MAX_SIZE``)
+# were read once at startup, so adding warm runners meant a restart.  The
+# typable forms are ``pool.status`` and ``pool.resize <target> [<max>]``,
+# which also answer with a ``PoolStatusEvent``.  Daemon-level and
+# host-scoped: only an IPC connection whose kernel-reported uid is the
+# daemon's own, or root, is answered with the pool; every other connection
+# (WS, another local account) gets ``ok=False, category="not_authorized"``.
+# A NEW verb (the 1.7 rule): an older daemon never answers, and "resized"
+# would describe a pool nobody changed, so the SDK refuses below
+# ``MIN_POOL_ADMIN_PROTOCOL``.
+# 1.36 -- ``ReferenceBundleCreateRequest`` (or the typable
+# ``reference.bundle.create <name>``) -> ``ReferenceBundleCreateResultEvent``
+# (#1478): create a workspace-tier reference sub-bundle, UNINDEXED, so a
+# driver can set up the bundle it promotes into without a session or an
+# embedding provider.  Daemon-level and session-less like the other curation
+# requests, and written by the daemon under the same owner rule.  The answer
+# carries the workspace's ``bundles`` after the create (the listing
+# ``ReferenceClaimsEvent.bundles`` already gives).  A NEW verb (the 1.7
+# rule): the SDKs refuse below ``MIN_REFERENCE_BUNDLE_PROTOCOL``.
+PROTOCOL_VERSION = "1.36"
 
 
 # =============================================================================
@@ -205,6 +674,7 @@ class EventType(str, Enum):
     TOOL_CALL_START = "tool.call_start"
     TOOL_CALL_END = "tool.call_end"
     TOOL_OUTPUT = "tool.output"  # Live output chunk from running tool
+    TOOL_RESULT_ENRICHED = "tool.result_enriched"  # A plugin's structured notice about a result (1.31)
 
     # Permission flow (Server <-> Client)
     PERMISSION_REQUESTED = "permission.requested"
@@ -246,6 +716,10 @@ class EventType(str, Enum):
     # above.  The two are one keyword apart and the wrong one was already on
     # the wire, so the names are kept deliberately unalike (#1069).
     BUDGET_RUNG_FIRED = "budget.rung_fired"
+    # Something a PERSON should look at (Arts. 72, 73, 26(5)).  Emphatically
+    # not "a serious incident": whether an entry is one under Art. 3(49) is
+    # a human determination about consequences the framework cannot see.
+    INCIDENT_RAISED = "incident.raised"
     GC_CONFIG = "gc.config"
     GC = "gc"                       # GC lifecycle (phase-switched)
 
@@ -265,7 +739,20 @@ class EventType(str, Enum):
     SESSION_DESCRIPTION_UPDATED = "session.description_updated"  # Description changed
 
     # Memory management (Server -> Client)
-    MEMORY_LIST = "memory.list"  # Memory list for completion cache and pager display
+    MEMORY_LIST = "memory.list"  # Memory list for completion cache, pager display and the rail (1.22)
+    # Memory verbs (#1232, 1.22): request/result pairs correlated by request_id
+    MEMORY_LIST_REQUEST = "memory.list.request"  # Client -> Server
+    MEMORY_GET_REQUEST = "memory.get.request"  # Client -> Server
+    MEMORY_GET_RESULT = "memory.get.result"  # Server -> Client
+    MEMORY_UPDATE_REQUEST = "memory.update.request"  # Client -> Server
+    MEMORY_UPDATE_RESULT = "memory.update.result"  # Server -> Client
+    MEMORY_DELETE_REQUEST = "memory.delete.request"  # Client -> Server
+    MEMORY_DELETE_RESULT = "memory.delete.result"  # Server -> Client
+
+    # Self-diagnostics (#1294, 1.25): a live confinement re-probe plus the
+    # cached facts a session already tracks, for the caller's OWN session.
+    DIAGNOSTICS_REQUEST = "session.diagnostics.request"  # Client -> Server
+    DIAGNOSTICS_RESULT = "session.diagnostics.result"  # Server -> Client
 
     # Sandbox management (Server -> Client)
     SANDBOX_PATHS = "sandbox.paths"  # Sandbox allowed paths for @@ completion cache
@@ -298,6 +785,8 @@ class EventType(str, Enum):
     # History (Client <-> Server)
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
+    HISTORY_PAGE_REQUEST = "history.page.request"  # Client -> Server (1.28)
+    HISTORY_PAGE = "history.page"  # Server -> Client: one page of rendered units (1.28)
 
     # Client configuration (Client -> Server)
     CLIENT_CONFIG = "client.config"
@@ -320,6 +809,12 @@ class EventType(str, Enum):
     WORKSPACE_CREATE_REQUEST = "workspace.create"  # Client -> Server
     WORKSPACE_CREATED = "workspace.created"  # Server -> Client
     WORKSPACE_SELECT_REQUEST = "workspace.select"  # Client -> Server
+    WORKSPACE_DELETE_REQUEST = "workspace.delete"  # Client -> Server (1.13)
+    WORKSPACE_DELETED = "workspace.deleted"  # Server -> Client: the answer to workspace.delete (1.13)
+    WORKSPACE_INSPECT_REQUEST = "workspace.inspect"  # Client -> Server (1.27)
+    WORKSPACE_INSPECTED = "workspace.inspected"  # Server -> Client: the answer to workspace.inspect (1.27)
+    WORKSPACE_CLONE_REQUEST = "workspace.clone"  # Client -> Server (1.27)
+    WORKSPACE_CLONE_PROGRESS = "workspace.clone_progress"  # Server -> Client: per-repo clone progress (1.27)
     CONFIG_STATUS = "config.status"  # Server -> Client (response to workspace.select)
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
@@ -331,6 +826,13 @@ class EventType(str, Enum):
     # docs/sdk-file-staging.md for the wire protocol.
     WORKSPACE_FILES_STAGE_REQUEST = "workspace.files.stage_request"  # Client -> Server
     WORKSPACE_FILES_STAGED = "workspace.files.staged"  # Server -> Client
+    # File download from a workspace (Client <-> Server, WS only, 1.20).
+    # The server answers with one TEXT content header, followed on success
+    # by ONE raw BINARY frame of ``size`` bytes.  See docs/sdk-file-staging.md.
+    WORKSPACE_FILE_FETCH_REQUEST = "workspace.file.fetch"  # Client -> Server
+    WORKSPACE_FILE_CONTENT = "workspace.file.content"  # Server -> Client
+    WORKSPACE_FILES_SEARCH_REQUEST = "workspace.files.search"  # Client -> Server
+    WORKSPACE_FILES_SEARCH_RESULT = "workspace.files.search_result"  # Server -> Client
 
     # Agent profiles (Client <-> Server)
     SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
@@ -338,6 +840,23 @@ class EventType(str, Enum):
     # Workspace file monitoring (Server -> Client)
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
+    WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
+    REFERENCE_CURATION_RESULT = "reference.curation.result"  # Answer to `reference.promote|dismiss` (1.33)
+    REFERENCE_CLAIMS = "reference.claims"  # Answer to ReferenceClaimsRequest (1.33)
+    REFERENCE_CLAIMS_REQUEST = "reference.claims.request"  # Client -> Server (1.33)
+    REFERENCE_CURATION_REQUEST = "reference.curation.request"  # Client -> Server (1.33)
+    REFERENCE_CATALOG = "reference.catalog"  # Answer to ReferenceCatalogRequest (1.33)
+    REFERENCE_CATALOG_REQUEST = "reference.catalog.request"  # Client -> Server (1.33)
+    REFERENCE_LINKS_UPDATE_REQUEST = "reference.links.request"  # Client -> Server (1.33)
+    REFERENCE_LINKS_UPDATE_RESULT = "reference.links.result"  # Answer to ReferenceLinksUpdateRequest (1.33)
+    REFERENCE_BUNDLE_CREATE_REQUEST = "reference.bundle.create.request"  # Client -> Server (1.36)
+    REFERENCE_BUNDLE_CREATE_RESULT = "reference.bundle.create.result"  # Answer to ReferenceBundleCreateRequest (1.36)
+    SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
+    SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
+    SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
+    SCAFFOLD_VALIDATE_RESULT = "scaffold.validate.result"  # Answer to `scaffold.validate [set] [profile]` (1.34)
+    POOL_STATUS_REQUEST = "pool.status.request"  # Client -> Server: read / resize the runner pool (1.35)
+    POOL_STATUS = "pool.status"  # Answer to PoolStatusRequest and to `pool.status` / `pool.resize` (1.35)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -372,6 +891,35 @@ class EventType(str, Enum):
     PERMISSION_SET_DEFAULT_REQUEST = "permission.set_default"
     PERMISSION_POLICY_SNAPSHOT_REQUEST = "permission.policy_snapshot.request"  # Client -> Server
     PERMISSION_POLICY_SNAPSHOT = "permission.policy_snapshot"                  # Server -> Client
+
+    # Identity at connect (#1074) — an application binds a per-user ticket
+    # that its user's client then presents on the WS Upgrade, so the daemon
+    # establishes identity BEFORE the first frame instead of waiting for a
+    # message the client may simply never send.  Request/result PAIRS
+    # carrying a ``request_id``, the protocol-1.3 shape, so ONE bind channel
+    # can serve many browsers concurrently.
+    TICKET_BIND_REQUEST = "ticket.bind"                # Client -> Server
+    TICKET_BIND_RESULT = "ticket.bind.result"          # Server -> Client
+    TICKET_REVOKE_REQUEST = "ticket.revoke"            # Client -> Server
+    TICKET_REVOKE_RESULT = "ticket.revoke.result"      # Server -> Client
+
+    # app:// secret resolution (#1226) — the ONE request direction that runs
+    # daemon -> application, over the same bind channel #1074's ticket verbs
+    # ride (application -> daemon).  The daemon asks the owning application to
+    # resolve a per-user secret reference (e.g. GH_TOKEN=app://github) at spawn;
+    # the application answers.  See "app:// secret references" below.
+    SECRET_RESOLVE_REQUEST = "secret.resolve"          # Server -> Application
+    SECRET_RESOLVE_RESULT = "secret.resolve.result"    # Application -> Server
+    # Revocation (#1226 §6.4): the application asks the daemon to
+    # session.reload_env the owner's loaded sessions, scoped by ownership.
+    SECRET_RELOAD_REQUEST = "secret.reload"            # Application -> Server
+    SECRET_RELOAD_RESULT = "secret.reload.result"      # Server -> Application
+    # The application asks the daemon to write the files a binding needs into
+    # a workspace the application cannot reach itself (1.30): the ``app://``
+    # reference line in ``.env`` and a small allow-list of home/instruction
+    # files.  Same bind channel, same app-credential-only rule.
+    WORKSPACE_APP_WRITE_REQUEST = "workspace.app_write"            # Application -> Server
+    WORKSPACE_APP_WRITE_RESULT = "workspace.app_write.result"      # Server -> Application
 
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
@@ -756,6 +1304,40 @@ class ToolCallStartEvent(Event):
     tool_name: str = ""
     tool_args: Dict[str, Any] = Field(default_factory=dict)
     call_id: Optional[str] = None
+    # Coarse class from jaato_server.shared.tool_classification.classify_tool
+    # (jaato/#1304 phase 3): "housekeeping" | "write" | "exec" | "read" |
+    # "agent" | "other".  Additive, no protocol bump — an older client
+    # ignores the field via `extra='ignore'` and a newer one falls back to
+    # its own client-side table (jaato-web-coder-ui's toolClass.ts) when
+    # it is absent, exactly the #823/"Three Rows the Web Client Drew That
+    # Nobody Sent" lesson this field is declared to avoid repeating: a
+    # daemon-emitted key an SDK model does not declare is silently dropped
+    # on ingest rather than reaching the client.
+    tool_class: Optional[str] = None
+
+
+class ToolResultEnrichedEvent(Event):
+    """An enrichment plugin's structured notice about one tool result (1.31).
+
+    Tool-result enrichment rewrites what the MODEL reads.  A plugin that also
+    has something to tell the CLIENT returns it in its enrichment metadata as
+    ``{"client_notice": {"kind": ..., "data": {...}}}``, and the daemon emits
+    it here once the result is built, so a client acts on the plugin's finding
+    instead of re-deriving it.  The framework does not interpret ``kind`` or
+    ``data``: a client matches the kinds it knows and ignores the rest.
+
+    Emitted after the call's ``tool.call_end``.  ``data`` is a JSON object of
+    at most 4 KiB; a notice that is not is dropped daemon-side with a WARNING.
+    """
+    type: EventType = Field(default=EventType.TOOL_RESULT_ENRICHED)
+    agent_id: str = ""
+    call_id: Optional[str] = None
+    tool_name: str = ""
+    #: The enrichment plugin that attached the notice.
+    plugin: str = ""
+    #: What the notice is, in the plugin's vocabulary (``[a-z][a-z0-9_]*``).
+    kind: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCallEndEvent(Event):
@@ -778,6 +1360,24 @@ class ToolCallEndEvent(Event):
     continuation_id: Optional[str] = None  # Session ID for continuation grouping (e.g., interactive shell)
     show_output: Optional[bool] = None  # Whether to render output_lines in the main panel (None = default True)
     show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
+    # Inline diff preview for a TRAIT_FILE_WRITER tool (jaato/#1304 phase 3):
+    # a capped unified diff computed by the executor from the SAME
+    # generate_unified_diff()/generate_new_file_diff() the permission-ask
+    # card already used (jaato_server/shared/plugins/file_edit/diff_utils.py),
+    # so the transcript can show a write's effect without a round trip.
+    # `diff` / `diff_truncated` are populated together, from
+    # `tool_result_diff_fields()` reading the tool's own result dict --
+    # absent for every tool that isn't a file writer.  `diff_truncated`
+    # True means the diff was capped at diff_utils.DEFAULT_MAX_LINES lines;
+    # the client's "Open diff" affordance is what a truncated preview is
+    # for.  Additive, no protocol bump.
+    diff: Optional[str] = None
+    diff_truncated: Optional[bool] = None
+    # The written file's path, copied onto the event so a client does not
+    # have to reach into the result dict for it (TRAIT_FILE_WRITER's own
+    # contract already requires the result to carry `path` / `files_modified`
+    # / `changes[].file` -- this is the first of those, when present).
+    path: Optional[str] = None
 
 
 #: Reserved ``ToolOutputEvent.call_id`` for media the MODEL produced, as
@@ -823,6 +1423,17 @@ class ToolOutputEvent(Event):
         final: Last chunk of this stream, so a client can close its
             playback buffer or finish writing the file without waiting
             on a separate completion event.
+        generated_by: Provenance of the bytes, for the Art. 50(2) marking
+            (protocol 1.14).  The model's own media carries
+            :func:`ai_generated_by` -- ``{"kind": "ai", "provider",
+            "model", "session_id", "agent_id"}`` -- stamped at delivery by
+            the session that knows which binding produced it; a
+            tool-result attachment carries what its producer put on
+            ``Attachment.generated_by``; ``None`` means nothing is CLAIMED
+            about the bytes, which is what a tool that merely relayed a
+            file must say.  Machine-readable half of the marking; the
+            client-facing half (a visible label, a manifest sidecar) is
+            the consumer's, and this is what it reads.
 
     Note:
         When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
@@ -838,6 +1449,7 @@ class ToolOutputEvent(Event):
     mime_type: Optional[str] = None  # Tags the data_b64 payload
     data_b64: Optional[str] = None  # Base64 binary payload
     final: bool = False  # Last chunk of this stream
+    generated_by: Optional[Dict[str, Any]] = None  # Provenance (1.14)
 
     def is_media(self) -> bool:
         """Whether this event carries a binary payload.
@@ -857,6 +1469,33 @@ class ToolOutputEvent(Event):
         rediscovers the literal ``"model-output"``.
         """
         return self.is_media() and self.call_id == MODEL_MEDIA_CALL_ID
+
+
+#: The ``generated_by.kind`` that says "an AI system produced these bytes".
+GENERATED_BY_AI = "ai"
+
+
+def ai_generated_by(
+    provider: Optional[str],
+    model: Optional[str],
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The provenance stamp for bytes a MODEL produced (protocol 1.14).
+
+    One shape for every producer, so a client can branch on ``kind`` and
+    an archive can recompute who made what from the session record:
+    ``provider`` / ``model`` are the binding that answered, ``session_id``
+    the daemon's session, ``agent_id`` the agent within it.  Keys whose
+    value is unknown are omitted rather than sent as ``null`` -- absent is
+    "not measured here", never a claim.
+    """
+    stamp: Dict[str, Any] = {"kind": GENERATED_BY_AI}
+    for key, value in (("provider", provider), ("model", model),
+                       ("session_id", session_id), ("agent_id", agent_id)):
+        if value:
+            stamp[key] = value
+    return stamp
 
 
 class PermissionResponseOption(BaseModel):
@@ -883,6 +1522,11 @@ class PermissionRequestedEvent(Event):
     format_hint: Optional[str] = None  # "diff" for colored diff display
     warnings: Optional[str] = None  # Security/analysis warnings to display separately
     warning_level: Optional[str] = None  # "info", "warning", "error"
+    # Same coarse class as ToolCallStartEvent.tool_class (jaato/#1304 phase
+    # 3), from jaato_server.shared.tool_classification.classify_tool.  Lets a
+    # permission card show a risk tag without its own name table.  Additive,
+    # no protocol bump.
+    tool_class: Optional[str] = None
 
 
 class PermissionInputModeEvent(Event):
@@ -949,6 +1593,11 @@ class PermissionStatusEvent(Event):
     type: EventType = Field(default=EventType.PERMISSION_STATUS)
     effective_default: str = "ask"  # "allow", "deny", or "ask"
     suspension_scope: Optional[str] = None  # "turn", "idle", "session", or None
+    auto_allow_housekeeping: Optional[bool] = None  # jaato/#1304: whether the
+    # profile opted into the auto_allow_housekeeping policy (read-only,
+    # low-risk tools resolve without asking).  ``None`` means "not reported"
+    # (an older daemon, or the enforcer could not be reached), never "off" --
+    # distinct from ``False``, which is a measured answer.
 
 
 class ClarificationRequestedEvent(Event):
@@ -1239,10 +1888,13 @@ class UsageBreakdown(BaseModel):
     # Prompt-cache token counts (None when provider does not support caching)
     cache_read_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
-    # Reasoning tokens (OpenAI o-series) — billed as output
+    # Output tokens spent reasoning, whatever the vendor calls them — a
+    # SUBSET of ``output_tokens`` and billed inside it, so never add the two
+    # (#1047).  ``None`` = not reported; a reported 0 is a measurement.
     reasoning_tokens: Optional[int] = None
-    # Thinking tokens (Anthropic / Gemini extended thinking)
-    # Subset of output_tokens; useful for UI breakdowns
+    # DEPRECATED: the same quantity as ``reasoning_tokens`` (the daemon
+    # fills both with one value), kept for clients that read this name.
+    # Never sum it with ``reasoning_tokens``.
     thinking_tokens: Optional[int] = None
     # Cost in USD; None when neither provider nor pricing table knows
     cost_usd: Optional[float] = None
@@ -1360,6 +2012,14 @@ class ContextUpdatedEvent(Event):
 
     GC configuration moved to ``GCConfigEvent`` in v1.0 — query that
     event (or read it from session init) for status-bar display.
+
+    ``reserved_output_tokens`` is the output cap every request carries
+    (the provider's ``get_max_output_tokens()``; 0 when none is sent or
+    the vendor does not count it).  A vendor that counts it refuses a
+    prompt over ``context_limit - reserved_output_tokens``, so
+    ``percent_used`` and ``tokens_remaining`` are measured against that
+    effective input limit (#1444).  Additive: an older daemon omits it
+    and a client reads 0, which is what every figure meant before.
     """
     type: EventType = Field(default=EventType.CONTEXT_UPDATED)
     agent_id: str = ""
@@ -1367,7 +2027,25 @@ class ContextUpdatedEvent(Event):
     context_limit: int = 0
     percent_used: float = 0.0
     tokens_remaining: int = 0
+    reserved_output_tokens: int = 0
     turns: int = 0
+    #: Where ``usage`` and ``percent_used`` come from (#1440), because the
+    #: daemon emits this event from two different measurements and a
+    #: readout that alternates between them unlabelled looks like context
+    #: appearing and vanishing:
+    #:
+    #: * ``"budget"`` -- jaato's own accounting (``get_context_usage``):
+    #:   the ``InstructionBudget`` estimate, scaled to the provider's last
+    #:   reported prompt when that was larger (the instruction-budget
+    #:   snapshot's ``total_source`` says whether it was).  What GC decides
+    #:   on.  Cache figures on such an event, when present, are the last
+    #:   response's, for reference; the total is not their sum.
+    #: * ``"provider"`` -- the usage the upstream reported for the request
+    #:   it just answered, cache reads and writes included.
+    #:
+    #: ``None`` from a daemon that predates the field: not stated, never
+    #: read as either.  Additive and optional, so no protocol bump.
+    source: Optional[str] = None
 
 
 class InstructionBudgetEvent(Event):
@@ -1381,6 +2059,11 @@ class InstructionBudgetEvent(Event):
     - context_limit, total_tokens, utilization_percent: Overall usage
     - gc_eligible_tokens, locked_tokens, preservable_tokens: GC info
     - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
+    - effective_total_tokens, total_source, calibration_factor,
+      provider_prompt_tokens (#1440): the total GC is judged on, whether it
+      is the estimate (``"estimate"``) or the estimate scaled to the
+      provider's last reported prompt (``"calibrated"``), the scale, and
+      that reported prompt (``None`` until one was reported)
     """
     type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_UPDATED)
     agent_id: str = ""
@@ -1556,17 +2239,251 @@ class RetryEvent(Event):
 
 
 class SessionListEvent(Event):
-    """List of available sessions - for user display."""
+    """List of available sessions - for user display.
+
+    Each row is a free-form dict.  Two of its keys are worth naming here
+    because a client BRANCHES on them rather than displaying them:
+
+    ``awaiting`` (protocol 1.17)
+        ``"permission"`` / ``"clarification"`` when that session is blocked
+        on an unanswered human prompt, absent otherwise.  It is the only
+        way a client attached to session A learns that session B wants it:
+        prompt events go to ``session.attached_clients``, and a client is
+        attached to one session at a time.  Absent on a row that is not
+        loaded, and on any daemon below 1.17 -- so absent means "nothing
+        is waiting, as far as this daemon says", never a positive "no".
+
+    ``awaiting_since`` (protocol 1.17)
+        When that prompt was raised, ISO-8601 UTC, so a client can render
+        "waiting 4 min" instead of "waiting".  A separate key rather than
+        a widening of ``awaiting``, which stays a scalar an older client
+        can ignore.  Absent means NOT MEASURED, never "just now".
+
+    ``inbox_pending`` (session group messaging, phase 2)
+        How many messages wait in that session's durable inbox -- spooled
+        by ``send_to_session`` / ``session.message`` because the target was
+        mid-turn with a payload it could not queue, or cold and not yet
+        revived.  Counted for cold rows too: a cold session with a pending
+        message is the one the daemon's watchdog is about to revive.  A
+        diagnostic a human reads (the #812 shape), additive and unbumped;
+        absent on a daemon that predates it.
+    """
     type: EventType = Field(default=EventType.SESSION_LIST)
     sessions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
 
 
 class MemoryListEvent(Event):
-    """List of available memories - for completion cache and pager display."""
+    """The memory store, as the plugin that HOLDS it reports it.
+
+    Two emitters, one shape: the answer to :class:`MemoryListRequest`
+    (protocol 1.22, ``request_id`` echoed) and the push after a ``memory``
+    user command (the TUI's completion cache).  ``SessionInfoEvent.memories``
+    carries the same rows, read the same way.  ``memory`` is
+    ``PLUGIN_TIER = "runner"``, so on a runner-served session -- the default
+    -- the rows are read from the RUNNER's plugin over the control lane.
+    Before 1.22 the command push read the DAEMON's copy while the command
+    itself ran on the runner (#1232), which on a split host, or wherever the
+    daemon copy had no storage, answered ``[]``.
+
+    Each row (a dict, so an older client ignores the keys it does not know):
+
+    ``id`` / ``description`` / ``tags`` / ``maturity`` (``raw`` |
+    ``validated`` | ``escalated`` | ``dismissed``) / ``confidence`` /
+    ``scope`` (``project`` | ``universal`` -- how broadly it applies)
+        What every emitter has always sent.
+    ``tier`` (1.22)
+        ``workspace`` or ``global`` (``~/.jaato/memories``): the rail merges
+        both stores, and a row says which one it came from.  Deliberately
+        NOT ``scope``, which already means something else on a memory.
+    ``timestamp`` / ``last_accessed`` / ``usage_count`` / ``generated_by``
+    / ``curated_by`` / ``source_agent`` / ``source_session`` (1.22)
+        Fields that already exist on the stored record, passed through.
+        ``curated_by`` is ``None`` on every ``raw`` memory by definition;
+        ``generated_by`` is ``None`` on a record written before #1123 --
+        *provenance unknown*, never human-authored.  ``content`` is NOT
+        listed: :class:`MemoryGetRequest` fetches it per row, so a large
+        store does not arrive in one frame.
+    ``written_this_session`` / ``retrieved_this_session`` (1.22)
+        Whether the session the request was served for wrote this memory,
+        or retrieved it with ``retrieve_memories``.  Answer-only: the
+        command push carries neither.
+
+    Fields (1.22, all additive):
+        request_id: The :class:`MemoryListRequest` this answers; ``""`` on
+            the command push.
+        ok: ``False`` when the store could not be read -- the runner did
+            not answer, the session does not enable the memory plugin.
+            ``memories`` is then EMPTY AND MEANINGLESS: an empty list is
+            never how a failure is spelled, because it reads as "nothing
+            remembered".
+        error / category: Why not.  ``category`` is one of
+            ``no_session``, ``no_plugin``, ``runner_unreachable``,
+            ``not_found``, ``invalid``, ``not_owner``, ``unknown_op``,
+            ``store_error``.
+        source: ``runner`` or ``daemon`` -- which plugin copy answered.
+            ``daemon`` only where there is no runner at all (embedded,
+            standalone), where the daemon's copy IS the store.
+        may_curate: Whether THIS caller may update / delete (the workspace
+            owner, or anyone on an unowned workspace), decided daemon-side
+            by the same predicate that refuses the verbs.  ``None`` on the
+            command push.
+    """
     type: EventType = Field(default=EventType.MEMORY_LIST)
     memories: List[Dict[str, Any]] = Field(default_factory=list)
-    # ^ List of {id: str, description: str, tags: List[str]}
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    may_curate: Optional[bool] = None
+
+
+class MemoryGetResultEvent(Event):
+    """Answer to :class:`MemoryGetRequest` (1.22): one memory, with content.
+
+    ``memory`` is the list row plus ``content`` and ``evidence``, or
+    ``None`` when ``ok`` is ``False`` (``category="not_found"`` for an id
+    neither tier holds).
+    """
+    type: EventType = Field(default=EventType.MEMORY_GET_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    memory: Optional[Dict[str, Any]] = None
+
+
+class MemoryUpdateResultEvent(Event):
+    """Answer to :class:`MemoryUpdateRequest` (1.22).
+
+    ``memory`` is the row AFTER the update, so a client can replace its
+    copy without a second list.  ``category="not_owner"`` is the owner gate
+    refusing; ``invalid`` is the plugin's schema validator refusing (an empty
+    description, a one-letter tag, a maturity outside the vocabulary).
+    """
+    type: EventType = Field(default=EventType.MEMORY_UPDATE_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    memory: Optional[Dict[str, Any]] = None
+
+
+class MemoryDeleteResultEvent(Event):
+    """Answer to :class:`MemoryDeleteRequest` (1.22)."""
+    type: EventType = Field(default=EventType.MEMORY_DELETE_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+
+
+class DiagnosticsResultEvent(Event):
+    """Answer to :class:`DiagnosticsRequest` (#1294, 1.25): the caller's
+    own session, self-diagnosed.
+
+    Everything here is about the session the caller is ATTACHED to -- the
+    request carries no session id, so there is nothing to widen the
+    answer to another session with.
+
+    Two families of field, and they answer different questions:
+
+    **Cached** (what the daemon already tracked about this session,
+    stamped at spawn/bootstrap -- never re-measured for this call):
+        ``runner_identity``: ``{runner_pid, pool_served, pool_slot_pid,
+            cascade_driver_id, apparmor_profile, stale}`` -- the same
+            shape :class:`~server.session_identity.RunnerIdentity`
+            persists (#812).  ``None`` when this session has no runner
+            (in-process).  ``stale`` is ``True`` only for a record
+            restored from disk after a daemon restart -- the pid it
+            names belongs to a previous process lifetime.
+        ``confinement_id``: the AppArmor profile name the session's
+            record claims (#1033), or ``""`` when none was requested.
+        ``sandbox_mode``: the session record's own value --
+            ``"apparmor"`` / ``"apparmor-complain"`` / ``"soft"`` / ``None``
+            (#1014's vocabulary).  This is a CACHED claim, exactly the
+            kind #1253 was filed about reading as confined when it was
+            not; ``probe`` below is the live check that claim can be
+            compared against.
+        ``consumption``: this session's own spend, as
+            :meth:`JaatoSession.get_consumption` already reports it --
+            reused, not recomputed.
+        ``notebook_boundary_kind``: the active notebook backend's
+            execution boundary (#1012's ``kernel_sandbox.BOUNDARY_*``),
+            or ``None`` when no notebook plugin is loaded.
+        ``protocol_version`` / ``server_version``: what this daemon
+            speaks and runs.
+        ``apparmor_grants`` (1.26, #1326): what the session's AppArmor
+            profile was provisioned with, recorded when it was loaded --
+            ``{recorded, template_version, profile_name, exec_scope,
+            requested_fragments, declared_by, fragments, missing_fragments,
+            unreadable_fragments, plugin_rules, references}``.
+            ``exec_scope`` is ``"scoped"`` (``//child`` may exec only what
+            the fragments name) or ``"unscoped"`` (the broad in-PATH set).
+            Each ``fragments`` row is ``{name, tier, path, rules, shadows}``;
+            ``plugin_rules`` rows are ``{plugin, rules}``; ``references``
+            (listed live, since ``selectReferences`` adds them mid-session)
+            are ``{ref_id, rules}``.  ``declared_by`` names the profile in the
+            ``inherits:`` chain that set ``apparmor_fragments`` (``None``
+            when none did, ``""`` when a restored session did not record
+            it).  ``recorded: False`` when the profile was loaded before
+            this daemon started or was never loaded here.  ``None`` (the
+            whole field) when the session is not AppArmor-confined.
+        ``seccomp`` (#1503, additive): the seccomp-bpf posture the
+            session's model-driven subprocesses get, as the runner
+            reported it at bootstrap -- ``{posture, allowed_families?,
+            reason?, required?, libseccomp?, spawns_refused?}`` where
+            ``posture`` is ``filter`` / ``off`` / ``absent`` /
+            ``unconfined``.  ``None`` from a daemon or runner that does not
+            report it.  The live value rides ``probe["seccomp"]``.
+
+    **Live** (measured fresh, at the moment of this call, on the runner --
+    never a cached value):
+        ``probe``: the on-demand re-probe
+        (``server.runner.bootstrap.probe_confinement_now``) --
+        ``{ok, error, expected_profile, current_profile, current_mode,
+        enforced, confined, scan}`` where ``scan`` is
+        ``{scanned, matched, divergent, unreadable, gone, uniform, route,
+        divergent_threads, unreadable_threads}`` (thread-level detail,
+        tid/name/label, per #1023's ``ThreadProfileScan``) or ``None``
+        when the walk itself could not run.  ``ok=False`` means the probe
+        could not determine an answer -- absence of evidence, rendered as
+        exactly that rather than as a guessed ``True`` or ``False``.
+        ``None`` (the whole field) when this session has no runner to
+        probe.
+
+    Fields:
+        request_id: The :class:`DiagnosticsRequest` this answers.
+        ok: ``False`` when nothing could be reported at all (no session,
+            or the caller was refused by the owner gate).  Even then a
+            live ``probe`` may still be ``None`` while everything else is
+            populated -- see ``category``.
+        error / category: Why not, when ``ok`` is ``False``.
+            ``category`` is one of ``no_session``, ``not_owner``,
+            ``runner_unreachable``.
+    """
+    type: EventType = Field(default=EventType.DIAGNOSTICS_RESULT)
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    runner_identity: Optional[Dict[str, Any]] = None
+    confinement_id: str = ""
+    sandbox_mode: Optional[str] = None
+    consumption: Optional[Dict[str, Any]] = None
+    notebook_boundary_kind: Optional[str] = None
+    protocol_version: str = ""
+    server_version: str = ""
+    probe: Optional[Dict[str, Any]] = None
+    apparmor_grants: Optional[Dict[str, Any]] = None
+    seccomp: Optional[Dict[str, Any]] = None
 
 
 class SandboxPathsEvent(Event):
@@ -1633,6 +2550,15 @@ class SessionInfoEvent(Event):
     # ^ [{name, methods}, ...] for services command completions
     tool_id_mappings: Dict[str, str] = Field(default_factory=dict)
     # ^ {hash_id: human_name, ...} for resolving opaque tool/category IDs in display
+    # The Article 50(1) first-interaction announcement (protocol 1.15), or
+    # ``None`` when this session does not announce -- see
+    # ``shared.ai_disclosure.announcement_for``.  Carried HERE as well as on
+    # the ``AgentOutputEvent(source="system")`` that also goes out, because
+    # this is the shape a client can act on before a turn exists: a voice
+    # client owns the speaker and can say it aloud, which the framework
+    # cannot do for it (there is no TTS in the tree).  The event states the
+    # obligation; the medium is the client's.
+    disclosure_announcement: Optional[str] = None
 
 
 class SessionDescriptionUpdatedEvent(Event):
@@ -1736,6 +2662,18 @@ class WorkspaceInfo(BaseModel):
     provider: Optional[str] = None  # Provider if configured
     model: Optional[str] = None  # Model if configured
     last_accessed: Optional[str] = None  # ISO timestamp
+    path: Optional[str] = None  # Absolute path on the daemon host
+    # The authenticated user who created it; None = unowned (visible to all).
+    # A user sees their own and the unowned workspaces, never another user's.
+    owner: Optional[str] = None
+    # The git checkouts in the workspace (1.27), DERIVED from disk on every
+    # listing, never declared: the workspace root itself (``path == "."``)
+    # and each immediate child directory holding ``.git``.  Each entry is
+    # ``{"forge": "github"|"gitlab"|<host>|"", "repo": "owner/name"|"",
+    # "branch": <branch, or short sha when detached>, "path": "."|<child>}``.
+    # Read from ``.git/HEAD`` and ``.git/config`` as files (no git process);
+    # credentials in a remote URL are never echoed.
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class WorkspaceListEvent(Event):
@@ -1746,11 +2684,89 @@ class WorkspaceListEvent(Event):
     # ^ List of WorkspaceInfo as dicts
 
 
+class WorkspaceDeletedEvent(Event):
+    """Answer to ``workspace.delete`` (protocol 1.13).
+
+    One event whatever happened, because the client is a list that has to
+    render *something* for the press: ``ok`` with the name on success;
+    ``ok=False`` and the reason when the daemon refused -- the workspace
+    belongs to another user, does not exist, still has loaded sessions or
+    other clients selecting it, or the name left the root.  On success the
+    directory and everything under it (persisted sessions included) is
+    gone and the deleting client's selection of it is cleared.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_DELETED)
+    name: str = ""
+    ok: bool = True
+    error: str = ""
+
+
+class WorkspaceInspectEvent(Event):
+    """Answer to ``workspace.inspect`` (protocol 1.27).
+
+    One event whatever happened.  ``ok=False`` with ``error`` when the name
+    left the root, names no workspace, or belongs to another user -- the
+    same refusals ``workspace.select`` / ``workspace.delete`` give.
+
+    ``sessions`` counts the sessions in this workspace by state: ``total``,
+    ``sleeping`` (persisted, not loaded), ``awake`` (loaded, not waiting on
+    a person) and ``waiting`` (loaded and blocked on a permission or
+    clarification prompt).  ``repos`` is :attr:`WorkspaceInfo.sources` plus,
+    per checkout, ``uncommitted`` (lines of ``git status --porcelain``),
+    ``unpushed`` (commits ahead of the upstream; ``None`` when there is no
+    upstream) and ``error`` (non-empty when git could not answer; the two
+    counts are then ``None``).  ``size_bytes`` is the recursive size of the
+    tree, ``None`` when the walk was too large or too slow to finish.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_INSPECTED)
+    name: str = ""
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    path: str = ""
+    size_bytes: Optional[int] = None
+    sessions: Dict[str, int] = Field(default_factory=dict)
+    repos: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkspaceCloneProgressEvent(Event):
+    """One step of a ``workspace.clone`` (protocol 1.27).
+
+    Every requested repo is first announced ``queued``; they are then cloned
+    one at a time through ``cloning`` (with ``percent`` from git's own
+    progress) and ``checkout`` to ``done`` or ``failed`` (with ``error``).
+    ``done`` / ``total`` count finished repos of this request, so the last
+    event of a request has ``done == total``.  A request refused as a whole
+    (workspace not visible, left the root) is ONE ``failed`` event with
+    ``repo == ""``.  A retry is a new request naming the one repo.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_CLONE_PROGRESS)
+    name: str = ""
+    request_id: str = ""
+    repo: str = ""
+    branch: str = ""
+    state: str = "queued"  # queued | cloning | checkout | done | failed
+    percent: int = 0
+    error: str = ""
+    done: int = 0
+    total: int = 0
+
+
 class WorkspaceCreatedEvent(Event):
-    """Response to workspace.create - new workspace created."""
+    """Response to workspace.create - new workspace created.
+
+    ``workspace`` is the created entry as ``workspace.list`` would render it
+    (name, path, ``configured``, ``owner``, ``last_accessed``), so a client
+    can add the row without a second listing.  ``name`` and ``path`` repeat
+    its two identifying fields for readers predating the dict.  The WS
+    server used to send ONLY ``workspace=`` -- a field this model did not
+    declare, dropped on ingest by ``extra='ignore'`` -- so every client
+    learned of a created workspace as one with no name.
+    """
     type: EventType = Field(default=EventType.WORKSPACE_CREATED)
     name: str = ""  # Relative path from workspace root
     path: str = ""  # Absolute path
+    workspace: Dict[str, Any] = Field(default_factory=dict)  # WorkspaceInfo as a dict
 
 
 class ConfigStatusEvent(Event):
@@ -1794,6 +2810,16 @@ class WorkspaceFilesChangedEvent(Event):
     type: EventType = Field(default=EventType.WORKSPACE_FILES_CHANGED)
     changes: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
+    seq: Optional[int] = None
+    # ^ Protocol 1.19 (#1189): this batch's number from the session's
+    #   workspace monitor, one more than the last.  Every entry in
+    #   ``changes`` changed at this ``seq``.  A counter, not a clock.
+    epoch: Optional[str] = None
+    # ^ Protocol 1.19: which monitor instance numbered it.  A ``seq`` from
+    #   a different epoch is not comparable -- the monitor is rebuilt when a
+    #   session is reloaded and counts again from 0 -- so a reader keeping a
+    #   "changed since" mark discards it when the epoch changes.  Both
+    #   fields are absent from a daemon older than 1.19.
 
 
 class WorkspaceFilesSnapshotEvent(Event):
@@ -1808,6 +2834,653 @@ class WorkspaceFilesSnapshotEvent(Event):
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
     total: int = 0
     # ^ Convenience: count of non-deleted entries
+    seq: Optional[int] = None
+    # ^ Protocol 1.19 (#1189): the monitor's latest batch number at the
+    #   moment of the snapshot -- what a client records as its mark when it
+    #   resets the panel right after attaching.
+    epoch: Optional[str] = None
+    # ^ Protocol 1.19: the monitor instance, as on the changed event.
+    seqs: Dict[str, int] = Field(default_factory=dict)
+    # ^ Protocol 1.19: path -> the ``seq`` of that path's latest change.  A
+    #   PARALLEL map rather than a third key on each ``files`` entry, because
+    #   those entries are ``Dict[str, str]`` and an older client validates
+    #   them as such -- an integer there would fail its whole event, where an
+    #   unknown top-level field is ignored.  A path with no entry changed
+    #   before this monitor numbered anything (restored across a reload):
+    #   read it as 0.  This map is what lets a client that reset its panel
+    #   keep only what changed afterwards across a reconnect, which replaces
+    #   its list wholesale.
+
+
+class WorkspaceIgnoreResultEvent(Event):
+    """Answer to ``workspace.ignore <path>`` (protocol 1.12).
+
+    The TUI's workspace panel adds the entry under the cursor to the
+    workspace's ``.gitignore`` — and removes it again with the same key —
+    by writing the file itself, which it can because it runs on the host.
+    A remote client (the web coding UI) cannot, so the daemon serves the
+    same toggle as a command and answers with this event.  The edit is
+    ``jaato_sdk.gitignore_toggle.toggle_gitignore_pattern`` on both routes,
+    so the two clients cannot disagree about what one press does.
+
+    The daemon's ``WorkspaceMonitor`` watches ``.gitignore`` and reloads its
+    parser on the write, so the pattern applies to every LATER file event;
+    an entry the panel already shows is not retroactively removed — that is
+    what the client-side hide is for.
+
+    Fields:
+        path: The entry as the caller sent it (a directory keeps its
+            trailing ``/``).
+        ignored: The entry's state AFTER the toggle — ``True`` when the line
+            was added, ``False`` when it was removed.  Meaningful only when
+            ``ok``.
+        ok: Whether the file was written.
+        error: Why not, when ``ok`` is ``False`` — the pattern was refused
+            (empty, absolute, a line break, a leading ``#`` / ``!``), the
+            caller has no workspace, or the write failed.
+        gitignore_path: The file that was edited, so a client can name it.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_IGNORE_RESULT)
+    path: str = ""
+    ignored: bool = False
+    ok: bool = True
+    error: str = ""
+    gitignore_path: str = ""
+
+
+class ReferenceCurationResultEvent(Event):
+    """Answer to ``reference.promote`` / ``reference.dismiss`` (protocol 1.33).
+
+    An agent PROPOSES a reference with ``proposeReference``; the result is a
+    claim under ``<workspace>/.jaato/references-claims/``, never a catalog
+    entry, because a confined runner cannot write the catalog.  A person
+    promotes the claim (the daemon writes ``.jaato/references/<id>.json``,
+    stamping ``origin.curated_by`` from this connection's identity) or
+    dismisses it (the claim file is removed).  Both are gated by the
+    workspace-owner rule the memory rail uses.
+
+    The daemon answers every request with exactly one of these, refusals
+    included.
+
+    Fields:
+        request_id: Echoed from a :class:`ReferenceCurationRequest`; ``""``
+            for the answer to a typed ``reference.promote|dismiss`` command.
+        action: ``promote`` or ``dismiss``.
+        claim_id: The claim acted on, as the caller named it.
+        ok: Whether the verb did what was asked.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``unknown_bundle``,
+            ``not_found``, ``invalid_claim``, ``collision``,
+            ``stale`` (a revision claim written against a version of the
+            reference that has since changed; nothing is written),
+            ``ambiguous`` (the revised id is in two catalog files),
+            ``unsafe_path`` or ``io_error``.  Branch on this, not on
+            ``error``.
+        error: The reason, for a person.
+        reference_id: The catalog id a promotion wrote.
+        reference_file: The workspace-relative catalog file it wrote.
+        warnings: Anything that happened beside success -- a promoted claim
+            whose file could not be removed afterwards, or a destination
+            index that was not updated.
+        bundle: The bundle promoted into; ``""`` for the catalog root.
+        reconcile: What happened to the destination bundle's vector index
+            after a promotion: ``none`` (it has none), ``updated``,
+            ``clean``, ``busy``, ``unavailable`` (no session to embed with,
+            no provider, a different model, no numpy) or ``error``.  The
+            reference is placed whatever this says; until the index holds
+            its row, similarity matching cannot find it.
+        reconcile_detail: The reason, when ``reconcile`` is not ``none`` /
+            ``updated`` / ``clean``.
+        revised: ``True`` when the claim was a REVISION of a reference
+            already in the catalog (``proposeReference`` with ``revises``):
+            the catalog file was replaced in place, its ``origin`` kept and
+            a record appended to its ``revisions``.  Additive; an older
+            daemon never sends it (and answers a revision ``collision``).
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CURATION_RESULT)
+    request_id: str = ""
+    action: str = ""
+    claim_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    reference_id: str = ""
+    reference_file: str = ""
+    warnings: List[str] = Field(default_factory=list)
+    bundle: str = ""
+    reconcile: str = ""
+    reconcile_detail: str = ""
+    revised: bool = False
+
+
+class ReferenceClaimsEvent(Event):
+    """The reference claims agents proposed in the caller's workspace (1.33).
+
+    Answer to :class:`ReferenceClaimsRequest`, carrying its ``request_id``.
+    A claim is what ``proposeReference`` wrote under
+    ``<workspace>/.jaato/references-claims/``: a proposed catalog entry
+    nobody has reviewed.  Read by the DAEMON, without following a link out
+    of the workspace; a file that is not a well-formed claim is named under
+    ``unreadable`` rather than dropped.
+
+    ``ok`` is ``False`` -- with ``category`` ``no_workspace`` or
+    ``unsafe_path`` -- when the claims could not be read; ``claims`` is then
+    meaningless, never "nothing proposed".
+
+    Each row: ``claim_id``, ``id``, ``name``, ``description``, ``tags``,
+    ``type`` (``local`` / ``inline``), ``path`` (local) or ``content``
+    (inline), ``origin`` (the claim's recorded origin: ``generated_by``,
+    ``created_by``, ``witnessed_by``, ``at``) and ``problems`` -- the
+    reasons a promotion would be refused right now (the id is already in the
+    catalog, the file is gone), empty when it would pass.  ``name``,
+    ``description`` and ``content`` were written by a MODEL and reviewed by
+    nobody: a client shows them as text, never as markup.
+
+    A REVISION claim (``proposeReference`` with ``revises``: a new version
+    of a reference already in the catalog) also carries ``revises`` (the
+    id), ``revises_file`` (where it lives), ``current`` (its fields now:
+    ``name``, ``description``, ``tags``, ``type``, ``path`` or ``content``,
+    ``links``) for a client to diff against, ``links_replaced`` (whether
+    the revision sets the edges or keeps them) and ``stale`` with
+    ``stale_reason`` -- decided now: the reference changed since the claim
+    was written, so a promotion would be refused ``stale``.  Additive keys
+    on free-form rows; an older client shows the row as a new page.
+
+    ``may_curate`` says whether THIS connection may promote or dismiss --
+    the workspace-owner rule the daemon also enforces.
+
+    ``bundles`` are the workspace-tier sub-bundles a promotion may name:
+    ``[{"name", "indexed", "model"?}]``, ``model`` only for a bundle with a
+    vector index.  The catalog root is the default destination and is not
+    listed.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CLAIMS)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    claims: List[Dict[str, Any]] = Field(default_factory=list)
+    unreadable: List[str] = Field(default_factory=list)
+    may_curate: bool = False
+    bundles: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class PoolStatusRequest(Event):
+    """Read the daemon's pre-warm runner pool, or resize it (1.35).
+
+    Answered by one :class:`PoolStatusEvent` carrying this ``request_id``.
+    With both sizes ``None`` it only reads.  ``target_size`` is the floor
+    on UNRESERVED idle slots (0 disables the pool); ``max_size`` the
+    ceiling on all idle slots, reservations included.  ``max_size`` alone,
+    with no ``target_size``, keeps the current floor.
+
+    Only an IPC connection whose kernel-reported uid is the daemon's own,
+    or root, is answered with the pool: the pool is a property of the
+    daemon process, never of a session or a remote client.
+    """
+    type: EventType = Field(default=EventType.POOL_STATUS_REQUEST)
+    request_id: str = ""
+    target_size: Optional[int] = None
+    max_size: Optional[int] = None
+
+
+class PoolStatusEvent(Event):
+    """The daemon's pre-warm runner pool, after a read or a resize (1.35).
+
+    Fields:
+        request_id: The request's id, echoed; ``""`` for the typed
+            ``pool.status`` / ``pool.resize`` commands.
+        ok: Whether the request was carried out.  ``False`` with
+            ``category`` and ``error`` otherwise; the sizing fields are
+            then meaningless.
+        category: ``""`` on success, else ``not_authorized`` (the
+            connection is not the daemon's own account or root),
+            ``invalid_request`` (a size that is not a non-negative
+            integer) or ``no_pool`` (this daemon runs without a pool
+            manager).
+        error: Why not, when ``ok`` is ``False``.
+        changed: Whether this request resized the pool.
+        previous_target_size / previous_max_size: The sizes before a
+            resize; ``None`` on a read.
+        target_size / max_size: The sizes now.
+        max_size_explicit: Whether the ceiling was chosen (by the env var
+            or a resize) rather than derived as ``2 * target_size``.
+        idle / unreserved / reserved: Idle slots right now -- all of them,
+            those any session may take, and those held for one cascade.
+            A larger ``target_size`` fills in over the next moments, one
+            fork at a time; read again to watch it.
+        pending_teardown: Idle slots dropped (by a shrink, the ceiling or
+            a dead channel) not yet reaped.
+        replenishing: Whether the thread that forks and reaps slots runs.
+        template_alive: Whether the template slots are forked from is up.
+        routing_enabled: Whether sessions are routed to the pool at all
+            (``JAATO_RUNNER_POOL_ENABLED``); a pool that is filled but
+            not routed to serves nobody.
+        persisted: Whether ``--restart`` will start the daemon with these
+            sizes.  ``False`` when the daemon could not write its restart
+            config, which is then the one place the sizes are not kept.
+        telemetry: The pool's counters (``pool_acquire_miss_total`` and
+            friends), the numbers a resize is decided from.
+    """
+    type: EventType = Field(default=EventType.POOL_STATUS)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    changed: bool = False
+    previous_target_size: Optional[int] = None
+    previous_max_size: Optional[int] = None
+    target_size: int = 0
+    max_size: int = 0
+    max_size_explicit: bool = False
+    idle: int = 0
+    unreserved: int = 0
+    reserved: int = 0
+    pending_teardown: int = 0
+    replenishing: bool = False
+    template_alive: bool = False
+    routing_enabled: bool = False
+    persisted: bool = False
+    telemetry: Dict[str, int] = Field(default_factory=dict)
+
+
+class ReferenceClaimsRequest(Event):
+    """List the reference claims in the caller's workspace (1.33).
+
+    Answered by :class:`ReferenceClaimsEvent` carrying this ``request_id``.
+    Writes nothing; any connection whose workspace it is may list.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CLAIMS_REQUEST)
+    request_id: str = ""
+
+
+class ReferenceCurationRequest(Event):
+    """Promote or dismiss one reference claim (1.33).
+
+    The correlated form of the ``reference.promote`` / ``reference.dismiss``
+    commands: answered by :class:`ReferenceCurationResultEvent` carrying this
+    ``request_id``.  ``action`` is ``promote`` or ``dismiss``.  ``bundle``
+    names a workspace-tier sub-bundle to promote into (``""``: the catalog
+    root); ``dismiss`` ignores it.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CURATION_REQUEST)
+    request_id: str = ""
+    action: str = ""
+    claim_id: str = ""
+    bundle: str = ""
+
+
+class ReferenceCatalogEvent(Event):
+    """The workspace reference catalog, as a curator sees it (1.33).
+
+    Answer to :class:`ReferenceCatalogRequest`, carrying its ``request_id``.
+    Read by the DAEMON from ``<workspace>/.jaato/references/`` and its
+    sub-bundles, without following a link.  Each row: ``id``, ``name``,
+    ``description``, ``bundle`` (``""`` for the catalog root), ``file``
+    (workspace-relative), ``links`` (its declared ``{to, rel, note?,
+    dangling?}`` edges; ``dangling`` when the target is not in this
+    catalog), ``linked_from`` (``{from, rel}`` edges pointing at it) and
+    ``duplicate_id`` when another file declares the same id (such a
+    reference cannot be edited).  ``name``, ``description`` and ``note`` are
+    catalog text: a client shows them as text.
+
+    ``ok`` is ``False`` (``no_workspace`` / ``unsafe_path``) when the catalog
+    could not be read; ``references`` is then meaningless.  ``unreadable``
+    names files under the catalog that are not a reference this view can
+    show.  ``may_curate`` says whether THIS connection may edit links.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CATALOG)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    references: List[Dict[str, Any]] = Field(default_factory=list)
+    unreadable: List[str] = Field(default_factory=list)
+    may_curate: bool = False
+
+
+class ReferenceCatalogRequest(Event):
+    """List the caller's workspace reference catalog (1.33).
+
+    Answered by :class:`ReferenceCatalogEvent` carrying this ``request_id``.
+    Writes nothing.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_CATALOG_REQUEST)
+    request_id: str = ""
+
+
+class ReferenceLinksUpdateRequest(Event):
+    """Replace one catalog reference's typed links (1.33).
+
+    ``links`` is the complete new list, ``[{to, rel, note?}]``; ``[]``
+    removes every declared edge.  Answered by
+    :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_LINKS_UPDATE_REQUEST)
+    request_id: str = ""
+    reference_id: str = ""
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReferenceBundleCreateRequest(Event):
+    """Create a workspace-tier reference sub-bundle (1.36, #1478).
+
+    Answered by :class:`ReferenceBundleCreateResultEvent` carrying this
+    ``request_id``.  ``name`` is one id token (the claim/reference id rule);
+    the bundle is created UNINDEXED -- ``references bundle index <name>``
+    adds a vector index later, from a session with an embedding provider.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_BUNDLE_CREATE_REQUEST)
+    request_id: str = ""
+    name: str = ""
+
+
+class ReferenceBundleCreateResultEvent(Event):
+    """What one bundle create did (1.36, #1478).
+
+    Fields:
+        request_id: Echoed from the request (``""`` for the typed command).
+        ok: Whether the bundle was created.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``collision`` (a bundle, or any
+            directory, by that name already exists), ``unsafe_path`` or
+            ``io_error``.
+        error: The reason, for a person.
+        bundle: The bundle name, as created (or as refused).
+        indexed: Whether the bundle has a vector index (``False`` for every
+            bundle this verb creates).
+        bundles: The workspace's sub-bundles after the call, in
+            ``ReferenceClaimsEvent.bundles`` shape (``{name, indexed,
+            model?}``) -- answered on every outcome, so a ``collision`` also
+            says whether the existing one is indexed.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_BUNDLE_CREATE_RESULT)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    bundle: str = ""
+    indexed: bool = False
+    bundles: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+#: The reference-curation requests (1.33).  Daemon-level: each handler
+#: resolves the caller's workspace from the CONNECTION and answers a
+#: session-less caller with a correlated result (``no_workspace`` when it has
+#: none), so a transport must route them without an attached session (#1475).
+REFERENCE_CURATION_REQUEST_TYPES = (
+    ReferenceClaimsRequest,
+    ReferenceCurationRequest,
+    ReferenceCatalogRequest,
+    ReferenceLinksUpdateRequest,
+    ReferenceBundleCreateRequest,
+)
+
+
+class ReferenceLinksUpdateResultEvent(Event):
+    """What one links update did (1.33).
+
+    The daemon writes the reference's JSON, changing only its ``links`` key,
+    because a confined runner cannot write the catalog.  Gated by the
+    workspace-owner rule the memory rail and promotion use.
+
+    Fields:
+        request_id: Echoed from the request.
+        reference_id: The reference, as the caller named it.
+        ok: Whether the links were written.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``not_owner``, ``invalid_links``,
+            ``not_found``, ``ambiguous`` (the id is declared in two files),
+            ``unsafe_path`` or ``io_error``.
+        error: The reason, for a person.
+        reference_file: The workspace-relative file written.
+        links: The links as written, normalised.
+        warnings: What did not block the write: a target this catalog does
+            not hold, or a ``supersedes`` another reference also declares.
+    """
+    type: EventType = Field(default=EventType.REFERENCE_LINKS_UPDATE_RESULT)
+    request_id: str = ""
+    reference_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    reference_file: str = ""
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class SessionMessageResultEvent(Event):
+    """The receipt for one ``session.message`` (protocol 1.22).
+
+    A message from the CALLER'S session to another session in a common
+    group -- a shared cascade, or a shared authenticated creator -- delivered
+    by ``SessionManager.deliver_group_message``, the same method the
+    ``courier`` plugin's ``send_to_session`` tool calls.  A cold target is
+    woken to process it.  FIRE AND FORGET: ``status`` says what happened to
+    the message, never what the peer decided, and there is no reply channel.
+
+    Fields:
+        request_id: The caller's correlation id, echoed (1.3 rule), so
+            several sends on one connection can be told apart.
+        target: The address the caller sent -- a session id or a sibling
+            name -- echoed.
+        status: ``accepted`` (a turn was started on the target; ``woken``
+            says whether it was revived to do so), ``queued`` (the target is
+            mid-turn and collects the message when the turn ends),
+            ``spooled`` (the target could not take the message now -- it is
+            mid-turn and the message carries attachments, or it is cold and
+            did not revive -- so the message waits in the target's durable
+            inbox and is driven at its next turn boundary or when the daemon
+            revives it), ``no_such_session``, ``ambiguous`` (a name matching several
+            members; ``candidates`` lists their ids), ``session_cold``
+            (waking is disabled), ``duplicate`` (``event_id`` already
+            actioned -- a benign no-op), ``terminated`` (the target ended
+            on an error or an exhausted budget and is never woken), or
+            ``refused`` with ``error``.
+        ok: Whether the target HOLDS the message (``accepted`` / ``queued``
+            / ``spooled``) or it was a benign ``duplicate``.  Everything else
+            is ``False``.
+        spooled: Whether a copy of the message is in the target's durable
+            inbox -- always for ``spooled``, and also for ``queued`` (the
+            copy survives an unload between the queue and the turn that
+            drains it).  Additive, default ``False``, so an older daemon's
+            receipt reads as it did.
+        files: One row per ``file_ref`` / ``text_attachment`` the caller
+            sent (1.24, additive): ``{name, disposition, ...}`` with
+            ``disposition`` one of ``referenced`` (the target shares the
+            sender's workspace and reads the file in place; ``path`` is
+            workspace-relative, with ``sha256`` and ``size``), ``copied``
+            (into the target's inbox, ``path`` in the target's terms),
+            ``inlined`` (a text attachment carried in the message body) or
+            ``refused`` (with ``reason``: ``outside_sender_workspace``,
+            ``not_found``, ``not_a_file``, ``credential``,
+            ``file_too_large``, ``message_files_too_large``,
+            ``target_workspace_unresolved``, ``copy_failed``,
+            ``copy_mismatch``) or ``discarded`` (a copy taken back because
+            the message was then refused or not delivered).  A refused file
+            refuses the WHOLE message (``status: refused``), never a
+            delivery with one file missing.
+        message_id: The daemon-minted id of the delivered message; ``""``
+            when nothing was delivered.
+        target_session_id: The resolved target, when one was resolved.
+        sibling_name: The target's cascade-scoped name, when it has one.
+        group_key: The group key the delivery was made under.
+        woken: Whether the target was revived from disk to receive it.
+        headless: Whether the target ran with no attached client.
+        candidates: For ``ambiguous``, the session ids the name matched.
+        error: Why not, when ``ok`` is ``False``.
+    """
+    type: EventType = Field(default=EventType.SESSION_MESSAGE_RESULT)
+    request_id: Optional[str] = None
+    target: str = ""
+    status: str = ""
+    ok: bool = False
+    message_id: str = ""
+    target_session_id: str = ""
+    sibling_name: str = ""
+    group_key: str = ""
+    woken: bool = False
+    headless: bool = False
+    spooled: bool = False
+    candidates: List[str] = Field(default_factory=list)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+
+
+class ScaffoldExplainEvent(Event):
+    """One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
+
+    ``explain`` introspects the framework installed in the CALLING process,
+    which is right when the CLI and the daemon share a virtualenv and wrong
+    the moment they do not.  An application that installs ``jaato-sdk`` into
+    its own venv and drives a daemon owned by another user over IPC has two
+    installs: the CLI's, and the one actually serving its sessions.  Topics
+    contributed by an extension that only the DAEMON has — premium's
+    ``reactors`` is the worked case — were then reported as
+    ``unknown explain scope``, which is indistinguishable from *no such
+    topic exists* and sends a reader to look for a feature they have.
+
+    So the daemon answers about itself.  It renders the topic through the
+    same merged dispatch the CLI uses, including every topic its own
+    ``jaato.scaffold_topics`` entry points contribute, and the CLI prints
+    the result marked with where it came from — a reader must never have to
+    guess which of the two installs an answer describes.
+
+    Fields:
+        topic: The topic asked for, echoed so a client can correlate.
+        ok: Whether the topic rendered.
+        text: The human rendering, as the CLI would print it.
+        data: The structured rendering — what ``--json`` prints, VERBATIM.
+            Usually an object, and deliberately not typed as one: the
+            in-tree ``profile`` topic renders an array of field rows, and
+            wrapping it to satisfy a narrower field would make the daemon's
+            ``--json`` differ from the same command's local ``--json`` —
+            two installs disagreeing about one topic, which is the failure
+            this event exists to remove rather than one to introduce.  A
+            reader branching on keys must check the shape first.
+        topics: Every topic THIS daemon serves, as ``scope_catalog`` rows
+            (``scope`` / ``arg`` / ``blurb`` / ``contributed_by`` / ...).
+            Always populated, including when ``ok`` is ``False``, because
+            "which topics does the daemon have" is exactly the question a
+            failed lookup raises.
+        error: Why not, when ``ok`` is ``False`` — no such topic on the
+            daemon either, a usage error (a topic needing a name, given
+            none), or the renderer raised.
+        server_version: The daemon's jaato-server version, so a client can
+            report WHOSE install answered rather than implying its own.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_EXPLAIN_RESULT)
+    topic: str = ""
+    ok: bool = True
+    text: str = ""
+    data: Any = Field(default_factory=dict)
+    topics: List[Dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    server_version: str = ""
+
+
+class ScaffoldIntegrationEvent(Event):
+    """The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
+
+    The sibling of :class:`ScaffoldExplainEvent`.  ``explain`` renders a topic
+    from the daemon's install; this RUNS a named integration — the
+    ``jaato-sdk`` skill is the one that ships — into the caller's own
+    workspace, on the daemon's install and host.  The point is the same: the
+    stamp records the version of whichever ``jaato-server`` runs it, and the
+    workspace directory is on that host, so the install that serves the
+    session is the one that must write the skill.  An application that carried
+    its own copy of the payload could drift from the framework; asking the
+    daemon means it never can.
+
+    The daemon applies the ``--refresh`` contract: it re-applies a copy that
+    is ``absent`` / ``stale`` / ``outdated`` (nothing local is lost) and
+    LEAVES an ``edited`` / ``diverged`` / ``unstamped`` copy untouched, saying
+    which in ``skipped_reason``.  A skipped refresh is correct behaviour, not
+    a failure — ``ok`` stays ``True`` — so a client reports it in a notice
+    rather than as an error.
+
+    Fields:
+        integration: The integration name asked for, echoed to correlate.
+        ok: Whether the verb ran.  ``False`` only for a verb-level refusal —
+            an unknown integration, no resolvable workspace, or the daemon
+            could not load its own scaffold code.  A refresh the daemon
+            declined to apply (an edited copy) is ``ok=True`` with a
+            ``skipped_reason``.
+        changed: Whether files were written.  ``False`` for a copy already
+            current, and for a skipped one.
+        state_before: The ``compare()`` state the copy was in — ``absent`` /
+            ``current`` / ``stale`` / ``outdated`` / ``edited`` / ``diverged``
+            / ``unstamped``.
+        state_after: The state after the verb ran.
+        skipped_reason: Why the refresh was left alone, with the same detail
+            text ``compare()`` produces, or ``""`` when it was applied.
+        target: The absolute path the integration installs at, so a client
+            can point a reader at the file it wrote.
+        text: The human rendering, the lines the CLI would print.
+        error: Why not, when ``ok`` is ``False``.
+        available: Every integration THIS daemon ships, so a refusal that
+            names an unknown one is actionable — the caller's own list is by
+            construction the wrong one.
+        server_version: The daemon's ``jaato-server`` version — the version
+            the stamp records, so a client reports WHOSE install wrote the
+            skill.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_INTEGRATION_RESULT)
+    integration: str = ""
+    ok: bool = True
+    changed: bool = False
+    state_before: str = ""
+    state_after: str = ""
+    skipped_reason: str = ""
+    target: str = ""
+    text: str = ""
+    error: str = ""
+    available: List[str] = Field(default_factory=list)
+    server_version: str = ""
+
+
+class ScaffoldValidateEvent(Event):
+    """The daemon's ``jaato-scaffold validate`` of the caller's workspace (1.34).
+
+    ``jaato-scaffold`` ships with jaato-sdk, and ``validate`` cannot run from
+    the SDK alone: most checks run on a RESOLVED profile (parsed, merged with
+    its ``inherits:`` and set overlay, constructed), and only jaato-server's
+    loader builds one.  So an SDK-only install asks the daemon, and the
+    daemon's full validator answers, contributed validators (#1306)
+    included.  It checks the workspace this connection is in (selected over
+    WS, declared at the handshake over IPC); there is no path parameter.
+
+    Fields:
+        ok: Whether the validator RAN.  ``False`` only when it could not: no
+            workspace for this connection, or the daemon cannot load its own
+            validator.  A run that found errors is ``ok=True`` with
+            ``errors > 0``; ``ok`` never means "valid".
+        workspace: The absolute path validated, on the daemon's host.
+        profile_set: The set overlay applied, or ``""``.
+        profile: The one profile validated, or ``""`` for all of them.
+        scope: How the run names what it validated (``all profiles``,
+            ``profile 'x'``), the same words a local run prints.
+        findings: Every finding, in ``Diagnostic.as_dict()`` shape
+            (``severity`` / ``code`` / ``message`` / ``profile`` / ``where``
+            / ``tier``, plus ``source`` on a contributed one).
+        errors: How many findings are ``error``, the count a caller's exit
+            code follows.
+        warnings: How many are ``warn``.
+        error: Why the validator did not run, when ``ok`` is ``False``.
+        server_version: The daemon's ``jaato-server`` version, so a client
+            says whose install produced the findings.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_VALIDATE_RESULT)
+    ok: bool = True
+    workspace: str = ""
+    profile_set: str = ""
+    profile: str = ""
+    scope: str = ""
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    errors: int = 0
+    warnings: int = 0
+    error: str = ""
+    server_version: str = ""
 
 
 # =============================================================================
@@ -1918,6 +3591,76 @@ class GetInstructionBudgetRequest(Event):
     """
     type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_REQUEST)
     agent_id: Optional[str] = None  # None = main agent
+
+
+class MemoryListRequest(Event):
+    """List the attached session's memory store, quietly (#1232, 1.22).
+
+    Answered by :class:`MemoryListEvent` carrying this ``request_id``.
+    Unlike the ``memory list`` user command it prints nothing to the
+    transcript, so a client may ask as often as it needs.  Session-scoped:
+    the store is read through the session's own runner.
+    """
+    type: EventType = Field(default=EventType.MEMORY_LIST_REQUEST)
+    request_id: str = ""
+
+
+class MemoryGetRequest(Event):
+    """Fetch one memory WITH its content (1.22).
+
+    Answered by :class:`MemoryGetResultEvent`.  Viewing follows the
+    session's visibility, like the list.
+    """
+    type: EventType = Field(default=EventType.MEMORY_GET_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+
+
+class MemoryUpdateRequest(Event):
+    """Edit a memory, or approve / dismiss it (1.22).
+
+    The structured replacement for ``memory edit``, which spawns ``$EDITOR``
+    on the runner's host and so cannot be driven from a browser.  Every
+    field is optional; ``None`` leaves it as it is.  ``maturity`` moves the
+    lifecycle -- ``validated`` approves, ``dismissed`` dismisses -- through
+    the plugin's one ``curated_by``-stamping helper, which records the
+    caller as the curator.  Limited to the workspace owner (anyone, on an
+    unowned workspace); answered by :class:`MemoryUpdateResultEvent`.
+    """
+    type: EventType = Field(default=EventType.MEMORY_UPDATE_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+    description: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    maturity: Optional[str] = None
+
+
+class MemoryDeleteRequest(Event):
+    """Remove a memory from whichever tier holds it (1.22).
+
+    Through the plugin's existing delete path (``delete_memory``), not a
+    second one.  Limited to the workspace owner; answered by
+    :class:`MemoryDeleteResultEvent`.
+    """
+    type: EventType = Field(default=EventType.MEMORY_DELETE_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+
+
+class DiagnosticsRequest(Event):
+    """Ask for a live self-diagnosis of the caller's OWN session (#1294, 1.25).
+
+    Declares no session-naming field of its own: the inherited
+    ``Event.session_id`` is stamped by the router on OUTGOING events and
+    read by nothing on the way in, so the daemon always answers for
+    whichever session THIS connection is attached to -- never a value
+    read off the request.  Answered by :class:`DiagnosticsResultEvent`,
+    which re-probes the runner's confinement fresh rather than reading a
+    cached claim.
+    """
+    type: EventType = Field(default=EventType.DIAGNOSTICS_REQUEST)
+    request_id: str = ""
 
 
 class CommandListRequest(Event):
@@ -2074,6 +3817,77 @@ class HistoryEvent(Event):
     # down (pydantic ValidationError), so a disk-restored session's
     # history.request / attach-replay / snapshot all failed on the accounting
     # alone even though the messages validated fine.
+
+
+class HistoryPageRequest(Event):
+    """Ask for one page of the rendered transcript, newest first (1.28).
+
+    Pages are cut from the END of the history: an empty ``before`` asks
+    for the most recent page, and each answer's ``before`` cursor asks for
+    the page just older than it.  The daemon never splits a renderable
+    unit (a fenced block, a table, a notebook cell, one message's tool
+    calls) across two pages, so ``max_lines`` is a target, not a cap: a
+    single unit taller than it is a page by itself.
+
+    Attributes:
+        agent_id: Whose transcript.
+        before: A cursor from a previous :class:`HistoryPageEvent`;
+            ``""`` for the latest page.
+        max_lines: Page budget in rendered lines; ``0`` = the daemon's
+            default (120), capped at 2000.
+        request_id: Echoed on the answer.
+    """
+    type: EventType = Field(default=EventType.HISTORY_PAGE_REQUEST)
+    agent_id: str = "main"
+    before: str = ""
+    max_lines: int = 0
+    request_id: str = ""
+
+
+class HistoryPageEvent(Event):
+    """One page of the transcript as renderable units (1.28).
+
+    The answer to :class:`HistoryPageRequest`, and -- request_id ``""`` --
+    what an attach sends INSTEAD of the full event replay when the
+    client's presentation asks for ``history_replay: "paged"``.
+
+    Each entry of ``units`` is, oldest first::
+
+        {"id": "<cursor>", "kind": "user"|"model"|"thinking"|"tools",
+         "group": "<id>", "turn": <int>, "lines": <int>,
+         "text": "...",                       # all kinds but tools
+         "tools": [{"call_id", "tool_name", "tool_args",
+                    "tool_class", "success"}]}  # tools only
+
+    ``model`` text has been through the output formatter pipeline, exactly
+    as the live stream is (``<j-code>``, ``<j-table>``...).  Consecutive
+    units sharing a ``group`` are segments of ONE text part -- join them
+    into one block.  ``success`` is ``null`` for a call no result was
+    recorded for.
+
+    Attributes:
+        agent_id: Whose transcript.
+        request_id: The request this answers; ``""`` for the attach page.
+        units: The page, oldest first.
+        before: Cursor for the next OLDER page; ``""`` when none.
+        has_more: ``before`` is non-empty.
+        total_units: Units in the whole history.
+        stale: The requested cursor no longer names any unit (the history
+            was rewritten under it); ``units`` is empty -- re-request the
+            latest page.
+        ok: ``False`` when no page could be produced; see ``error``.
+        error: Why, when ``ok`` is ``False``.
+    """
+    type: EventType = Field(default=EventType.HISTORY_PAGE)
+    agent_id: str = "main"
+    request_id: str = ""
+    units: List[Dict[str, Any]] = Field(default_factory=list)
+    before: str = ""
+    has_more: bool = False
+    total_units: int = 0
+    stale: bool = False
+    ok: bool = True
+    error: str = ""
 
 
 # =============================================================================
@@ -2363,6 +4177,391 @@ class PermissionPolicySnapshotEvent(Event):
 
 
 # =============================================================================
+# Identity at connect — the ticket bind channel (Client <-> Server)
+#
+# An application that has ALREADY authenticated a user in its own realm
+# (Keycloak, Auth0, SAML, LDAP, an internal session store — the daemon never
+# learns which) mints a short-lived, single-use ticket bound to that user,
+# hands it to that user's client, and the client presents it exactly where
+# the shared bearer token is presented today: ``Authorization: Bearer`` on
+# the Upgrade, or ``?token=`` for browsers.  The daemon resolves it at
+# CONNECTION ESTABLISHMENT and stamps the identity on the connection, so
+# declining to present an identity is not representable rather than being
+# the permissive path.
+#
+# Both verbs are REQUEST/RESULT pairs correlated by ``request_id``, which is
+# what lets one long-lived bind connection serve many concurrent logins —
+# the shape protocol 1.3 established for ``inject_prompt``.  Neither carries
+# an ``app_id``: the daemon takes that from the credential that
+# authenticated the bind connection, so it is an authenticated fact rather
+# than a caller's assertion about itself.  See ``server/ws_tickets.py``.
+# =============================================================================
+
+class TicketBindRequest(Event):
+    """Ask the daemon to mint a connect ticket for one of this app's users.
+
+    Sent on a connection authenticated by an **application credential**
+    (``--ws-app-credentials``).  Any other connection — the shared bearer
+    token, a ticket-authenticated user connection, or an unauthenticated
+    one under ``--ws-unsafe-no-auth`` — is answered ``status="denied"``:
+    minting identities is the app credential's one privilege, and holding a
+    ticket must never let a user mint more.
+
+    There is deliberately **no** ``app_id`` field.  ``preferred_username`` is
+    unique only within a realm, so two applications each holding an ``alice``
+    would collide in ``Session.created_by`` and every ownership guard would
+    silently pass across the application boundary.  The daemon qualifies the
+    identity itself (``BoundIdentity.qualified``, ``"<app_id>:<user>"``) from
+    the credential that called this verb, so no integrator can forget to.
+
+    Attributes:
+        request_id: Correlates this bind with the
+            :class:`TicketBindResultEvent` that answers it.  Required in
+            practice — one bind channel serves many concurrent logins, and
+            without it a result cannot be attributed to a request.
+        user: The identity this application asserts, in whatever spelling its
+            own realm uses.  Never validated by the daemon — that is the
+            point — but refused when empty (``created_by=""`` is falsy, so
+            every ``if user_id and ...`` guard would short-circuit exactly as
+            it does for an unauthenticated client), over-long, or carrying
+            control characters (the value is logged and persisted).
+        ttl_seconds: Ticket lifetime, ``1..3600``.  A value outside the range
+            is REFUSED rather than clamped: silently issuing something other
+            than what was asked for is how an integrator comes to believe a
+            ticket lasts a day.
+        single_use: When ``True`` (the default) the first connection that
+            presents the ticket consumes it, so a captured ticket cannot open
+            a second connection.  ``False`` lets one ticket open several
+            connections until it expires — for a client that opens a second
+            socket for a side channel, and a weaker posture either way.
+    """
+    type: EventType = Field(default=EventType.TICKET_BIND_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    ttl_seconds: int = 300
+    single_use: bool = True
+
+
+class TicketBindResultEvent(Event):
+    """Server's response to :class:`TicketBindRequest`.
+
+    ``status`` is one of:
+
+    * ``"bound"``    — a ticket was minted; ``ticket``, ``qualified``,
+      ``app_id`` and ``expires_at`` are populated.
+    * ``"denied"``   — this connection may not bind.  It is not an app
+      credential connection, or no app credentials are configured on this
+      daemon at all (in which case the feature is simply off and the
+      deployment behaves exactly as it did before protocol 1.10).
+    * ``"invalid"``  — the request was malformed: an empty or unusable
+      ``user``, or a ``ttl_seconds`` outside ``1..3600``.  Nothing was
+      minted.
+    * ``"capacity"`` — the daemon is holding its ceiling of outstanding
+      tickets.  Nothing was minted, and retrying after some expire is the
+      remedy.  Refusing beats evicting somebody else's valid ticket, which
+      would turn one misbehaving application into failed logins for another.
+
+    Only ``"bound"`` carries a credential.  A caller that branches on
+    anything else must not read ``ticket``, which is ``""`` in every other
+    case — never a placeholder, so absence stays checkable.
+
+    Attributes:
+        ticket: The plaintext credential to hand to that user's client.  The
+            daemon retains only its SHA-256 digest, so this value cannot be
+            recovered from the daemon afterwards — losing it means binding
+            again.
+        qualified: ``"<app_id>:<user>"`` — the identity this connection will
+            be attributed to, and the exact string that will appear in
+            ``Session.created_by``.  Returned so the application can record
+            the attribution it will later have to reconcile against, rather
+            than re-deriving a concatenation the daemon owns.
+        app_id: The binding application, as the daemon authenticated it.
+            Echoed because an application holding several credentials would
+            otherwise have to infer which one it used.
+        expires_at: ISO-8601 UTC instant the ticket stops resolving.  For the
+            binder's own scheduling; the daemon enforces the deadline from a
+            monotonic clock, so an NTP step cannot extend or curtail it.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say — a reader of ``"unknown"`` is back where they started.
+    """
+    type: EventType = Field(default=EventType.TICKET_BIND_RESULT)
+    request_id: str = ""
+    status: str = ""
+    ticket: str = ""
+    qualified: str = ""
+    app_id: str = ""
+    expires_at: str = ""
+    detail: Optional[str] = None
+
+
+class TicketRevokeRequest(Event):
+    """Revoke one outstanding ticket, or every ticket of one user.
+
+    The logout path: the application ends a session in its own realm and
+    tells the daemon that anything it minted for that user is void.  Exactly
+    one of ``ticket`` / ``user`` must be supplied — both, or neither, is
+    ``status="invalid"``, because a request that names both has two
+    incompatible readings and guessing between them is how the wrong thing
+    gets revoked.
+
+    **Scoped to the calling application.**  The daemon knows ``app_id`` from
+    the bind connection's credential and revokes only tickets bound under it;
+    one application cannot revoke — or log out — another's ``alice``.  A
+    ticket belonging to another application answers ``"not_found"``, the same
+    answer an unknown ticket gives, so this verb is not an existence oracle
+    across the application boundary.
+
+    Revoking an already-consumed ticket is the ordinary case for a logout
+    that follows a completed login, and is reported honestly as
+    ``"not_found"`` with ``revoked=0`` rather than as a failure.
+
+    Attributes:
+        request_id: Correlates with :class:`TicketRevokeResultEvent`.
+        ticket: The plaintext ticket to revoke, as returned by
+            :class:`TicketBindResultEvent`.
+        user: Revoke every outstanding ticket for this user of this
+            application instead.
+    """
+    type: EventType = Field(default=EventType.TICKET_REVOKE_REQUEST)
+    request_id: str = ""
+    ticket: str = ""
+    user: str = ""
+
+
+class TicketRevokeResultEvent(Event):
+    """Server's response to :class:`TicketRevokeRequest`.
+
+    ``status`` is one of:
+
+    * ``"revoked"``   — at least one ticket was removed; ``revoked`` says how
+      many.
+    * ``"not_found"`` — nothing matched.  Covers an unknown ticket, one
+      already consumed or expired, and one belonging to a different
+      application: deliberately indistinguishable, so the verb reveals
+      nothing about tickets the caller did not mint.
+    * ``"denied"``    — this connection may not revoke (not an app
+      credential connection).
+    * ``"invalid"``   — neither or both of ``ticket`` / ``user`` supplied.
+
+    Attributes:
+        revoked: How many tickets were removed.  ``0`` whenever ``status`` is
+            not ``"revoked"``.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say.
+    """
+    type: EventType = Field(default=EventType.TICKET_REVOKE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    revoked: int = 0
+    detail: Optional[str] = None
+
+
+class SecretResolveRequest(Event):
+    """Ask the owning application to resolve an ``app://`` secret reference (#1226).
+
+    The ONE request direction that runs **daemon -> application**.  Every other
+    verb on the #1074 bind channel is application -> daemon (``ticket.bind`` /
+    ``ticket.revoke``); this rides the same authenticated connection in the
+    opposite direction, correlated by ``request_id``, with a daemon-side
+    deadline.  It is sent when ``JaatoServer._resolve_session_env`` meets a
+    value like ``GH_TOKEN=app://github`` in a workspace owned by ``app:user``:
+    the daemon identifies the application from the qualified owner and asks
+    *that* application, and only that one, to mint the secret for *that* user.
+
+    The application is free not to answer (an older SDK, no handler wired): the
+    daemon's deadline then elapses and the reference is dropped with a WARNING
+    (or, for the strict form ``app://github?required``, the bootstrap is
+    refused).  So there is no SDK minimum to negotiate — a request that goes
+    unanswered degrades exactly as a refusal does.
+
+    Attributes:
+        request_id: Correlates this request with the
+            :class:`SecretResolveResultEvent` that answers it.  One bind
+            channel serves every workspace of every user the application owns,
+            so a result that cannot be attributed to a request is useless.
+        user: The **unqualified** identity to resolve for — the ``user`` half
+            of the workspace owner ``app:user``.  The application already knows
+            which ``app_id`` it is (the credential it authenticated the bind
+            channel with), so it is never sent: the daemon has resolved the
+            application from the owner precisely so it can pick the connection
+            to ask, and echoing the app id would let a request name an
+            application other than the one it reaches.
+        workspace: The absolute workspace path the session runs in, so the
+            application can key a per-workspace binding (``(sub, workspace) ->
+            credential`` in the design's picture).
+        name: The reference name — ``github`` in ``app://github`` — naming
+            which of that user's secrets to mint.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVE_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    workspace: str = ""
+    name: str = ""
+
+
+class SecretResolveResultEvent(Event):
+    """The application's answer to :class:`SecretResolveRequest` (#1226).
+
+    ``status`` is one of:
+
+    * ``"ok"``        — the secret was resolved; ``value`` carries it and
+      ``expires_at`` MAY carry an ISO-8601 UTC instant it stops being valid.
+    * ``"not_found"`` — the application has no binding for this
+      ``(user, workspace, name)``.  The reference is dropped.
+    * ``"denied"``    — the application refuses to resolve it.  Dropped.
+    * ``"error"``     — the application tried and failed; ``detail`` says why.
+      Dropped.
+
+    Only ``"ok"`` carries a ``value``.  Every other status drops the reference
+    from the session's environment — a literal ``app://github`` reaching a
+    subprocess is a token that fails with a confusing 401, so the daemon never
+    forwards the unresolved form (#1226 §6.1).
+
+    Attributes:
+        value: The resolved secret, present only when ``status == "ok"``.  It
+            reaches the bootstrap envelope's env dict and **nowhere else** — not
+            the session record, not the snapshot, not the workspace ``.env``,
+            all of which keep ``app://<name>`` so a revived session resolves
+            afresh (which is also what lets revocation take effect).
+        expires_at: ISO-8601 UTC instant the value stops being valid, when the
+            application knows one (a GitHub App user token lasts ~8h).  The
+            daemon schedules a ``session.reload_env`` a margin before it
+            (``JAATO_OAUTH_REFRESH_MARGIN``) so the session never holds a dead
+            token.  Absent means "no expiry known": the value is used until the
+            session is next re-resolved for another reason.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say.  Never the secret.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    value: Optional[str] = None
+    expires_at: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class SecretReloadRequest(Event):
+    """The application asks the daemon to re-resolve a user's loaded sessions (#1226 §6.4).
+
+    The revocation path: the application deletes a binding (a *Disconnect
+    GitHub*, a *workspace -> none*) and tells the daemon to
+    ``session.reload_env`` every LOADED session the affected user owns, so the
+    now-revoked ``app://`` reference drops out of the environment rather than
+    lingering until the process ends.  Sent application -> daemon on the bind
+    channel, like ``ticket.revoke``, and **scoped to the calling application**:
+    the daemon qualifies ``user`` with the ``app_id`` the bind connection
+    authenticated as, so one application can never reload another's ``alice``.
+
+    Attributes:
+        request_id: Correlates with :class:`SecretReloadResultEvent`.
+        user: The **unqualified** identity whose sessions to reload.  The
+            daemon qualifies it itself (``f"{app_id}:{user}"``) exactly as
+            ``ticket.bind`` does, so the app id is never a request field.
+    """
+    type: EventType = Field(default=EventType.SECRET_RELOAD_REQUEST)
+    request_id: str = ""
+    user: str = ""
+
+
+class SecretReloadResultEvent(Event):
+    """The daemon's answer to :class:`SecretReloadRequest` (#1226 §6.4).
+
+    ``status`` is one of:
+
+    * ``"ok"``      — the owner's loaded sessions were re-resolved; ``reloaded``
+      says how many.  ``0`` is the ordinary answer when the user has no session
+      loaded, and is not a failure.
+    * ``"denied"``  — this connection may not ask (not an app-credential
+      connection, or no app credentials configured on this daemon).
+
+    Attributes:
+        reloaded: How many loaded sessions were re-resolved.  ``0`` whenever
+            ``status`` is not ``"ok"``, and the ordinary answer for a user with
+            nothing loaded.
+        detail: Human-readable elaboration, omitted when there is nothing to say.
+    """
+    type: EventType = Field(default=EventType.SECRET_RELOAD_RESULT)
+    request_id: str = ""
+    status: str = ""
+    reloaded: int = 0
+    detail: Optional[str] = None
+
+
+class WorkspaceAppWriteRequest(Event):
+    """The application asks the daemon to write a binding's files into a workspace (1.30).
+
+    A workspace bound to an application-held secret needs its ``.env`` to carry
+    the REFERENCE (``GH_TOKEN=app://github``): the daemon resolves only
+    references it finds there, and a binding with no line is inert.  The
+    application normally writes that line itself, and cannot when it runs as a
+    user that has no access to the daemon's workspace root (a BFF running as an
+    ordinary account beside a root daemon).  This verb has the daemon, which
+    owns the workspaces, do the write instead.
+
+    Sent application -> daemon on the bind channel, like ``secret.reload``, and
+    refused on any other connection.  The daemon enforces what may be written,
+    so the request cannot be used to plant a secret or reach outside the
+    workspace:
+
+    * ``workspace`` must be a known workspace OWNED by ``app_id:user`` (the
+      ownership ``app://`` resolution itself uses).  Anything else answers
+      ``not_found``, the same words an unknown path gets.
+    * every ``env`` value is an ``app://`` reference or ``None`` (remove).  A
+      literal value is refused, so no secret is ever written to disk.  Removal
+      leaves a line whose current value is not an ``app://`` reference alone.
+    * ``files`` paths are an allow-list: ``.home/.gitconfig``, and one
+      ``.md`` file directly under ``.jaato/instructions/``.  A path is resolved
+      with symlinks followed and must stay inside the workspace.
+
+    Attributes:
+        request_id: Correlates with :class:`WorkspaceAppWriteResultEvent`.
+        user: The **unqualified** identity; the daemon qualifies it with the
+            connection's app id, so one application cannot write into
+            another's workspace.
+        workspace: The absolute workspace path.
+        env: ``{NAME: "app://<name>" | None}``.
+        files: ``[{"path": str, "content": str | None, "managed_by": str |
+            None}]``.  ``content`` ``None`` removes.  ``managed_by`` makes the
+            write conditional on ownership: the file is written when absent or
+            when its first line is a ``jaato-managed: <managed_by>`` marker,
+            and left alone (``skipped-user-file``) otherwise, which is how a
+            copy the user made their own survives.  A removal requires it.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_APP_WRITE_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    workspace: str = ""
+    env: Dict[str, Optional[str]] = Field(default_factory=dict)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkspaceAppWriteResultEvent(Event):
+    """The daemon's answer to :class:`WorkspaceAppWriteRequest` (1.30).
+
+    ``status`` is one of ``"ok"`` (the request was valid and applied; each
+    item's own outcome is in ``env`` / ``files``), ``"not_found"`` (the
+    workspace is unknown or not owned by this application's ``user``),
+    ``"denied"`` (not an app-credential connection, or a value or path the
+    rules refuse; nothing was written) or ``"error"``.
+
+    Attributes:
+        env: ``{NAME: action}``, action one of ``written``, ``unchanged``,
+            ``removed``, ``absent``, ``kept-literal`` (a removal that found a
+            non-reference value and left it), ``error``.
+        files: ``[{"path", "action", "detail"}]``, action one of ``written``,
+            ``unchanged``, ``removed``, ``absent``, ``skipped-user-file``,
+            ``error``.
+        detail: Human-readable elaboration.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_APP_WRITE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    env: Dict[str, str] = Field(default_factory=dict)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
+    detail: Optional[str] = None
+
+
+# =============================================================================
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
 
@@ -2383,12 +4582,58 @@ class WorkspaceSelectRequest(Event):
     name: str = ""  # Workspace name (relative path from root)
 
 
+class WorkspaceDeleteRequest(Event):
+    """Client asks the daemon to delete a workspace it may see (protocol 1.13).
+
+    Destructive: the client confirms before sending.  Answered by
+    ``WorkspaceDeletedEvent``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_DELETE_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+    # 1.27: delete the workspace's LOADED sessions (stopping them) first,
+    # instead of refusing because they are loaded.  Ownership and another
+    # client's selection still refuse.
+    stop_sessions: bool = False
+
+
+class WorkspaceInspectRequest(Event):
+    """Ask for a workspace's details (protocol 1.27, WS only).
+
+    Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_INSPECT_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+    request_id: str = ""
+
+
+class WorkspaceCloneRequest(Event):
+    """Clone repositories into a workspace (protocol 1.27, WS only).
+
+    ``repos`` entries are ``{"repo": "owner/name", "branch": "main",
+    "forge": "github"}``; each lands in ``<workspace>/<name>``.  Only the
+    ``github`` forge is supported.  Credentials are the workspace's own
+    ``GH_TOKEN``, resolved as a session in that workspace would resolve it,
+    and never sent on argv or in a URL.  Answered by a stream of
+    :class:`WorkspaceCloneProgressEvent` echoing ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_CLONE_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+    request_id: str = ""
+    repos: List[Dict[str, str]] = Field(default_factory=list)
+
+
 class ConfigUpdateRequest(Event):
     """Client updates workspace configuration (provider, model, API key)."""
     type: EventType = Field(default=EventType.CONFIG_UPDATE_REQUEST)
     provider: str = ""  # Provider name (anthropic, google, github, etc.)
     model: Optional[str] = None  # Model name (optional, uses provider default)
     api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
+    # 1.27: write ONLY the provider's API-key variable (``api_key`` required);
+    # the .env's JAATO_PROVIDER / MODEL_NAME are left alone and no server is
+    # bootstrapped.  The session picker's key choice, applied before
+    # ``session.new``.  Answered by ``config.updated`` carrying the binding the
+    # .env still holds (not the key's provider), or an ``ErrorEvent``.
+    key_only: bool = False
 
 
 class StagedFileSpec(BaseModel):
@@ -2489,6 +4734,107 @@ class StageFilesEvent(Event):
     failed: List[Dict[str, str]] = Field(default_factory=list)  # [{"name", "category", "error"}]
 
 
+class WorkspaceFileFetchRequest(Event):
+    """Download one file from the caller's workspace (WS only, protocol 1.20).
+
+    The reverse of :class:`StageFilesRequest`.  ``path`` is relative to the
+    workspace root, or absolute when it lies inside it; the daemon resolves
+    it against the workspace THIS connection is in (the session's, else the
+    one it selected) and refuses anything that resolves outside it, symlinks
+    followed first.
+
+    **Wire protocol:** the server answers with one TEXT
+    :class:`WorkspaceFileContentEvent` carrying the same ``request_id``.
+    When ``ok`` is true and ``metadata_only`` was false, exactly ONE raw
+    BINARY frame of ``size`` bytes follows it immediately -- the two are
+    written back to back under the connection's send lock, so no other
+    frame can arrive between them.
+
+    ``metadata_only`` asks for the header alone: whether the file exists,
+    its size and type.  A host tool offering a download asks this first, so
+    the model is told "no such file" instead of offering a link that fails.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILE_FETCH_REQUEST)
+    request_id: str = ""
+    path: str = ""
+    metadata_only: bool = False
+
+
+class WorkspaceFileContentEvent(Event):
+    """Server's answer to :class:`WorkspaceFileFetchRequest` (protocol 1.20).
+
+    ``request_id`` echoes the request.  ``path`` is the file's path relative
+    to the workspace root (normalised, so a client can key on it), ``name``
+    its basename, ``size`` its length in bytes and ``mime_type`` a guess
+    from its name (``application/octet-stream`` when there is none).
+
+    On failure ``ok`` is false, no binary frame follows, and ``category``
+    is one of:
+
+    - ``"workspace_not_found"`` -- this connection is in no workspace.
+    - ``"unsafe_path"`` -- empty, or resolves outside the workspace.
+    - ``"not_found"`` -- nothing at that path.
+    - ``"not_a_file"`` -- a directory or another non-regular file.
+    - ``"credential"`` -- a file that holds credentials (the workspace
+      ``.env``, a stored ``*_auth.json``); refused by name so a download
+      link can never carry a key out of the workspace.
+    - ``"too_large"`` -- over the daemon's download cap.
+    - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILE_CONTENT)
+    request_id: str = ""
+    ok: bool = False
+    path: str = ""
+    name: str = ""
+    size: int = 0
+    mime_type: str = ""
+    metadata_only: bool = False
+    category: str = ""
+    error: str = ""
+
+
+class WorkspaceFilesSearchRequest(Event):
+    """Find files in the caller's workspace by name (WS only, protocol 1.32).
+
+    ``query`` is split on whitespace and every term must appear, ignoring
+    case, in a file's workspace-relative path.  The whole tree is searched --
+    dotfiles, gitignored paths and entries the Files panel hides -- except the
+    contents of ``.git`` directories.  ``max_results`` caps the answer
+    (default 100, at most 500).  Answered by one
+    :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SEARCH_REQUEST)
+    request_id: str = ""
+    query: str = ""
+    max_results: int = 100
+
+
+class WorkspaceFilesSearchResultEvent(Event):
+    """Server's answer to :class:`WorkspaceFilesSearchRequest` (protocol 1.32).
+
+    ``matches`` is ranked best first (a match in the file NAME before one in
+    a directory, shallower paths first); each is ``{"path", "size",
+    "credential"}`` with ``path`` relative to the workspace root, the key
+    ``workspace.file.fetch`` takes.  ``credential`` marks a file the fetch
+    verb refuses (a ``.env``, a stored ``*_auth.json``), so a client does not
+    offer to download it.  ``total`` is how many matched before the cap.
+    ``truncated`` means the walk stopped at its entry or time bound, so files
+    beyond it were not looked at.
+
+    On failure ``ok`` is false and ``category`` is ``"workspace_not_found"``
+    (this connection is in no workspace).
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SEARCH_RESULT)
+    request_id: str = ""
+    ok: bool = False
+    query: str = ""
+    matches: List[Dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+    truncated: bool = False
+    category: str = ""
+    error: str = ""
+
+
 class ClientType(str, Enum):
     """Presentation-layer categories for PresentationContext.
 
@@ -2555,6 +4901,14 @@ class PresentationContext(BaseModel):
             (the default) means the client can present none -- the honest
             answer for a plain terminal.
         client_type: The kind of client (see ``ClientType`` enum).
+        client_discloses_ai: Whether this client already tells the person
+            they are interacting with an AI system, so the framework
+            withholds its own Article 50(1) announcement.
+        locale: The BCP 47 language tag of the person's interface
+            (``"de-DE"``, ``"es"``), when the client knows it.  Recorded
+            beside the Article 50(1) announcement so the audit record says
+            which language the person was addressed in; ``None`` is
+            recorded as absent, never defaulted (#1157).
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -2587,10 +4941,53 @@ class PresentationContext(BaseModel):
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
 
+    # ── Disclosure (Regulation (EU) 2024/1689, Art. 50(1)) ──────
+    # ``True`` when this client ALREADY tells the person they are talking
+    # to an AI -- a persistent badge, a product whose whole surface says
+    # so.  The framework then withholds its own first-interaction
+    # announcement, which is the Act's "unless this is obvious from the
+    # point of view of a natural person who is reasonably well-informed,
+    # observant and circumspect" clause.
+    #
+    # Asserted by the client because the client is the only party that can
+    # see the screen; and for the same reason it is deliberately NOT read
+    # by ``jaato-scaffold validate`` -- a per-connection assertion cannot
+    # answer a question about a profile, so ``disclosure_absent`` stays
+    # exactly as it is.  Default ``False``: a client that has not said it
+    # discloses has not disclosed.
+    client_discloses_ai: bool = False
+
+    # ── Locale (Regulation (EU) 2024/1689, Art. 50(1), #1157) ───
+    # The BCP 47 tag of the interface the person is using, declared by
+    # the client because only the client knows what language its
+    # surface is in.  Read by exactly one thing: the ``announcement``
+    # audit record, which binds the disclosure text to the channel and
+    # language it was delivered in.  Not consulted by the model's
+    # prompt -- the persona decides the language it speaks -- and never
+    # inferred from the daemon's own environment: a daemon's ``LANG``
+    # says nothing about the person on the other end of the socket, and
+    # an audit row asserting a locale nobody declared is worse than one
+    # that says the locale was not declared.
+    locale: Optional[str] = None
+
     # ── Communication style ────────────────────────────────────
     # When None, inferred from client_type: CHAT → CONVERSATIONAL,
     # all others → NARRATIVE.  Clients may override explicitly.
     communication_style: Optional['CommunicationStyle'] = None
+
+    # ── History replay on attach (1.28) ─────────────────────────
+    # How an ATTACH shows this client the conversation so far:
+    #   "full"  -- replay the whole transcript as output events, top to
+    #              bottom (the TUI's redraw);
+    #   "paged" -- send only the most recent page as a HistoryPageEvent;
+    #              older pages on demand via HistoryPageRequest;
+    #   "none"  -- replay nothing (a surface whose history is already on
+    #              screen, e.g. Telegram).
+    # ``None`` keeps the historical default: CHAT -> "none", every other
+    # client type -> "full".
+    history_replay: Optional[str] = None
+    # Line budget for the attach page under "paged"; ``None`` = default.
+    history_page_lines: Optional[int] = None
 
     # ──────────────────────────────────────────────────────────
 
@@ -2696,44 +5093,49 @@ class PresentationContext(BaseModel):
 
         return "\n".join(lines)
 
+    @field_validator("renderable_media", mode="before")
+    @classmethod
+    def _renderable_media_is_a_list(cls, value: Any) -> Any:
+        """A scalar mime is one entry, never its characters.
+
+        ``list("image/*")`` is ``['i', 'm', 'a', ...]`` -- a client that
+        serialised the field as a bare string would then match nothing in
+        :meth:`can_render_media`, with nothing reporting why.  ``None``
+        reads as the empty default.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to a plain dict for event transport."""
-        return {
-            "content_width": self.content_width,
-            "content_height": self.content_height,
-            "supports_markdown": self.supports_markdown,
-            "supports_tables": self.supports_tables,
-            "supports_code_blocks": self.supports_code_blocks,
-            "supports_images": self.supports_images,
-            "supports_rich_text": self.supports_rich_text,
-            "supports_unicode": self.supports_unicode,
-            "supports_mermaid": self.supports_mermaid,
-            "supports_expandable_content": self.supports_expandable_content,
-            "client_type": self.client_type.value,
-            "communication_style": self.communication_style.value if self.communication_style else None,
-        }
+        """Serialize to a plain dict for event transport.
+
+        Every field on the model, by the model's own dump -- not a
+        hand-maintained list.  The list is how ``client_discloses_ai``
+        (#1116) and ``renderable_media`` (#824) were declared on this
+        class and carried by neither direction, so a client asserting it
+        disclosed already was announced to anyway and the suppression the
+        guard proved on the predicate never held over the wire (#1157).
+        A field added later rides automatically; enums are dumped as
+        their values (``mode="json"``), which is what :meth:`from_dict`
+        and every older daemon read.
+        """
+        return self.model_dump(mode="json")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PresentationContext':
-        """Create from a dict (e.g. deserialized from ClientConfigRequest)."""
-        return cls(
-            content_width=data.get("content_width", 80),
-            content_height=data.get("content_height"),
-            supports_markdown=data.get("supports_markdown", True),
-            supports_tables=data.get("supports_tables", True),
-            supports_code_blocks=data.get("supports_code_blocks", True),
-            supports_images=data.get("supports_images", False),
-            supports_rich_text=data.get("supports_rich_text", True),
-            supports_unicode=data.get("supports_unicode", True),
-            supports_mermaid=data.get("supports_mermaid", False),
-            supports_expandable_content=data.get("supports_expandable_content", False),
-            client_type=ClientType(data.get("client_type", "terminal")),
-            communication_style=(
-                CommunicationStyle(data["communication_style"])
-                if data.get("communication_style")
-                else None
-            ),
-        )
+        """Create from a dict (e.g. deserialized from ClientConfigRequest).
+
+        The model's own validation: an absent key takes the field's
+        default (an older client that sends none of the Art. 50(1) fields
+        reads as not disclosing, with no locale -- the safe direction), an
+        unknown key is ignored (a newer client against an older daemon),
+        and enums accept their values.  ``renderable_media`` sent as a
+        bare string is coerced by the validator above.
+        """
+        return cls.model_validate(dict(data or {}))
 
 
 class ClientConfigRequest(Event):
@@ -2877,6 +5279,46 @@ class BudgetRungFiredEvent(Event):
     usage: Optional[Dict[str, float]] = None
     driving_dimension: Optional[str] = None
     tier_changes: Dict[str, str] = Field(default_factory=dict)
+
+
+class IncidentEvent(Event):
+    """Something happened that a person should look at (protocol 1.16).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    the moment it becomes AWARE of it -- 10 for a death, 2 for a
+    widespread infringement.  All three clocks start from awareness, and
+    the framework already knew when the events that could be one
+    happened; it recorded none of them as such, each being a log line in
+    a different format with no severity and no clock.
+
+    **This event does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences --
+    harm to a person, disruption of critical infrastructure -- that the
+    framework cannot see.  It reports the fact and the clock; a person
+    decides.  The absence of a ``severity`` field is that decision, not
+    an omission.
+
+    The same record goes to the application trace as an ``INCIDENT:``
+    line (``shared.incidents``), which is what ``jaato-doctor
+    --incidents`` reads and what a deployment gets without configuring
+    anything.
+
+    Attributes:
+        kind: One of ``shared.incidents.INCIDENT_KINDS``.
+        at: Unix timestamp of when the framework became aware.
+        cause: One line saying what happened.
+        site: ``file.py::function`` -- what noticed.
+        provider / model / tier: The binding that was serving, when
+            there was one.  Absent rather than ``null`` when unknown.
+    """
+    type: EventType = Field(default=EventType.INCIDENT_RAISED)
+    kind: str = ""
+    at: float = 0.0
+    cause: str = ""
+    site: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    tier: Optional[str] = None
 
 
 class MidTurnInterruptEvent(Event):
@@ -3127,6 +5569,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
+    EventType.TOOL_RESULT_ENRICHED.value: ToolResultEnrichedEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
     EventType.PERMISSION_REQUESTED.value: PermissionRequestedEvent,
     EventType.PERMISSION_INPUT_MODE.value: PermissionInputModeEvent,
@@ -3163,6 +5606,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.GC.value: GCEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.MEMORY_LIST.value: MemoryListEvent,
+    EventType.MEMORY_GET_RESULT.value: MemoryGetResultEvent,
+    EventType.MEMORY_UPDATE_RESULT.value: MemoryUpdateResultEvent,
+    EventType.MEMORY_DELETE_RESULT.value: MemoryDeleteResultEvent,
+    EventType.DIAGNOSTICS_RESULT.value: DiagnosticsResultEvent,
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
     EventType.SERVICE_LIST.value: ServiceListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
@@ -3175,6 +5622,11 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.EVENTS_SUBSCRIBED.value: EventsSubscribedEvent,
     EventType.COMMAND.value: CommandRequest,
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
+    EventType.MEMORY_LIST_REQUEST.value: MemoryListRequest,
+    EventType.MEMORY_GET_REQUEST.value: MemoryGetRequest,
+    EventType.MEMORY_UPDATE_REQUEST.value: MemoryUpdateRequest,
+    EventType.MEMORY_DELETE_REQUEST.value: MemoryDeleteRequest,
+    EventType.DIAGNOSTICS_REQUEST.value: DiagnosticsRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,
@@ -3186,10 +5638,13 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TOOL_EXECUTE_RESULT.value: ToolExecuteResultEvent,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
+    EventType.HISTORY_PAGE_REQUEST.value: HistoryPageRequest,
+    EventType.HISTORY_PAGE.value: HistoryPageEvent,
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
     EventType.BUDGET_RUNG_FIRED.value: BudgetRungFiredEvent,
+    EventType.INCIDENT_RAISED.value: IncidentEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
     EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management
@@ -3197,6 +5652,12 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_LIST.value: WorkspaceListEvent,
     EventType.WORKSPACE_CREATE_REQUEST.value: WorkspaceCreateRequest,
     EventType.WORKSPACE_CREATED.value: WorkspaceCreatedEvent,
+    EventType.WORKSPACE_DELETE_REQUEST.value: WorkspaceDeleteRequest,
+    EventType.WORKSPACE_DELETED.value: WorkspaceDeletedEvent,
+    EventType.WORKSPACE_INSPECT_REQUEST.value: WorkspaceInspectRequest,
+    EventType.WORKSPACE_INSPECTED.value: WorkspaceInspectEvent,
+    EventType.WORKSPACE_CLONE_REQUEST.value: WorkspaceCloneRequest,
+    EventType.WORKSPACE_CLONE_PROGRESS.value: WorkspaceCloneProgressEvent,
     EventType.WORKSPACE_SELECT_REQUEST.value: WorkspaceSelectRequest,
     EventType.CONFIG_STATUS.value: ConfigStatusEvent,
     EventType.CONFIG_UPDATE_REQUEST.value: ConfigUpdateRequest,
@@ -3204,9 +5665,29 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file monitoring
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
+    EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
+    EventType.REFERENCE_CURATION_RESULT.value: ReferenceCurationResultEvent,
+    EventType.REFERENCE_CLAIMS.value: ReferenceClaimsEvent,
+    EventType.REFERENCE_CLAIMS_REQUEST.value: ReferenceClaimsRequest,
+    EventType.REFERENCE_CURATION_REQUEST.value: ReferenceCurationRequest,
+    EventType.REFERENCE_CATALOG.value: ReferenceCatalogEvent,
+    EventType.REFERENCE_CATALOG_REQUEST.value: ReferenceCatalogRequest,
+    EventType.REFERENCE_LINKS_UPDATE_REQUEST.value: ReferenceLinksUpdateRequest,
+    EventType.REFERENCE_LINKS_UPDATE_RESULT.value: ReferenceLinksUpdateResultEvent,
+    EventType.REFERENCE_BUNDLE_CREATE_REQUEST.value: ReferenceBundleCreateRequest,
+    EventType.REFERENCE_BUNDLE_CREATE_RESULT.value: ReferenceBundleCreateResultEvent,
+    EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
+    EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
+    EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,
+    EventType.SCAFFOLD_VALIDATE_RESULT.value: ScaffoldValidateEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,
+    # Workspace file download (TEXT header + one BINARY frame, 1.20)
+    EventType.WORKSPACE_FILE_FETCH_REQUEST.value: WorkspaceFileFetchRequest,
+    EventType.WORKSPACE_FILE_CONTENT.value: WorkspaceFileContentEvent,
+    EventType.WORKSPACE_FILES_SEARCH_REQUEST.value: WorkspaceFilesSearchRequest,
+    EventType.WORKSPACE_FILES_SEARCH_RESULT.value: WorkspaceFilesSearchResultEvent,
     # Peer channel
     EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
     EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,
@@ -3237,6 +5718,20 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PERMISSION_SET_DEFAULT_REQUEST.value: PermissionSetDefaultRequest,
     EventType.PERMISSION_POLICY_SNAPSHOT_REQUEST.value: PermissionPolicySnapshotRequest,
     EventType.PERMISSION_POLICY_SNAPSHOT.value: PermissionPolicySnapshotEvent,
+    # Identity at connect — the ticket bind channel (#1074)
+    EventType.TICKET_BIND_REQUEST.value: TicketBindRequest,
+    EventType.TICKET_BIND_RESULT.value: TicketBindResultEvent,
+    EventType.TICKET_REVOKE_REQUEST.value: TicketRevokeRequest,
+    EventType.TICKET_REVOKE_RESULT.value: TicketRevokeResultEvent,
+    EventType.SECRET_RESOLVE_REQUEST.value: SecretResolveRequest,
+    EventType.SECRET_RESOLVE_RESULT.value: SecretResolveResultEvent,
+    EventType.SECRET_RELOAD_REQUEST.value: SecretReloadRequest,
+    EventType.SECRET_RELOAD_RESULT.value: SecretReloadResultEvent,
+    EventType.WORKSPACE_APP_WRITE_REQUEST.value: WorkspaceAppWriteRequest,
+    EventType.WORKSPACE_APP_WRITE_RESULT.value: WorkspaceAppWriteResultEvent,
+    # The runner pool (1.35).
+    EventType.POOL_STATUS_REQUEST.value: PoolStatusRequest,
+    EventType.POOL_STATUS.value: PoolStatusEvent,
 }
 
 

@@ -41,8 +41,8 @@ from jaato_eval.runner import (
 #: NO ``REVERSIONS`` LIST HERE, DELIBERATELY.
 #:
 #: ``test_every_guard_detects_its_own_reversion`` discovers guard modules
-#: under ``_PACKAGES = ("jaato-server/shared/tests",
-#: "jaato-server/server/tests")`` only.  This module is in
+#: under ``_PACKAGES = ("jaato-server/jaato_server/shared/tests",
+#: "jaato-server/jaato_server/server/tests")`` only.  This module is in
 #: ``jaato-eval/tests``, so a ``REVERSIONS`` list declared here would be
 #: read by nothing while looking exactly like a covered one — which is
 #: the decorative-guard failure that suite exists to prevent, wearing its

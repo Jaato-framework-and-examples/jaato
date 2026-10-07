@@ -45,11 +45,11 @@ POLL_INTERVAL = 0.25
 #: ``jaato_sdk`` is what the test code drives the daemon THROUGH; ``server``
 #: and ``shared`` are what the daemon IS.  A suite in which these resolve to
 #: a checkout nobody chose is asserting about a tree nobody ran (jaato #1050).
-TREE_MODULES = ("jaato_sdk", "server", "shared")
+TREE_MODULES = ("jaato_sdk", "jaato_server")
 
 #: The two server-tier packages, and the directory that holds them in a
 #: source checkout of this repository.
-_SERVER_PACKAGES = ("server", "shared")
+_SERVER_PACKAGES = ("jaato_server",)
 _SERVER_SIBLING = "jaato-server"
 
 #: Printed by the child, with the env the daemon is about to be given, in the
@@ -379,7 +379,7 @@ class ConformanceDaemon:
         # on the pidfile, not the socket.  Found the first time this fixture
         # met a machine that already had a daemon on it, which in CI is a
         # previous job's leftover and in development is the operator's own.
-        cmd = [sys.executable, "-m", "server",
+        cmd = [sys.executable, "-m", "jaato_server",
                "--ipc-socket", self.socket_path,
                "--pid-file", os.path.join(self._tmpdir, "d.pid"),
                "--log-file", str(self._log)]

@@ -50,9 +50,9 @@ Article vocabulary → the jaato primitive that already implements it.
 |---|---|---|---|
 | Environment (filesystem) | `workspace_path` on the client + fixture tree | `jaato-sdk/jaato_sdk/client/ipc.py`; `jaato-cascade-based-prototype/fixtures/` | exists |
 | Environment (read-only task definition) | `config_root` — `.jaato/` resolved separately from the workspace | `open_session(config_root=…)` | exists |
-| Environment (isolation) | `apparmor=True`, `runtime_limits` (cgroup v2: memory/pids/cpu) | `shared/runtime_limits.py` | exists |
+| Environment (isolation) | `apparmor=True`, `runtime_limits` (cgroup v2: memory/pids/cpu) | `jaato_server/shared/runtime_limits.py` | exists |
 | Environment (mocked services) | `.mcp.json`, `.jaato/services/` | prototype `.jaato/services/maven_central/` | exists |
-| Harness under test | profile: `plugins`, `tool_scopes`, `model`, `provider`, `plugin_configs`, `suppress_base_instructions` | `shared/plugins/subagent/config.py` | exists |
+| Harness under test | profile: `plugins`, `tool_scopes`, `model`, `provider`, `plugin_configs`, `suppress_base_instructions` | `jaato_server/shared/plugins/subagent/config.py` | exists |
 | Harness *variants* | profile sets selected by one env var | `JAATO_PROFILE_SET` → `.jaato/profiles/<set>/` | exists |
 | Task input | prompt + `agent_params` (persona `{{param}}` substitution) | `open_session(agent_params=…)` | exists |
 | Output contract | `completion_payload_schema` → typed `signal_completion` payload | profile field; `Session.complete()` returns it | exists |
@@ -63,7 +63,7 @@ Article vocabulary → the jaato primitive that already implements it.
 | Cost / token metrics | `UsageBreakdown.cost_usd`, cache + reasoning token splits, on `TurnCompletedEvent` | `jaato-sdk/jaato_sdk/events.py` | exists |
 | Latency / trajectory | OTel spans `jaato.turn → jaato.tool → jaato.permission` | `docs/opentelemetry-design.md` | exists |
 | Run grouping | `cascade_driver_id` + cascade-as-client subscription | `docs/design/cascade-as-client.md` | design locked |
-| Per-run safety ceiling | `budget_control.limits` (usd / tokens / seconds / tool_calls / turns) | `shared/budget_control.py` | exists |
+| Per-run safety ceiling | `budget_control.limits` (usd / tokens / seconds / tool_calls / turns) | `jaato_server/shared/budget_control.py` | exists |
 | World spec | agent persona + curated memory scope (raw→curated curator) | `docs/design/agent-continuity.md` | pattern documented |
 | Post-training consumer | — | `kb-stage-agent-LoRA-training` (separate repo) | exists |
 | Task manifest | `task.yaml` | `jaato-eval/jaato_eval/manifest.py` | built |
@@ -170,6 +170,23 @@ graders:
 Three grader kinds, all of which already exist in some form. The manifest does
 not invent a grading language — it names existing artefacts.
 
+#### Two harness kinds
+
+`harness.kind: session` (the default) is the manifest above. `harness.kind:
+driver` (jaato #1110) makes the arm a **process** the engine starts from
+`harness.run`, which opens as many sessions as it likes — the
+driver-as-graph shape, where the orchestration is deterministic code and
+host tools live in the driver's process. The engine hands it the arm as a
+versioned environment contract (`JAATO_EVAL_CONTRACT=1`: workspace, config
+root, socket, **the arm's cascade id**, and `input.params` as
+`JAATO_EVAL_PARAM_*`), observes the cid from its own connection, and reads
+the exit code: `0` gradeable, `75` BLOCKED, anything else an unsigned arm.
+The alternatives set aside — an in-process callable, a driver that writes
+its own result, a driver run outside and fed to `report` — each either
+weakened "one arm blowing up must not take the sweep with it" or rebuilt
+the accounting this layer exists to centralise. `jaato-eval/README.md`
+carries the contract table.
+
 ### 2. Fixture materialisation
 
 Copy `fixture` → a fresh temp workspace per run; point `workspace_path` at the
@@ -227,7 +244,7 @@ article does not mention and this codebase already computes.
 ## Where it lives
 
 A sibling package `jaato-eval/`, depending on **`jaato-sdk` only** — never on
-`jaato-server/shared`. `certify/` already enforces this discipline with a
+`jaato-server/jaato_server/shared`. `certify/` already enforces this discipline with a
 facade guard (R1: "plant a `from shared…` import → the facade guard must
 catch it"); adopt the same guard here.
 
@@ -277,7 +294,7 @@ builds, ZhipuAI GLM — with identical profile *names* in each set, so the swap 
 one env var. A well-calibrated task separates them; a task that every set passes
 or every set fails carries no information.
 
-`shared/model_tiers.py` offers a second, finer axis (planner / dispatcher /
+`jaato_server/shared/model_tiers.py` offers a second, finer axis (planner / dispatcher /
 executor within one run), which measures something different: not "is this task
 too easy" but "which cognitive step actually needs the expensive model".
 
@@ -305,7 +322,7 @@ the eval layer.
 **The tool-call ledger could not be reconstructed over the SDK.**
 Completion processors pair calls to responses by identifier, and
 `build_tool_call_ledger` does exactly that server-side. But the history
-serializer (`server/command_router.py::_serialize_part`) emitted the
+serializer (`jaato_server/server/command_router.py::_serialize_part`) emitted the
 identifier on the `function_response` branch and not on the
 `function_call` branch, so it survived on only one side of the wire.
 
@@ -329,7 +346,7 @@ Two PRs closed it:
 - **#640** put the single pairing rule in
   `jaato_sdk.completion_processors.build_ledger`, taking either carrier
   (in-process `Message` objects or serialized wire dicts).
-  `shared.completion_processors.build_tool_call_ledger` became a thin
+  `jaato_server.shared.completion_processors.build_tool_call_ledger` became a thin
   alias — 104 lines to 30 — with all 23 existing ledger tests passing
   unchanged as the evidence that behaviour was preserved.
 

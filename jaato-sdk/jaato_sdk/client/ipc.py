@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
 from jaato_sdk.client.errors import (
+    RequestRefused,
     SessionCreateFailed,
     SessionNotConfirmed,
     SessionNotSent,
@@ -68,11 +69,14 @@ from jaato_sdk.events import (
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
+    ExternalEventRequest,
     CommandListRequest,
     CommandListEvent,
     ConnectedEvent,
     ErrorEvent,
     HistoryRequest,
+    HistoryPageRequest,
+    HistoryPageEvent,
     HistoryEvent,
     ClientConfigRequest,
     ClientType,
@@ -88,6 +92,28 @@ from jaato_sdk.events import (
     PermissionClearRequest,
     PermissionSetDefaultRequest,
     PermissionPolicySnapshotRequest,
+    MemoryListRequest,
+    PoolStatusEvent,
+    PoolStatusRequest,
+    ReferenceClaimsEvent,
+    ReferenceCatalogEvent,
+    ReferenceCatalogRequest,
+    ReferenceClaimsRequest,
+    ReferenceCurationRequest,
+    ReferenceBundleCreateRequest,
+    ReferenceBundleCreateResultEvent,
+    ReferenceLinksUpdateRequest,
+    ReferenceLinksUpdateResultEvent,
+    ReferenceCurationResultEvent,
+    MemoryListEvent,
+    MemoryGetRequest,
+    MemoryGetResultEvent,
+    MemoryUpdateRequest,
+    MemoryUpdateResultEvent,
+    MemoryDeleteRequest,
+    MemoryDeleteResultEvent,
+    DiagnosticsRequest,
+    DiagnosticsResultEvent,
     describe_event_type_problems,
 )
 
@@ -232,6 +258,28 @@ def _created_session_id(event: Any) -> Optional[str]:
     value = (getattr(event, "details", None) or {}).get("created_session_id")
     return value if isinstance(value, str) and value else None
 
+
+
+def model_override_args(
+    model: Optional[str], provider: Optional[str],
+) -> List[str]:
+    """The ``session.new`` argv for a model override (protocol 1.27).
+
+    ``--model <m>`` and, when given, ``--provider <p>``.  A provider without
+    a model names nothing to run, so it is refused here rather than sent to
+    a daemon that would refuse it too.
+
+    Raises:
+        ValueError: ``provider`` given without ``model``.
+    """
+    if provider and not model:
+        raise ValueError("create_session: 'provider' requires 'model'")
+    args: List[str] = []
+    if model:
+        args.extend(["--model", model])
+    if provider:
+        args.extend(["--provider", provider])
+    return args
 
 class IPCClient:
     r"""Client for connecting to Jaato server via IPC.
@@ -690,7 +738,10 @@ class IPCClient:
         — both declarative and programmatic styles are preserved.  Connection
         knobs (``socket_path``, ``env_file``, ``workspace_path``, ``auto_start``,
         ``client_type``, ``connect_timeout``) and ``on_permission`` have sensible
-        defaults.  See ``docs/design/sdk-convenience-layer.md``.
+        defaults.  ``session_timeout`` (unset = 60s) is forwarded as
+        :meth:`create_session`'s ``timeout`` -- the ``session.new``
+        confirmation budget, distinct from ``connect_timeout``; raise it on a
+        busy or shared daemon.  See ``docs/design/sdk-convenience-layer.md``.
         """
         from .convenience import open_session
         return open_session(cls, **kwargs)
@@ -1250,7 +1301,7 @@ class IPCClient:
             ipc_arg = self.socket_path
 
         cmd = [
-            sys.executable, "-m", "server",
+            sys.executable, "-m", "jaato_server",
             "--ipc-socket", ipc_arg,
             "--daemon",
         ]
@@ -1501,6 +1552,8 @@ class IPCClient:
         cascade_driver_id: Optional[str] = None,
         sibling_name: Optional[str] = None,
         timeout: float = 60.0,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> str:
         """Create a new session on the server.
 
@@ -1587,6 +1640,13 @@ class IPCClient:
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
+            model: Override the model the resolved profile (or, with no
+                profile, the workspace ``.env``) binds -- sent as
+                ``--model`` (protocol 1.27).  The daemon applies it to a
+                COPY of the profile, and a revived session keeps it.
+            provider: Override the provider too (``--provider``).  Only
+                meaningful with ``model``; passing it alone raises
+                ``ValueError`` here (the daemon refuses it as well).
 
         Returns:
             The new session ID.  Never ``None`` — a failure raises.
@@ -1607,6 +1667,8 @@ class IPCClient:
                 retrying makes a SECOND session with its own runner and pool
                 slot — check ``list_sessions()`` first.
             TypeError: If ``profile`` is not None, str, or dict.
+            ValueError: ``provider`` without ``model``, or ``model`` against
+                a daemon below :attr:`MIN_MODEL_OVERRIDE_PROTOCOL`.
 
         All three share the base ``SessionCreateFailed``; catch that to treat
         every creation failure alike, and ``.may_exist`` to branch on the only
@@ -1663,6 +1725,8 @@ class IPCClient:
             args.extend(["--cascade-driver-id", cascade_driver_id])
         if sibling_name:
             args.extend(["--sibling-name", sibling_name])
+        args.extend(model_override_args(model, provider))
+        self._require_model_override_protocol(model)
         # ``payload`` is the documented generic escape hatch; the request id
         # rides it so no new CommandRequest field is needed.
         payload = dict(payload or {})
@@ -1873,6 +1937,19 @@ class IPCClient:
     async def attach_session(self, session_id: str) -> bool:
         """Attach to an existing session.
 
+        The daemon answers with the session's current state -- its agents and
+        their status -- and the conversation so far,
+        rebuilt from the session's stored history.  How the conversation
+        arrives is this client's choice (``PresentationContext.
+        history_replay``, protocol 1.28): ``"full"`` replays it as output
+        events, oldest first (the default for every client type but
+        chat); ``"paged"`` sends only the most recent page as a
+        ``HistoryPageEvent``, older pages via
+        :meth:`request_history_page`; ``"none"`` sends none of it (the
+        chat default).  It is not a replay of the events missed while
+        disconnected: output streamed mid-turn reaches the history only
+        when its turn completes.
+
         Args:
             session_id: The session to attach to.
 
@@ -1978,8 +2055,12 @@ class IPCClient:
         The daemon answers with a ``SessionListEvent`` whose rows carry
         ``session_id``, ``orphaned_seconds``, the effective
         ``max_orphan_seconds`` / ``max_session_seconds`` bounds, whether the
-        session ``is_processing`` (spending, right now), and the ``runner``
-        identity — the runner pid, pool slot and cascade executing it.
+        session ``is_processing`` (spending, right now), the ``runner``
+        identity — the runner pid, pool slot and cascade executing it — and
+        (#1106) ``unload_grace_seconds`` / ``unload_grace_remaining``: a
+        nonzero remainder says the daemon is DELIBERATELY holding the session
+        for a client that may come back, which is otherwise indistinguishable
+        from one nothing has got round to unloading.
 
         An orphan is a session nothing is consuming: no attached client, not
         even the synthetic headless marker a woken or cascade-driven session
@@ -2039,6 +2120,909 @@ class IPCClient:
             command="session.stop",
             args=[session_id],
         ))
+
+    #: Protocol floor for :meth:`reload_session_env`.  Same rule as
+    #: :attr:`MIN_SESSION_STOP_PROTOCOL`: a daemon that does not know the verb
+    #: ignores it silently, and "reloaded" would then be reported about a
+    #: session still running on its old credential.
+    MIN_SESSION_RELOAD_ENV_PROTOCOL = "1.11"
+
+    async def reload_session_env(self, session_id: Optional[str] = None) -> None:
+        """Re-read a live session's ``.env`` and credentials and rebuild its provider.
+
+        A session resolves its environment (workspace ``.env``, profile
+        ``env:``, post-auth overrides) and its provider credential ONCE, when
+        its runner boots.  Store a key with ``<provider>-auth key`` or write
+        a ``.env`` line afterwards and the open session keeps what it had --
+        a daemon-wide default, or nothing -- until a new session is created.
+        This verb is the refresh: the daemon re-resolves (decoding secret
+        URIs, which only it can) and the runner re-applies the whole dict
+        and re-creates the provider, so the next turn runs on the credential
+        now on disk.  Refused, with nothing changed, while a turn is running.
+
+        The daemon confirms with a ``SystemMessageEvent`` naming the outcome
+        and the credential source the rebuilt provider resolved
+        (``"API key from .../zhipuai_auth.json"``), which is the line to
+        compare against what you just stored.
+
+        The daemon also runs this by itself after a successful
+        ``<provider>-auth login|key`` when the caller's live session is on
+        that provider; call it explicitly after editing a ``.env`` by hand.
+
+        Args:
+            session_id: The session to reload.  ``None`` means the session
+                this client is attached to.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SESSION_RELOAD_ENV_PROTOCOL`, which would ignore
+                the command silently.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_RELOAD_ENV_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"reload_session_env: this daemon speaks protocol {spoken} and "
+                f"does not serve session.reload_env (needs >= "
+                f"{self.MIN_SESSION_RELOAD_ENV_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon, or start a new session to pick up the credential."
+            )
+        await self._send_event(CommandRequest(
+            command="session.reload_env",
+            args=[session_id] if session_id else [],
+        ))
+
+    MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12"
+
+    async def toggle_workspace_ignore(self, path: str) -> None:
+        """Add ``path`` to the session workspace's ``.gitignore``, or remove it again.
+
+        The TUI workspace panel's ``i`` key, served daemon-side (protocol
+        1.12) so a client with no access to the workspace's filesystem can
+        make the same edit.  Exact-match toggle of ONE line: a directory
+        entry keeps its trailing ``/``; a glob that already covers the path
+        is neither matched nor touched.  The daemon's ``WorkspaceMonitor``
+        reloads on the write, so the pattern binds every later file event;
+        entries already shown are not pruned.
+
+        The daemon answers with one ``WorkspaceIgnoreResultEvent`` whatever
+        happened — ``ok`` / ``ignored`` on success, ``ok=False`` with the
+        reason when the pattern was refused, the caller has no workspace,
+        or the write failed.
+
+        Args:
+            path: The workspace-relative entry, as the workspace panel
+                shows it.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_WORKSPACE_IGNORE_PROTOCOL`, which would ignore
+                the command silently — and "ignored" would then describe a
+                file nobody changed.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_WORKSPACE_IGNORE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"toggle_workspace_ignore: this daemon speaks protocol {spoken} "
+                f"and does not serve workspace.ignore (needs >= "
+                f"{self.MIN_WORKSPACE_IGNORE_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon, or edit the workspace's .gitignore directly."
+            )
+        await self._send_event(CommandRequest(
+            command="workspace.ignore",
+            args=[path],
+        ))
+
+    #: Floor for ``reference.promote`` / ``reference.dismiss`` (1.33).  A
+    #: missing verb (the 1.7 rule): an older daemon ignores the command, and
+    #: "promoted" would describe a catalog nobody changed.
+    MIN_REFERENCE_CURATION_PROTOCOL = "1.33"
+
+    async def list_reference_claims(
+        self, *, timeout: float = 10.0,
+    ) -> ReferenceClaimsEvent:
+        """List the reference claims agents proposed in this workspace (1.33).
+
+        An agent proposes a reference with ``proposeReference``; that writes
+        a CLAIM under ``.jaato/references-claims/``, never a catalog entry.
+        This is the curator's view of them, read by the daemon: each row
+        carries the proposed entry, the claim's recorded ``origin`` (who
+        proposed it, and ``witnessed_by`` when a person approved the call)
+        and ``problems`` -- why a promotion would be refused right now.
+        ``may_curate`` says whether this connection may act on them.  The
+        answer's ``ok`` is ``False`` when the claims could not be read, never
+        "nothing proposed".
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("list_reference_claims")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "list_reference_claims", ReferenceClaimsRequest(), timeout, "refc")
+
+    async def promote_reference_claim(
+        self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
+    ) -> ReferenceCurationResultEvent:
+        """Promote an agent's reference claim into the workspace catalog (1.33).
+
+        The daemon re-validates the claim, writes
+        ``.jaato/references/<id>.json`` (or ``<bundle>/<id>.json``) stamping
+        ``origin.curated_by`` from this connection's identity, and removes
+        the claim.  When the destination bundle has a vector index, the
+        daemon reconciles it with vectors from this connection's session and
+        reports the outcome in ``reconcile``.  Only the workspace owner may,
+        on an owned workspace.  Returns the daemon's answer; a refusal is
+        ``ok=False`` with a ``category``.
+
+        Args:
+            claim_id: The claim's id, as :meth:`list_reference_claims` or
+                ``listReferences`` shows it.
+            bundle: A workspace-tier sub-bundle to promote into (one of the
+                listing's ``bundles``); ``""`` for the catalog root.
+            timeout: Generous by default: reconciling an index may wait on
+                the session loading its embedding model.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        return await self._send_reference_curation("promote", claim_id, timeout, bundle)
+
+    async def dismiss_reference_claim(
+        self, claim_id: str, *, timeout: float = 10.0,
+    ) -> ReferenceCurationResultEvent:
+        """Drop an agent's reference claim without promoting it (1.33).
+
+        Same gate and answer as :meth:`promote_reference_claim`; the claim
+        file is removed and the catalog is not touched.
+        """
+        return await self._send_reference_curation("dismiss", claim_id, timeout)
+
+    async def _send_reference_curation(
+        self, action: str, claim_id: str, timeout: float, bundle: str = "",
+    ) -> ReferenceCurationResultEvent:
+        method = f"{action}_reference_claim"
+        self._require_reference_curation_protocol(method)
+        return await self._correlated_request(  # type: ignore[return-value]
+            method,
+            ReferenceCurationRequest(action=action, claim_id=claim_id, bundle=bundle),
+            timeout, "refc")
+
+    async def list_reference_catalog(
+        self, *, timeout: float = 10.0,
+    ) -> ReferenceCatalogEvent:
+        """List this workspace's reference catalog with its typed links (1.33).
+
+        Every reference in ``.jaato/references/`` and its sub-bundles, read
+        by the daemon: each row carries its declared ``links`` (a target
+        this catalog does not hold is marked ``dangling``) and
+        ``linked_from``, the edges pointing at it.  ``may_curate`` says
+        whether this connection may edit them.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("list_reference_catalog")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "list_reference_catalog", ReferenceCatalogRequest(), timeout, "refk")
+
+    async def update_reference_links(
+        self, reference_id: str, links: List[Dict[str, Any]], *,
+        timeout: float = 10.0,
+    ) -> ReferenceLinksUpdateResultEvent:
+        """Replace one catalog reference's typed links (1.33).
+
+        ``links`` is the complete new list of ``{to, rel, note?}``; ``[]``
+        removes every declared edge.  The daemon validates them, writes only
+        the reference file's ``links`` key, and answers with the links as
+        written and any ``warnings`` (a target not in the catalog, a
+        ``supersedes`` another reference also declares).  Only the workspace
+        owner may, on an owned workspace.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_CURATION_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_reference_curation_protocol("update_reference_links")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "update_reference_links",
+            ReferenceLinksUpdateRequest(reference_id=reference_id, links=list(links)),
+            timeout, "refk")
+
+    #: Floor for :meth:`create_reference_bundle` (1.36, #1478).  A NEW verb
+    #: (the 1.7 rule): an older daemon ignores it, and the caller would wait
+    #: out its timeout for a bundle nobody created.
+    MIN_REFERENCE_BUNDLE_PROTOCOL = "1.36"
+
+    async def create_reference_bundle(
+        self, name: str, *, timeout: float = 10.0,
+    ) -> ReferenceBundleCreateResultEvent:
+        """Create a workspace-tier reference sub-bundle, unindexed (1.36, #1478).
+
+        Needs no session and no embedding provider: the daemon writes
+        ``.jaato/references/<name>/bundle.json`` and nothing else, so a
+        driver can create the bundle it then promotes into
+        (:meth:`promote_reference_claim` with ``bundle=name``).  A vector
+        index is a separate step, ``references bundle index <name>`` from a
+        session whose workspace has an embedding provider.  An existing
+        bundle (or directory) by that name answers ``category="collision"``
+        with nothing changed -- a driver may treat that as "already there".
+        Only the workspace owner may, on an owned workspace.  The answer's
+        ``bundles`` lists the workspace's sub-bundles after the call.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_REFERENCE_BUNDLE_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_REFERENCE_BUNDLE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"create_reference_bundle: this daemon speaks protocol {spoken} "
+                f"and does not serve reference bundle creation (needs >= "
+                f"{self.MIN_REFERENCE_BUNDLE_PROTOCOL}).  It would ignore the "
+                f"request silently.  Upgrade the daemon.")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "create_reference_bundle", ReferenceBundleCreateRequest(name=name),
+            timeout, "refb")
+
+    def _require_reference_curation_protocol(self, method: str) -> None:
+        """Refuse a daemon that would ignore the reference-claim verbs.
+
+        One below 1.33 drops the request silently: the caller would wait
+        out its timeout, or read "promoted" about a catalog nobody changed.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_REFERENCE_CURATION_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"{method}: this daemon speaks protocol {spoken} and does not "
+                f"serve the reference-claim verbs (needs >= "
+                f"{self.MIN_REFERENCE_CURATION_PROTOCOL}).  Upgrade the daemon.")
+
+    MIN_SESSION_MESSAGE_PROTOCOL = "1.23"
+
+    #: Floor for a ``session.message`` that carries ``file_refs`` or
+    #: ``text_attachments`` (1.24).  Two NEW keys on an existing verb: a
+    #: 1.23 daemon reads neither, delivers the text alone and answers
+    #: ``accepted`` -- a degraded call that reads as success, the #845
+    #: shape -- so a call carrying either is refused below this, while a
+    #: text-only call keeps the 1.23 floor.
+    MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24"
+
+    def _require_session_message_protocol(self, *, with_files: bool) -> None:
+        """Refuse a daemon that would not serve ``session.message`` as
+        asked: one below the verb's floor ignores the command silently, and
+        one below the FILES floor delivers the text without the files and
+        calls that ``accepted`` -- both read as success to the caller."""
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_MESSAGE_PROTOCOL):
+            raise ValueError(
+                f"send_session_message: this daemon speaks protocol {spoken} "
+                f"and does not serve session.message (needs >= "
+                f"{self.MIN_SESSION_MESSAGE_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon."
+            )
+        if with_files and not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_MESSAGE_FILES_PROTOCOL):
+            raise ValueError(
+                f"send_session_message: this daemon speaks protocol {spoken} "
+                f"and does not carry file_refs / text_attachments on "
+                f"session.message (needs >= "
+                f"{self.MIN_SESSION_MESSAGE_FILES_PROTOCOL}).  It would "
+                f"deliver the text without them and report accepted.  "
+                f"Upgrade the daemon, or send text only."
+            )
+
+    async def send_session_message(
+        self,
+        target: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        file_refs: Optional[list] = None,
+        text_attachments: Optional[list] = None,
+        event_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Message another session in this session's GROUP, waking it if cold.
+
+        The client-tier form of the ``courier`` plugin's ``send_to_session``
+        (protocol 1.23; files since 1.24).  The sender is this connection's OWN session --
+        resolved daemon-side from the connection, never from here -- and the
+        target must share a group with it: a cascade, or the same
+        authenticated creator (``server.session_groups``).  A cold target is
+        revived from disk and driven; a busy one queues the message on the
+        idle-only peer tier; a terminated one is never woken.
+
+        Fire-and-forget: the daemon answers with ONE
+        ``SessionMessageResultEvent`` carrying the receipt -- ``status`` is
+        ``accepted`` / ``queued`` (delivered), ``no_such_session``,
+        ``ambiguous`` (with ``candidates``), ``session_cold``, ``duplicate``,
+        ``terminated`` or ``refused`` (with ``error``).  Neither delivered
+        status claims the peer read or acted on anything.
+
+        Args:
+            target: A session id, or a cascade-scoped sibling name.
+            text: The message.  May be empty when ``attachments`` carry the
+                content (#838).
+            attachments: Optional binary content, as :meth:`send_message`
+                accepts (a file-path ``str`` or a ``{mime_type, data,
+                display_name}`` dict), normalised by
+                :meth:`_normalize_attachments`.  Attachments ride the drive
+                branch only: a busy target's message is SPOOLED to its
+                durable inbox rather than queued with the bytes dropped.
+            file_refs: Files in the SENDER session's workspace to hand the
+                target (1.24): paths relative to that workspace, or
+                ``{path, workspace?}`` dicts.  These are references the
+                DAEMON resolves -- never bytes read here -- so a path names
+                a file on the daemon's host, inside the session's own
+                workspace.  A target sharing the workspace reads it in
+                place; one in another workspace gets a copy under its own
+                inbox (10 MB per file, 50 MB per message).  The result
+                event's ``files`` says per file what became of it; one
+                refused file refuses the whole message.
+            text_attachments: ``{text, display_name?, mime_type?}`` dicts
+                (1.24) -- a patch, a snippet -- inlined for the target up to
+                32 KiB in total, stored as files beyond it.
+            event_id: Idempotency key.  A redelivered id answers
+                ``duplicate``, a benign no-op.
+            request_id: Correlation id echoed on the result event, so several
+                sends on one connection can be told apart.
+
+        Raises:
+            ValueError: if the message carries no content at all, or
+                against a daemon below :attr:`MIN_SESSION_MESSAGE_PROTOCOL`,
+                which would ignore the command silently -- and "delivered"
+                would then describe a message nobody carried; or, when
+                ``file_refs`` / ``text_attachments`` are given, below
+                :attr:`MIN_SESSION_MESSAGE_FILES_PROTOCOL`, which would
+                deliver the text WITHOUT them and call that ``accepted``.
+        """
+        refs = list(file_refs or [])
+        texts = list(text_attachments or [])
+        self._require_session_message_protocol(with_files=bool(refs or texts))
+        wire_attachments: List[Dict[str, Any]] = []
+        if attachments:
+            wire_attachments = self._normalize_attachments(attachments)
+        if not text and not wire_attachments and not refs and not texts:
+            raise ValueError(
+                "send_session_message requires text, attachments, file_refs "
+                "or text_attachments — a message with no content drives a "
+                "turn the peer has nothing to answer"
+            )
+        payload: Dict[str, Any] = {"target": target, "text": text}
+        if event_id is not None:
+            payload["event_id"] = event_id
+        if wire_attachments:
+            payload["attachments"] = wire_attachments
+        if refs:
+            payload["file_refs"] = refs
+        if texts:
+            payload["text_attachments"] = texts
+        # ``CommandRequest`` carries no ``request_id`` of its own (and its
+        # base drops unknown fields), so the correlation id rides the
+        # payload and the daemon echoes it from there.
+        if request_id is not None:
+            payload["request_id"] = request_id
+        await self._send_event(CommandRequest(
+            command="session.message",
+            args=[],
+            payload=payload,
+        ))
+
+    MIN_SCAFFOLD_EXPLAIN_PROTOCOL = "1.18"
+
+    async def explain_topic(
+        self,
+        topic: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to render one ``jaato-scaffold explain`` topic.
+
+        ``jaato-scaffold`` introspects the framework installed in the CALLING
+        process, which is the right answer only while the CLI and the daemon
+        share a virtualenv.  A deployed application has two: ``jaato-sdk`` in
+        its own ``.venv``, driving a daemon owned by a different user whose
+        install carries extensions — the ``jaato.scaffold_topics`` entry
+        points a package like jaato-premium contributes — that the caller's
+        install does not.  The CLI's refusal is then indistinguishable from
+        *no such topic exists*, which sends a reader looking for a feature
+        they already have.
+
+        The daemon answers with one ``ScaffoldExplainEvent`` whatever
+        happened: ``ok`` with ``text`` / ``data``, or ``ok=False`` with
+        ``error`` and the ``topics`` its OWN install can answer — the list
+        that makes a refusal actionable.  ``server_version`` is carried so a
+        caller can say whose install produced the rendering; two installs
+        answering differently about one topic is the normal state here, not
+        an anomaly.
+
+        Args:
+            topic: The topic name, or ``None`` for the daemon's overview and
+                its topic catalog.
+            name: The topic's argument, where it takes one.
+
+        There is deliberately **no workspace parameter**.  A workspace-reading
+        topic reads the caller's own workspace, which the daemon resolves from
+        the session the caller is attached to or the workspace it declared —
+        both already entitlement-checked at the handshake.  Letting this verb
+        name a directory would add a second, unchecked path ingress for the
+        sake of a read-only report.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SCAFFOLD_EXPLAIN_PROTOCOL`, which would ignore the
+                command silently — and silence is exactly the answer this
+                verb exists to stop being read as "there is no such topic".
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SCAFFOLD_EXPLAIN_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"explain_topic: this daemon speaks protocol {spoken} and does "
+                f"not serve scaffold.explain (needs >= "
+                f"{self.MIN_SCAFFOLD_EXPLAIN_PROTOCOL}).  It would ignore the "
+                f"command silently, which is indistinguishable from the topic "
+                f"not existing.  Upgrade the daemon, or run jaato-scaffold in "
+                f"the daemon's own virtualenv."
+            )
+        # Both positions are always sent, with "" for absent: dropping an
+        # absent one shifts the rest, so `explain_topic(name=X)` would put an
+        # argument where the handler reads a topic name.
+        await self._send_event(CommandRequest(
+            command="scaffold.explain",
+            args=[topic or "", name or ""],
+        ))
+
+    MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21"
+
+    async def run_integration(self, name: str) -> None:
+        """Run ``jaato-scaffold integration <name>`` on the daemon (1.21).
+
+        The sibling of :meth:`explain_topic`.  ``jaato-scaffold integration``
+        installs an integration payload — the ``jaato-sdk`` skill is the one
+        that ships — with a version-and-digest stamp, and keeps it current
+        with ``--refresh``: it re-applies a copy that is ``absent`` /
+        ``stale`` / ``outdated`` and leaves an ``edited`` / ``diverged`` /
+        ``unstamped`` one alone.  The command must run on the install that
+        serves the session — the stamp records THAT ``jaato-server``'s
+        version, and the workspace directory is on THAT host — so the daemon
+        runs it rather than the caller shelling out to its own venv.
+
+        The daemon answers with one :class:`ScaffoldIntegrationEvent` whatever
+        happened: ``ok`` with ``changed`` / ``state_before`` / ``state_after``
+        / ``skipped_reason``, or ``ok=False`` with ``error`` and the
+        ``available`` integrations its OWN install ships — the list that
+        makes an unknown-name refusal actionable.  A refresh the daemon
+        DECLINED to apply (an edited copy) is ``ok=True`` with a
+        ``skipped_reason``, because leaving a local edit alone is the correct
+        behaviour rather than a failure.
+
+        The integration installs into the caller's OWN workspace, which the
+        daemon resolves from the session the caller is attached to or the
+        workspace it declared — both entitlement-checked at the handshake, the
+        same path :meth:`explain_topic` and ``workspace.file.fetch`` use.
+        There is deliberately no workspace parameter, for the same reason.
+
+        Args:
+            name: The integration to run, e.g. ``"claude-code"``.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SCAFFOLD_INTEGRATION_PROTOCOL`, which would ignore
+                the command silently — and silence is indistinguishable from
+                "the skill was installed", so a caller must not read it as a
+                success.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SCAFFOLD_INTEGRATION_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"run_integration: this daemon speaks protocol {spoken} and "
+                f"does not serve scaffold.integration (needs >= "
+                f"{self.MIN_SCAFFOLD_INTEGRATION_PROTOCOL}).  It would ignore "
+                f"the command silently, which is indistinguishable from the "
+                f"skill having been installed.  Upgrade the daemon, or run "
+                f"jaato-scaffold integration in the daemon's own virtualenv."
+            )
+        await self._send_event(CommandRequest(
+            command="scaffold.integration",
+            args=[name or ""],
+        ))
+
+    MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34"
+
+    async def validate_workspace(
+        self,
+        profile_set: Optional[str] = None,
+        profile: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to run ``jaato-scaffold validate`` (protocol 1.34).
+
+        ``jaato-scaffold`` ships with jaato-sdk, and ``validate`` needs
+        jaato-server's loader: most checks run on a profile only once it is
+        parsed, merged with its ``inherits:`` and set overlay, and
+        constructed.  An install with only the SDK therefore asks the daemon,
+        whose full validator (contributed validators included) checks this
+        connection's OWN workspace — the one declared at the handshake, which
+        the daemon refuses unless the connecting account can reach it.  There
+        is deliberately no path parameter, for the reason
+        :meth:`explain_topic` gives.
+
+        The daemon answers with one ``ScaffoldValidateEvent``: ``ok`` with
+        the ``findings`` (``Diagnostic.as_dict()`` shape) and their
+        ``errors`` / ``warnings`` counts, or ``ok=False`` with ``error`` when
+        the validator could not run.  ``ok`` never means "valid".
+
+        Args:
+            profile_set: A ``JAATO_PROFILE_SET`` name to overlay.
+            profile: Validate only this profile.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SCAFFOLD_VALIDATE_PROTOCOL`, which would ignore the
+                command silently, and a caller waiting on findings would read
+                the silence as "no findings".
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SCAFFOLD_VALIDATE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"validate_workspace: this daemon speaks protocol {spoken} and "
+                f"does not serve scaffold.validate (needs >= "
+                f"{self.MIN_SCAFFOLD_VALIDATE_PROTOCOL}).  It would ignore the "
+                f"command silently, which a caller would read as no findings.  "
+                f"Upgrade the daemon, or run jaato-scaffold validate where "
+                f"jaato-server is installed."
+            )
+        # Both positions are always sent, "" for absent, so a profile with no
+        # set does not land where the handler reads the set.
+        await self._send_event(CommandRequest(
+            command="scaffold.validate",
+            args=[profile_set or "", profile or ""],
+        ))
+
+    # =========================================================================
+    # The runner pool (protocol 1.35)
+    # =========================================================================
+
+    MIN_POOL_ADMIN_PROTOCOL = "1.35"
+
+    async def pool_status(self, *, timeout: float = 10.0) -> PoolStatusEvent:
+        """Read the daemon's pre-warm runner pool (protocol 1.35).
+
+        See :meth:`resize_pool`; this is the same request with no sizes.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_POOL_ADMIN_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        return await self.resize_pool(timeout=timeout)
+
+    async def resize_pool(
+        self,
+        target_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+        *,
+        timeout: float = 10.0,
+    ) -> PoolStatusEvent:
+        """Resize the daemon's pre-warm runner pool while it runs (1.35).
+
+        ``target_size`` is the floor on unreserved idle slots (0 disables
+        the pool); ``max_size`` the ceiling on all idle slots.  ``None``
+        keeps a size as it is, so with neither this only reads.  A larger
+        floor fills in over the next moments, one fork at a time; a
+        smaller one drops idle slots only, never one serving a session.
+
+        The daemon answers only a connection whose kernel-reported uid is
+        its own or root: the answer is ``ok=False`` with
+        ``category="not_authorized"`` from any other account, and over WS.
+        ``persisted`` says whether ``--restart`` keeps the new sizes.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_POOL_ADMIN_PROTOCOL`, which would never answer,
+                so "resized" would describe a pool nobody changed.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_POOL_ADMIN_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"resize_pool: this daemon speaks protocol {spoken} and does "
+                f"not serve the pool verbs (needs >= "
+                f"{self.MIN_POOL_ADMIN_PROTOCOL}).  It would never answer.  "
+                f"Upgrade the daemon, or set JAATO_RUNNER_POOL_SIZE and "
+                f"restart it."
+            )
+        return await self._correlated_request(  # type: ignore[return-value]
+            "resize_pool",
+            PoolStatusRequest(target_size=target_size, max_size=max_size),
+            timeout, "pool")
+
+    # =========================================================================
+    # The memory verbs (#1232, protocol 1.22)
+    #
+    # A QUIET read of the attached session's memory store, plus the rail's
+    # structured edit / approve / dismiss / remove.  Each is a request/result
+    # pair correlated by ``request_id``, answered from the plugin copy that
+    # holds the store (the runner's), and each refuses a daemon below 1.22:
+    # an older one answers "Unknown request type" with no request_id and
+    # never the result a caller waits on.
+    # =========================================================================
+
+    MIN_MEMORY_VERBS_PROTOCOL = "1.22"
+
+    def _require_memory_verbs_protocol(self, method: str) -> None:
+        """Refuse a memory verb against a daemon that does not serve it."""
+        if _protocol_compatible(
+                self.server_protocol_version, self.MIN_MEMORY_VERBS_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{method}: this daemon speaks protocol {spoken} and does not "
+            f"serve the memory verbs (needs >= "
+            f"{self.MIN_MEMORY_VERBS_PROTOCOL}).  It would answer 'Unknown "
+            f"request type' and never the result this call waits on.  "
+            f"Upgrade the daemon, or use the `memory` command."
+        )
+
+    async def _memory_request(self, method: str, event: Event, timeout: float) -> Event:
+        """Send one memory request and return its correlated answer.
+
+        Subscribes BEFORE sending, so an answer that arrives before this
+        coroutine resumes is not missed; re-buffers the incidental events it
+        read when it is the only subscriber, as :meth:`_await_inject_result`
+        does.  Raises ``TimeoutError`` when no answer arrives, and
+        ``ConnectionError`` when the connection closes first -- never a
+        synthesised empty answer, which for a list would read as "nothing
+        remembered".
+        """
+        self._require_memory_verbs_protocol(method)
+        return await self._correlated_request(method, event, timeout, "mem")
+
+    async def _correlated_request(
+        self, method: str, event: Event, timeout: float, prefix: str,
+    ) -> Event:
+        """Send ``event`` with a fresh ``request_id`` and await its answer.
+
+        The mechanics :meth:`_memory_request` documents, without the
+        protocol gate (each caller checks its own floor first).
+
+        Raises:
+            RequestRefused: The answer echoing ``request_id`` is an
+                ``ErrorEvent`` (e.g. the IPC session gate, #1475).
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        request_id = f"{prefix}_{uuid.uuid4().hex[:16]}"
+        event.request_id = request_id  # type: ignore[attr-defined]
+        q = self._subscribe_events()
+        incidental: list = []
+        try:
+            if not await self._send_event(event):
+                raise ConnectionError(
+                    f"{method}: the request could not be sent (not connected)")
+
+            async def _wait() -> Optional[Event]:
+                while True:
+                    got = await q.get()
+                    if got is None:
+                        return None
+                    if getattr(got, "request_id", None) == request_id and \
+                            got.type != event.type:
+                        return got
+                    if len(self._event_subscribers) == 1:
+                        incidental.append(got)
+
+            answer = await asyncio.wait_for(_wait(), timeout=timeout)
+        finally:
+            self._unsubscribe_events(q)
+            if incidental and not self._event_subscribers:
+                self._buffered_events.extend(incidental)
+        if answer is None:
+            raise ConnectionError(
+                f"{method}: the connection closed before the daemon answered")
+        if isinstance(answer, ErrorEvent):
+            # A correlated refusal (#1475): the daemon refused the request
+            # before any handler produced the request's own result event.
+            raise RequestRefused(
+                method, answer.error, error_type=answer.error_type,
+                request_id=request_id, details=answer.details)
+        return answer
+
+    async def list_memories(self, *, timeout: float = 10.0) -> MemoryListEvent:
+        """List the attached session's memory store, quietly (1.22).
+
+        Unlike the ``memory list`` command this prints nothing to the
+        transcript.  The answer's ``ok`` is ``False`` -- with ``error`` and
+        ``category`` -- when the store could not be read; its ``memories``
+        are then meaningless, never "nothing remembered".  Rows carry
+        ``tier`` (``workspace`` / ``global``), timestamps, usage, both
+        provenance stamps and the two this-session flags, but not the
+        content: see :meth:`get_memory`.  ``may_curate`` says whether this
+        connection may change them.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_MEMORY_VERBS_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        return await self._memory_request(  # type: ignore[return-value]
+            "list_memories", MemoryListRequest(), timeout)
+
+    async def get_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryGetResultEvent:
+        """Fetch one memory WITH its content and evidence (1.22)."""
+        return await self._memory_request(  # type: ignore[return-value]
+            "get_memory", MemoryGetRequest(memory_id=memory_id), timeout)
+
+    async def update_memory(
+        self,
+        memory_id: str,
+        *,
+        description: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        maturity: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> MemoryUpdateResultEvent:
+        """Edit a memory, or move its maturity (1.22).
+
+        The structured replacement for ``memory edit`` (which spawns
+        ``$EDITOR`` on the runner's host).  ``None`` leaves a field alone.
+        A maturity change is recorded in ``curated_by`` with THIS
+        connection's authenticated identity.  Limited to the workspace
+        owner: a refusal is ``ok=False, category="not_owner"``.
+        """
+        return await self._memory_request(  # type: ignore[return-value]
+            "update_memory",
+            MemoryUpdateRequest(
+                memory_id=memory_id, description=description,
+                content=content, tags=tags, maturity=maturity,
+            ),
+            timeout,
+        )
+
+    async def approve_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryUpdateResultEvent:
+        """Approve a memory: ``update_memory(maturity="validated")``."""
+        return await self.update_memory(
+            memory_id, maturity="validated", timeout=timeout)
+
+    async def dismiss_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryUpdateResultEvent:
+        """Dismiss a memory: ``update_memory(maturity="dismissed")``.
+
+        The store keeps no dismissed trace -- a dismissed raw memory is
+        unlinked from the queue -- so it is gone from the next list.
+        """
+        return await self.update_memory(
+            memory_id, maturity="dismissed", timeout=timeout)
+
+    async def delete_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryDeleteResultEvent:
+        """Remove a memory through the plugin's own delete path (1.22)."""
+        return await self._memory_request(  # type: ignore[return-value]
+            "delete_memory", MemoryDeleteRequest(memory_id=memory_id), timeout)
+
+    # =========================================================================
+    # Self-diagnostics (#1294, protocol 1.25)
+    #
+    # A live confinement re-probe plus the cached facts a session already
+    # tracks, for the CALLER'S OWN attached session -- the request carries
+    # no session id, so there is nothing here to name another session with.
+    # =========================================================================
+
+    MIN_DIAGNOSTICS_PROTOCOL = "1.25"
+
+    # 1.27: ``session.new --model/--provider``.  An older daemon's argv
+    # parser reads an unknown flag as the session NAME, so the override
+    # would be silently dropped -- refused here instead.
+    MIN_MODEL_OVERRIDE_PROTOCOL = "1.27"
+
+    def _require_model_override_protocol(self, model: Optional[str]) -> None:
+        """Refuse a ``create_session(model=...)`` below 1.27 (no-op without one)."""
+        if not model or _protocol_compatible(
+                self.server_protocol_version, self.MIN_MODEL_OVERRIDE_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"create_session: this daemon speaks protocol {spoken} and would "
+            f"read --model as the session name (needs >= "
+            f"{self.MIN_MODEL_OVERRIDE_PROTOCOL}).  Upgrade the daemon."
+        )
+
+    def _require_diagnostics_protocol(self, method: str) -> None:
+        """Refuse the diagnostics verb against a daemon that does not serve it."""
+        if _protocol_compatible(
+                self.server_protocol_version, self.MIN_DIAGNOSTICS_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{method}: this daemon speaks protocol {spoken} and does not "
+            f"serve session.diagnostics (needs >= "
+            f"{self.MIN_DIAGNOSTICS_PROTOCOL}).  It would answer 'Unknown "
+            f"request type' and never the result this call waits on.  "
+            f"Upgrade the daemon."
+        )
+
+    async def get_diagnostics(
+        self, *, timeout: float = 10.0,
+    ) -> DiagnosticsResultEvent:
+        """A live self-diagnosis of the attached session (#1294).
+
+        Reports two kinds of fact, and the result keeps them apart:
+        CACHED ones the daemon already tracked about this session
+        (``runner_identity``, ``confinement_id``, ``sandbox_mode``), and a
+        LIVE re-probe of the runner's confinement (``probe``), measured
+        fresh at the moment of this call.  A cached ``sandbox_mode``
+        reading "confined" is exactly the shape #1253 was filed about, so
+        never read ``sandbox_mode`` as what ``probe`` would have said --
+        ask, and compare.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_DIAGNOSTICS_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_diagnostics_protocol("get_diagnostics")
+        request_id = f"diag_{uuid.uuid4().hex[:16]}"
+        event = DiagnosticsRequest(request_id=request_id)
+        q = self._subscribe_events()
+        incidental: list = []
+        try:
+            if not await self._send_event(event):
+                raise ConnectionError(
+                    "get_diagnostics: the request could not be sent "
+                    "(not connected)")
+
+            async def _wait() -> Optional[Event]:
+                while True:
+                    got = await q.get()
+                    if got is None:
+                        return None
+                    if getattr(got, "request_id", None) == request_id and \
+                            got.type != event.type:
+                        return got
+                    if len(self._event_subscribers) == 1:
+                        incidental.append(got)
+
+            answer = await asyncio.wait_for(_wait(), timeout=timeout)
+        finally:
+            self._unsubscribe_events(q)
+            if incidental and not self._event_subscribers:
+                self._buffered_events.extend(incidental)
+        if answer is None:
+            raise ConnectionError(
+                "get_diagnostics: the connection closed before the "
+                "daemon answered")
+        return answer  # type: ignore[return-value]
 
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
@@ -2424,6 +3408,77 @@ class IPCClient:
             payload=payload,
         ))
 
+    async def send_external_event(
+        self,
+        name: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        timestamp: str = "",
+        session_id: str = "",
+    ) -> None:
+        """Publish an external event onto the session's ``EventBus``.
+
+        The host's way of telling a running session that something happened
+        outside it — ``order.placed``, ``build.finished``, ``ticket.assigned``.
+        It reaches every agent that called
+        ``subscribeToEvents(event_types=['external_event'])``, and sinks onward
+        to the daemon-wide reactor bus, so it is the one verb that can trigger
+        a reactor from a client.
+
+        ``ExternalEventRequest`` has existed as a TYPE in both SDKs and as a
+        METHOD in neither (#1167): the only producer was an out-of-tree web
+        component hand-rolling the JSON frame.  Both halves of that are fixed
+        together — this method, and the daemon dispatching the request on IPC
+        as well as WebSocket.
+
+        **Not** :meth:`wake_session`.  A wake drives a USER turn on one
+        session; this publishes a bus event and drives no turn of its own.  A
+        session with no ``external_event`` subscriber receives it and does
+        nothing, which is a success: ``notified == 0`` is the normal state
+        before any agent has subscribed.
+
+        Fire-and-forget, like the verbs around it.  A refusal arrives on the
+        event stream as an ``ErrorEvent`` — ``error_type="ExternalEventError"``
+        when the session has no bus, ``"SessionError"`` when the session is
+        gone, and ``"RequestError"`` (``Unknown request type:
+        ExternalEventRequest``) from a daemon predating #1167 on IPC.  That
+        last one is why this method takes no protocol floor: the refusal is a
+        named error on the stream rather than the silence an unknown command
+        verb produces, and a floor would ALSO refuse against the WebSocket
+        daemons where the request has always worked.
+
+        Args:
+            name: The event name the host chose, e.g. ``order.placed``.  This
+                is what an agent's ``subscribeToEvents(event_names=[...])``
+                filter matches, so it must agree with what the persona asked
+                to hear.
+            data: Arbitrary JSON-serialisable payload.  ``None`` is sent as
+                ``{}`` — a name with no data is a legitimate ping.
+            timestamp: ISO 8601, when the thing being reported happened.
+                Empty lets the daemon stamp arrival time; supply your own
+                when the event is being relayed rather than raised now.
+            session_id: The target session.  Empty means the one this client
+                is attached to, which is the usual case.
+
+        Raises:
+            ValueError: if ``name`` is empty.  An unnamed event matches no
+                subscriber filter and renders as a blank ``Type:`` to the
+                model, so it is refused here rather than delivered as an
+                event nobody can act on.
+        """
+        if not name:
+            raise ValueError(
+                "send_external_event requires a name — an unnamed event "
+                "matches no subscribeToEvents filter and reaches the model "
+                "with nothing to say what happened"
+            )
+        await self._send_event(ExternalEventRequest(
+            name=name,
+            data=data if data is not None else {},
+            timestamp=timestamp,
+            session_id=session_id,
+        ))
+
     # ---- typed wake-primitive methods (see _wake_client) ----
     async def bind_wake(self, wake_ref: str, trust_keys: list, *,
                         timeout: float = 30.0):
@@ -2525,6 +3580,47 @@ class IPCClient:
             agent_id: Which agent's history to request.
         """
         await self._send_event(HistoryRequest(agent_id=agent_id))
+
+    MIN_HISTORY_PAGE_PROTOCOL = "1.28"
+
+    async def request_history_page(
+        self,
+        agent_id: str = "main",
+        *,
+        before: str = "",
+        max_lines: int = 0,
+        timeout: float = 30.0,
+    ) -> HistoryPageEvent:
+        """Fetch one page of the RENDERED transcript, newest first (1.28).
+
+        Call with no ``before`` for the most recent page, then pass each
+        answer's ``before`` to walk older -- the shape a chat client's
+        scroll-up wants.  Units are never split across pages (a fenced
+        block, a table, one message's tool calls), so ``max_lines`` is a
+        target; model text arrives formatted by the output pipeline, as it
+        did live.  ``stale=True`` means the cursor no longer names anything
+        (the history was rewritten): re-request the latest page.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_HISTORY_PAGE_PROTOCOL`, which would answer
+                "Unknown request type" and never the page.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_HISTORY_PAGE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"request_history_page: this daemon speaks protocol {spoken} "
+                f"and does not serve paged history (needs >= "
+                f"{self.MIN_HISTORY_PAGE_PROTOCOL}).  Use request_history()."
+            )
+        return await self._correlated_request(  # type: ignore[return-value]
+            "request_history_page",
+            HistoryPageRequest(agent_id=agent_id, before=before,
+                               max_lines=max_lines),
+            timeout, "hist",
+        )
 
     # =========================================================================
     # SDK feature parity — session-primitive verbs

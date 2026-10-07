@@ -262,6 +262,9 @@ class AgentUIHooks(Protocol):
         show_popup: Optional[bool] = None,
         is_error_result: bool = False,
         result_status: Optional[str] = None,
+        diff: Optional[str] = None,
+        diff_truncated: Optional[bool] = None,
+        path: Optional[str] = None,
     ) -> None: ...
 
     def on_tool_output(
@@ -274,6 +277,7 @@ class AgentUIHooks(Protocol):
         mime_type: Optional[str] = None,
         data_b64: Optional[str] = None,
         final: bool = False,
+        generated_by: Optional[Dict[str, Any]] = None,
     ) -> None: ...
 
     def on_agent_instruction_budget_updated(

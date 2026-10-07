@@ -77,7 +77,7 @@ jaato-tui (thin client)  web-client (thin client)
 - **SDK imports nothing** from server or TUI
 - **TUI imports only one constant** (`PRERENDERED_LINE_PREFIX`) from SDK
 - **Plugin discovery** via entry points — clean extension mechanism
-- **Lazy loading** in `shared/__init__.py` — already supports minimal imports
+- **Lazy loading** in `jaato_server/shared/__init__.py` — already supports minimal imports
 
 This clean separation is a significant advantage for the split.
 
@@ -90,7 +90,7 @@ After thorough analysis, here's how the codebase's assets classify by competitiv
 - **Runtime instructions** (`jaato_runtime.py` embedded prompts) — anti-fabrication, parallel tool guidance, turn summaries
 - **Subagent profiles** (`.jaato/profiles/`) — specialist definitions with tool/model/GC configs
 - **Knowledge modules** (`knowledge/`, `tests_enablement_2.0/`) — Java/Spring patterns, ADRs, ERIs, validation
-- **Prompt templates** (`.jaato/prompts/`, `shared/prompt_templates/`) — parameterized prompt library
+- **Prompt templates** (`.jaato/prompts/`, `jaato_server/shared/prompt_templates/`) — parameterized prompt library
 - **Design philosophy** (`docs/design-philosophy.md`) — the 5 core principles
 - **GC system design** — hybrid generational strategy, instruction budget algorithm
 
@@ -159,8 +159,8 @@ After thorough analysis, here's how the codebase's assets classify by competitiv
 │                  REPO A (BSL 1.1)                    │
 │                                                      │
 │  jaato-sdk/               Protocol & client library  │
-│  jaato-server/server/     Server daemon              │
-│  jaato-server/shared/     Core framework             │
+│  jaato-server/jaato_server/server/     Server daemon              │
+│  jaato-server/jaato_server/shared/     Core framework             │
 │    ├── jaato_client.py    Facade                     │
 │    ├── jaato_runtime.py   Runtime (minus prompts)    │
 │    ├── jaato_session.py   Session management         │
@@ -195,15 +195,15 @@ After thorough analysis, here's how the codebase's assets classify by competitiv
 | Component | Package | Rationale |
 |---|---|---|
 | `jaato-sdk/` (complete) | jaato-sdk | Pure protocol; must be open for third-party client development |
-| `jaato-server/server/` (complete) | jaato-server | Daemon, IPC, WebSocket — infrastructure plumbing |
-| `jaato-server/shared/jaato_client.py` | jaato-server | Facade — public API |
-| `jaato-server/shared/jaato_runtime.py` | jaato-server | Runtime — but with **stub/minimal system instructions** |
-| `jaato-server/shared/jaato_session.py` | jaato-server | Session management — core loop |
-| `jaato-server/shared/ai_tool_runner.py` | jaato-server | Tool execution engine |
-| `jaato-server/shared/token_accounting.py` | jaato-server | Token ledger (the retry logic is standard) |
-| `jaato-server/shared/mcp_context_manager.py` | jaato-server | MCP integration |
-| `jaato-server/shared/plugins/registry.py` | jaato-server | Plugin discovery & lifecycle |
-| `jaato-server/shared/plugins/base.py` | jaato-server | Plugin base classes |
+| `jaato-server/jaato_server/server/` (complete) | jaato-server | Daemon, IPC, WebSocket — infrastructure plumbing |
+| `jaato-server/jaato_server/shared/jaato_client.py` | jaato-server | Facade — public API |
+| `jaato-server/jaato_server/shared/jaato_runtime.py` | jaato-server | Runtime — but with **stub/minimal system instructions** |
+| `jaato-server/jaato_server/shared/jaato_session.py` | jaato-server | Session management — core loop |
+| `jaato-server/jaato_server/shared/ai_tool_runner.py` | jaato-server | Tool execution engine |
+| `jaato-server/jaato_server/shared/token_accounting.py` | jaato-server | Token ledger (the retry logic is standard) |
+| `jaato-server/jaato_server/shared/mcp_context_manager.py` | jaato-server | MCP integration |
+| `jaato-server/jaato_server/shared/plugins/registry.py` | jaato-server | Plugin discovery & lifecycle |
+| `jaato-server/jaato_server/shared/plugins/base.py` | jaato-server | Plugin base classes |
 | Tool plugins (40+) | jaato-server | cli, file_edit, mcp, interactive_shell, permission, todo, memory, web_search, etc. |
 | Model providers (8) | jaato-server | google_genai, anthropic, claude_cli, github_models, ollama, nim, zhipuai, antigravity |
 | Auth plugins (5) | jaato-server | anthropic_auth, github_auth, antigravity_auth, nim_auth, zhipuai_auth |
@@ -231,7 +231,7 @@ These are the surgical points where the open repo diverges:
 
 5. **`reliability/` plugin**: Move to closed repo. The nudge patterns and anti-failure policies are part of the intelligence layer.
 
-6. **`shared/prompt_templates/`**: Remove all prompt template files. Leave the template-loading mechanism in place.
+6. **`jaato_server/shared/prompt_templates/`**: Remove all prompt template files. Leave the template-loading mechanism in place.
 
 7. **Design docs**: Ship `docs/architecture.md` (condensed) and `docs/sequence-diagram-architecture.md` (condensed) for contributor onboarding. Remove all `docs/design/`, `docs/roadmap/`, `docs/reviews/`, and detailed design documents.
 
@@ -274,7 +274,7 @@ In essence: they get a **powerful engine without a tuned brain**. They can write
 | **System Instructions** | `.jaato/instructions/00-system-instructions.md` | The 19 operational principles — the core "personality" |
 | **Runtime Prompts** | Extracted from `jaato_runtime.py` | Anti-fabrication, parallel tool guidance, turn summaries |
 | **Subagent Profiles** | `.jaato/profiles/*.json` | Specialist definitions (skills, validators, analysts) |
-| **Prompt Templates** | `.jaato/prompts/*.md`, `shared/prompt_templates/` | Parameterized prompt library |
+| **Prompt Templates** | `.jaato/prompts/*.md`, `jaato_server/shared/prompt_templates/` | Parameterized prompt library |
 | **Knowledge Modules** | `knowledge/` | ADRs, ERIs, templates, validation rules |
 | **Enablement Tests** | `tests_enablement_2.0/` | Integration tests for knowledge system |
 | **Hybrid GC Plugin** | `gc_hybrid/` | Three-tier generational GC algorithm |
@@ -497,7 +497,7 @@ Before splitting, make the open/closed boundary a clean seam *within* the existi
    - Test that the plugin entry point system correctly discovers GC plugins from external packages
 
 4. **Extract knowledge modules**
-   - Ensure `knowledge/` and `tests_enablement_2.0/` have no imports into `jaato-server/shared/`
+   - Ensure `knowledge/` and `tests_enablement_2.0/` have no imports into `jaato-server/jaato_server/shared/`
    - They should be loaded purely through the template/reference system, not Python imports
 
 5. **Mark `.jaato/` contents as external configuration**
@@ -599,7 +599,7 @@ _TASK_COMPLETION_INSTRUCTION = _load_instruction(
 **Before:**
 ```python
 # Hard import
-from shared.plugins.gc_hybrid import HybridGCPlugin
+from jaato_server.shared.plugins.gc_hybrid import HybridGCPlugin
 ```
 
 **After:**

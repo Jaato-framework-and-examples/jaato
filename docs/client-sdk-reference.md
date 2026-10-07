@@ -26,7 +26,7 @@ JAATO ships two official client SDKs that provide programmatic access to `jaato-
 
 | SDK | Package | Version | Language | Transport |
 |-----|---------|---------|----------|-----------|
-| Python | `jaato-sdk` | 0.3.4 | Python 3.10+ | IPC (Unix socket / Windows named pipe) + WebSocket |
+| Python | `jaato-sdk` | 0.3.4 | Python 3.12+ | IPC (Unix socket / Windows named pipe) + WebSocket |
 | TypeScript | `@jaato/sdk` | 0.1.0 | TypeScript 5.4+ / JavaScript | WebSocket only |
 
 Both SDKs expose the same wire protocol and the same set of typed methods. The Python SDK additionally supports local IPC transport (for TUI/desktop clients), while the TS SDK is WebSocket-only (for browser and Node.js consumers).
@@ -80,7 +80,7 @@ HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 ```
 
-**Auto-start:** When `auto_start=True` (default), the client launches `python -m server --daemon` if the socket/pipe is not available. On Windows, the resolved pipe path is passed to avoid shell mangling of backslashes.
+**Auto-start:** When `auto_start=True` (default), the client launches `python -m jaato_server --daemon` if the socket/pipe is not available. On Windows, the resolved pipe path is passed to avoid shell mangling of backslashes.
 
 **Windows named pipe resolution:** The client accepts multiple input formats (`\.\pipe\jaato`, `pipe\jaato`, `jaato`) and normalizes to `\\.\pipe\<name>`. Uses `WaitNamedPipeW` (1ms timeout) for existence probing and `WaitNamedPipeW` (full timeout) for availability checks — both consume no pipe instances, avoiding ghost-client issues.
 
@@ -657,7 +657,7 @@ On Windows, if `wait_for()` cancels a coroutine after `create_pipe_connection()`
 | `jaato_sdk/tests/test_events_wire_format.py` | Wire format baseline tests |
 | `jaato_sdk/tests/test_helpers.py` | Helper function tests |
 | `jaato_sdk/tests/test_sdk_parity_methods.py` | Cross-SDK method parity tests |
-| `pyproject.toml` | Package metadata (v0.3.4, Python 3.10+, pydantic, python-dotenv) |
+| `pyproject.toml` | Package metadata (v0.3.4, Python 3.12+, pydantic, python-dotenv) |
 
 ### TypeScript SDK (`jaato-sdk-ts/`)
 
@@ -674,7 +674,7 @@ On Windows, if `wait_for()` cancels a coroutine after `create_pipe_connection()`
 | `package.json` | Package metadata (v0.1.0, ESM, zero runtime deps) |
 | `README.md` | Comprehensive README with API reference, consuming options, publishing workflow |
 
-### Shared (in `jaato-server/shared/`)
+### Shared (in `jaato-server/jaato_server/shared/`)
 
 | File | Contents |
 |------|----------|

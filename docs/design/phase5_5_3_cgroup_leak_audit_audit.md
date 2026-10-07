@@ -150,7 +150,7 @@ Two test surfaces:
 ### 4.1 `CgroupsManager.list_orphan_sub_cgroups` (pure FS scan)
 
 Lives in a new module-local fixture or extends
-`shared/tests/test_cgroups.py`.  Each test pins one property:
+`jaato_server/shared/tests/test_cgroups.py`.  Each test pins one property:
 
 1. `test_list_orphan_returns_empty_when_no_matching_dirs` — empty
    fake cgroup root → empty list.
@@ -171,7 +171,7 @@ Lives in a new module-local fixture or extends
 ### 4.2 `SessionManager._cascade_teardown_isolated_subagents` orphan reap
 
 Extends
-`server/tests/test_cascade_teardown_isolated_subagents.py` (or
+`jaato_server/server/tests/test_cascade_teardown_isolated_subagents.py` (or
 mirror the existing test cadence in
 `test_spawn_isolated_runner_helper.py`).  Each test pins one
 property:

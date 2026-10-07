@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-sdk"
-version = "0.22.0"
+version = "0.30.0"
 description = "Jaato SDK - Protocol and client library for jaato server"
 readme = "PKG_README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
@@ -17,8 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
@@ -32,9 +30,15 @@ Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 
 [project.scripts]
 # Client-side preflight doctor — diagnoses an SDK client's env / socket /
-# daemon / auth before it ever calls connect().  Mirrors jaato-server's
-# jaato-scaffold console script (see jaato-server/pyproject.toml).
+# daemon / auth before it ever calls connect().
 jaato-doctor = "jaato_sdk.doctor:main"
+# The ONE declaration of jaato-scaffold (#1267).  The shell and the authoring
+# verbs (`new`, `integration`) ship here, because application developers
+# install only the SDK.  jaato-server contributes `explain` / `validate` /
+# `dependencies` / `releases` through the `jaato.scaffold_verbs` entry-point
+# group in its own pyproject; it must never declare this script too, or two
+# distributions would fight over one file in bin/.
+jaato-scaffold = "jaato_sdk.scaffold.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -50,6 +54,20 @@ ws = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["jaato_sdk*", "jaato*"]
+
+# Integrations ship WITH the scaffold that applies them, so an applied copy
+# cannot describe a different version than the one installed.
+# `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares the
+# stamp it leaves against this distribution's version.
+# `authoring_snapshot.json` is what `jaato-scaffold new` reads about providers
+# and env vars when jaato-server's source tree is not installed beside it
+# (#1267).  `explain_snapshot.json` is every `jaato-scaffold explain` topic
+# jaato-server renders without a workspace or the network, answered when
+# jaato-server is not installed.
+[tool.setuptools.package-data]
+"jaato_sdk.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
+                        "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md",
+                        "authoring_snapshot.json", "explain_snapshot.json"]
 
 [tool.pytest.ini_options]
 markers = [

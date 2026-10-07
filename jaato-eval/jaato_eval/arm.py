@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from .manifest import TaskManifest
 from .provenance import provenance
+from .results_format import RESULTS_FORMAT_VERSION, caveats_for
 from .verdict import BLOCKED, Report, Verdict
 
 
@@ -88,6 +89,15 @@ class ArmResult:
             console groups by exactly this id, so persisting it turns every
             row into a join onto the provider's own record of the arm
             (request count, upstream, per-request cost, generation ids).
+            For a DRIVER arm (``harness.kind: driver``, jaato #1110), the
+            FIRST of ``session_ids`` — kept as a scalar so every consumer
+            that joins on one id keeps working.
+        session_ids: Every session this arm opened, in creation order.  A
+            session arm has exactly one; a driver arm has one per stage,
+            and the OpenRouter join is per stage, so the whole list is
+            recorded.  Empty when none is known — an arm blocked before
+            it opened anything — never ``None``: an absent key is an old
+            record, an empty list is a measured nothing.
         model: The model the daemon actually BOUND, from
             ``SessionInfoEvent.model_name``.  Not ``profile_set``, which is
             a naming convention rather than data — ``openrouter_gemini25flash``
@@ -139,6 +149,7 @@ class ArmResult:
     error: Optional[str] = None
     blocked_reason: Optional[str] = None
     session_id: Optional[str] = None
+    session_ids: List[str] = field(default_factory=list)
     model: Optional[str] = None
     provider: Optional[str] = None
     upstream_provider: Optional[str] = None
@@ -166,6 +177,14 @@ class ArmResult:
     def to_dict(self) -> Dict[str, Any]:
         """Flat record for the JSONL results file."""
         return {
+            # The two fields written for a consumer OUTSIDE this package
+            # (jaato #1124).  ``results_version`` is what lets such a reader
+            # refuse a file it cannot read instead of rendering half of it;
+            # ``caveats`` carries the limits of the instruments that graded
+            # THIS arm, in the harness's own words, so a number and its
+            # qualification cannot be separated by whoever quotes them.
+            "results_version": RESULTS_FORMAT_VERSION,
+            "caveats": caveats_for(v.grader_id for v in self.verdicts),
             "arm_id": self.spec.arm_id,
             "task_id": self.spec.task.task_id,
             "profile_set": self.spec.profile_set,
@@ -184,6 +203,7 @@ class ArmResult:
             # could not establish from a field a newer engine added, and an
             # omitted key looks like the latter.
             "session_id": self.session_id,
+            "session_ids": list(self.session_ids),
             "model": self.model,
             "provider": self.provider,
             "upstream_provider": self.upstream_provider,

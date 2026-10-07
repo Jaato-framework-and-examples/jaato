@@ -29,7 +29,7 @@ def test_check_never_fails_and_names_itself():
 
 def test_names_the_seam_when_one_is_found():
     pytest.importorskip("mcp")
-    pytest.importorskip("shared.plugins.mcp.plugin")
+    pytest.importorskip("jaato_server.shared.plugins.mcp.plugin")
     c = _one()
     if c.status is not PASS:
         pytest.skip(f"no seam in this environment: {c.detail}")
@@ -40,7 +40,7 @@ def test_names_the_seam_when_one_is_found():
 def test_agrees_with_the_plugin_about_the_installed_sdk():
     """The check must report what the plugin will actually do, not a guess."""
     pytest.importorskip("mcp")
-    plugin = pytest.importorskip("shared.plugins.mcp.plugin")
+    plugin = pytest.importorskip("jaato_server.shared.plugins.mcp.plugin")
     from mcp import types as mcp_types
 
     seam = plugin.detect_jsonrpc_seam(mcp_types)

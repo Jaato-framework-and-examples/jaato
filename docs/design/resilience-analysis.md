@@ -33,7 +33,7 @@ comparison, not absolute scoring.
 ### Strengths
 
 - WS heartbeat: `ping_interval=30`, `ping_timeout=10`
-  (`server/websocket.py:520-521`)
+  (`jaato_server/server/websocket.py:520-521`)
 - SDK `IPCRecoveryClient` (`jaato-sdk/jaato_sdk/client/recovery.py`)
   has a real state machine + exponential backoff with jitter
   (max 10 attempts, base 1s, cap 60s, ±30% jitter)
@@ -60,7 +60,7 @@ comparison, not absolute scoring.
 
 ### Strengths
 
-- Persistence on multiple triggers (`server/session_manager.py`):
+- Persistence on multiple triggers (`jaato_server/server/session_manager.py`):
   - On turn completion (line 720–722) — captures interrupted state
   - Manual checkpoint (`save_session`, line 1943–1956)
   - On unload (line 1816–1817) — flushes dirty state
@@ -90,7 +90,7 @@ comparison, not absolute scoring.
 
 ### Strengths
 
-`with_retry()` in `shared/retry_utils.py` is mature:
+`with_retry()` in `jaato_server/shared/retry_utils.py` is mature:
 
 - Three-way error classification: `transient` / `rate_limit` / `infra`
   (line 135–183)
@@ -124,7 +124,7 @@ comparison, not absolute scoring.
 
 - All tool exceptions are caught and returned as
   `(False, {error, traceback})` — never crash the turn
-  (`shared/ai_tool_runner.py:719-770`)
+  (`jaato_server/shared/ai_tool_runner.py:719-770`)
 - `CancelledException` is special-cased, no retry, clean exit
 - **Auto-background** for long-running tools that opt in via
   `BackgroundCapable`: tools exceeding the threshold return a
@@ -154,7 +154,7 @@ comparison, not absolute scoring.
 ### Strengths
 
 - **Two-stage recovery** on context-limit errors
-  (`shared/jaato_session.py:4836-4922`):
+  (`jaato_server/shared/jaato_session.py:4836-4922`):
   1. Try GC first via `_try_gc_for_context_recovery()`
   2. Fall back to `_truncate_results_to_fit()` if GC didn't help
 - Token count extracted from error message via regex
@@ -184,15 +184,15 @@ The **weakest layer**. Multiple silent failures and non-atomic writes.
 
 ### Critical issues
 
-- **Session save is non-atomic** (`shared/plugins/session/file_session.py:137-160`).
+- **Session save is non-atomic** (`jaato_server/shared/plugins/session/file_session.py:137-160`).
   Direct write — no `tmp + fsync + rename`. A power loss during save
   can leave a corrupted JSON.
 - **Backup metadata writes silently fail**
-  (`shared/plugins/file_edit/backup.py:165`):
+  (`jaato_server/shared/plugins/file_edit/backup.py:165`):
   `except IOError: pass`. The backup file exists but the metadata
   pointing to it is lost → orphaned backup.
 - **Waypoint save silently fails**
-  (`shared/plugins/waypoint/manager.py:141`): same `except IOError: pass`.
+  (`jaato_server/shared/plugins/waypoint/manager.py:141`): same `except IOError: pass`.
   Waypoint exists in memory but never persisted to disk.
 - **Token ledger has no fsync.** Append-mode JSONL means partial
   lines on crash.
@@ -212,7 +212,7 @@ The **second-weakest layer**.
 ### Critical issues
 
 - **`plugin.initialize()` is not wrapped in try/except**
-  (`shared/plugins/registry.py:725-779`). If a plugin's init raises,
+  (`jaato_server/shared/plugins/registry.py:725-779`). If a plugin's init raises,
   the entire `expose_tool()` fails and may take down session creation.
 - **`plugin.shutdown()` is not wrapped.** First plugin to fail stops
   all subsequent shutdowns. Worse: `_exposed.discard()` never runs,
@@ -237,7 +237,7 @@ The **second-weakest layer**.
 ### Critical issues
 
 - **No try/except in `connect()` flow**
-  (`shared/mcp_context_manager.py:122-166`). If `stdio_client` fails,
+  (`jaato_server/shared/mcp_context_manager.py:122-166`). If `stdio_client` fails,
   the partial context leaks.
 - **No reconnection logic.** A dead MCP server stays dead.
 - **`get_connection()` raises `KeyError`** if the server is
@@ -259,7 +259,7 @@ The **second-weakest layer**.
 - Auth resolution returns structured errors (commit `2bc34206`:
   `auth_context` field with `credentials_resolved` flag)
 - SSL/proxy/auth error detection in
-  `shared/plugins/service_connector/plugin.py`
+  `jaato_server/shared/plugins/service_connector/plugin.py`
 
 ### Gaps
 

@@ -70,7 +70,7 @@ File paths are under `/home/user/jaato/`.
 
 ### Hook location
 
-`jaato-server/shared/jaato_session.py:3962` — right after
+`jaato-server/jaato_server/shared/jaato_session.py:3962` — right after
 `_add_model_response_to_history()` appends the `ProviderResponse` and before
 `_execute_tools_and_continue()` iterates tool_use blocks.
 
@@ -91,8 +91,8 @@ if rewind_reason and self._rewind_budget.allow():
 
 | Component | Location | Notes |
 |-----------|----------|-------|
-| **Detector** | new module, e.g. `shared/rewind.py` | Reads `response.finish_reason` (`FinishReason.MAX_TOKENS`) and scans `response.parts[*].function_call.args` for `{}` or missing required keys per the tool's `ToolSchema`. Returns a reason string or `None`. |
-| **Rewinder** | uses `SessionHistory.pop_last()` at `shared/session_history.py:85` | Precedent exists — GC already manipulates history (`_remove_tool_results_from_history` at `jaato_session.py:5274`). Need a variant that rewrites the last assistant message to keep text parts and drop tool_use parts. |
+| **Detector** | new module, e.g. `jaato_server/shared/rewind.py` | Reads `response.finish_reason` (`FinishReason.MAX_TOKENS`) and scans `response.parts[*].function_call.args` for `{}` or missing required keys per the tool's `ToolSchema`. Returns a reason string or `None`. |
+| **Rewinder** | uses `SessionHistory.pop_last()` at `jaato_server/shared/session_history.py:85` | Precedent exists — GC already manipulates history (`_remove_tool_results_from_history` at `jaato_session.py:5274`). Need a variant that rewrites the last assistant message to keep text parts and drop tool_use parts. |
 | **Hint injector** | `SessionHistory.append(Message.from_text(Role.USER, ...))` | Synthetic user turn referencing the preserved narration and the specific tool. |
 | **Budget** | per-session counter on `JaatoSession` | Cap at 1–2 rewinds per logical operation; reset on successful tool_result. |
 | **Telemetry** | `turn_span` in the chat loop | Tool span is too narrow — the tool never ran. Set `jaato.rewind.reason` and `jaato.rewind.tool` on the turn span since we are pre-empting execution. |
@@ -134,7 +134,7 @@ is a **fallback, not an override**: it fills in an unreported or merely-`stop`
 finish and never displaces a reason in `TERMINAL_FINISH_REASONS`
 (`MAX_TOKENS`, `SAFETY`, `ERROR`, `CANCELLED`). Every streaming provider calls
 it instead of assigning, and
-`shared/tests/test_truncation_is_not_reported_as_tool_use.py` fails if one
+`jaato_server/shared/tests/test_truncation_is_not_reported_as_tool_use.py` fails if one
 goes back to assigning.
 
 #### The finish reason a stream never reported (#687)
@@ -170,11 +170,11 @@ track whether a terminal event was **seen**, separately from what it said, so
 that an unmapped label does not read as an interruption and an interruption
 does not read as an unmapped label. When the event never came it drops the
 accumulated function calls, marks the response `INCOMPLETE`, and raises
-`StreamInterruptedError` — which `shared/retry_utils.py` classifies as
+`StreamInterruptedError` — which `jaato_server/shared/retry_utils.py` classifies as
 transient, so `with_retry` retries it for every provider at once (each
 provider's own `classify_error` returns `None` for types it does not know).
 
-`shared/tests/test_a_dead_stream_is_not_a_finished_turn.py` fails if a
+`jaato_server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py` fails if a
 provider stops proving its stream terminated, or stops recording one of the
 wire signals it reads as terminal.
 
@@ -203,7 +203,7 @@ Example:
 ### 1. Cache invalidation cost
 
 The rewind edits the last assistant message. For providers using prompt
-caching (e.g. `cache_control` in `shared/plugins/model_provider/anthropic/`),
+caching (e.g. `cache_control` in `jaato_server/shared/plugins/model_provider/anthropic/`),
 this invalidates the cache breakpoint at the edited turn — the next
 `provider.complete()` call re-reads the full prefix once. Acceptable for a
 rare event, but worth confirming that the cache breakpoint placement does not

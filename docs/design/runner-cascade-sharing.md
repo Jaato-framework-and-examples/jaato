@@ -301,7 +301,7 @@ classification, not whole-plugin categorisation.
 >
 > Profile naming is therefore `jaato-ws-{confinement_id}`, where the id is
 > derived from the BOUNDARY — workspace, config root, and a digest of the
-> rendered profile body (`server/confinement_id.py`).  A slot's reuse key
+> rendered profile body (`jaato_server/server/confinement_id.py`).  A slot's reuse key
 > carries that name, so a reused slot is by construction one whose profile
 > has not changed and **no transition happens at all**.  This is narrower
 > than the withdrawn "one profile per cascade" decision below: sessions of

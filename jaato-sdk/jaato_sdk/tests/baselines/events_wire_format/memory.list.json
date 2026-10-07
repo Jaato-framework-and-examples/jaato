@@ -2,5 +2,11 @@
   "type": "memory.list",
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
-  "memories": []
+  "memories": [],
+  "request_id": "",
+  "ok": true,
+  "error": "",
+  "category": "",
+  "source": "",
+  "may_curate": null
 }

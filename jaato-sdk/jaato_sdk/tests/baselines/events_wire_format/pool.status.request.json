@@ -1,0 +1,8 @@
+{
+  "type": "pool.status.request",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "target_size": null,
+  "max_size": null
+}

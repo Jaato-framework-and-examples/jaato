@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-JAATO provides unified proxy support and **Kerberos/SPNEGO authentication** for enterprise environments where outbound traffic must traverse HTTP proxies. The `shared/http/` module abstracts proxy configuration across three HTTP libraries (urllib, requests, httpx) and provides two key improvements over standard proxy handling: **exact host matching** via `JAATO_NO_PROXY` (compared to the standard `NO_PROXY` suffix matching) and **transparent Kerberos token generation** for corporate proxies requiring SPNEGO/Negotiate authentication (via `pyspnego`, or a native Windows SSPI fallback when `pyspnego` is unavailable).
+JAATO provides unified proxy support and **Kerberos/SPNEGO authentication** for enterprise environments where outbound traffic must traverse HTTP proxies. The `jaato_server/shared/http/` module abstracts proxy configuration across three HTTP libraries (urllib, requests, httpx) and provides two key improvements over standard proxy handling: **exact host matching** via `JAATO_NO_PROXY` (compared to the standard `NO_PROXY` suffix matching) and **transparent Kerberos token generation** for corporate proxies requiring SPNEGO/Negotiate authentication (via `pyspnego`, or a native Windows SSPI fallback when `pyspnego` is unavailable).
 
 ---
 
@@ -173,7 +173,7 @@ export JAATO_KERBEROS_PROXY=true
 
 ## Part 4: Multi-Library Support
 
-The `shared/http/` module provides factory functions for three HTTP libraries, ensuring consistent proxy behavior regardless of which library a provider or plugin uses:
+The `jaato_server/shared/http/` module provides factory functions for three HTTP libraries, ensuring consistent proxy behavior regardless of which library a provider or plugin uses:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -274,7 +274,7 @@ Both handlers are installed together for defense-in-depth: pre-auth avoids the e
 ### requests
 
 ```python
-from shared.http import get_requests_session, get_requests_kwargs
+from jaato_server.shared.http import get_requests_session, get_requests_kwargs
 
 # Session-level configuration (recommended for multiple requests)
 session = get_requests_session()
@@ -288,7 +288,7 @@ response = requests.get(url, **kwargs)
 ### httpx (Sync and Async)
 
 ```python
-from shared.http import get_httpx_client, get_httpx_async_client
+from jaato_server.shared.http import get_httpx_client, get_httpx_async_client
 
 # Synchronous
 with get_httpx_client() as client:

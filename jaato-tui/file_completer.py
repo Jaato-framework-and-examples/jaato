@@ -173,6 +173,7 @@ DEFAULT_COMMANDS = [
     ("screenshot delay", "Capture once after N seconds (default: 5)"),
     ("screenshot help", "Show screenshot command help"),
     ("plan", "Show current plan status"),
+    ("diagnostics", "Self-diagnose this session's confinement and runtime facts (#1294)"),
     ("quit", "Exit the client"),
     ("exit", "Exit the client"),
 ]

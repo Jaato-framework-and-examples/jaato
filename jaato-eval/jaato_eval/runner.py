@@ -33,6 +33,20 @@ only its sign-off.  That belongs in the first bucket, and it reaches it —
 see :mod:`jaato_eval.sign_off`, which owns the rule, and ``_run_session``,
 which grades through such a terminal instead of raising past the grading.
 Every other error terminal still lands in the second.
+
+TWO HARNESS KINDS, ONE TAXONOMY
+===============================
+
+An arm is one session (``harness.kind: session``, the default) or one
+DRIVER PROCESS orchestrating many (``harness.kind: driver``, jaato #1110;
+the mechanics live in :mod:`jaato_eval.driver`).  :func:`run_arm`
+dispatches on the kind after materialising the workspace, and both paths
+land in the same two buckets: a driver exiting ``0`` is graded, a driver
+that never really ran is BLOCKED (killed at the ceiling, its own
+``EX_TEMPFAIL``, a shell that could not run the command, a signal nobody
+here sent), and a driver exiting any code it CHOSE is the driver kind's
+UNSIGNED terminal (``DriverStoppedShort``) — graded per grader, as a spent
+nudge budget is.
 """
 from __future__ import annotations
 
@@ -42,176 +56,25 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from .accounting import _SUMMED_USAGE, _TurnAccumulator  # noqa: F401 — re-exported
 from .arm import ArmResult, ArmSpec
+from .driver import (CascadeObserver, DriverOutcome, arm_cascade_id,
+                     attributed_sessions, driver_environment, record_binding,
+                     run_driver, workspace_session_records)
 from .fixture import FixtureError, Workspace, discard, materialise
 from .graders import REGISTRY, GraderContext
 from .ledger import build_ledger_result
 from .profile import resolve_budget_ceiling
 from .results import canonical_hash
-from .sign_off import MAX_COMPLETION_NUDGES, is_unsigned_terminal
+from .sign_off import (DRIVER_STOPPED_SHORT, MAX_COMPLETION_NUDGES,
+                       is_unsigned_terminal)
 from .verdict import Verdict
-
-#: Usage keys summed across turns rather than taken from the last turn.
-#: ``total_tokens`` is deliberately excluded: for a prompt-inclusive
-#: provider it is the end-of-turn CONTEXT SIZE, not spend, so summing it
-#: across turns overcounts.  ``spend_total_tokens`` is the billed figure.
-#:
-#: The cache pair follows the same rule, and used to break it.
-#: ``cache_read_tokens`` / ``cache_creation_tokens`` are the turn's LAST
-#: RESPONSE's figures — a level, not spend — so adding them across turns
-#: produced neither.  The SDK documents the distinction as load-bearing
-#: (``jaato_sdk.events``): under ``model_tiers`` a mid-turn tier switch
-#: re-reads the whole prefix cold at the new model, and the last-response
-#: figures hide exactly that miss.  The fingerprint of the bug was visible
-#: in the archived corpus — three of four Gemini arms reported
-#: ``cache_creation`` equal to ``cache_read`` to the token, which is one
-#: level reading copied into two fields, not two independent billed sums
-#: (jaato #800).  ``spend_cache_read_tokens`` /
-#: ``spend_cache_creation_tokens`` are already summed over the turn's
-#: responses, the same shape as ``spend_total_tokens``, so summing them
-#: across turns is the right operation.
-#:
-#: ``prompt_tokens`` / ``output_tokens`` were the last pair here with the
-#: same defect, and could not be fixed with the cache pair because no spend
-#: counterpart reached the wire: the session accumulated ``spend_prompt`` /
-#: ``spend_output`` per response and dropped both at the boundary.
-#: jaato #802 carries them, so every member of this tuple is now a billed
-#: figure and the tuple's name is true of all of it.
-_SUMMED_USAGE = ("spend_prompt_tokens", "spend_output_tokens",
-                 "spend_total_tokens",
-                 "spend_cache_read_tokens", "spend_cache_creation_tokens",
-                 "reasoning_tokens", "thinking_tokens")
-
 
 #: Test seam: the graded context, for suites that must assert on what the
 #: graders were HANDED rather than on a verdict downstream of it.  A no-op
 #: in production; a stub suite rebinds it.
 def _CONTEXT_SPY(context):  # noqa: N802 - a seam, not a class
     return None
-
-
-class _TurnAccumulator:
-    """Collects per-turn facts as ``TurnCompletedEvent``s arrive.
-
-    Usage arrives per turn, not once at the end, so an arm's real spend is
-    only knowable by accumulating.  ``cost_usd`` stays ``None`` unless at
-    least one turn reported a cost — a zero would be indistinguishable
-    from "free", which it is not.
-    """
-
-    def __init__(self) -> None:
-        self.turns = 0
-        self.finish_reason = "stop"
-        self.usage: Dict[str, Any] = {k: 0 for k in _SUMMED_USAGE}
-        self.cost_usd: Optional[float] = None
-        self.termination_reason = ""
-        self.termination_detail = ""
-        self.termination_error_type = ""
-        self.agent_error: Optional[str] = None
-        self.completion_gap: Optional[str] = None
-        # PROVIDER-SIDE FACTS THE WIRE DOES NOT CARRY YET.  Both stay None
-        # on every arm today: the OpenRouter provider reads
-        # ``native_finish_reason`` off the choice and the routed upstream
-        # off the response, and neither reaches TurnCompletedEvent (jaato
-        # #766).  Read here anyway, by name, so the per-arm report fills
-        # these columns the day the framework reports them — the
-        # alternative is a report that keeps printing "—" for a fact the
-        # daemon has started sending.
-        self.native_finish_reason: Optional[str] = None
-        self.upstream_provider: Optional[str] = None
-
-    def on_terminated(self, event: Any) -> None:
-        """Record why the session wound down.
-
-        ``SessionTerminatedEvent.reason`` is the only place an abnormal
-        stop names ITSELF.  A budget ceiling in particular short-circuits
-        BEFORE any turn runs, so no ``TurnCompletedEvent`` fires and the
-        per-turn ``finish_reason`` never mentions it — the SDK's own
-        docstring warns that a driver reading only turns reports "a
-        generic failure ... a ceiling stop indistinguishable from a
-        break".  That is exactly what this engine did until it subscribed
-        here.
-
-        ``natural`` / ``client_request`` / ``stopped`` are ordinary
-        wind-downs and say nothing about completeness; only
-        ``budget_exhausted`` and ``error`` name a stop.
-        """
-        self.termination_reason = getattr(event, "reason", "") or ""
-        detail = (getattr(event, "details", None)
-                  or getattr(event, "error_summary", None) or "")
-        self.termination_detail = str(detail)
-        # The terminal's TYPE, alongside its prose.  ``reason="error"``
-        # says only that something failed; the type is what separates a
-        # daemon that died mid-turn from an agent that finished its work
-        # and never called signal_completion (see :mod:`jaato_eval.sign_off`).
-        self.termination_error_type = str(
-            getattr(event, "error_type", "") or "")
-
-    def note_unsigned(self, exc: Exception) -> None:
-        """Record an error terminal the arm is being graded through anyway.
-
-        Called by :func:`_run_session` when ``complete()`` raises a
-        terminal :mod:`jaato_eval.sign_off` classifies as *unsigned* — the
-        agent worked and left a workspace, it just never called
-        ``signal_completion``.  The facts land here rather than on a local
-        so that the arm's result and every grader see the same account of
-        why no payload arrived, and so a session whose
-        ``SessionTerminatedEvent`` never reached us (the exception carries
-        the same two fields) is described just as fully.
-
-        Never overwrites what the terminal event already said: the event is
-        the daemon's own account, the exception is the SDK's relay of it.
-        """
-        error_type = str(getattr(exc, "error_type", "") or "")
-        if error_type and not self.termination_error_type:
-            self.termination_error_type = error_type
-        summary = str(getattr(exc, "error_summary", "") or "")
-        if summary and not self.termination_detail:
-            self.termination_detail = summary
-        if not self.termination_reason:
-            self.termination_reason = "error"
-        self.agent_error = str(exc)
-
-    def on_turn(self, event: Any) -> None:
-        self.turns += 1
-        reason = getattr(event, "finish_reason", None)
-        if reason:
-            self.finish_reason = reason
-        # LATCHED PER TURN, not read off the last one.  completion_gap
-        # rides EXACTLY ONE event and is read-and-cleared, so a session
-        # that gave up and then received more work stops reporting it —
-        # sampling only the final turn would miss the very turn that
-        # carried the fact.  It means "asked twice and refused", not
-        # "did not signal on this turn", so a legitimately multi-turn
-        # session never sets it.
-        gap = getattr(event, "completion_gap", None)
-        if gap:
-            self.completion_gap = str(gap)
-        # LATCHED, not overwritten by a later turn that omits them: a
-        # gateway reports the upstream once per response and a normalised
-        # finish reason has no native twin on most turns, so "the last turn
-        # did not say" must not erase what an earlier one did.
-        native = getattr(event, "native_finish_reason", None)
-        if native:
-            self.native_finish_reason = str(native)
-        upstream = getattr(event, "upstream_provider", None)
-        if upstream:
-            self.upstream_provider = str(upstream)
-        usage = getattr(event, "usage", None)
-        if usage is None:
-            return
-        for key in _SUMMED_USAGE:
-            value = getattr(usage, key, None)
-            if isinstance(value, (int, float)):
-                self.usage[key] += value
-        cost = getattr(usage, "cost_usd", None)
-        if isinstance(cost, (int, float)):
-            self.cost_usd = (self.cost_usd or 0.0) + float(cost)
-
-    def snapshot(self) -> Dict[str, Any]:
-        out = dict(self.usage)
-        out["cost_usd"] = self.cost_usd
-        return out
 
 
 #: Wall-clock ceiling for one arm's session, in seconds.  The harness owns
@@ -360,6 +223,13 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         result.blocked_reason = f"fixture: {exc}"
         return result
 
+    if task.harness.is_driver:
+        return await _run_driver_arm(
+            spec, result, workspace, socket_path=socket_path,
+            cascade_driver_id=cascade_driver_id,
+            arm_timeout_seconds=arm_timeout_seconds,
+            keep_workspace=keep_workspace)
+
     started = time.monotonic()
     session_ref: Dict[str, Any] = {}
     try:
@@ -378,13 +248,7 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         # nothing else, so an author who had set `budget.seconds: 1800`
         # and saw 900 had no way to discover that this ceiling exists,
         # let alone that it is a different gate with its own flag.
-        result.blocked_reason = (
-            f"arm exceeded the per-arm ceiling of {limit:.0f}s "
-            f"({describe_arm_timeout(arm_timeout_seconds)}) and was cut "
-            "short — BLOCKED, not FAIL: a run that did not finish says "
-            "nothing about the configuration under test. This is NOT the "
-            "task's `budget.seconds`, which is the pool's clock across all "
-            "its arms")
+        result.blocked_reason = _ceiling_blocked_reason(limit, arm_timeout_seconds)
         result.duration_seconds = time.monotonic() - started
         _record_partial_usage(
             result, accumulator,
@@ -424,7 +288,7 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     context = GraderContext(
         workspace_path=workspace.path,
         config_root=task.resolved_config_root(),
-        agent_params=dict(task.input.agent_params),
+        agent_params=task.input.grader_params,
         payload=payload,
         ledger=ledger,
         history=history,
@@ -436,6 +300,10 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         completion_gap=accumulator.completion_gap,
         turns=accumulator.turns,
         socket_path=socket_path,
+        # The pool's cid, or None for a task that declared no pool: a
+        # session arm legitimately runs un-cid'd, and the contract says
+        # such a variable is absent rather than empty.
+        cascade_id=cascade_driver_id,
         error=accumulator.agent_error,
     )
 
@@ -461,11 +329,15 @@ def _record_declared_budget(result: "ArmResult", spec: ArmSpec,
     resolved — see :mod:`jaato_eval.profile` on why that must not read as
     "unbudgeted".
     """
+    # A driver arm names no profile — its stages each bind their own, and
+    # a ceiling read off one of them would be presented as the arm's.  So
+    # the field stays ``None`` there: unknown, which is the truth.
+    profile = spec.task.harness.profile
     result.budget_ceiling = resolve_budget_ceiling(
         spec.task.resolved_config_root(),
-        spec.task.harness.profile,
+        profile,
         spec.profile_set or spec.task.harness.profile_set,
-    )
+    ) if profile else None
     result.pool_limits = dict(spec.task.budget.limits) or None
     result.pool_on_arrival = pool_on_arrival
 
@@ -487,12 +359,198 @@ def _record_binding(result: "ArmResult", workspace: Workspace,
     bound would be worse than a blank.
     """
     result.session_id = session_ref.get("id")
+    result.session_ids = [result.session_id] if result.session_id else []
     result.model = session_ref.get("model")
     result.provider = session_ref.get("provider")
     result.upstream_provider = accumulator.upstream_provider
     result.native_finish_reason = accumulator.native_finish_reason
     result.completion_nudges = _completion_nudges(
         workspace, result.session_id, accumulator.completion_gap)
+
+
+def _ceiling_blocked_reason(limit: float,
+                            arm_timeout_seconds: Optional[float]) -> str:
+    """The BLOCKED reason for an arm cut at the per-arm ceiling.
+
+    One string for both harness kinds, so a driver arm and a session arm
+    cut by the same gate read the same in the report.  NAMES THE KNOB
+    (#724): the old message stated the number and nothing else, so an
+    author who had set `budget.seconds: 1800` and saw 900 had no way to
+    discover that this ceiling exists, let alone that it is a different
+    gate with its own flag.
+    """
+    return (f"arm exceeded the per-arm ceiling of {limit:.0f}s "
+            f"({describe_arm_timeout(arm_timeout_seconds)}) and was cut "
+            "short — BLOCKED, not FAIL: a run that did not finish says "
+            "nothing about the configuration under test. This is NOT the "
+            "task's `budget.seconds`, which is the pool's clock across all "
+            "its arms")
+
+
+async def _run_driver_arm(spec: ArmSpec, result: ArmResult, workspace: Workspace,
+                          *, socket_path: Optional[str],
+                          cascade_driver_id: Optional[str],
+                          arm_timeout_seconds: Optional[float],
+                          keep_workspace: bool) -> ArmResult:
+    """The ``harness.kind: driver`` half of :func:`run_arm`.
+
+    Observer first, then the process — the order is what keeps the first
+    session's first event from being missed — then attribution from the
+    workspace, then the exit-code vocabulary decides the bucket.  Every
+    path records the binding and the spend before the workspace goes, for
+    the same reason the session path does: the arm a reader most needs to
+    look up is the one that did not finish.
+    """
+    task = spec.task
+    cid = arm_cascade_id(spec.arm_id, cascade_driver_id)
+    limit = effective_arm_timeout(arm_timeout_seconds)
+    started = time.monotonic()
+    try:
+        env = driver_environment(
+            workspace=workspace.path, config_root=task.resolved_config_root(),
+            cascade_id=cid, params=task.input.params, socket_path=socket_path)
+        async with CascadeObserver(cid, socket_path=socket_path) as observer:
+            outcome = await run_driver(task.harness.run or "", cwd=workspace.path,
+                                       env=env, timeout=limit)
+            records = workspace_session_records(workspace.path)
+            sids = attributed_sessions(observer, records)
+            if outcome.timed_out:
+                # The driver is gone; its sessions are not.  Stop the ones
+                # that have not ended rather than leave them to the orphan
+                # sweep — each is a stage still spending against the pool.
+                await observer.stop_sessions(observer.unfinished(sids))
+    except Exception as exc:  # noqa: BLE001 — the driver was never exercised
+        result.blocked_reason = f"driver arm could not start: {exc!r}"
+        result.duration_seconds = time.monotonic() - started
+        if not keep_workspace:
+            discard(workspace)
+        return result
+
+    result.duration_seconds = time.monotonic() - started
+    accumulator = observer.merged(sids)
+    _record_driver_binding(result, workspace, sids, records, accumulator)
+    # Every path, not only the BLOCKED ones: the observer's turn stream is
+    # a FLOOR for a driver arm by construction (a session opened before the
+    # registration was applied is only on disk), and the merge never
+    # reports less than either source saw.
+    _record_partial_usage(result, accumulator, _tracker_usage_many(workspace, sids))
+    detail = _driver_detail(outcome, observer, sids)
+
+    if outcome.timed_out:
+        result.blocked_reason = _ceiling_blocked_reason(limit, arm_timeout_seconds)
+    elif outcome.fault:
+        # The three endings the driver did not choose — its own
+        # EX_TEMPFAIL, a shell that could not run the command, a signal
+        # nobody here sent.  ``DriverOutcome.fault`` says which and why;
+        # the engine adds what was said.
+        result.blocked_reason = f"{outcome.fault} {detail}".rstrip()
+    if result.blocked_reason:
+        if not keep_workspace:
+            discard(workspace)
+        return result
+
+    result.error = None if outcome.gradeable else (
+        f"{DRIVER_STOPPED_SHORT}: driver exited {outcome.exit_code}"
+        + (f" — {outcome.evidence.splitlines()[-1]}" if outcome.evidence else ""))
+    context = GraderContext(
+        workspace_path=workspace.path,
+        config_root=task.resolved_config_root(),
+        agent_params=task.input.grader_params,
+        payload=None,
+        # A driver arm has no ONE history; the ledger is honestly
+        # unfaithful, so a processor that reads tool_calls BLOCKS.
+        ledger=build_ledger_result(None),
+        history=[],
+        usage=result.usage,
+        finish_reason=result.finish_reason,
+        termination_reason=f"exit {outcome.exit_code}",
+        termination_detail=detail,
+        termination_error_type="" if outcome.gradeable else DRIVER_STOPPED_SHORT,
+        turns=result.turns,
+        socket_path=socket_path,
+        # The one the DRIVER was handed, so its scorer reads the cid its
+        # sessions were actually stamped with.
+        cascade_id=cid,
+        error=result.error,
+    )
+    _CONTEXT_SPY(context)
+    result.verdicts = await _grade(task, context)
+    if not keep_workspace:
+        discard(workspace)
+    return result
+
+
+def _driver_detail(outcome: DriverOutcome, observer: CascadeObserver,
+                   sids: Sequence[str]) -> str:
+    """What the driver said, and what its sessions said, as one string.
+
+    The stderr tail first — it is the driver's own account — then any
+    session terminal that named a stop, then any pool refusal the
+    observer saw.  A driver whose stage was refused a spawn may not have
+    printed why; the observer knows.
+    """
+    parts: List[str] = []
+    if outcome.evidence:
+        parts.append(outcome.evidence)
+    abnormal = observer.abnormal_terminals(sids)
+    if abnormal:
+        parts.append("sessions: " + "; ".join(abnormal))
+    if observer.refusals:
+        parts.append("pool refusals: " + "; ".join(observer.refusals))
+    return "\n".join(parts)
+
+
+def _record_driver_binding(result: ArmResult, workspace: Workspace,
+                           sids: Sequence[str],
+                           records: Dict[str, Dict[str, Any]],
+                           accumulator: _TurnAccumulator) -> None:
+    """Record WHICH sessions this arm was — all of them — and what served it.
+
+    ``session_id`` is the first, so the scalar join keeps working;
+    ``session_ids`` is the whole list, because the OpenRouter join is per
+    stage.  Model and provider come from the first session's persisted
+    record: ``SessionInfoEvent`` is answered to the creating client and
+    never routed to an observer, so the wire cannot say and the record
+    can.  Everything unknown stays ``None``.
+    """
+    result.session_ids = list(sids)
+    result.session_id = sids[0] if sids else None
+    first = records.get(result.session_id) if result.session_id else None
+    result.model, result.provider = record_binding(first) if first else (None, None)
+    result.upstream_provider = accumulator.upstream_provider
+    result.native_finish_reason = accumulator.native_finish_reason
+    result.completion_nudges = _completion_nudges_many(workspace, sids)
+
+
+def _tracker_usage_many(workspace: Workspace,
+                        session_ids: Sequence[str]) -> Dict[str, float]:
+    """:func:`_tracker_usage` summed over a driver arm's sessions.
+
+    Summed per dimension, so a driver arm's floor is the sum of its
+    stages' persisted trackers; a session with no record contributes
+    nothing, which is what "no snapshot is never worse than no snapshot"
+    means across several.
+    """
+    total: Dict[str, float] = {}
+    for sid in session_ids:
+        for key, value in _tracker_usage(workspace, sid).items():
+            total[key] = total.get(key, 0.0) + value
+    return total
+
+
+def _completion_nudges_many(workspace: Workspace,
+                            session_ids: Sequence[str]) -> Optional[int]:
+    """:func:`_completion_nudges` summed over a driver arm's sessions.
+
+    ``None`` only when NO session's count could be established; a session
+    whose log said nothing contributes nothing to a sum the others made
+    countable.  The ``completion_gap`` witness is per session and is not
+    consulted here — the arm's accumulator is a merge, and a merged gap
+    would name no session.
+    """
+    counts = [_completion_nudges(workspace, sid, None) for sid in session_ids]
+    known = [c for c in counts if c is not None]
+    return sum(known) if known else None
 
 
 async def _grade(task, context: GraderContext) -> List[Verdict]:
@@ -675,7 +733,11 @@ class _ArmSession:
 #: Dimensions the persisted tracker snapshot reports, mapped onto the
 #: accumulator's vocabulary.  Only unambiguous pairs are carried: the
 #: snapshot's ``tokens`` is a single total with no prompt/output split, so
-#: it cannot fill those two without inventing a division.
+#: it cannot fill those two without inventing a division.  The ``usd``
+#: pair carries one more caveat than the mapping can state — a snapshot
+#: ``0.0`` means "no response reported a cost", so it must not overwrite
+#: ``cost_usd = None``; :func:`_record_partial_usage` is where the two
+#: facts are both in hand, and is where that is applied.
 _TRACKER_TO_USAGE = {"usd": "cost_usd", "tokens": "spend_total_tokens"}
 
 
@@ -802,6 +864,12 @@ def _record_partial_usage(result: "ArmResult",
     nothing.  The invariant is that reported cost never UNDERSTATES what
     the accumulator saw; closing the in-flight gap needs per-response usage
     (#723).
+
+    A DRIVER arm calls this on every path, not only a BLOCKED one: its
+    observer's turn stream is a floor by construction (a session the
+    driver opened before the observer's registration was applied is only
+    on disk), so the max-merge against the persisted trackers is the
+    right operation for its success path too.
     """
     result.turns = accumulator.turns
     if accumulator.finish_reason and not result.finish_reason:
@@ -811,11 +879,25 @@ def _record_partial_usage(result: "ArmResult",
         if key == "turns":
             result.turns = max(result.turns, int(value))
             continue
-        # Never report LESS than either source saw.  The tracker counts per
-        # response and normally wins for a cut arm; the accumulator can still
-        # be ahead on a dimension the snapshot does not carry, or if the
-        # record was written before the final response landed.
         current = usage.get(key)
+        # A TRACKER ZERO IS NOT A MEASURED ZERO, and ``cost_usd`` is the
+        # one dimension where that difference is representable: the
+        # accumulator keeps it ``None`` until a turn reports a cost,
+        # because "free" and "nobody said" are opposite facts (the
+        # distinction jaato #688 gives its own name upstream,
+        # ``TokenUsage.reported``).  The tracker's ``usd`` starts at zero
+        # and advances only when a response reports one, so a ``0.0``
+        # there carries exactly what ``None`` already carries — and
+        # writing it in would answer the question rather than decline to,
+        # on every driver arm, since this runs on that path unconditionally.
+        # A zero the ACCUMULATOR reached stands: a turn said so.
+        if key == "cost_usd" and current is None and not value:
+            continue
+        # Otherwise: never report LESS than either source saw.  The tracker
+        # counts per response and normally wins for a cut arm; the
+        # accumulator can still be ahead on a dimension the snapshot does
+        # not carry, or if the record was written before the final response
+        # landed.
         if not isinstance(current, (int, float)) or value > current:
             usage[key] = value
     result.usage = usage

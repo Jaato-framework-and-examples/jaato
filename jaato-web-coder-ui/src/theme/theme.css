@@ -1,0 +1,415 @@
+@import "tailwindcss";
+/* Name the source root explicitly.  Tailwind v4's automatic detection
+   consults the repository's .gitignore rules from the working directory
+   upwards and, in this monorepo layout, produced no utilities at all (the
+   built CSS carried only preflight + our rules).  "../" is src/. */
+@source "../";
+
+/* Tailwind has no built-in pointer-type variant (only ``motion-safe`` /
+   ``motion-reduce`` ship in core).  ``coarse:`` is what the composer's
+   hint line hides behind on a touch device -- the hint answers "what will
+   Enter do", which a touch keyboard's own Enter/Send affordance already
+   makes plain, and the space is worth more back to the message. */
+@custom-variant coarse (@media (pointer: coarse));
+
+/* The two faces of the redesign, self-hosted from npm so a deployment
+   behind a corporate proxy needs no font CDN: Barlow for text, Barlow
+   Condensed for chrome (labels, buttons, tab names).  Weights are the
+   ones the design uses; a subset per file, the browser fetches what the
+   page's glyphs need. */
+@import "@fontsource/barlow/400.css";
+@import "@fontsource/barlow/500.css";
+@import "@fontsource/barlow/600.css";
+@import "@fontsource/barlow-condensed/500.css";
+@import "@fontsource/barlow-condensed/600.css";
+
+/* Defaults = the redesign's light face (the TUI "light" theme on the
+   Industry paper ground); applyTheme() overrides these at runtime for
+   whichever theme is selected.  Eleven colours come from the theme
+   file; ``--c-steel`` is the twelfth, the redesign's INTERFACE accent
+   (see themes.ts), kept apart from the theme's ``primary`` so a theme's
+   neons can shrink to state glyphs while one steel carries the chrome. */
+:root {
+  --c-primary: #0077cc;
+  --c-secondary: #006600;
+  --c-accent: #996600;
+  --c-success: #006600;
+  --c-warning: #996600;
+  --c-error: #cc0000;
+  --c-muted: #7a7a7d;
+  --c-bg: #f2f2f3;
+  --c-surface: #ffffff;
+  --c-text: #1d1f20;
+  --c-text-muted: #5d5d60;
+  --c-steel: #3F6690;
+  /* Hairlines are ink at 16%, so they read on both grounds without a second definition. */
+  --c-divider: color-mix(in srgb, var(--c-text) 16%, transparent);
+  /* A quiet tint on the ground: user turns, table stripes, hover. */
+  --c-tint: color-mix(in srgb, var(--c-text) 7%, var(--c-bg));
+  --font-mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  --font-sans: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-heading: "Barlow Condensed", "Barlow", system-ui, sans-serif;
+}
+
+@theme inline {
+  --color-primary: var(--c-primary);
+  --color-secondary: var(--c-secondary);
+  --color-accent: var(--c-accent);
+  --color-success: var(--c-success);
+  --color-warning: var(--c-warning);
+  --color-error: var(--c-error);
+  --color-muted: var(--c-muted);
+  --color-bg: var(--c-bg);
+  --color-surface: var(--c-surface);
+  --color-text: var(--c-text);
+  --color-text-muted: var(--c-text-muted);
+  --color-steel: var(--c-steel);
+  --color-divider: var(--c-divider);
+  --color-tint: var(--c-tint);
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-sans);
+  --font-heading: var(--font-heading);
+}
+
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* Every component is a square, hairline-bordered object; nothing the
+   browser rounds by default gets to disagree. */
+button, input, select, textarea { border-radius: 0; font-family: inherit; }
+
+/* ── Plates ──────────────────────────────────────────────────────────
+   The unit of the redesign: a square, hairline-bordered surface with
+   registration marks at its corners (<Plate> renders the four marks).
+   ``--plate-edge`` recolours the border for a plate that means
+   something — steel for the focused / primary one, warning for a
+   permission request. */
+/* In the components layer, not unlayered: an unlayered rule outranks every
+   Tailwind utility whatever its specificity, so ``position: relative`` here
+   silently cancelled the ``absolute`` of every floating plate -- the live
+   tool-output popup and the command proposals sat in normal flow, and the
+   popup's ``right-5`` then pushed it off the left edge of the transcript.
+   A plate is positioned by default (its corner marks need it) and a
+   caller's utility may say otherwise. */
+@layer components {
+  .plate {
+    position: relative;
+    background: var(--c-surface);
+    border: 1px solid var(--plate-edge, var(--c-divider));
+  }
+}
+.plate-ground { background: var(--c-bg); }
+.plate-steel { --plate-edge: var(--c-steel); }
+.plate-warning { --plate-edge: color-mix(in srgb, var(--c-warning) 55%, transparent); }
+.plate-error { --plate-edge: color-mix(in srgb, var(--c-error) 55%, transparent); }
+.plate > .corner {
+  position: absolute; width: 11px; height: 11px; pointer-events: none;
+  color: var(--corner-color, color-mix(in srgb, var(--c-text) 55%, transparent));
+}
+.plate > .corner::before, .plate > .corner::after { content: ""; position: absolute; background: currentColor; }
+.plate > .corner::before { left: 5px; top: 0; width: 1px; height: 100%; }
+.plate > .corner::after  { top: 5px; left: 0; width: 100%; height: 1px; }
+.plate > .corner.tl { top: -6px; left: -6px; }
+.plate > .corner.tr { top: -6px; right: -6px; }
+.plate > .corner.bl { bottom: -6px; left: -6px; }
+.plate > .corner.br { bottom: -6px; right: -6px; }
+
+/* Surfaces and lines, kept for the components that still name them. */
+.surface-1 { background: var(--c-surface); }
+.surface-2 { background: var(--c-tint); }
+.hairline { border-color: var(--c-divider); }
+.tint { background: var(--c-tint); }
+/* The pale error ground a destructive confirmation sits on. */
+.tint-error { background: color-mix(in srgb, var(--c-error) 7%, var(--c-surface)); }
+
+/* ── Chrome type ─────────────────────────────────────────────────────
+   Condensed, tracked, uppercase: what the INTERFACE says.  Monospace is
+   reserved for what the daemon said (ids, paths, models, arguments). */
+.kicker {
+  font-family: var(--font-heading); font-weight: 500; font-size: 11px;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--c-steel);
+}
+.kicker-muted { color: var(--c-text-muted); }
+.chrome {
+  font-family: var(--font-heading); font-weight: 600; font-size: 14px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.chrome-sm { font-size: 12px; }
+.display { font-family: var(--font-heading); font-weight: 600; line-height: 1.1; letter-spacing: -0.015em; }
+
+/* ── Buttons ──────────────────────────────────────────────────────────
+   In the components layer, not unlayered: in Tailwind v4 an unlayered rule
+   outranks every utility whatever its specificity, so a bare ``.btn`` here
+   silently cancelled ``normal-case`` / ``tracking-normal`` / ``font-sans`` /
+   ``text-left`` / ``whitespace-normal`` on a caller's button -- which left
+   long clarification and reference choices rendering as one uppercase
+   non-wrapping line that overflowed the plate (#1245).  A button keeps its
+   chrome look by default; a caller's utility may override it, as ``.plate``
+   already lets one override its ``position``. */
+@layer components {
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font-family: var(--font-heading); font-weight: 600; font-size: 14px; line-height: 1.2;
+    letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;
+    color: var(--c-text); background: transparent;
+    border: 1px solid var(--c-divider); padding: 7px 14px; cursor: pointer;
+  }
+  .btn:hover { background: var(--c-tint); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: var(--c-steel); color: var(--c-bg); border-color: var(--c-steel); }
+  .btn-primary:hover { filter: brightness(0.92); background: var(--c-steel); }
+  .btn-steel { color: var(--c-steel); border-color: var(--c-steel); }
+  .btn-quiet { color: var(--c-text-muted); }
+  .btn-quiet:hover { color: var(--c-text); }
+  .btn-danger { color: var(--c-error); }
+  .btn-sm { font-size: 12px; padding: 2px 8px; font-weight: 500; }
+  .btn-md { font-size: 13px; padding: 5px 12px; }
+  /* A destructive confirm: solid error fill (the delete panel, a discard). */
+  .btn-danger-solid { background: var(--c-error); color: var(--c-surface); border-color: var(--c-error); }
+  .btn-danger-solid:hover { filter: brightness(0.92); background: var(--c-error); }
+  /* A primary that is not yet possible reads as grey, not as a faded steel:
+     the Start button of the session picker says "not yet", not "broken". */
+  .btn-primary:disabled, .btn-danger-solid:disabled {
+    opacity: 1; filter: none;
+    background: color-mix(in srgb, var(--c-text) 10%, var(--c-bg));
+    color: color-mix(in srgb, var(--c-text) 55%, var(--c-bg));
+    border-color: transparent;
+  }
+  .btn kbd, .btn .key { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; text-transform: none; opacity: 0.7; border: 0; padding: 0; }
+  .btn-primary kbd, .btn-primary .key { color: inherit; }
+}
+
+/* Text links in the chrome: the quiet way out of a screen. */
+.link { color: var(--c-text-muted); text-decoration: underline; text-underline-offset: 3px; }
+.link:hover { color: var(--c-text); }
+
+/* ── Forms ────────────────────────────────────────────────────────── */
+.input {
+  width: 100%; min-height: 34px; padding: 6px 10px; font: inherit; font-size: 14px;
+  color: var(--c-text); caret-color: var(--c-steel);
+  background: var(--c-surface); border: 1px solid var(--c-divider); outline: none;
+}
+.input:hover { border-color: color-mix(in srgb, var(--c-text) 45%, transparent); }
+.input:focus-visible, .input:focus { border-color: var(--c-steel); }
+.input-mono { font-family: var(--font-mono); font-size: 13px; }
+/* A field whose value is not yet acceptable (a required pick, a typed name that
+   does not match).  Beats the focus colour on purpose: the warning is the news. */
+.input.input-warn, .input.input-warn:hover, .input.input-warn:focus { border-color: var(--c-warning); }
+.field-label { display: block; font-size: 12px; margin-bottom: 4px; color: var(--c-text-muted); }
+:focus-visible { outline: 2px solid var(--c-steel); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--c-steel) 30%, transparent); }
+
+/* Definition grids: label muted left, value right-aligned, mono. */
+.kv { display: grid; grid-template-columns: max-content 1fr; column-gap: 14px; row-gap: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+.kv > :nth-child(odd) { color: var(--c-text-muted); }
+.kv > :nth-child(even) { text-align: right; }
+
+/* A thin progress bar: ground track, one solid fill. */
+.bar { height: 3px; background: color-mix(in srgb, var(--c-text) 16%, var(--c-bg)); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--c-steel); }
+
+/* Indeterminate variant: a segment sweeps the track while a request is in
+   flight and the transport exposes no byte-level progress (file staging,
+   #1248/#1250).  A moving segment, never a faked percentage. */
+.bar-indeterminate > span { width: 40%; animation: bar-sweep 1.1s ease-in-out infinite; }
+@keyframes bar-sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+
+/* Pygments token roles (see protocol/pygments.ts). */
+.tok-keyword     { color: var(--c-steel); font-weight: 600; }
+.tok-function    { color: var(--c-success); }
+.tok-class       { color: var(--c-accent); }
+.tok-builtin     { color: var(--c-accent); }
+.tok-name        { color: var(--c-text); }
+.tok-string      { color: var(--c-success); }
+.tok-number      { color: var(--c-warning); }
+.tok-operator    { color: var(--c-text-muted); }
+.tok-punctuation { color: var(--c-text-muted); }
+.tok-comment     { color: var(--c-muted); font-style: italic; }
+.tok-decorator   { color: var(--c-accent); }
+.tok-tag         { color: var(--c-steel); }
+.tok-attribute   { color: var(--c-success); }
+.tok-error       { color: var(--c-error); text-decoration: underline wavy; }
+.tok-inserted    { color: var(--c-success); }
+.tok-deleted     { color: var(--c-error); }
+.tok-heading     { color: var(--c-steel); font-weight: 700; }
+.tok-prompt      { color: var(--c-muted); }
+.tok-text        { color: var(--c-text); }
+
+/* Diff lines in permission prompts / tool output. */
+.diff-add { color: var(--c-success); background: color-mix(in srgb, var(--c-success) 8%, transparent); }
+.diff-del { color: var(--c-error); background: color-mix(in srgb, var(--c-error) 8%, transparent); }
+.diff-hunk { color: var(--c-steel); }
+.diff-meta { color: var(--c-muted); }
+
+/* Prose from the model: 15px on a 74ch measure, headings condensed. */
+.prose-j { font-size: 15px; line-height: 1.55; max-width: 74ch; }
+.prose-j p { margin: 0.35rem 0; }
+.prose-j h1, .prose-j h2, .prose-j h3, .prose-j h4 { margin: 0.9rem 0 0.3rem; line-height: 1.15; font-family: var(--font-heading); font-weight: 600; letter-spacing: -0.01em; }
+.prose-j h1 { font-size: 1.6rem; } .prose-j h2 { font-size: 1.35rem; } .prose-j h3 { font-size: 1.15rem; } .prose-j h4 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.prose-j ul, .prose-j ol { margin: 0.3rem 0 0.3rem 1.4rem; }
+.prose-j ul { list-style: disc; } .prose-j ol { list-style: decimal; }
+.prose-j li { margin: 0.1rem 0; }
+.prose-j blockquote { border-left: 2px solid var(--c-steel); padding-left: 0.75rem; color: var(--c-text-muted); margin: 0.4rem 0; }
+.prose-j hr { border: 0; border-top: 1px solid var(--c-divider); margin: 0.75rem 0; }
+.prose-j code.inline { font-family: var(--font-mono); font-size: 0.87em; border-bottom: 1px solid color-mix(in srgb, var(--c-steel) 50%, transparent); padding: 0 0.1rem; }
+.prose-j a { color: var(--c-steel); text-decoration: underline; text-underline-offset: 3px; }
+
+.code-block { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; }
+
+/* A rendered workspace markdown file (panels/MarkdownView.tsx) rides the
+   transcript's .prose-j rules, sized down for the rail, plus the pieces
+   only a whole document has: images, task lists, fenced code highlighted
+   by rehype-highlight (hljs-* classes, mapped onto the tok-* palette). */
+.md-doc { font-size: 13px; max-width: none; }
+.md-doc h1 { font-size: 1.35rem; } .md-doc h2 { font-size: 1.18rem; } .md-doc h3 { font-size: 1.05rem; }
+.md-doc h1, .md-doc h2 { border-bottom: 1px solid var(--c-divider); padding-bottom: 0.15rem; }
+.md-doc pre code.inline { border: 0; padding: 0; font-size: inherit; }
+.md-doc .md-img { max-width: 100%; height: auto; margin: 0.4rem 0; }
+.md-doc .md-img-open { display: inline-block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 100%; }
+/* The image viewer's ground (panels/ImageView.tsx): a checkerboard, so a
+   transparent pixel is not mistaken for a white one. */
+.img-checker {
+  background-color: var(--c-surface);
+  background-image: conic-gradient(color-mix(in srgb, var(--c-muted) 18%, transparent) 25%, transparent 0 50%, color-mix(in srgb, var(--c-muted) 18%, transparent) 0 75%, transparent 0);
+  background-size: 16px 16px;
+}
+.md-doc .md-img-missing { color: var(--c-text-muted); font-style: italic; }
+.md-doc .md-link-blocked { color: var(--c-text-muted); text-decoration: line-through; }
+.md-doc ul.contains-task-list { list-style: none; margin-left: 0.4rem; }
+.md-doc li.task-list-item input { margin-right: 0.4rem; vertical-align: middle; }
+.md-doc del { color: var(--c-text-muted); }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal { color: var(--c-steel); font-weight: 600; }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute { color: var(--c-success); }
+.hljs-number, .hljs-symbol, .hljs-variable, .hljs-template-variable { color: var(--c-warning); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--c-success); }
+.hljs-built_in, .hljs-type, .hljs-title.class_, .hljs-meta { color: var(--c-accent); }
+.hljs-comment, .hljs-quote { color: var(--c-muted); font-style: italic; }
+.hljs-deletion { color: var(--c-error); }
+.hljs-tag, .hljs-name { color: var(--c-steel); }
+.hljs-attr, .hljs-property { color: var(--c-text); }
+.hljs-punctuation, .hljs-operator { color: var(--c-text-muted); }
+
+/* Notebook cells (<nb-row>, #1193): one grid per cell so the In/Out/Err
+   labels line up in one column, as the TUI draws them.  A row is
+   ``display: contents`` so its label and body are the grid's own items. */
+.nb-cells { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 0.75rem; margin: 0.4rem 0; }
+.nb-row { display: contents; }
+.nb-label { font-family: var(--font-mono); font-size: 12px; color: var(--c-text-muted); text-align: right; white-space: nowrap; padding-top: 0.55rem; }
+.nb-out { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.35rem 0; }
+.nb-row-failed .nb-label, .nb-row-failed .nb-out { color: var(--c-error); }
+/* A numbered code line's number (JMarkup.tsx's ``CodeLines``): CSS-generated
+   ``::before`` content, never a text node, so it cannot be part of what a
+   copy of the block picks up (jaato/#1304) -- ``user-select: none`` alone is
+   kept too, as the same claim made a second way, since it costs nothing. */
+.code-block .cl-n { counter-reset: cl var(--cl-n); }
+.code-block .cl-n::before {
+  counter-increment: cl;
+  content: counter(cl);
+  user-select: none;
+  color: var(--c-muted);
+  text-align: right;
+  padding-right: 0.9rem;
+  min-width: 2.5rem;
+  display: inline-block;
+}
+
+table.j-table { border-collapse: collapse; margin: 0.4rem 0; font-size: 13px; }
+table.j-table th, table.j-table td { border: 1px solid var(--c-divider); padding: 0.2rem 0.6rem; text-align: left; vertical-align: top; }
+table.j-table th { font-family: var(--font-heading); font-weight: 600; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--c-text-muted); background: var(--c-tint); }
+
+/* Thin scrollbars everywhere. */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--c-muted) 50%, transparent) transparent; }
+
+@keyframes pulse-dot { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+.pulse { animation: pulse-dot 1.2s ease-in-out infinite; }
+
+kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(--c-divider); border-bottom-width: 2px; padding: 0 0.3rem; color: var(--c-text-muted); }
+
+/* ── Command palette (#1304 §6) ──────────────────────────────────────
+   Ctrl/⌘+K's overlay: a short fade on the backdrop, a fade-plus-lift on
+   the panel.  The only two animated components this change introduces,
+   so the ``prefers-reduced-motion`` opt-out is scoped to them rather than
+   applied as a blanket rule that would also silence ``.pulse`` (a state
+   indicator, not decoration) and the workspace bar's sweep. */
+@keyframes palette-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes palette-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.palette-backdrop { animation: palette-fade 100ms ease-out; }
+.palette-panel { animation: palette-in 120ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .palette-backdrop, .palette-panel { animation: none; }
+}
+
+/* The conversation minimap rail (MinimapRail.tsx) replaces the pane's
+   native scrollbar, which is too thin to grab on a touch tablet.  The
+   scrollbar is hidden only where the rail is shown; wheel, touch and
+   keys still scroll the pane itself.  In the components layer so a
+   utility can still override either rule. */
+@layer components {
+  .minimap-rail { background: color-mix(in srgb, var(--c-text) 5%, var(--c-bg)); }
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+}
+
+/* ── Toolchains panel (#1344, the "status strip + tiles" design) ─────
+   Colours come from the theme, so a dark theme draws the same states.
+   The strip says what the environment is doing; one tone per state. */
+@layer components {
+  .tc-strip { display: grid; grid-template-columns: 14px 1fr auto; align-items: center; column-gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--c-divider); font-size: 13px; font-weight: 500; }
+  .tc-strip > .glyph { font-family: var(--font-mono); font-size: 13px; }
+  .tc-strip-running { background: color-mix(in srgb, var(--c-steel) 10%, var(--c-surface)); color: color-mix(in srgb, var(--c-steel) 80%, var(--c-text)); }
+  .tc-strip-failed  { background: color-mix(in srgb, var(--c-error) 9%, var(--c-surface)); color: var(--c-error); }
+  .tc-strip-waiting { background: color-mix(in srgb, var(--c-warning) 13%, var(--c-surface)); color: color-mix(in srgb, var(--c-warning) 70%, var(--c-text)); }
+  .tc-strip-neutral { background: var(--c-bg); color: var(--c-text); }
+  .tc-strip-ready   { background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface)); color: var(--c-success); }
+  .tc-strip-action { height: 30px; padding: 0 10px; border: 1px solid currentColor; background: transparent; color: inherit; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+  .tc-strip-action:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .tc-progress { height: 3px; background: color-mix(in srgb, var(--c-steel) 15%, var(--c-surface)); overflow: hidden; }
+  .tc-progress > span { display: block; width: 35%; height: 100%; background: var(--c-steel); animation: tc-slide 1.4s linear infinite; }
+  @keyframes tc-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(286%); } }
+
+  .tc-log { margin: 0; background: var(--c-bg); padding: 8px 10px; font-family: var(--font-mono); font-size: 11px; line-height: 1.5; color: var(--c-text-muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 128px; overflow: auto; }
+
+  .tc-ask { display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 12px; padding: 10px 12px; font-size: 13px; }
+  .tc-ask-hint { background: color-mix(in srgb, var(--c-warning) 13%, var(--c-surface)); border: 1px solid color-mix(in srgb, var(--c-warning) 40%, var(--c-surface)); }
+  .tc-ask-proposal { background: color-mix(in srgb, var(--c-steel) 6%, var(--c-surface)); border: 1px solid color-mix(in srgb, var(--c-steel) 45%, transparent); }
+  .tc-primary { height: 32px; padding: 0 12px; background: var(--c-steel); color: var(--c-surface); border: 0; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; cursor: pointer; }
+  .tc-primary:hover { background: color-mix(in srgb, var(--c-steel) 80%, var(--c-text)); }
+  .tc-x { width: 32px; height: 32px; border: 1px solid color-mix(in srgb, var(--c-text) 35%, transparent); background: transparent; color: var(--c-text); font-family: var(--font-mono); cursor: pointer; }
+  .tc-x:hover { background: color-mix(in srgb, var(--c-text) 6%, transparent); }
+  .tc-primary:disabled, .tc-x:disabled, .tc-text-btn:disabled, .tc-chip:disabled, .tc-add:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* Two columns of tiles; one when the panel is narrow (a container query,
+     so it follows the rail's width, not the window's). */
+  .tc-body { container-type: inline-size; }
+  .tc-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  @container (max-width: 340px) { .tc-tiles { grid-template-columns: minmax(0, 1fr); } }
+  .tc-tile { min-height: 92px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--c-text) 20%, transparent); background: var(--c-surface); display: flex; flex-direction: column; gap: 4px; }
+  .tc-tile-label { font-family: var(--font-heading); font-weight: 600; font-size: 18px; line-height: 1.1; }
+  .tc-tile-version { font-family: var(--font-mono); font-size: 13px; margin-left: 6px; }
+  .tc-tile-sub { font-size: 12px; color: var(--c-text-muted); overflow-wrap: anywhere; }
+  .tc-tile-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: var(--font-mono); font-size: 11px; }
+  .tc-text-btn { background: transparent; border: 0; padding: 2px 0; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-text-muted); cursor: pointer; }
+  .tc-text-btn:hover:not(:disabled) { color: var(--c-error); }
+  .tc-add { min-height: 92px; padding: 10px 12px; border: 1px dashed color-mix(in srgb, var(--c-steel) 50%, transparent); background: var(--c-surface); text-align: left; display: flex; flex-direction: column; justify-content: center; gap: 4px; cursor: pointer; }
+  .tc-add[aria-expanded="true"] { border-style: solid; border-color: var(--c-steel); background: color-mix(in srgb, var(--c-steel) 8%, var(--c-surface)); }
+  .tc-add-label { font-family: var(--font-heading); font-weight: 600; font-size: 16px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-steel); }
+
+  .tc-picker { border: 1px solid var(--c-steel); }
+  .tc-pick-row { display: grid; grid-template-columns: 72px 1fr auto; align-items: center; column-gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--c-divider); }
+  .tc-pick-row:last-child { border-bottom: 0; }
+  .tc-chip { height: 28px; min-width: 40px; padding: 0 8px; font-family: var(--font-mono); font-size: 11px; background: var(--c-surface); color: var(--c-text); border: 1px solid color-mix(in srgb, var(--c-text) 25%, transparent); cursor: pointer; }
+  .tc-chip[aria-checked="true"] { background: var(--c-steel); color: var(--c-surface); border-color: var(--c-steel); }
+
+  .tc-rescan { background: transparent; border: 0; padding: 2px 0; font-family: var(--font-heading); font-weight: 600; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--c-steel); cursor: pointer; white-space: nowrap; }
+  .tc-rescan:hover:not(:disabled) { color: var(--c-text); }
+  .tc-rescan:disabled { opacity: 0.45; cursor: not-allowed; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tc-progress > span { animation: none; }
+}

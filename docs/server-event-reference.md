@@ -1,6 +1,6 @@
 # Server Event Reference
 
-Complete reference of all events in the jaato server event protocol. Events are JSON-serializable dataclasses defined in `jaato-sdk/jaato_sdk/events.py`, dispatched via `server.emit()`, and delivered to clients over IPC/WebSocket.
+Complete reference of all events in the jaato server event protocol. Events are JSON-serializable dataclasses defined in `jaato-sdk/jaato_sdk/events.py`, dispatched via `jaato_server.server.emit()`, and delivered to clients over IPC/WebSocket.
 
 All events inherit from `Event`:
 ```
@@ -955,7 +955,7 @@ Event
 
 ## Client → Server Requests
 
-These events flow from client to server and are **not** emitted via `server.emit()`.
+These events flow from client to server and are **not** emitted via `jaato_server.server.emit()`.
 
 ### `SendMessageRequest`
 **Wire type:** `message.send`
@@ -1093,7 +1093,7 @@ These events flow from client to server and are **not** emitted via `server.emit
 
 ## Dispatch Architecture Summary
 
-All server→client events funnel through `server.emit()`, which dispatches to connected clients via IPC (length-prefixed framing) or WebSocket.
+All server→client events funnel through `jaato_server.server.emit()`, which dispatches to connected clients via IPC (length-prefixed framing) or WebSocket.
 
 **Dispatch sources by category:**
 

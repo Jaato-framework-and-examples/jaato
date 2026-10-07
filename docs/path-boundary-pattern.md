@@ -45,7 +45,7 @@ typed it in an MSYS2 shell.
 and will pass it to Python's file APIs (`open()`, `Path()`, `os.path.*`, etc.).
 
 ```python
-from shared.path_utils import msys2_to_windows_path
+from jaato_server.shared.path_utils import msys2_to_windows_path
 
 def _resolve_path(self, path: str) -> Path:
     path = msys2_to_windows_path(path)  # ← First line, before any Path() or os.path call
@@ -74,7 +74,7 @@ drive letters — both paths are already in Python's native format.
 checks, equality checks, startswith).
 
 ```python
-from shared.path_utils import normalize_for_comparison
+from jaato_server.shared.path_utils import normalize_for_comparison
 
 # Prefix check (is path inside workspace?)
 norm_path = normalize_for_comparison(real_path)
@@ -104,7 +104,7 @@ results that the model or user might reference.
 error messages, or display strings.
 
 ```python
-from shared.path_utils import normalize_result_path
+from jaato_server.shared.path_utils import normalize_result_path
 
 return {
     "success": True,
@@ -140,7 +140,7 @@ Any function parameter named `path`, `file_path`, `source_path`, `destination_pa
 or similar that comes from the model or user:
 
 ```python
-from shared.path_utils import msys2_to_windows_path
+from jaato_server.shared.path_utils import msys2_to_windows_path
 
 def my_tool_executor(self, args: Dict[str, Any]) -> Dict[str, Any]:
     path = args.get("path", "")
@@ -154,7 +154,7 @@ def my_tool_executor(self, args: Dict[str, Any]) -> Dict[str, Any]:
 Any place where two paths are compared as strings (not via `os.path.samefile()`):
 
 ```python
-from shared.path_utils import normalize_for_comparison
+from jaato_server.shared.path_utils import normalize_for_comparison
 
 norm_target = normalize_for_comparison(target_path)
 norm_allowed = normalize_for_comparison(allowed_root)
@@ -167,7 +167,7 @@ if norm_target.startswith(norm_allowed + '/'):
 Any path that appears in the return value, error message, or display output:
 
 ```python
-from shared.path_utils import normalize_result_path
+from jaato_server.shared.path_utils import normalize_result_path
 
 return {
     "path": normalize_result_path(path),
@@ -233,7 +233,7 @@ followed by `/` or end of string.
 
 ## Implementation
 
-All functions live in `shared/path_utils.py`. See that module for the full API:
+All functions live in `jaato_server/shared/path_utils.py`. See that module for the full API:
 
 | Function | Layer | Purpose |
 |----------|-------|---------|
@@ -295,7 +295,7 @@ relative to actually lives.
 | `BootstrapEnvelope` / `SessionInitEnvelope` | Raise in `__post_init__`: a session bootstrapped with a relative path fails rather than resolving |
 
 Guarded by
-`jaato-server/shared/tests/test_relative_paths_do_not_cross_the_daemon_boundary.py`,
+`jaato-server/jaato_server/shared/tests/test_relative_paths_do_not_cross_the_daemon_boundary.py`,
 which asserts on the *rejection*. Asserting that a relative path resolved
 correctly would pass whenever the two processes happen to share a cwd —
 which is precisely how this survived several green runs.

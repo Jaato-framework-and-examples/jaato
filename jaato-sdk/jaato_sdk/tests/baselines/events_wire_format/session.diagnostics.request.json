@@ -1,0 +1,6 @@
+{
+  "type": "session.diagnostics.request",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": ""
+}

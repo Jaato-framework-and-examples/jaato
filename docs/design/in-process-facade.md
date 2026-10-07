@@ -24,7 +24,7 @@ JaatoServer  (notifications → typed events: AgentOutputEvent, PermissionReques
 
 Two facts this nails down:
 - **The callback→event mapping is already written** — `AgentUIHooks` (15 hooks,
-  `shared/plugins/subagent/ui_hooks.py`) + `on_output` → typed events, via the
+  `jaato_server/shared/plugins/subagent/ui_hooks.py`) + `on_output` → typed events, via the
   runner shim and JaatoServer.
 - **`_on_event` is a transport-agnostic tap** (core.py:1383; settable via
   `set_event_callback`). IPC/WS are just consumers; an in-process consumer is
@@ -210,12 +210,12 @@ The embedded path has no upstream resolution step, so the adapter MUST resolve
 credential secret URIs itself before `configure_tools` / `create_provider`:
 
 ```python
-from shared.config_resolver import resolve_secret_uri
+from jaato_server.shared.config_resolver import resolve_secret_uri
 api_key = resolve_secret_uri(plugin_configs[provider]["api_key"])
 ```
 
 `resolve_secret_uri` is the public entry point (added so neither the adapter nor
-examples import the private `shared.plugins.subagent.config._resolve_secret_uri`).
+examples import the private `jaato_server.shared.plugins.subagent.config._resolve_secret_uri`).
 It is a no-op for plain keys / env-var configs; `pass://`-style URIs additionally
 require **jaato-premium installed in the embedding venv** (the `jaato.premium` →
 `secret_resolvers` entry point; resolvers are discovered lazily on first call).

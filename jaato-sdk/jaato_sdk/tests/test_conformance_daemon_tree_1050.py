@@ -109,8 +109,9 @@ def test_the_server_tier_comes_from_the_anchors_own_checkout(tmp_path):
     resolve would carry that split into the daemon.
     """
     checkout = tmp_path / "a-worktree"
-    for pkg in ("jaato-sdk/jaato_sdk", "jaato-server/server",
-                "jaato-server/shared"):
+    for pkg in ("jaato-sdk/jaato_sdk", "jaato-server/jaato_server",
+                "jaato-server/jaato_server/server",
+                "jaato-server/jaato_server/shared"):
         (checkout / pkg).mkdir(parents=True)
         (checkout / pkg / "__init__.py").write_text("")
 
@@ -143,7 +144,7 @@ def test_without_a_colocated_checkout_it_falls_back_to_resolution(tmp_path):
     assert roots["sdk"] == str(tmp_path / "site-packages")
     # No <tmp>/jaato-server exists, so `server` falls back to this process's
     # own resolution rather than being dropped.
-    assert roots.get("server") == _package_root(_resolve("server"))
+    assert roots.get("server") == _package_root(_resolve("jaato_server"))
 
 
 def test_a_module_that_resolves_to_nothing_yields_none(monkeypatch):

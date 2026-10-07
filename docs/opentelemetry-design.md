@@ -27,7 +27,7 @@ This document describes the architecture and implementation plan for adding Open
 
 ### 1.2 Design Principles
 
-1. **Plugin-based**: Telemetry is implemented as an optional plugin (`shared/plugins/telemetry/`)
+1. **Plugin-based**: Telemetry is implemented as an optional plugin (`jaato_server/shared/plugins/telemetry/`)
 2. **Zero-cost abstraction**: When disabled, no OTel imports or overhead
 3. **Decorator pattern**: Instrumentation via decorators/context managers, not code changes
 4. **Backwards compatible**: Existing code works unchanged; telemetry is additive
@@ -624,8 +624,8 @@ the **default beneath** the matching `plugin_configs.telemetry` key above:
 ### 5.3 Programmatic Configuration
 
 ```python
-from shared.jaato_client import JaatoClient
-from shared.plugins.telemetry import create_otel_plugin
+from jaato_server.shared.jaato_client import JaatoClient
+from jaato_server.shared.plugins.telemetry import create_otel_plugin
 
 # Create and configure telemetry
 telemetry = create_otel_plugin()
@@ -703,7 +703,7 @@ The hooks will be augmented to also emit telemetry, not replaced.
 
 ### 6.3 Server Events Integration
 
-Server events (`server/events.py`) can optionally propagate trace context:
+Server events (`jaato_server/server/events.py`) can optionally propagate trace context:
 
 ```python
 @dataclass
@@ -867,7 +867,7 @@ docker run -p 4317:4317 otel/opentelemetry-collector-contrib
 JAATO_TELEMETRY_ENABLED=true \
 JAATO_TELEMETRY_EXPORTER=console \
 python -c "
-from shared.jaato_client import JaatoClient
+from jaato_server.shared.jaato_client import JaatoClient
 client = JaatoClient()
 client.send_message('Hello')
 "
@@ -878,7 +878,7 @@ client.send_message('Hello')
 ### Phase 1: Foundation (Week 1)
 
 **Deliverables:**
-- `shared/plugins/telemetry/` directory structure
+- `jaato_server/shared/plugins/telemetry/` directory structure
 - `plugin.py` - Protocol definition
 - `null_plugin.py` - No-op implementation
 - `otel_plugin.py` - Basic OTel implementation
@@ -905,9 +905,9 @@ shared/plugins/telemetry/
 - Tool execution span instrumentation
 
 **Files to modify:**
-- `shared/jaato_runtime.py` - Add `set_telemetry_plugin()`
-- `shared/jaato_session.py` - Add span context managers
-- `shared/ai_tool_runner.py` - Add tool span instrumentation
+- `jaato_server/shared/jaato_runtime.py` - Add `set_telemetry_plugin()`
+- `jaato_server/shared/jaato_session.py` - Add span context managers
+- `jaato_server/shared/ai_tool_runner.py` - Add tool span instrumentation
 
 ### Phase 3: Provider Integration (Week 3)
 
@@ -917,10 +917,10 @@ shared/plugins/telemetry/
 - Retry span instrumentation
 
 **Files to modify:**
-- `shared/plugins/model_provider/google_genai/provider.py`
-- `shared/plugins/model_provider/anthropic/provider.py`
-- `shared/plugins/model_provider/github_models/provider.py`
-- `shared/utils.py` - `with_retry()` instrumentation
+- `jaato_server/shared/plugins/model_provider/google_genai/provider.py`
+- `jaato_server/shared/plugins/model_provider/anthropic/provider.py`
+- `jaato_server/shared/plugins/model_provider/github_models/provider.py`
+- `jaato_server/shared/utils.py` - `with_retry()` instrumentation
 
 ### Phase 4: Advanced Features (Week 4)
 
@@ -931,9 +931,9 @@ shared/plugins/telemetry/
 - Server event trace context propagation
 
 **Files to modify:**
-- `shared/jaato_session.py` - GC spans
-- `shared/ai_tool_runner.py` - Permission spans
-- `server/events.py` - Trace context in events
+- `jaato_server/shared/jaato_session.py` - GC spans
+- `jaato_server/shared/ai_tool_runner.py` - Permission spans
+- `jaato_server/server/events.py` - Trace context in events
 
 ### Phase 5: Documentation & Polish (Week 5)
 
@@ -1014,7 +1014,7 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBL
 **Programmatic equivalent:**
 
 ```python
-from shared.plugins.telemetry import create_langfuse_plugin
+from jaato_server.shared.plugins.telemetry import create_langfuse_plugin
 
 telemetry = create_langfuse_plugin()
 telemetry.initialize({

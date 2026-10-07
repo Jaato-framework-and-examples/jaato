@@ -47,7 +47,7 @@ def apparmor_available() -> bool:
     the safe direction: no import, no daemon, nothing to confine.
     """
     try:
-        from server.apparmor import AppArmorManager
+        from jaato_server.server.apparmor import AppArmorManager
     except ImportError:             # SDK-only checkout: no daemon at all
         return (
             bool(shutil.which("apparmor_parser"))

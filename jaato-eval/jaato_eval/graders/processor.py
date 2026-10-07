@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import List
 
 from ..manifest import GraderSpec
+from ..sign_off import describe_unsigned
 from ..verdict import FAIL, PASS, Verdict
 from .base import GraderContext, blocked
 
@@ -89,8 +90,8 @@ class ProcessorGrader:
             if context.missing_sign_off:
                 return blocked(
                     self.spec, claim,
-                    f"the agent never called signal_completion "
-                    f"({context.termination_error_type}), so there is no "
+                    f"{describe_unsigned(context.termination_error_type)}, "
+                    "so there is no "
                     "payload to validate — its workspace was still graded "
                     "by the graders that read the workspace, and the "
                     "profile's completion_payload_schema is not implicated")

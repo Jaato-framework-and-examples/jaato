@@ -70,7 +70,10 @@ Up-front (before any binary frame is read):
 Per-file (some failures still allow processing of subsequent files):
 
 - `unsafe_path` — `name` is empty, absolute, or contains `..`. Frame
-  is drained; remaining files continue.
+  is drained; remaining files continue. Also reported, after the frame
+  is read, when the path is, or passes through, a symlink leaving the
+  workspace, or the destination is itself a symlink (see
+  [Symlinks in the workspace](#symlinks-in-the-workspace)).
 - `size_limit_per_file` — declared `size` exceeds the per-file cap
   (default 10 MB). Frame is drained; remaining files continue.
 - `size_mismatch` — the binary frame's actual length doesn't equal the
@@ -85,15 +88,72 @@ Fatal (aborts the remainder of the stream):
   Subsequent files in the request are silently skipped because we
   cannot trust the stream alignment.
 
+### Symlinks in the workspace
+
+A workspace is model-writable: the agent's `cli` and `file_edit` tools
+write there, so a link may have been planted on the file (`foo ->
+/etc/...`) or on a parent directory (`sub -> /`). The daemon never writes
+through one (#1386). Every staging route — `StageFilesRequest`, the legacy
+inline `staged_files` on `session.new`, and `/api/task/artifacts` — writes
+through `jaato_server/server/contained_write.py::write_contained`, the same
+rule `workspace.app_write` uses:
+
+1. The workspace root is resolved with `realpath` once.
+2. Parent directories are created and checked one component at a time.
+   An existing component must resolve inside the root and be a
+   directory; a missing one is created inside a directory already proved
+   contained. A link pointing outside is refused whether or not its target
+   exists, so the refusal says nothing about the host's filesystem.
+3. A destination that is itself a symlink is refused, even one pointing
+   inside the workspace.
+4. The file is written to a temp name in the same directory and moved
+   into place with `os.replace`, which replaces a link rather than
+   following it.
+
+A link that stays inside the workspace may still be used as a parent
+directory. The refused entry is reported as `unsafe_path` and skipped;
+the other files in the request continue, and staging never raises.
+
 ## Caps
 
 | Limit | Default | Where enforced |
 |-------|---------|----------------|
-| Per-file size | 10 MB | `DEFAULT_STAGE_PER_FILE_LIMIT` in `server/websocket.py` |
-| Total payload size | 50 MB | `DEFAULT_STAGE_TOTAL_LIMIT` in `server/websocket.py` |
+| Per-file size | 10 MB | `DEFAULT_STAGE_PER_FILE_LIMIT` in `jaato_server/server/websocket.py` |
+| Total payload size | 50 MB | `DEFAULT_STAGE_TOTAL_LIMIT` in `jaato_server/server/websocket.py` |
+| One WebSocket message | 16 MiB | `DEFAULT_WS_MAX_MESSAGE_SIZE`; `--ws-max-message-size` (floor 1M) |
 
-These will become per-deployment configurable when the next consumer
+The staging caps will become per-deployment configurable when the next consumer
 needs different values.
+
+### The message limit is a separate cap, and it is not polite
+
+Each file is sent as **one** binary message, so it is also bounded by the
+largest WebSocket message the daemon accepts. `websockets` enforces that
+by **closing the connection** with code 1009. It does not answer the
+request: its reader closes the socket as soon as the frame arrives, before
+any handler could reply. So the refusal has to happen on the client, before
+sending:
+
+- The daemon advertises its limits in `ConnectedEvent.server_info`:
+  `max_message_size`, `stage_per_file_limit` (never above
+  `max_message_size`) and `stage_total_limit`. The TS SDK exposes them as
+  `client.serverLimits`.
+- **A daemon that advertises none is an older one, and it enforces 1 MiB.**
+  Until the daemon passed an explicit `max_size`, `websockets` applied its
+  1 MiB default. So a 1.4 MB file closed the socket mid-upload, the client
+  reconnected as a new client, and `stageFiles` waited 120 s for an answer
+  that could not come. `serverLimitsFrom` returns those legacy values when
+  `max_message_size` is absent.
+- The TS SDK rejects a pending `stageFiles` / `fetchWorkspaceFile` **at once**
+  when its connection closes, with a `RequestInterruptedError` carrying the
+  close code, instead of waiting out the deadline.
+- The daemon logs a close with any code other than 1000 / 1001 / 1005 /
+  1006 at WARNING, naming the limit on a 1009.
+
+The 16 MiB default is derived rather than picked: a file at the 10 MB
+per-file cap sent **inline** as base64 (`staged_files` on `session.new`,
+`attachments` on `send_message`) is 4/3 of it, plus room for the JSON
+around it.
 
 ## Workspace targeting
 
@@ -120,7 +180,7 @@ staging into a single request, which suits the auto-provision flow
 where the workspace doesn't exist before `session.new` runs.
 
 The two paths share the same write code (`_write_staged_payload` in
-`server/websocket.py`). New SDK-built clients should prefer
+`jaato_server/server/websocket.py`). New SDK-built clients should prefer
 `StageFilesRequest` because:
 
 - It avoids base64 inflation.
@@ -265,6 +325,55 @@ a server round-trip.
 | `session_pool.py` | Add `workspace_id` to `SessionMetadata`; add `stage_files()` convenience method; extract workspace_id from `SessionInfoEvent` |
 | `bot.py` | No changes needed (wiring is in session_pool/transport) |
 | `handlers/` | Call `pool.stage_files()` from file-handling handlers after user sends a document |
+
+## The other direction: downloading a file (protocol 1.20)
+
+`workspace.file.fetch` takes one file back out of the same workspace
+staging writes into. The answer is one TEXT header followed, on
+success, by ONE raw BINARY frame:
+
+```
+client                                                      server
+  │  TEXT  WorkspaceFileFetchRequest                           │
+  │ ─────────────────────────────────────────────────────────► │
+  │  {"type": "workspace.file.fetch", "request_id": "dl-1",    │
+  │   "path": "out/report.pdf", "metadata_only": false}        │
+  │                                                            │
+  │               TEXT  WorkspaceFileContentEvent              │
+  │ ◄───────────────────────────────────────────────────────── │
+  │               {"type": "workspace.file.content",           │
+  │                "request_id": "dl-1", "ok": true,           │
+  │                "path": "out/report.pdf", "name":           │
+  │                "report.pdf", "size": 184320,               │
+  │                "mime_type": "application/pdf"}             │
+  │                                                            │
+  │               BINARY  <184320 bytes>                        │
+  │ ◄───────────────────────────────────────────────────────── │
+```
+
+- **The binary frame is the next frame after its header.** The daemon
+  writes both under the connection's send lock, so nothing can land
+  between them. The header carries no id the frame could be matched by;
+  adjacency IS the protocol. The TS SDK's transport holds the header
+  until its frame arrives and delivers them as one event, and
+  `JaatoClient.fetchWorkspaceFile(path)` resolves with both.
+- **`request_id` correlates the answer**, so several fetches may be in
+  flight on one connection.
+- **`metadata_only: true`** asks for the header alone (does the file
+  exist, its size, its type). No frame follows.
+- **A refusal is a header with `ok: false` and no frame.** Categories:
+  `workspace_not_found`, `unsafe_path` (empty, or resolves outside the
+  workspace, with symlinks followed first), `not_found`, `not_a_file`,
+  `credential` (the workspace `.env` or a `.jaato/*_auth.json`, refused by
+  name), `too_large` (over 50 MB, the staging total cap), `io_error`.
+- **WS only**, like staging. An IPC client is on the daemon's host and
+  reads the filesystem directly.
+- An older daemon answers `ErrorEvent("Unknown message type")` and never
+  the header, so the TS SDK refuses below `MIN_FILE_FETCH_PROTOCOL`
+  (`"1.20"`) rather than waiting out a reply nobody will send.
+
+The rules live in `jaato-server/jaato_server/server/workspace_download.py`; the
+handler is `JaatoWSServer._handle_file_fetch_request`.
 
 ## Future work
 

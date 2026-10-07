@@ -17,7 +17,7 @@ with a thin new layer on top of existing infrastructure.
 ### 1. PTC Executor → ALREADY EXISTS: Notebook Plugin
 
 The proposed "Embedded IPython Executor" is almost exactly what
-`shared/plugins/notebook/` already provides:
+`jaato_server/shared/plugins/notebook/` already provides:
 
 | PTC Proposal | What We Have | Gap |
 |---|---|---|
@@ -122,7 +122,7 @@ def generate_tools_module(
 ### 4. Security Layer → ALREADY EXISTS: CodeAnalyzer
 
 The proposed namespace restrictions map directly to
-`shared/plugins/notebook/code_analyzer.py`:
+`jaato_server/shared/plugins/notebook/code_analyzer.py`:
 
 | PTC Proposal | What We Have |
 |---|---|
@@ -295,7 +295,7 @@ benefit — the whole point of PTC is that intermediate results stay in the scri
 
 ### Phase 1: Stub Generator + Bridge (MVP)
 
-1. Add `shared/plugins/notebook/tool_stubs.py`:
+1. Add `jaato_server/shared/plugins/notebook/tool_stubs.py`:
    - `generate_tools_module(schemas, bridge)` → `types.ModuleType`
    - `ToolBridge` wrapper around `ToolExecutor`
    - `ToolExecutionError` exception class

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from shared.plugins.reliability.types import BehavioralPattern, FailureKey
+from jaato_server.shared.plugins.reliability.types import BehavioralPattern, FailureKey
 
 from .state import ReliabilityReactorState
 

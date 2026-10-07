@@ -1,8 +1,8 @@
 {
   "type": "workspace_mismatch.requested",
   "timestamp": "<TIMESTAMP>",
-  "request_id": "",
   "session_id": "",
+  "request_id": "",
   "session_workspace": "",
   "client_workspace": "",
   "response_options": [],

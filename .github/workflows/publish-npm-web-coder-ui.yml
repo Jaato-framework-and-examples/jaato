@@ -1,0 +1,217 @@
+name: "Publish @jaato/web-coder-ui to npm"
+
+# Mirror of publish-npm-sdk-ts.yml for the browser client — manual
+# trigger, the same gates the `web-client` CI job runs, a
+# version-already-on-registry check, then a STAGED publish (see the
+# sdk workflow's header for why a stage-only token, and how a maintainer
+# promotes the staged version with 2FA).
+#
+# What ships: `dist/` (the Vite bundle, with @jaato/sdk compiled in) and
+# `bin/jaato-web-coder-ui.js`, the dependency-free launcher behind
+# `npx @jaato/web-coder-ui`.  The package has NO runtime dependencies — see the
+# note above `devDependencies` in jaato-web-coder-ui/package.json.
+#
+# Byproduct for people who host the bundle themselves: the same run
+# uploads `jaato-web-coder-ui-dist-<version>.tar.gz` (the contents of `dist/`)
+# as a workflow artifact AND, once the staged publish was accepted by the
+# registry, attaches it to a GitHub Release tagged `web-coder-ui-v<version>`
+# — artifacts expire after 90 days, a release is a stable URL an operator
+# can pin.  The release is the self-hosting bundle and is complete on its
+# own; the npm version it names goes live when the stage is approved.
+#
+# Setup once on the npm side: the same @jaato org token that stages
+# @jaato/sdk ("Read and write (stage only)" on @jaato/*) lives in the
+# repo's `npm-sdk` environment as NPM_TOKEN, so this workflow reuses it.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            jaato-sdk-ts/package-lock.json
+            jaato-web-coder-ui/package-lock.json
+
+      - name: Install + build the TS SDK (declarations for the type-check)
+        working-directory: jaato-sdk-ts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install jaato-web-coder-ui
+        working-directory: jaato-web-coder-ui
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check
+        working-directory: jaato-web-coder-ui
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Unit tests (protocol, store, launcher)
+        working-directory: jaato-web-coder-ui
+        run: npm test
+
+      - name: Production build
+        working-directory: jaato-web-coder-ui
+        run: npx vite build
+
+      - name: Drop the unused third-party apt sources
+        # Same reason as ci-tests.yml: `--with-deps` runs apt-get update.
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
+
+      - name: Install Playwright Chromium
+        working-directory: jaato-web-coder-ui
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end against the mock daemon
+        working-directory: jaato-web-coder-ui
+        run: npx playwright test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-sdk
+    permissions:
+      contents: write        # the release that carries the self-hosting tarball
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Use an npm that knows `npm stage` (11.15+)
+        # setup-node's Node ships npm 10; staged publishing arrived in npm
+        # 11.15.0.  Newest npm, not a pin: its `stage` surface is the one
+        # the registry currently speaks.  The registry .npmrc setup-node
+        # wrote is honoured with its placeholder token, as `npm install`
+        # always was here.
+        run: |
+          npm install -g npm@latest --no-audit --no-fund
+          npm --version
+          npm stage publish --help >/dev/null
+
+      - name: Read package version
+        id: version
+        working-directory: jaato-web-coder-ui
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Package @jaato/web-coder-ui version: ${version}"
+
+      - name: Check version not already on npm
+        # 200 → version already published, 404 → ours to publish.
+        # Anything else (rate-limited, registry transient) → fail loudly
+        # so we don't accidentally re-publish or skip.
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/@jaato/web-coder-ui/${version}")
+          if [ "$status" = "200" ]; then
+            echo "::error::Version ${version} of @jaato/web-coder-ui already exists on npm"
+            exit 1
+          fi
+          if [ "$status" != "404" ]; then
+            echo "::error::Unexpected status ${status} from registry — refusing to publish"
+            exit 1
+          fi
+          echo "Version ${version} is available for publishing"
+
+      - name: Check @jaato/web-coder-ui exists on npm (a first version cannot be staged)
+        # `npm stage publish` is refused for a name the registry has never
+        # seen — measured on this package's first run: `404 Not Found -
+        # POST /-/stage/package/<name>`.  So a brand-new package's FIRST
+        # version has to be published directly by a maintainer with 2FA,
+        # from a checkout at this commit; every later version stages.
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/web-coder-ui")
+          if [ "$status" = "404" ]; then
+            echo "::error::@jaato/web-coder-ui has never been published, and npm cannot STAGE a first version. Publish it directly ONCE as a maintainer with 2FA, from a checkout at this commit: cd jaato-web-coder-ui && npm --prefix ../jaato-sdk-ts ci && npm ci && npm run build && npm publish --access public. Later versions stage."
+            exit 1
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::Unexpected status ${status} from registry for @jaato/web-coder-ui — refusing to continue"
+            exit 1
+          fi
+          echo "@jaato/web-coder-ui exists on npm; staging a new version is possible"
+
+      - name: Verify NPM_TOKEN is accepted by the registry
+        # npm answers an unauthorised PUT on a scoped package with a bare
+        # 404 ("'@jaato/x@y' is not in this registry"), so an expired,
+        # revoked or read-only NPM_TOKEN otherwise surfaces at the very
+        # last step, after the build, looking like a missing package.
+        # `npm whoami` proves the token authenticates; it does not prove
+        # write access to @jaato, which only the publish itself can.
+        run: |
+          user=$(npm whoami 2>/dev/null) || {
+            echo "::error::the registry rejected NPM_TOKEN (npm whoami failed): expired, revoked, or not an npm token. Rotate the secret in the npm-sdk environment."
+            exit 1
+          }
+          echo "Token authenticates as npm user '${user}'"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install dependencies
+        run: |
+          npm --prefix jaato-sdk-ts ci --no-audit --no-fund
+          npm --prefix jaato-web-coder-ui ci --no-audit --no-fund
+
+      - name: Build
+        # `npm run build` builds the SDK declarations, type-checks, then
+        # runs `vite build` → jaato-web-coder-ui/dist/.
+        working-directory: jaato-web-coder-ui
+        run: npm run build
+
+      - name: Pack the self-hosting tarball
+        working-directory: jaato-web-coder-ui
+        run: tar -czf "jaato-web-coder-ui-dist-${{ steps.version.outputs.version }}.tar.gz" -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jaato-web-coder-ui-dist-${{ steps.version.outputs.version }}
+          path: jaato-web-coder-ui/jaato-web-coder-ui-dist-${{ steps.version.outputs.version }}.tar.gz
+          if-no-files-found: error
+
+      - name: Stage the publish on npm (a maintainer with 2FA promotes it)
+        # NPM_TOKEN is a "Read and write (stage only)" granular token: npm
+        # is retiring direct publish by token (January 2027), and a
+        # stage-only token gets E_STAGE_REQUIRED from `npm publish`.  So
+        # the version is STAGED — uploaded, not public — and goes live only
+        # when a maintainer approves it with a 2FA code, from the CLI or
+        # npmjs.com.  --access public: scoped packages default to
+        # restricted; the flag makes @jaato/web-coder-ui installable without auth.
+        working-directory: jaato-web-coder-ui
+        run: |
+          npm stage publish --access public
+          version="${{ steps.version.outputs.version }}"
+          echo "::notice::@jaato/web-coder-ui@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-ui  then  npm stage approve <stage-id>  (or reject it with npm stage reject <stage-id>)."
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Attach the self-hosting tarball to a GitHub Release
+        # After the stage, so a refused upload never leaves a release that
+        # names a version npm will never have.  The tarball is the
+        # self-hosting bundle and complete on its own; the npm version the
+        # notes name goes live when the stage is approved.  The tag is
+        # prefixed because this repository publishes several packages.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          tag="web-coder-ui-v${version}"
+          gh release create "$tag" \
+            "jaato-web-coder-ui/jaato-web-coder-ui-dist-${version}.tar.gz" \
+            --target "$GITHUB_SHA" \
+            --title "@jaato/web-coder-ui ${version}" \
+            --notes "Self-hosting bundle for @jaato/web-coder-ui ${version} (the contents of dist/). On npm once the staged publish is approved: npx @jaato/web-coder-ui@${version}. Serve it behind any static host and publish a config.json next to index.html to pre-fill the daemon URL — see jaato-web-coder-ui/README.md."

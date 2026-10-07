@@ -1,0 +1,2 @@
+$ grep WARNING .jaato/logs/session_*.log | grep disclosure
+2026-09-20 12:37:25,231 WARNING shared.jaato_session: suppress_base_instructions drops the 'disclosure' piece for agent main -- a posture change, not a token saving (the model is no longer told to disclose that it is an AI system, Regulation (EU) 2024/1689 Art. 50(1))

@@ -3,7 +3,7 @@
 **Parent plan:** `per_session_confined_runner_phase5_plan.md` §5.10
 (Theme C).
 **Memory backlog:** `project_backlog_apparmor_child_subprofile`.
-**Inline reference:** `jaato-server/server/apparmor.py:413-449`
+**Inline reference:** `jaato-server/jaato_server/server/apparmor.py:413-449`
 (template comment block `!!! KNOWN ESCAPE VECTOR !!!`).
 **Status:** Draft.  Awaiting design confirmation before §5.10c/d
 (subprocess wire-up) land.
@@ -356,7 +356,7 @@ full §5.10e audit.
 
 ### 7.1 Template snapshot (§5.10a)
 
-`shared/tests/test_apparmor.py` extends with assertions on the
+`jaato_server/shared/tests/test_apparmor.py` extends with assertions on the
 rendered profile:
 
 1. `test_child_subprofile_block_present` — the rendered profile
@@ -371,7 +371,7 @@ rendered profile:
 
 ### 7.2 Transition callback (§5.10b)
 
-`shared/tests/test_apparmor_child_transition.py` (new):
+`jaato_server/shared/tests/test_apparmor_child_transition.py` (new):
 
 1. `test_callback_writes_changeprofile_string` — fake
    `/proc/self/attr/current` path; callback writes
@@ -385,7 +385,7 @@ rendered profile:
 
 ### 7.3 Plugin preexec_fn composition (§5.10c, §5.10d)
 
-`server/runner/tests/test_cli_runner_apparmor_child.py` (new) +
+`jaato_server/server/runner/tests/test_cli_runner_apparmor_child.py` (new) +
 similar for `interactive_shell`:
 
 1. `test_preexec_invokes_apparmor_then_cgroup` — record call order

@@ -21,13 +21,13 @@ import threading
 from typing import Any, Callable, Dict, Optional
 
 from jaato_sdk.events import PermissionRequestedEvent
-from shared.plugins.permission.channels import (
+from jaato_server.shared.plugins.permission.channels import (
     Channel,
     ChannelDecision,
     ChannelResponse,
     PermissionRequest,
 )
-from shared.plugins.permission.runner_rpc_channel import _RESPONSE_KEY_TO_DECISION
+from jaato_server.shared.plugins.permission.runner_rpc_channel import _RESPONSE_KEY_TO_DECISION
 
 
 class PendingPermissions:

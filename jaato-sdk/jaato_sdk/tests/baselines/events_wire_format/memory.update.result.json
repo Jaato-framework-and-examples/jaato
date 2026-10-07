@@ -1,0 +1,12 @@
+{
+  "type": "memory.update.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "memory_id": "",
+  "ok": true,
+  "error": "",
+  "category": "",
+  "source": "",
+  "memory": null
+}

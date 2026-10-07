@@ -255,7 +255,7 @@ JAATO follows the emerging [OpenTelemetry GenAI Semantic Conventions](https://op
 ### Programmatic Configuration
 
 ```python
-from shared.plugins.telemetry import create_otel_plugin
+from jaato_server.shared.plugins.telemetry import create_otel_plugin
 
 telemetry = create_otel_plugin()
 telemetry.initialize({

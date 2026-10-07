@@ -1,7 +1,7 @@
 # Binary Media Chunks — modality direction, and getting bytes to a client
 
 **Status:** design note. §5.5 (the direction-qualified tier key) is
-**implemented** — `shared/model_tiers.py` parses `{kind: direction}` into
+**implemented** — `jaato_server/shared/model_tiers.py` parses `{kind: direction}` into
 `TierEntry.inbound_modalities` / `.outbound_modalities`, the content gate and
 startup check ask directional questions, and `jaato-scaffold validate` warns
 that outbound roles are inert. Everything else here is still a proposal. Written to give two parallel
@@ -42,7 +42,7 @@ model cannot consume is exactly the content a client might want.
 
 Read this before proposing anything new; more is built than it first appears.
 
-### 2.1 Tool result streaming — `shared/plugins/streaming/protocol.py`
+### 2.1 Tool result streaming — `jaato_server/shared/plugins/streaming/protocol.py`
 
 A complete chunk protocol, already solving ordering and identity:
 
@@ -83,18 +83,18 @@ handlers are scheduled fire-and-forget. Dispatch snapshots each bucket first,
 so subscribe/unsubscribe during dispatch takes effect on the next event. **Any
 client — a TUI, an SDK orchestrator, a cascade driver — subscribes this way.**
 
-**2. The model subscribes** — `shared/event_bus_tools.py` registers
+**2. The model subscribes** — `jaato_server/shared/event_bus_tools.py` registers
 `subscribeToEvents` / `getEvents` / `listSubscriptions` / `unsubscribe` as core
 tools, delivering matched events into the conversation via `inject_prompt()`.
 So an *agent* can wait on events too, which is how a cascade parent watches a
 child.
 
-**3. Plugins and reactor rules subscribe** — `shared/event_bus.py`, the
+**3. Plugins and reactor rules subscribe** — `jaato_server/shared/event_bus.py`, the
 per-runtime in-process `EventBus`: `subscribe(subscriber_name, filter,
 callback)` / `publish()`.
 
-`server.emit()` is the single fan-out point feeding all three. `_SERVER_TO_BUS`
-(`server/core.py:129`) decides which protocol events are *also* republished on
+`jaato_server.server.emit()` is the single fan-out point feeding all three. `_SERVER_TO_BUS`
+(`jaato_server/server/core.py:129`) decides which protocol events are *also* republished on
 the in-process bus; events absent from that map still reach clients, they are
 just not visible to surface 3.
 
@@ -107,7 +107,7 @@ with no new API on any of the three surfaces.
 ### 2.3 The per-chunk client event
 
 `ToolOutputEvent` (`events.py:690`) already exists and is already emitted
-(`server/core.py:3640`), already bus-mapped (`EventType.TOOL_OUTPUT →
+(`jaato_server/server/core.py:3640`), already bus-mapped (`EventType.TOOL_OUTPUT →
 BusEventType.TOOL_OUTPUT`), and already correlates by `call_id`:
 
 ```python
@@ -176,7 +176,7 @@ Precisely four things. Note how small this list is relative to §2.
    user, and possibly withheld from the model*. Audience must become data.
 
 4. **No backpressure.** `_event_queues[client_id] = asyncio.Queue()`
-   (`server/ipc.py:484`) is unbounded, so the `QueueFull` branch at `:922` is
+   (`jaato_server/server/ipc.py:484`) is unbounded, so the `QueueFull` branch at `:922` is
    unreachable. A slow consumer grows the queue without bound: for text a
    cosmetic lag, for audio unbounded memory and monotonically increasing drift.
 
@@ -455,7 +455,7 @@ twice. A provider reporting `supports_streaming() == False` still gets the
 batched call, and still emits its text: the vision turns this path was built
 for are unchanged.
 
-Guarded by `shared/tests/test_an_attachment_does_not_silence_the_model.py`,
+Guarded by `jaato_server/shared/tests/test_an_attachment_does_not_silence_the_model.py`,
 which asserts on the dispatch and on audio reaching a subscribed client, and
 declares both reversions to the meta-suite.
 
@@ -477,7 +477,7 @@ if not (message_text and message_text.strip()):
 ```
 
 `event.attachments` sat on the same object, read twenty lines later to be
-handed to `server.send_message` — on the path this branch had already
+handed to `jaato_server.server.send_message` — on the path this branch had already
 returned from. Measured, one daemon, one session profile, the same 88 KB
 `audio/wav` attachment, only the text differing:
 
@@ -518,7 +518,7 @@ refused by name (`ErrorEvent(error_type="EmptyMessageError")`) before its
 turn is closed. Both still emit the synthetic `TurnCompletedEvent` that
 keeps a client's stall detector from killing the session.
 
-Guarded by `server/tests/test_an_attachment_is_content.py`, which
+Guarded by `jaato_server/server/tests/test_an_attachment_is_content.py`, which
 declares both reversions to the meta-suite.
 
 ## 10. What a model was given is replayed to whatever model comes next (#847)
@@ -609,7 +609,7 @@ look impossible. Every call site already sits inside the `llm_span` wrapping
 `complete()` and after the turn's history append, so it resolves against the
 same active model the request will use.
 
-Guarded by `shared/tests/test_history_modality_gate.py`, which checks the
+Guarded by `jaato_server/shared/tests/test_history_modality_gate.py`, which checks the
 stored history in every case — a test asserting only "the text tier sent no
 audio" passes for the destructive fix too.
 
@@ -752,7 +752,7 @@ because these defaults live on `GCConfig` — one of them behind the env var —
 and spelling them at the loader would make every profile carrying a `gc:`
 block silently outrank `JAATO_GC_MEDIA_BYTES`.
 
-Guarded by `shared/tests/test_heard_audio_does_not_accumulate.py`, whose
+Guarded by `jaato_server/shared/tests/test_heard_audio_does_not_accumulate.py`, whose
 final assertion is the issue's own acceptance criterion: request payload
 across six voice turns must not grow with the turn count.
 
@@ -927,7 +927,7 @@ half the drain sites to carry parts would make delivery a lottery on which
 site collected the message. The honest shape is the one above: the drive path
 carries bytes, the queue path refuses them by name.
 
-The **HTTP wake ingress** (`server/wake_ingress.py`) stays text-only too. Its
+The **HTTP wake ingress** (`jaato_server/server/wake_ingress.py`) stays text-only too. Its
 canonical signed body is `{wake_ref, text, source, event_id, ts}` and the
 relay signs the RAW bytes of it; putting a base64 payload inside that
 envelope changes a verified security contract (and the size of every signed

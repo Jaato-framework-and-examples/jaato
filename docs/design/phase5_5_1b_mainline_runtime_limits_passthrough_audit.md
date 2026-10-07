@@ -10,7 +10,7 @@ isolated subagents.
 
 ## 1. Problem
 
-`shared/runtime_limits.py:RuntimeLimits` carries two enforcement
+`jaato_server/shared/runtime_limits.py:RuntimeLimits` carries two enforcement
 layers:
 
 - **Kernel-enforced** (cgroup v2): `memory_max_mb`, `pids_max`,
@@ -49,7 +49,7 @@ kwargs.  The mainline path remains.
 In-scope:
 
 - Extend `runner_spawn.spawn_session_runner` to read
-  `server._profile.runtime_limits` (the WS path already reads the
+  `jaato_server.server._profile.runtime_limits` (the WS path already reads the
   same field for cgroup provision at `websocket.py:622`) and
   forward the app-layer fields to `RunnerSpawner.spawn`.
 - When no profile is set, or the profile has no `runtime_limits`,
@@ -75,7 +75,7 @@ Out of scope:
 
 ## 3. Architectural decisions
 
-### 3.1 Source of truth: `server._profile.runtime_limits`
+### 3.1 Source of truth: `jaato_server.server._profile.runtime_limits`
 
 `spawn_session_runner` already takes a `server` arg.  The WS pre-init
 hook at `websocket.py:620-624` reads `getattr(cgroup_profile,
@@ -87,7 +87,7 @@ Alternative considered + rejected: add explicit
 `max_output_chars` / `tool_timeout_seconds` kwargs to
 `spawn_session_runner` and have callers compute + pass them.
 Adds two parameters that both callers (IPC + WS) would compute
-identically from the same `server._profile` — caller-side
+identically from the same `jaato_server.server._profile` — caller-side
 duplication for no surface benefit.
 
 ### 3.2 No defaulting on the mainline path
@@ -101,7 +101,7 @@ runner's compile-time defaults (e.g., the cli plugin's
 
 ### 3.3 None-safe read
 
-`server._profile` is `None` for inline-spec / no-profile sessions
+`jaato_server.server._profile` is `None` for inline-spec / no-profile sessions
 (parent design §3.3a).  `getattr(server, "_profile", None)`
 returns `None`; `getattr(profile, "runtime_limits", None)`
 returns `None`; both kwargs forward as `None`; `RunnerSpawner.spawn`
@@ -111,7 +111,7 @@ no-profile case.
 ## 4. Test plan
 
 Regression pins extend
-`server/tests/test_runner_spawn.py` (reuses the existing
+`jaato_server/server/tests/test_runner_spawn.py` (reuses the existing
 `_FakeSpawner` + `_FakeJaatoServer` scaffolding so the new tests
 exercise the same kwarg-capture path the existing
 `test_spawn_calls_spawner_with_session_fields` already pins).
@@ -121,10 +121,10 @@ Each test names the property it pins:
    profile with `runtime_limits(tool_timeout_seconds=30,
    max_output_bytes=8192)` → `RunnerSpawner.spawn` receives those
    values verbatim.
-2. `test_no_profile_passes_none_for_both_kwargs` — `server._profile
+2. `test_no_profile_passes_none_for_both_kwargs` — `jaato_server.server._profile
    = None` → both kwargs forwarded as `None`.
 3. `test_profile_without_runtime_limits_passes_none` —
-   `server._profile.runtime_limits = None` → both kwargs `None`.
+   `jaato_server.server._profile.runtime_limits = None` → both kwargs `None`.
 4. `test_kernel_fields_do_not_leak_into_app_layer_kwargs` — profile
    that sets only `memory_max_mb=4096` → both app-layer kwargs
    stay `None` (kernel fields don't affect the env-passthrough).

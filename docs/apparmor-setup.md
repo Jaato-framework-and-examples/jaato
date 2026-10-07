@@ -38,6 +38,21 @@ Surface these in your IPC client's event loop so the user can see at a glance wh
 - **Linux** with AppArmor kernel module loaded
 - `apparmor_parser` and `aa-exec` on `PATH` (usually from `apparmor-utils`)
 - A writable profile directory (default: `/etc/apparmor.d/jaato`)
+- A **service user** (or your own user) to run the daemon as — the setup
+  below assumes one. See the note directly under this list.
+
+> **Confinement is not ownership, and the daemon should not be root.** An
+> AppArmor profile bounds which paths a session may touch; it says nothing
+> about who the files it writes belong to. The per-session runner is
+> `fork`+`exec`ed under the **daemon's** uid — nothing in jaato drops
+> privileges — so a root daemon leaves every file the agent writes into a
+> workspace root-owned (`writeNewFile`, `file_edit` backups, the directories
+> created beneath them, and everything a `cli` subprocess produces, since it
+> runs with `cwd=<workspace_root>`). The workspace's owner then needs `sudo`
+> to overwrite or delete their own files. A root daemon logs a WARNING saying
+> so at startup. Where a service user is genuinely impossible, `--umask 002`
+> (or `JAATO_UMASK=002`) plus a **setgid** workspace directory keeps those
+> files group-writable — it does not change who owns them.
 
 ### Install on Ubuntu/Debian
 
@@ -107,13 +122,13 @@ If you run the WebSocket server standalone, you can explicitly control AppArmor:
 
 ```bash
 # Auto-detect (default)
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
 
 # Explicitly enable — logs a warning if prerequisites are missing
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --apparmor
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --apparmor
 
 # Explicitly disable
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-apparmor
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-apparmor
 ```
 
 Check the log to confirm which mode is active:
@@ -140,6 +155,9 @@ When a WS client creates a session, the server:
 |----------|--------|
 | Session workspace (`~/.jaato/workspaces/sessions/{id}/`) | Read-write |
 | Python venv (server's `sys.prefix`) | Read-only |
+| The interpreter installation the venv resolves to (`sys.base_prefix`), when it is not under `/usr` (uv, pyenv, conda) | Read, map shared objects, exec `bin/*` (template v45) |
+| `/dev/ptmx`, `/dev/pts/*` (base and `tool_hat`: `interactive_shell` opens the pty in-process) | Read-write (template v45 for `/dev/ptmx`) |
+| `/usr/share/python-wheels/`, `/usr/share/git-core/templates/` (`//child`) | Read-only (template v45) |
 | Session temp files (`/tmp/jaato-{id}-*`) | Read-write |
 | System binaries (`/usr/bin/`, `/bin/`) | Execute (inherit) |
 | Network (TCP/UDP outbound) | Allowed |
@@ -189,7 +207,7 @@ Two consequences worth knowing before you deploy:
 `maps` / `smaps` are deliberately **not** denied at the kernel layer: they
 leak address layout rather than credentials, and the distribution's own
 `abstractions/base` may grant them for the C library's use. The
-application-layer denylist in `shared/plugins/sandbox_utils.py` — which
+application-layer denylist in `jaato_server/shared/plugins/sandbox_utils.py` — which
 gates only model-driven path-taking tools (`readFile`, `glob_files`,
 `file_edit`), and so can afford to be stricter — does cover them, along with
 everything above. That gate applies whether or not AppArmor is available,
@@ -198,7 +216,9 @@ which is what covers the degraded posture below.
 The write-denies on user-authored config are the integrity half of the
 profile: those files are read back by the framework and turned into
 behaviour (a persona, a profile, a prefetch script, a template that becomes
-code at render time), so a confined session that could rewrite one would be
+code at render time, a predefined plan a profile's
+`plugin_configs.todo.initial_plan_name` loads from `.jaato/plans/` —
+template v33), so a confined session that could rewrite one would be
 authoring its own instructions. Tenant-runtime state under `.jaato/`
 (`sessions/`, `logs/`, `cache/`, `memory/`, `todos/`, …) carries no deny and
 stays writable. Two deliberate omissions: `.jaato/prompts/`, because
@@ -207,6 +227,35 @@ runner, and `.jaato/template_extracts/`, which is where the template plugin
 writes the templates it extracts from tool output — the sibling directory
 that keeps that path working while the provisioned catalog in
 `.jaato/templates/` stays read-only to the agent.
+
+### A session cannot run what it wrote into its workspace
+
+The workspace is granted read, write, lock and link, and **no exec**: in
+`//child` an exec of a file under the workspace is refused, as is an
+`mmap(PROT_EXEC)` of a shared object built there.  This is deliberate.
+The workspace is the one tree the model can write, so an exec grant on
+it would let a payload write a binary and run it outside every rule the
+profile states about which programs a session may start.
+
+What follows for operators: **probes and tools a session needs must be
+installed on the host `PATH`** (`/usr/bin`, `/usr/local/bin`), not into
+the workspace.  A `curl … | sh` into the workspace, a `go build -o ./x
+&& ./x`, a `pip install --target ./lib` of a package with C extensions
+all fail by design.
+
+The sanctioned exceptions are narrow and come from plugins, not the
+template, on a **daemon-managed** workspace only:
+
+| Exception | Grant |
+|---|---|
+| the managed tool venv (#1274) | `<ws>/.jaato/tool-venv/bin/*` exec |
+| tools installed by `uv tool` / `pipx` / `pip --user` into the workspace HOME (#1225) | `<ws>/.home/.local/bin/*` and `.home/.local/share/**/bin/*` exec |
+| the web coder's toolchains plugin (#1344, out of tree) | `<ws>/**` map+exec, contributed only on a managed workspace, so a project's own build output runs |
+
+A user's own checkout (IPC, user-CWD session) gets none of them.  The
+SELinux backend makes the same choice by type: `jaato_workspace_t` is not
+executable and only `jaato_managed_ws_t` is (see
+[the SELinux backend design](design/selinux-backend.md) §8).
 
 ### Lifecycle
 
@@ -339,7 +388,7 @@ dmesg | grep "apparmor=\"DENIED\""
 ```
 
 Common causes:
-- Tool needs access to a path not in the profile (add it to the template in `server/apparmor.py`)
+- Tool needs access to a path not in the profile (add it to the template in `jaato_server/server/apparmor.py`)
 - Python package outside the venv path (install in the server's venv)
 
 ## Docker / container considerations

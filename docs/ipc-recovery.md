@@ -358,7 +358,7 @@ On each reconnection attempt:
 
 2. Check server status:
    ```bash
-   .venv/bin/python -m server --status
+   .venv/bin/python -m jaato_server --status
    ```
 
 3. Check socket file exists:

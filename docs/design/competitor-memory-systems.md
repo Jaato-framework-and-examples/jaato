@@ -170,7 +170,7 @@ owning an opinion about what "the same thought twice" means, which is the
 move §4 already refuses for temporal validity.
 
 So detection is a **pattern**, and its home exists: the `observer`
-archetype (`shared/scaffold/build.py:226`) — a third session with a judge
+archetype (`jaato_server/shared/scaffold/build.py:226`) — a third session with a judge
 persona reading both halves and ruling on progress.  `AgentOutputEvent`
 carries `text`, so the words are on the bus.
 
@@ -208,7 +208,7 @@ misreports costs more than a pattern nobody wrote.
 - **A stalled daemon loop killed a cascade half** (`perpetual-monologue-
   cascade` §7.18).  `RunnerRPCTimeout` now logs
   `MODEL_THREAD_TRANSPORT_ERROR`, emits `recoverable=True` and returns, so
-  the turn fails and the session stays loaded (`server/core.py:5202-5232`).
+  the turn fails and the session stays loaded (`jaato_server/server/core.py:5202-5232`).
   Worth reading as its own lesson: #628 shipped the *comment* describing
   this control flow without the `return`, and a half still died 3.5 minutes
   in, WARNING and INFO one millisecond apart on the same exception.

@@ -1,0 +1,14 @@
+{
+  "source_repo": "https://github.com/github/gitignore",
+  "source_ref": "62f3997f1917b30f6eaee0c53ac2d791426513f2",
+  "license": "CC0-1.0",
+  "note": "Vendored per-toolchain gitignore templates. Refresh: re-fetch each file at a new ref, update source_ref and the sha256 map, run the checksum test.",
+  "files": {
+    "Go.gitignore": "94df48436cb67874a8760e780b86d0941348cdec4eb8629c3ae7b844179e757a",
+    "Gradle.gitignore": "2f73aa44ccdc7c8a9f8cc96d07f830616df398f5a8fc8b19e03e68f0def0972e",
+    "Java.gitignore": "5d513a42c1ab253b640801fb409ebb2d5186a5f624f2965749530fcc159f5941",
+    "Maven.gitignore": "6ddedb3c2703e0ee4538046dd99b17b75a9640d2f0d873e8b87b33694b95ca9b",
+    "Node.gitignore": "ce9367abec03b5e2dd07b5c7a5fe43a9ae6ee563014f59ac1aed150a252813ff",
+    "Python.gitignore": "21074b2297056606162cbc2527021b7dbf37df21fc31f111a8688e2250fb8045"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "type": "reference.links.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "reference_id": "",
+  "ok": true,
+  "category": "",
+  "error": "",
+  "reference_file": "",
+  "links": [],
+  "warnings": []
+}

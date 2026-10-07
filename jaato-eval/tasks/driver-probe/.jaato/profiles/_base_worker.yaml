@@ -1,0 +1,61 @@
+# Tier-1 base for the 'worker' stage — PROVIDER-AGNOSTIC.
+# Holds stage determinism (plugins, permission policy).  Active model +
+# provider live in profiles/<set>/worker.yaml, selected by
+# JAATO_PROFILE_SET.  This base MUST stay inherit-able (do not bind a
+# provider/model here — that breaks set-selection).
+name: _base_worker
+description: worker stage (base; bind provider/model in a set).
+
+# file_edit is preloaded: writeNewFile is a DISCOVERABLE tool, so under
+# deferred loading the model would have to call list_tools first.  For a
+# smoke test that turns one measurement into two, and a failure to
+# discover would be indistinguishable from a failure to write.
+plugins:
+  - environment
+  - file_edit(preload)
+  - permission
+
+plugin_configs:
+  permission:
+    policy:
+      # allow, and no whitelist.  The PLUGIN LIST above is the tool
+      # surface — there is no shell and no network tool in it.  A
+      # whitelist would restate that boundary in a second place, and
+      # any drift between the two resolves as a denial the model
+      # cannot route around, reported as the model failing.  That is a
+      # broken environment manufacturing a FAIL: neither "the agent did
+      # something wrong" nor "the agent was not exercised", so it lands
+      # in no bucket of the runner's failure taxonomy and averages
+      # straight into the pass rate.
+      #
+      # 'ask' would be worse still: there is no human on this session,
+      # so it hangs the arm until the budget trips.
+      defaultPolicy: allow
+
+# NO budget_control — deliberately.  A session carrying one is on its own
+# books and does not draw on a cascade pool, which would leave this task's
+# `budget:` pool untouched and its demonstration inert.  The per-arm
+# ceiling is shown in tasks/ledger-probe instead.
+
+# Per-session resource caps.  These live HERE and only here: the framework
+# reads getattr(profile, "runtime_limits") in runner_spawn, and there is no
+# session-kwarg vehicle, so a copy in task.yaml could never have reached the
+# runner however it was plumbed.  (One was there, promising it did.)
+# WHICH HALF ACTUALLY BITES DEPENDS ON HOW THE SESSION WAS SERVED.
+# RuntimeLimits splits across two enforcement layers: memory_max_mb,
+# pids_max and cpu_weight are kernel-enforced through cgroup v2, while
+# tool_timeout_seconds and max_output_bytes are userspace.
+#
+# runner_spawn.py consults the pre-warm pool only `if ... cgroup_attach is
+# None`, so a pool-served session gets NO cgroup attachment — observed
+# here as `cgroup_attach=no` on every spawn.  On that path the kernel half
+# is inert and the userspace half still applies.  Declaring memory_max_mb
+# and assuming it holds is therefore a mistake worth not making silently;
+# set JAATO_RUNNER_POOL_ENABLED=false to trade the warm slot (~7s) for a
+# cold spawn (~30s) that can carry one.
+runtime_limits:
+  tool_timeout_seconds: 60
+
+# apparmor also belongs here rather than in the manifest.  It is left off
+# because these example tasks must run on a host without confinement
+# configured; a task that needs it sets `apparmor: true` in this file.

@@ -94,7 +94,7 @@ send_message(prompt)
 
 ### Provider Protocol Surface (History-Related)
 
-From `shared/plugins/model_provider/base.py`:
+From `jaato_server/shared/plugins/model_provider/base.py`:
 
 | Method | Line | Statefulness | Role |
 |--------|------|:---:|------|
@@ -607,7 +607,7 @@ Save:    session._history.messages → serialize(messages) → disk
 Restore: disk → deserialize(data) → session._history.replace(messages)
 ```
 
-The `serialize_history()` / `deserialize_history()` methods on the provider protocol could be retained as utility functions, moved to a shared module, or the existing `shared/plugins/session/serializer.py` could be extended to handle `Message` serialization directly (it may already do so).
+The `serialize_history()` / `deserialize_history()` methods on the provider protocol could be retained as utility functions, moved to a shared module, or the existing `jaato_server/shared/plugins/session/serializer.py` could be extended to handle `Message` serialization directly (it may already do so).
 
 ### Telemetry
 

@@ -79,7 +79,7 @@ Mirrors `SessionTerminatedEvent`'s error fields and adds recovery-relevant ones:
 There is no `recoverable` flag — *every* `AgentErrorEvent` is a recovery point
 by definition.
 
-### `on_agent_error` hook (`shared/plugins/subagent/ui_hooks.py`)
+### `on_agent_error` hook (`jaato_server/shared/plugins/subagent/ui_hooks.py`)
 
 Symmetric with `on_agent_completed`; fire-and-forget (returns `None`):
 
@@ -118,10 +118,10 @@ The daemon-side `ServerAgentHooks` implementation (`core.py:2806+`) emits
 
 1. **`jaato-sdk/jaato_sdk/events.py`** — add `AgentErrorEvent` (mirror
    `SessionTerminatedEvent` ~L406-452 + the fields above).
-2. **`shared/plugins/subagent/ui_hooks.py`** — add `on_agent_error` to the
+2. **`jaato_server/shared/plugins/subagent/ui_hooks.py`** — add `on_agent_error` to the
    `AgentUIHooks` protocol.
-3. **`server/core.py` `ServerAgentHooks`** (~L2806-3055) — implement
-   `on_agent_error` to `server.emit(AgentErrorEvent(...))`.
+3. **`jaato_server/server/core.py` `ServerAgentHooks`** (~L2806-3055) — implement
+   `on_agent_error` to `jaato_server.server.emit(AgentErrorEvent(...))`.
 4. **Emit at the three exhaustion sites, BEFORE teardown:**
    - `core.py:4426` (model-thread terminal) — call `hooks.on_agent_error(...)`
      immediately before the existing `SessionTerminatedEvent` emit.

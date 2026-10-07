@@ -1,0 +1,5 @@
+$ session.new --profile screener   # events as the SDK receives them
+{"event": "SESSION_INFO", "disclosure_announcement": "You are interacting with an AI system operated by Acme Support GmbH, not with a human being."}
+{"event": "AGENT_OUTPUT", "source": "system", "text": "You are interacting with an AI system operated by Acme Support GmbH, not with a human being."}
+{"event": "AGENT_OUTPUT", "source": "user", "text": "Hello, is anyone there?"}
+{"event": "AGENT_OUTPUT", "source": "model", "text": "Hello, is anyone there?"}

@@ -157,17 +157,23 @@ class _FakeClient:
 
     async def connect(self, timeout=None):
         self.behaviour.setdefault("connected", []).append(timeout)
-        return True
+        # ``raise_on_connect``: the daemon is not there.  ``connect``
+        # answers False rather than raising, as the real client does.
+        return not self.behaviour.get("raise_on_connect")
 
     async def disconnect(self):
         self.disconnected = True
 
     async def cascade_register(self, cid, role="observer", event_types=None):
-        """Arms must observe their cid or the daemon sends them nothing.
+        """A cascade observer's registration — the driver arm's one RPC.
 
-        A cid'd session's events fan out to the cid's registered
-        cascade-clients rather than to the connection that created it.
-        Recorded so a test can hold that this happens, and BEFORE create.
+        A session arm no longer registers (jaato #643 made the creating
+        connection receive its own session's events); a DRIVER arm must,
+        because the sessions it accounts for are created by another
+        process.  Recorded so a test can hold WHAT was registered, and the
+        scripted ``observer_events`` are then delivered through the
+        handlers exactly as the daemon would route them: a test that
+        stamps a ``session_id`` on each event is testing the attribution.
         """
         self.behaviour.setdefault("observers", []).append(
             {"cid": cid, "role": role,
@@ -176,6 +182,13 @@ class _FakeClient:
              # across a sweep's arms, so a global flag would read False for
              # every arm after the first and quietly stop testing anything.
              "before_create": not self.created})
+        for event_type, event in self.behaviour.get("observer_events", []):
+            self._emit(event_type, event)
+
+    async def stop_session(self, session_id):
+        """``session.stop`` (#812) — what a driver arm sends for a session
+        its killed driver left behind."""
+        self.behaviour.setdefault("stopped", []).append(session_id)
 
     async def cascade_budget_set(self, cid, limits, degrade=None):
         # Marks this client as the pool owner, so a test can assert the
@@ -316,13 +329,17 @@ def _install_stub_sdk(behaviour):
         AGENT_ERROR="AGENT_ERROR",
         # The two the per-arm report needs: the binding (jaato #777's join
         # key, model and provider) and the pool reading.
-        SESSION_INFO="SESSION_INFO", SYSTEM_MESSAGE="SYSTEM_MESSAGE")
+        SESSION_INFO="SESSION_INFO", SYSTEM_MESSAGE="SYSTEM_MESSAGE",
+        # The first routed event of a session's life — what a driver arm's
+        # observer keys its per-session accounting on.
+        AGENT_CREATED="AGENT_CREATED")
     events_mod.ClientType = types.SimpleNamespace(API="API")
     # The event CLASSES the engine names when registering as a cascade
     # observer.  cascade_register filters on type-name, so the stub only
     # needs objects whose __name__ matches.
     for cls_name in ("TurnCompletedEvent", "HistoryEvent",
-                     "SessionTerminatedEvent", "ErrorEvent"):
+                     "SessionTerminatedEvent", "ErrorEvent",
+                     "AgentCreatedEvent"):
         setattr(events_mod, cls_name, type(cls_name, (), {}))
     for name, mod in (("jaato_sdk", sdk), ("jaato_sdk.client", client_mod),
                       ("jaato_sdk.client.ipc", ipc_mod),

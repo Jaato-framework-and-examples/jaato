@@ -6,6 +6,7 @@ Interactive TUI client for jaato with multi-agent support, streaming output, and
 
 ```bash
 pip install jaato-tui
+# or:  uv pip install jaato-tui
 ```
 
 ## Overview
@@ -21,7 +22,7 @@ The rich client provides:
 
 ```bash
 # Start server daemon first
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon
 
 # Connect TUI to running server
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock

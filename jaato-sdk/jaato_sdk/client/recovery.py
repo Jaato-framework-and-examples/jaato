@@ -359,7 +359,8 @@ class IPCRecoveryClient:
                                                  on_status_change=print) as s:
                 print(await s.ask("Long task…"))
 
-        See ``docs/design/sdk-convenience-layer.md``.
+        ``session_timeout`` is forwarded as ``create_session(timeout=)``, as
+        on :meth:`IPCClient.session`.  See ``docs/design/sdk-convenience-layer.md``.
         """
         from .convenience import open_session
         return open_session(cls, **kwargs)
@@ -566,6 +567,8 @@ class IPCRecoveryClient:
         cascade_driver_id: Optional[str] = None,
         sibling_name: Optional[str] = None,
         timeout: float = 60.0,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Optional[str]:
         """Create a new session.
 
@@ -588,6 +591,9 @@ class IPCRecoveryClient:
             cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
                 ``IPCClient.create_session`` for the contract.  Pass
                 the same opaque ID across every session of one cascade.
+            model: Model override (``--model``, protocol 1.27); see
+                ``IPCClient.create_session``.
+            provider: Provider override, only with ``model``.
             timeout: Seconds to wait for the ``SessionInfoEvent`` — mirrors
                 ``IPCClient.create_session`` so a plain→recovery swap is
                 drop-in (forwarded to the underlying client).  The recovery
@@ -629,6 +635,8 @@ class IPCRecoveryClient:
             cascade_driver_id=cascade_driver_id,
             sibling_name=sibling_name,
             timeout=timeout,
+            model=model,
+            provider=provider,
         )
         self._session_id = session_id
         return session_id
@@ -820,6 +828,248 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.stop_session(session_id)
 
+    async def reload_session_env(self, session_id: Optional[str] = None) -> None:
+        """Re-read a live session's ``.env`` and credentials and rebuild its provider.
+
+        See :meth:`IPCClient.reload_session_env` for full docs.  The inner
+        client raises against a daemon too old to serve the verb, which
+        would otherwise ignore it and leave the session on its old
+        credential while the caller believed it reloaded.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.reload_session_env(session_id)
+
+    async def send_session_message(
+        self,
+        target: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        file_refs: Optional[list] = None,
+        text_attachments: Optional[list] = None,
+        event_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Message another session in this session's group, waking it if cold.
+
+        See :meth:`IPCClient.send_session_message` for full docs.  The inner
+        client raises against a daemon too old to serve the verb, which
+        would otherwise ignore it while the caller believed the message was
+        delivered -- and against one too old to carry ``file_refs`` /
+        ``text_attachments``, which would deliver the text without them.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.send_session_message(
+                target, text, attachments=attachments, file_refs=file_refs,
+                text_attachments=text_attachments, event_id=event_id,
+                request_id=request_id,
+            )
+
+    async def toggle_workspace_ignore(self, path: str) -> None:
+        """Add an entry to the session workspace's ``.gitignore``, or remove it again.
+
+        See :meth:`IPCClient.toggle_workspace_ignore` for full docs.  The
+        inner client raises against a daemon too old to serve the verb,
+        which would otherwise ignore it while the caller believed the entry
+        was ignored.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.toggle_workspace_ignore(path)
+
+    async def list_reference_claims(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_reference_claims`; the inner client
+        refuses a daemon below protocol 1.33."""
+        return await self._memory_client("list_reference_claims").list_reference_claims(
+            timeout=timeout)
+
+    async def promote_reference_claim(
+        self, claim_id: str, *, bundle: str = "", timeout: float = 180.0,
+    ):
+        """See :meth:`IPCClient.promote_reference_claim`."""
+        return await self._memory_client("promote_reference_claim").promote_reference_claim(
+            claim_id, bundle=bundle, timeout=timeout)
+
+    async def dismiss_reference_claim(self, claim_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.dismiss_reference_claim`."""
+        return await self._memory_client("dismiss_reference_claim").dismiss_reference_claim(
+            claim_id, timeout=timeout)
+
+    async def list_reference_catalog(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_reference_catalog`."""
+        return await self._memory_client("list_reference_catalog").list_reference_catalog(
+            timeout=timeout)
+
+    async def create_reference_bundle(self, name: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.create_reference_bundle`."""
+        return await self._memory_client("create_reference_bundle").create_reference_bundle(
+            name, timeout=timeout)
+
+    async def update_reference_links(
+        self, reference_id: str, links, *, timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.update_reference_links`."""
+        return await self._memory_client("update_reference_links").update_reference_links(
+            reference_id, links, timeout=timeout)
+
+    async def send_external_event(
+        self,
+        name: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        timestamp: str = "",
+        session_id: str = "",
+    ) -> None:
+        """Publish an external event onto the session's ``EventBus``.
+
+        See :meth:`IPCClient.send_external_event` for full docs.  Deliberately
+        NOT replayed on reconnect: an external event reports something that
+        happened at a moment, and re-publishing it after the socket came back
+        would tell every subscriber it happened twice.  A caller that needs
+        at-least-once delivery across a reconnect is the one that knows
+        whether its event is still true, so it re-sends.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.send_external_event(
+                name, data, timestamp=timestamp, session_id=session_id,
+            )
+
+    async def explain_topic(
+        self,
+        topic: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to render one ``jaato-scaffold explain`` topic.
+
+        See :meth:`IPCClient.explain_topic` for full docs.  The answer
+        arrives as a ``ScaffoldExplainEvent`` on the event stream, so this
+        forwards the request and nothing more.  The inner client raises
+        against a daemon below the protocol floor rather than waiting out a
+        reply it will never send — which for this verb would be reported as
+        *the topic does not exist*, the exact confusion it was added to
+        remove.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.explain_topic(topic, name)
+
+    async def run_integration(self, name: str) -> None:
+        """Run ``jaato-scaffold integration <name>`` on the daemon (1.21).
+
+        See :meth:`IPCClient.run_integration` for full docs.  The answer
+        arrives as a ``ScaffoldIntegrationEvent`` on the event stream, so this
+        forwards the request and nothing more.  The inner client raises
+        against a daemon below the protocol floor rather than waiting out a
+        reply it will never send — which for this verb would be reported as
+        *the skill was installed*, when it was not.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.run_integration(name)
+
+    async def validate_workspace(
+        self,
+        profile_set: Optional[str] = None,
+        profile: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to run ``jaato-scaffold validate`` (1.34).
+
+        See :meth:`IPCClient.validate_workspace` for full docs.  The answer
+        arrives as a ``ScaffoldValidateEvent`` on the event stream, so this
+        forwards the request and nothing more.  The inner client raises
+        against a daemon below the protocol floor rather than waiting out a
+        reply it will never send, which would read as *no findings*.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.validate_workspace(profile_set, profile)
+
+    # ------------------------------------------------------------------
+    # The memory verbs (#1232, protocol 1.22)
+    #
+    # Each forwards to the inner client and returns its correlated answer.
+    # They are request/result pairs rather than fire-and-forget, so there is
+    # no "answer on the event stream" to fall back on: with no inner client
+    # the call raises ConnectionError instead of returning a fabricated
+    # empty answer, which for a list would read as "nothing remembered".
+    # ------------------------------------------------------------------
+
+    def _memory_client(self, method: str) -> IPCClient:
+        self._check_can_send()
+        if not self._client:
+            raise ConnectionError(f"{method}: not connected")
+        return self._client
+
+    async def pool_status(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.pool_status`."""
+        return await self._memory_client("pool_status").pool_status(
+            timeout=timeout)
+
+    async def resize_pool(
+        self,
+        target_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+        *,
+        timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.resize_pool`."""
+        return await self._memory_client("resize_pool").resize_pool(
+            target_size, max_size, timeout=timeout)
+
+    async def list_memories(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_memories`."""
+        return await self._memory_client("list_memories").list_memories(
+            timeout=timeout)
+
+    async def get_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.get_memory`."""
+        return await self._memory_client("get_memory").get_memory(
+            memory_id, timeout=timeout)
+
+    async def update_memory(
+        self,
+        memory_id: str,
+        *,
+        description: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        maturity: Optional[str] = None,
+        timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.update_memory`."""
+        return await self._memory_client("update_memory").update_memory(
+            memory_id, description=description, content=content,
+            tags=tags, maturity=maturity, timeout=timeout)
+
+    async def approve_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.approve_memory`."""
+        return await self._memory_client("approve_memory").approve_memory(
+            memory_id, timeout=timeout)
+
+    async def dismiss_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.dismiss_memory`."""
+        return await self._memory_client("dismiss_memory").dismiss_memory(
+            memory_id, timeout=timeout)
+
+    async def delete_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.delete_memory`."""
+        return await self._memory_client("delete_memory").delete_memory(
+            memory_id, timeout=timeout)
+
+    async def get_diagnostics(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.get_diagnostics`.
+
+        No inner client raises ``ConnectionError`` rather than returning a
+        fabricated result -- a probe answered from nothing would be a
+        guessed confinement verdict, the one thing #1294's re-probe must
+        never be.
+        """
+        return await self._memory_client("get_diagnostics").get_diagnostics(
+            timeout=timeout)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,
@@ -990,6 +1240,19 @@ class IPCRecoveryClient:
 
         if self._client:
             await self._client.request_history(agent_id)
+
+    async def request_history_page(
+        self,
+        agent_id: str = "main",
+        *,
+        before: str = "",
+        max_lines: int = 0,
+        timeout: float = 30.0,
+    ):
+        """See :meth:`IPCClient.request_history_page`."""
+        return await self._memory_client(
+            "request_history_page").request_history_page(
+                agent_id, before=before, max_lines=max_lines, timeout=timeout)
 
     # =========================================================================
     # SDK feature parity — session-primitive verbs
