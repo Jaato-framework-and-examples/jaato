@@ -9313,6 +9313,27 @@ scope. Guard:
 seven reversions, on a real `SessionManager` listing with cold records on
 disk.
 
+### A Profile Listing Read From a Busy Neighbour (#1593)
+
+`session.profiles` answered with another workspace's profiles whenever
+that workspace's sessions were mid-turn: the router passed only the
+workspace, so `discover_profiles` took its config root and
+`JAATO_PROFILE_SET` from `get_config_root()` / `get_session_env()`, whose
+`os.environ` fallback carries what `_in_workspace` / `_with_session_env`
+overlay during ANOTHER session's turn.
+
+`CommandRouter._profile_listing_scope` now passes the client's own
+workspace (transport's, else declared `working_dir`), config root
+(`_client_config_root`) and `.env` (declared `env_file`, else
+`<workspace>/.env`). `discover_profiles(session_env=...)` resolves from
+its arguments alone when given an env mapping: the set comes from that
+mapping, and an omitted root or base path is never filled from the
+session-context helpers. Callers that pass no `session_env` keep the
+context-derived behaviour. Not done: the other daemon-level callers of
+those helpers (option 2 of the issue). Guard:
+`jaato_server/server/tests/test_profile_listing_is_the_clients_own_1593.py`,
+three reversions.
+
 ### What a Picker Needs to Know About a Workspace (protocol 1.27)
 
 The workspace and session pickers asked for facts the daemon held and no

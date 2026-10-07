@@ -1712,6 +1712,25 @@ def _agent_not_found_error(
 from jaato_server.server.confinement.base import no_boundary as _no_boundary  # noqa: E402
 
 
+
+def _read_listing_env(env_file: Optional[str]) -> Dict[str, str]:
+    """The env a profile listing is resolved under: *env_file*'s values only.
+
+    Parsed as ``SessionManager._resolve_profile`` parses it (``dotenv_values``
+    then ``expand_variables``).  A missing or unreadable file is an empty
+    env, never the daemon's ``os.environ`` (#1593).
+    """
+    if not env_file or not os.path.isfile(env_file):
+        return {}
+    try:
+        from dotenv import dotenv_values
+        from jaato_server.shared.plugins.subagent.config import expand_variables
+        raw = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+        return dict(expand_variables(raw, context=raw))
+    except Exception as exc:  # noqa: BLE001 - a listing must not fail on .env
+        logger.info("list_profiles: env_file %r not read (%s)", env_file, exc)
+        return {}
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -15640,6 +15659,7 @@ class SessionManager:
         self,
         workspace_path: Optional[str] = None,
         config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
     ) -> Tuple[List["ProfileSummary"], List["ProfileParseError"]]:
         """List available agent profiles.
 
@@ -15660,6 +15680,16 @@ class SessionManager:
             workspace_path: Workspace directory to discover profiles from.
                 May be ``None`` (user-level and premium profiles are still
                 returned).
+            config_root: The caller's config root; ``None`` means
+                ``<workspace_path>/.jaato``.
+            env_file: The ``.env`` whose ``JAATO_PROFILE_SET`` selects the
+                profile set.  ``None`` (or unreadable) means no set.
+
+        Discovery is resolved from these arguments alone (#1593): nothing
+        is read from the session-context helpers' ``os.environ``
+        fallback, which carries whichever session is mid-turn on this
+        daemon, so a client is never shown another workspace's profiles
+        or profile set.
 
         Returns:
             Tuple ``(profiles, parse_errors)``.  ``profiles`` is the
@@ -15674,6 +15704,7 @@ class SessionManager:
             ".jaato/profiles",
             base_path=workspace_path or ".",
             config_root=config_root,
+            session_env=_read_listing_env(env_file),
         )
         summaries: List[ProfileSummary] = []
         for name, profile in discovery.profiles.items():
