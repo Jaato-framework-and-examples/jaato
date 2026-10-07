@@ -2036,28 +2036,73 @@ class CommandRouter:
             wake_ref=wake_ref or "", outcome=outcome.value,
             detail=f"unbind_wake: {outcome.value}"))
 
-    def _sessions_visible_to(self, client_id: str) -> list:
-        """The daemon's sessions, scoped to what this client's user may see.
+    def _client_config_root(self, client_id: str) -> Optional[str]:
+        """The config root *client_id* is in, or ``None`` (#1584).
 
-        The boundary is the one the transport reports through
-        ``visible_workspace_paths`` (protocol 1.13): ``None`` -- IPC, or a
-        WS connection carrying no identity -- means the unscoped listing
-        every client always got.  A list means a session is shown when it
-        runs in one of those workspaces, or when this user created it
-        (``created_by``, #859), and hidden otherwise -- another user's
-        session in a shared workspace included.  ``session.list`` renders
-        this set and ``session.attach`` admits only members of it, so the
-        listing is never wider or narrower than what the verb accepts.
+        First hit wins:
+
+        1. the config root the client declared itself
+           (``ClientConfigRequest.config_root``, entitlement-checked on IPC);
+        2. the config root of the session the client is attached to;
+        3. ``<workspace>/.jaato`` for the workspace
+           :meth:`resolve_caller_workspace` answers (the transport's
+           declared workspace, else ``ClientConfigRequest.working_dir``).
+
+        ``None`` means the client named neither a root nor a workspace, and
+        such a client is shown only what it created.
+        """
+        from jaato_server.server.session_scope import effective_config_root
+
+        declared = getattr(self._session_manager, "client_declared_config", None)
+        cfg = declared(client_id) if callable(declared) else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        explicit = cfg.get("config_root")
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        session = self._session_manager.get_client_session(client_id)
+        attached_root = getattr(session, "config_root", None) if session else None
+        if isinstance(attached_root, str) and attached_root:
+            return attached_root
+        client_ws = self._event_sink.get_client_workspace(client_id)
+        if not isinstance(client_ws, str) or not client_ws:
+            client_ws = cfg.get("working_dir") if isinstance(
+                cfg.get("working_dir"), str) else None
+        workspace, _sources = self.resolve_caller_workspace(client_id, client_ws)
+        if not isinstance(workspace, str):
+            return None
+        return effective_config_root(None, workspace)
+
+    def _sessions_visible_to(self, client_id: str) -> list:
+        """The daemon's sessions, scoped to what this client may see.
+
+        Two boundaries, chosen by what the transport knows about the client:
+
+        * an IDENTIFIED client (``visible_workspace_paths`` answers a list,
+          protocol 1.13): a session is shown when it runs in one of those
+          workspaces, or when this user created it (``created_by``, #859)
+          -- unchanged since #1113;
+        * any other client (IPC, a WS connection with no bound identity):
+          a session is shown when it ran under THIS client's config root
+          (:meth:`_client_config_root`, compared resolved and normalised),
+          or when this client's user created it.  A row whose config root
+          is unknown matches nothing, and a client with neither a config
+          root nor a workspace sees only what it created (#1584).  This
+          was "every session on the daemon" before #1584.
+
+        ``session.list`` renders this set and ``session.attach`` /
+        ``session.delete`` admit only members of it, so the listing is never
+        wider or narrower than what the verbs accept.
         """
         from jaato_server.server.event_sink import client_visible_workspaces
 
         sessions = self._session_manager.list_sessions()
         paths = client_visible_workspaces(self._event_sink, client_id)
-        if paths is None:
-            return sessions
         user = self._event_sink.get_client_user(client_id)
-        if not isinstance(user, str):
+        if not isinstance(user, str) or not user:
             user = None
+        if paths is None:
+            return self._sessions_in_config_root(client_id, sessions, user)
         roots = [os.path.normpath(p) for p in paths]
 
         def _inside(workspace_path: Optional[str]) -> bool:
@@ -2069,6 +2114,27 @@ class CommandRouter:
         return [s for s in sessions
                 if (user is not None and s.created_by == user) or _inside(s.workspace_path)]
 
+    def _sessions_in_config_root(
+        self, client_id: str, sessions: list, user: Optional[str],
+    ) -> list:
+        """*sessions* an identity-less client may see (#1584).
+
+        See :meth:`_sessions_visible_to`.  Only positive evidence matches:
+        a row with no known config root is shown to its creator alone.
+        """
+        from jaato_server.server.session_scope import config_root_key
+
+        mine = config_root_key(self._client_config_root(client_id))
+
+        def _visible(s: Any) -> bool:
+            if user is not None and getattr(s, "created_by", None) == user:
+                return True
+            if mine is None:
+                return False
+            return config_root_key(getattr(s, "config_root", None)) == mine
+
+        return [s for s in sessions if _visible(s)]
+
     def _refuse_foreign_session(
         self,
         client_id: str,
@@ -2078,7 +2144,8 @@ class CommandRouter:
         """Refuse *verb* on a session outside the caller's boundary.
 
         Returns True (and has answered the client) when the command must
-        not proceed.  Unscoped transports never refuse here.
+        not proceed.  The boundary is :meth:`_sessions_visible_to`, for
+        every transport: since #1584 no client is unscoped.
 
         ``session.delete`` takes the same gate as ``session.attach``,
         which it did not before: #1113 wrote the boundary in terms of the
@@ -2090,9 +2157,6 @@ class CommandRouter:
         standing between one user and another user's session record, and
         an id here is a second-granularity timestamp.
         """
-        from jaato_server.server.event_sink import client_visible_workspaces
-        if client_visible_workspaces(self._event_sink, client_id) is None:
-            return False
         if any(s.session_id == target_session_id
                for s in self._sessions_visible_to(client_id)):
             return False

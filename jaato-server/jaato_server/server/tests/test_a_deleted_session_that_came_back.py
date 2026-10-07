@@ -252,10 +252,12 @@ def test_deleting_your_own_session_still_works():
     sm.delete_session.assert_called_once_with("mine")
 
 
-def test_an_unscoped_transport_deletes_exactly_as_before():
+def test_an_identity_less_transport_cannot_delete_outside_its_config_root():
+    """#1584: no transport is unscoped any more.  A client with no bound
+    identity and no config root may delete only what it created."""
     router, sm, _ = _router_for_delete(None)
     router._handle_session_delete("c1", ["bobs"])
-    sm.delete_session.assert_called_once_with("bobs")
+    sm.delete_session.assert_not_called()
 
 
 # --------------------------------------------------------------------------

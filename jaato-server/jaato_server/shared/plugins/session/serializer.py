@@ -711,6 +711,8 @@ def serialize_session_info(state: SessionState) -> Dict[str, Any]:
         # A cold FINISHED session is listed as finished (2.11).
         'ended_at': state.ended_at,
         'end_reason': state.end_reason,
+        # #1584: the listing boundary is the config root a session ran under.
+        'config_root': state.config_root,
     }
 
 
@@ -739,4 +741,5 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
         workspace_path=data.get('workspace_path'),
         ended_at=data.get('ended_at'),  # None on pre-2.11 records
         end_reason=data.get('end_reason'),
+        config_root=data.get('config_root'),  # None on pre-2.4 records
     )

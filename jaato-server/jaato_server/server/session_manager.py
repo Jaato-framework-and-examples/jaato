@@ -64,6 +64,7 @@ from jaato_server.shared.runtime_limits import RuntimeLimits, apply_isolated_def
 from jaato_server.shared.session_envelope import BootstrapEnvelope
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from .awaiting import awaiting_of
+from .session_scope import effective_config_root
 from .lock_profile import ProfiledRLock
 from . import session_new_timing
 from .session_finished import note_lifecycle as note_session_lifecycle
@@ -605,6 +606,12 @@ class RuntimeSessionInfo:
     #: not finished, loaded or cold.
     ended_at: Optional[str] = None
     end_reason: Optional[str] = None
+    #: The config root this session ran under (#1584), as
+    #: :func:`server.session_scope.effective_config_root` answers it: the
+    #: recorded value, else ``<workspace>/.jaato``, else ``None`` (unknown,
+    #: matches no client).  What ``session.list`` and the snapshot scope an
+    #: identity-less client by.  Not rendered on the wire row.
+    config_root: Optional[str] = None
 
 
 def _seccomp_for_record(session: Any) -> Optional[Dict[str, Any]]:
@@ -5592,8 +5599,10 @@ class SessionManager:
     ) -> List["RuntimeSessionInfo"]:
         """The session listing to put on a snapshot bound for *client_id*.
 
-        No client and no resolver both mean "unscoped", which is what the
-        IPC transport and every in-process caller have always had.
+        No client and no resolver both mean "unscoped": an in-process caller
+        has no client to leak to.  A transport client is always named, and
+        the router's resolver scopes it -- by its identity, or by its config
+        root when it has none (#1584).
 
         A resolver that RAISES yields the empty list, not the unscoped one.
         The two failure directions are not equal: an empty listing costs a
@@ -13344,6 +13353,11 @@ class SessionManager:
             description=state.description,
             is_dirty=recovered_count > 0,  # Mark dirty if recovery happened
             workspace_path=state.workspace_path,
+            # #1584: the root the revived runner was handed, so a re-save
+            # keeps recording it and the listing scopes this session by it.
+            # Before, a revived Session carried ``None`` and its next save
+            # erased the record's value.
+            config_root=restore_config_root,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
             model_override_env=state.metadata.get('model_override_env'),
@@ -15758,6 +15772,9 @@ class SessionManager:
                     profile_name=getattr(info, "profile_name", None),
                     ended_at=getattr(info, "ended_at", None),
                     end_reason=getattr(info, "end_reason", None),
+                    created_by=getattr(info, "created_by", None),
+                    config_root=effective_config_root(
+                        getattr(info, "config_root", None), info.workspace_path),
                 )
 
         # Overlay in-memory sessions (have more current info).
@@ -15809,6 +15826,8 @@ class SessionManager:
                 profile_name=getattr(session.server, "profile_name", None),
                 ended_at=session.ended_at,
                 end_reason=session.end_reason,
+                config_root=effective_config_root(
+                    session.config_root, session.workspace_path),
             )
 
         # Sort by last activity
@@ -15825,8 +15844,8 @@ class SessionManager:
 
         Includes current session info plus:
         - sessions: the sessions *client_id* may be shown (see
-          :meth:`_sessions_for_snapshot`); every session on the daemon when
-          no client is named, which is what an unscoped transport gets
+          :meth:`_sessions_for_snapshot`); every session on the daemon only
+          when no client is named (an in-process caller)
         - tools: All tools with enabled status
         - models: Available model names
 
@@ -15921,6 +15940,16 @@ class SessionManager:
         """Get a session by ID (in-memory only)."""
         with self._lock:
             return self._sessions.get(session_id)
+
+    def client_declared_config(self, client_id: str) -> Dict[str, Any]:
+        """A copy of what *client_id* declared in ``ClientConfigRequest``.
+
+        Read by ``CommandRouter._client_config_root`` (#1584): the declared
+        ``config_root`` and ``working_dir`` are two of the sources a client's
+        listing boundary is derived from.  Empty for a client that sent none.
+        """
+        with self._lock:
+            return dict(self._client_config.get(client_id, {}))
 
     def get_client_session(self, client_id: str) -> Optional[Session]:
         """Get the session a client is attached to."""

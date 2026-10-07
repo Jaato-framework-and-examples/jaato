@@ -4,13 +4,17 @@ The transport reports a boundary through ``visible_workspace_paths``: the
 paths of the workspaces the connection's user may see, or ``None`` when no
 scoping applies (IPC; a WS connection with no identity).  Pinned here:
 
-- ``None`` is the unscoped listing every client always got;
+- ``None`` (no identity) is NOT unscoped any more (#1584): such a client
+  sees its own config root's sessions and what it created -- the
+  config-root half is pinned in
+  ``test_session_listing_is_scoped_to_config_root_1584.py``;
 - with a boundary, a session is shown when it runs inside one of those
   workspaces OR when this user created it, and hidden otherwise -- another
   user's session in a shared workspace included;
 - ``session.attach`` admits exactly the shown set, and refuses the rest by
   name without touching the session manager;
-- a sink predating the method (out of tree) contributes "no scoping".
+- a sink predating the method (out of tree) contributes "no identity
+  boundary", which is the config-root boundary, never the whole daemon.
 """
 from __future__ import annotations
 
@@ -49,6 +53,8 @@ def _router(paths, user="app:alice", sink_has_method=True):
     sm.list_sessions.return_value = SESSIONS
     sm.check_workspace_mismatch.return_value = None
     sm.attach_session.return_value = False
+    sm.get_client_session.return_value = None
+    sm.client_declared_config.return_value = {}
     sink = MagicMock(spec=["send_event", "get_client_user", "get_client_workspace",
                            "set_client_session"] + (["visible_workspace_paths"] if sink_has_method else []))
     sink.get_client_user.return_value = user
@@ -67,10 +73,12 @@ def _listed(sink):
     return {s["id"] for s in ev.sessions}
 
 
-def test_no_boundary_is_the_unscoped_listing():
+def test_no_boundary_is_not_the_whole_daemon():
+    """#1584: no identity boundary and no config root -- only what this
+    client's user created, never every session on the daemon."""
     router, _, sink = _router(None)
     router._handle_session_list("c1", None)
-    assert _listed(sink) == {s.session_id for s in SESSIONS}
+    assert _listed(sink) == {"alices-elsewhere"}
 
 
 def test_a_boundary_keeps_the_users_workspaces_and_the_users_own_sessions():
@@ -87,10 +95,10 @@ def test_an_empty_boundary_is_a_boundary_not_an_absence():
     assert _listed(sink) == {"alices-elsewhere"}
 
 
-def test_a_sink_without_the_method_contributes_no_scoping():
+def test_a_sink_without_the_method_is_not_unscoped():
     router, _, sink = _router(None, sink_has_method=False)
     router._handle_session_list("c1", None)
-    assert _listed(sink) == {s.session_id for s in SESSIONS}
+    assert _listed(sink) == {"alices-elsewhere"}
 
 
 def test_attach_refuses_a_hidden_session_by_name_and_admits_a_shown_one():
@@ -104,9 +112,12 @@ def test_attach_refuses_a_hidden_session_by_name_and_admits_a_shown_one():
     sm.attach_session.assert_called_once()
 
 
-def test_attach_is_unguarded_without_a_boundary():
+def test_attach_is_guarded_without_a_boundary_too():
+    """#1584: attach admits the listed set on every transport."""
     router, sm, _ = _router(None)
     router._handle_session_attach("c1", None, ["in-bobs"], None)
+    sm.attach_session.assert_not_called()
+    router._handle_session_attach("c1", None, ["alices-elsewhere"], None)
     sm.attach_session.assert_called_once()
 
 
