@@ -121,7 +121,9 @@ profile or script that is not listed.  The declaration is
 and nothing to the `.jaato/` tree's fixed layout.
 
 It has **one form**, a YAML file passed as `--config PATH`.  There are no
-per-tool flags, so one tool and ten are declared the same way:
+per-tool flags, so one tool and ten are declared the same way.  A
+session tool's budget, plugins and limits come from its profile, so the
+file does not repeat them:
 
 ```yaml
 server:
@@ -134,11 +136,8 @@ defaults:
 tools:
   review_pr:
     kind: session
-    profile: reviewer
+    profile: reviewer               # budget_control etc. live in the profile
     description: "Reviews a diff and returns findings."  # never the persona
-    budget_control:
-      limits: {usd: 2.0}
-      degrade: [{at: 100, action: abort}]
     task_support: optional
   ship_feature:
     kind: driver
