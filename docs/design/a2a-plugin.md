@@ -4,6 +4,11 @@
 **Scope**: whether A2A support can live entirely OUT of tree, what it
 would own, and the three gaps that stand between "a chain of sessions
 ran" and "one A2A task completed".
+**Read §2 first if you are choosing a transport.**  The engine here is
+protocol-agnostic, Claude speaks MCP rather than A2A, and MCP's
+2026-07-28 tasks extension has closed most of the gap that made A2A the
+obvious wire — so which one ships first is a question about your callers,
+not about this design.
 
 ---
 
@@ -17,8 +22,12 @@ call as a tool?
 
 **Yes, for a single session, with no framework change at all.**  For a
 multi-stage workflow the answer is yes *and* it needs three small
-things that do not exist today, two of them premium-side.  Sections 6
-and 7 are those things.
+things that do not exist today, two of them premium-side.  Sections 7
+and 8 are those things.
+
+And the premise question the first draft never asked — **who calls this, and
+do they even speak A2A?** — is §2.  Claude does not; that changes which
+transport ships first.
 
 The finding that shapes everything below: the primitive an A2A server
 needs most — **a client identity that is not a socket** — already
@@ -27,7 +36,90 @@ load-bearing as that.
 
 ---
 
-## 2. What A2A actually requires
+## 2. Who calls this, and over which wire
+
+The ask was "a tool for other agents".  This section is the question that
+was missing from the first draft of this document: **which** agents, and
+what do they actually speak?
+
+### 2.1 Claude does not speak A2A
+
+Not Claude Code, not the Claude API, not the Claude Agent SDK, not Managed
+Agents.  **MCP is Anthropic's client-side protocol** for reaching anything
+external; the Claude API's external-tool surface is the MCP connector
+(`mcp_servers` + an `mcp_toolset` tool), and A2A appears nowhere in it.
+
+Anthropic nevertheless **co-governs** A2A.  Since December 2025 both
+protocols live at the Linux Foundation's Agentic AI Foundation, which
+Anthropic co-founded alongside Block and OpenAI — MCP donated by Anthropic,
+A2A by Google, with IBM's ACP merged into A2A beforehand.  Co-governance is
+not client support, and the two are not rivals: the division of labour
+everyone now states the same way is *MCP is how an agent talks to its tools;
+A2A is how an agent talks to another agent.*
+
+So a jaato agent exposed over A2A is reachable from Claude **through a
+bridge** — an MCP server that fronts A2A, of which several community
+implementations exist.  One hop, maintained by somebody else.  Not a dead
+end; not the shortest path either.
+
+### 2.2 MCP is no longer the poorer fit, and that is a correction
+
+An earlier reading of this design held that jaato's primitives map onto A2A
+far better than onto MCP, because an MCP tool call was a request/response
+with no task lifecycle, no way to ask a question mid-flight, and no typed
+result.  **That was true of MCP before revision 2026-07-28 and is not true
+now.**  Stating it without checking would have pointed this work at the
+wrong wire.
+
+| What jaato has | A2A v1.0 | MCP 2026-07-28 + `io.modelcontextprotocol/tasks` |
+|---|---|---|
+| a session that runs for minutes | `Task`, `SUBMITTED` / `WORKING` | a task handle, `working` |
+| `request_clarification` | `INPUT_REQUIRED` | `input_required` + `tasks/update` (Multi Round-Trip Requests) |
+| `completion_payload_schema` | `Artifact` | `Tool.outputSchema`; the result is inlined in `tasks/get` |
+| `cancel_cascade` / `stop_session` | `CancelTask` | `tasks/cancel` |
+| terminal states | `COMPLETED` / `FAILED` / `CANCELED` | `completed` / `failed` / `cancelled` |
+| progress while it runs | SSE `TaskStatusUpdateEvent`, push notifications | **poll** `tasks/get` — no server push |
+| what a caller discovers | Agent Card `skills[]`, input/output modes, examples | `tools/list` and a description |
+
+The four rows that matter most to this design are the same on both wires.
+What survives as a genuine A2A advantage is the bottom two: **push** versus
+poll, and the Agent Card as a richer discovery document than a tool list.
+Those are real, and they are a smaller difference than "A2A fits, MCP does
+not".
+
+One wrinkle worth noting rather than discovering later: 2026-07-28 removed
+sessions from MCP's protocol core, so a jaato SESSION maps onto an MCP
+**task**, never onto an MCP session.  There is no longer such a thing.
+
+### 2.3 jaato is an MCP client and nothing else
+
+`shared/mcp_context_manager.py` imports `ClientSession` and `stdio_client`;
+the `mcp` plugin consumes servers over stdio and there is no server
+implementation anywhere in the tree.  So an MCP server fronting a jaato
+session is **net-new work too** — it is not something already sitting there
+waiting to be pointed at.
+
+### 2.4 One engine, two transports
+
+The consequence for §12 is concrete: **if the intended caller is Claude — or
+Cursor, or anything else that speaks MCP — the MCP server is the first
+transport to ship, not A2A.**  A2A is the right wire for the other
+ecosystem: the agent mesh around Google, LangGraph, CrewAI and the ~150
+organisations running A2A in production.
+
+Nothing about the engine changes between them.  §8.1's list should be read
+as two layers rather than one:
+
+| Layer | A2A | MCP |
+|---|---|---|
+| **task engine** — mint an id, `create_headless_session(cid)`, inject, `register_in_process_client(cid)`, terminal rule → artifact | identical | identical |
+| **transport** — wire vocabulary, discovery document, and whether the client is pushed to or polls | JSON-RPC + SSE, Agent Card | MCP methods + tasks extension, `tools/list` |
+
+A design that puts the engine behind one interface gets the second wire for
+roughly the cost of its vocabulary.  One that writes A2A's object model
+through the middle of the engine pays for it twice.
+
+## 3. What A2A actually requires
 
 Pinned to spec **v1.0.0**.  The canonical spec names its RPCs in
 gRPC style (`SendMessage`, `SendStreamingMessage`, `GetTask`,
@@ -50,7 +142,7 @@ with a lifecycle, **Artifacts**, **Parts** (`text` / `raw` / `url` /
 
 ---
 
-## 3. The mapping
+## 4. The mapping
 
 The reason this is worth doing: almost every A2A concept already has a
 jaato primitive with the same shape, and several of jaato's are
@@ -58,9 +150,9 @@ jaato primitive with the same shape, and several of jaato's are
 
 | A2A | jaato | Note |
 |---|---|---|
-| Agent Card `skills[]` | profiles, or a reactor rule-set | §5 — the two engines |
+| Agent Card `skills[]` | profiles, or a reactor rule-set | §6 — the two engines |
 | skill input schema | `spawn_payload_schema` | already string-typed for a wire (#883) |
-| `Task` | a session, or a `cascade_driver_id` | §5 |
+| `Task` | a session, or a `cascade_driver_id` | §6 |
 | `contextId` | `cascade_driver_id` | already a first-class tenant id |
 | `WORKING` | `AgentStatusChangedEvent`, `TurnProgressEvent` | |
 | `INPUT_REQUIRED` | `ClarificationBatchEvent` | `batch_only=True` on runner sessions; answered with one `ClarificationBatchResponseEvent` |
@@ -83,7 +175,7 @@ its caller never has to trust the callee to respect.
 
 ---
 
-## 4. The extension surface that already exists
+## 5. The extension surface that already exists
 
 `docs/design/daemon-extensions.md` names five hooks.  Three matter
 here, one is unusable, and one is a gift.
@@ -94,9 +186,9 @@ here, one is unusable, and one is a gift.
 | 2 | `ws_server.set_connection_interceptor(check, handler)` | **unusable** — fires post-upgrade on a `websockets` connection (`websocket.py:1252`, served by `websockets.serve` at `:1132`). A2A is HTTP JSON-RPC + SSE, which needs `process_request`. Run an own HTTP server instead |
 | 3 | `session_manager.add_session_hook(hook)` | per-session wiring, if the plugin needs any |
 | 4 | `env_plugin.register_aspect(name, handler)` | lets an agent introspect its own A2A exposure |
-| 5 | `subagent_plugin.register_remote_handler(handler)` | **the gift** — see §9 |
+| 5 | `subagent_plugin.register_remote_handler(handler)` | **the gift** — see §10 |
 
-### 4.1 The primitive that makes this cheap
+### 5.1 The primitive that makes this cheap
 
 ```python
 session_manager.register_in_process_client(
@@ -120,7 +212,7 @@ Together with `create_session(...)` (`:6458`, taking `profile_name`,
 (`:7888`) and `handle_request(client_id, session_id, event)` (`:11919`),
 that is a complete task engine reachable from an entry point.
 
-### 4.2 The one re-entrancy rule
+### 5.2 The one re-entrancy rule
 
 The callback runs **synchronously inside `_emit_to_session` while
 `SessionManager._lock` is held**.  It must not call back into any
@@ -137,12 +229,12 @@ and should be copied rather than re-derived.
 
 ---
 
-## 5. Two engines, and the free/premium line falls out of them
+## 6. Two engines, and the free/premium line falls out of them
 
 An A2A **skill** can be backed by either of two things jaato already
 has, and they are not the same product.
 
-### 5.1 Session-scoped — public tree only
+### 6.1 Session-scoped — public tree only
 
 One skill = one **profile**.  One task = one **session**.  The card's
 skill list is the profile list (`SessionProfilesEvent`; #1052 already
@@ -152,7 +244,7 @@ a solved problem).  The artifact is that session's
 
 Everything this needs is public.  This is the whole Phase 0.
 
-### 5.2 Workflow-scoped — premium reactors
+### 6.2 Workflow-scoped — premium reactors
 
 One skill = a **reactor rule-set**.  One task = a `cascade_driver_id`
 spanning N sessions.
@@ -186,7 +278,7 @@ by rule id).  The `ActionContext` a script receives
 | `gate(name, ttl_seconds, public_intent_fields, tenant_id)` | 114 | lease / announce / release with a TTL watchdog |
 | `post_webhook(url, body, headers)` | 982 | A2A push notifications, nearly free |
 | `emit_event(type, payload)` | 1029 | rule chaining |
-| `run_shell(cmd, cwd, timeout)` | 1005 | — and see §10 |
+| `run_shell(cmd, cwd, timeout)` | 1005 | — and see §11 |
 | `external_event` as a matchable event type | — | an inbound trigger already exists |
 
 So the split is not a licensing invention; it is where the capability
@@ -198,12 +290,12 @@ actually sits:
 
 ---
 
-## 6. What reactors do *not* give, and it is the interesting part
+## 7. What reactors do *not* give, and it is the interesting part
 
 Reactors make the **topology** declarative.  They do not give the chain
 an **identity** or a **terminus** — and A2A needs both.
 
-### 6.1 The cid does not survive a handoff
+### 7.1 The cid does not survive a handoff
 
 `fork_from_originating` → `_spawn_with_history` →
 `create_headless_session(profile_name, agent_name, workspace_path,
@@ -231,7 +323,7 @@ together.  **Recommendation: inherit by default**, with an explicit
 ceiling and a warm slot already behaves as one run in every respect but
 this one.
 
-### 6.2 Nothing says the workflow is over
+### 7.2 Nothing says the workflow is over
 
 A reactor chain ends because the last `agent.completed` matched no
 rule.  From outside, that is **indistinguishable from a rule that
@@ -257,7 +349,7 @@ expressed in the same JMESPath vocabulary as every other edge in the
 graph, a failure branch is a second rule with ``success == `false` ``
 → FAILED, and the package adds **no new configuration surface at all**.
 
-### 6.3 Gates are per-child completion, not a barrier
+### 7.3 Gates are per-child completion, not a barrier
 
 Worth stating because it is tempting to reach for gates as the join.
 `HandoffGate` is a **binary RED/GREEN latch with a single lease**
@@ -274,7 +366,7 @@ conditional branches are in.
 
 ---
 
-## 7. Proposed architecture
+## 8. Proposed architecture
 
 ```
   message/send ──▶ mint taskId  (== cascade_driver_id)
@@ -283,7 +375,7 @@ conditional branches are in.
                         │
                         ▼
                reactors.json drives the chain          ← TENANT DATA
-               (every fork inherits the cid — §6.1)
+               (every fork inherits the cid — §7.1)
                         │
                         ▼
                terminal rule → reactors/a2a_complete.py            EXIT
@@ -293,25 +385,25 @@ conditional branches are in.
                                                              └─▶ tasks/get
 ```
 
-### 7.1 What the plugin owns
+### 8.1 What the plugin owns
 
 - HTTP/JSON-RPC + SSE server, on its own port.  The in-tree `webhook`
   plugin (`shared/plugins/webhook/http_server.py`) is the precedent and
   already carries TLS/mTLS, CIDR allowlists, rate limiting and replay
   refusal (#713) — read it before writing a second one.
-- Agent Card generation from an explicit manifest (§7.3).
+- Agent Card generation from an explicit manifest (§8.3).
 - Task store: id minting, state, artifacts, history.  Durable enough to
   answer `GetTask` after a daemon restart — session records persist, so
   `ListTasks` can lean on `session.list` / `list_orphan_sessions`.
 - The entry and exit seams, and the bounded event queue.
 - `a2a_complete.py`, shipped as an action script.
 
-### 7.2 What the plugin does NOT own
+### 8.2 What the plugin does NOT own
 
 The workflow.  Everything between entry and exit is `reactors.json` —
 tenant data, hot-reloadable, with no plugin release in the loop.
 
-### 7.3 The card needs its own manifest
+### 8.3 The card needs its own manifest
 
 With reactors in play a skill is a rule-set, not a profile, so the card
 cannot be generated by iterating profiles — and it should not be
@@ -321,18 +413,18 @@ the same family as an over-broad Agent Card.
 
 `.jaato/a2a.json`: which skills are exposed, each one's entry profile
 or rule-set, input/output modes, examples, and the card's identity
-block.  It doubles as the **export allowlist**, which §10 requires
+block.  It doubles as the **export allowlist**, which §11 requires
 regardless.
 
 ---
 
-## 8. Changes outside the plugin
+## 9. Changes outside the plugin
 
 The point of this document is how little there is.
 
 | # | Change | Where | Size |
 |---|---|---|---|
-| 1 | propagate the cid through `_spawn_with_history` | **premium** | ~1 argument + a policy decision (§6.1) |
+| 1 | propagate the cid through `_spawn_with_history` | **premium** | ~1 argument + a policy decision (§7.1) |
 | 2 | `add_event_observer()` beside `set_event_callback` | public | small, and optional — see below |
 
 **On #2.**  `_emit_to_client` (`session_manager.py:4068`) dispatches
@@ -349,7 +441,7 @@ cid, cancelling, reaping — is already public API.
 
 ---
 
-## 9. The outbound direction is nearly free
+## 10. The outbound direction is nearly free
 
 The mirror — a jaato agent *calling* a remote A2A agent — may need no
 new tool at all.  Extension point 5,
@@ -375,7 +467,7 @@ the example currently sets the trap.
 
 ---
 
-## 10. Security posture
+## 11. Security posture
 
 This listens on a port and hands arbitrary remote callers a turn in an
 agent that may hold `cli`, `file_edit` and — through a reactor action
@@ -404,47 +496,64 @@ script — `ctx.run_shell`.  Four things are not optional.
 
 ---
 
-## 11. Phasing
+## 12. Phasing
 
 | Phase | Deliverable | Needs |
 |---|---|---|
 | 0 | Card + blocking `SendMessage` + `GetTask`, one allowlisted profile | nothing — public tree only |
 | 1 | SSE streaming off the same callback, bounded queue | nothing |
 | 2 | `INPUT_REQUIRED` ↔ `ClarificationBatchEvent`, attachments both ways | nothing |
-| 3 | Workflow-scoped tasks: cid propagation + `a2a_complete.py` | §8 #1 (premium) |
+| 3 | Workflow-scoped tasks: cid propagation + `a2a_complete.py` | §9 #1 (premium) |
 | 4 | Push notifications; outbound via `register_remote_handler` | nothing |
 
 Phase 0 is small: create a session, drive one turn, await
 `AgentCompletedEvent` on the cid, return `payload` as the artifact.
 
+**The transport this ladder assumes is a choice, not a given.**  Per §2.4,
+a deployment whose callers speak MCP should read Phase 0-2 with the MCP
+column of §2.2's table substituted — a tool whose call returns a task
+handle, `tasks/get` for status, `input_required` + `tasks/update` for the
+clarification, `Tool.outputSchema` for the artifact.  Phases 3 and 4 are
+unchanged, except that MCP's tasks extension is **poll-only**, so there are
+no push notifications to add: Phase 1's bounded queue still earns its place
+(it bounds what a poll reads), and Phase 4 loses half its content.  The
+engine and every `Needs` entry are identical either way.
+
 ---
 
-## 12. Open questions
+## 13. Open questions
 
-1. **Fork cid inheritance** — default-on or opt-in (§6.1).  Blocks Phase 3.
-2. **`emit_event` scope.**  It publishes to `self.server.event_bus`, the
+1. **Fork cid inheritance** — default-on or opt-in (§7.1).  Blocks Phase 3.
+2. **Which MCP revision this tree can speak, if MCP is the chosen wire.**
+   `mcp[cli]` is unpinned here, and the SDK generation already moved its
+   decode seam under us once (see CLAUDE.md on mcp 2.x).  Whether the
+   installed SDK implements 2026-07-28 and whether
+   `io.modelcontextprotocol/tasks` is in its Tier 1 support decides whether
+   §2.2's table describes something buildable today or something to wait
+   for.  Answerable in one `pip show` and one import — not answered here.
+3. **`emit_event` scope.**  It publishes to `self.server.event_bus`, the
    *originating session's* bus.  Whether a rule on session B can match
    an event a script emitted from session A decides whether cross-session
    rule chaining works at all, or whether every hop must be a fork.
    **Not verified** — one method was read, not the bus.
-3. **Task granularity when both engines are present.**  If a tenant
+4. **Task granularity when both engines are present.**  If a tenant
    exposes a profile-backed skill and a workflow-backed one, is
    `contextId` ever distinct from `taskId`?  A2A's model wants
    `contextId` to group a *conversation* across tasks, which suggests
    cid = `contextId` and a separate `taskId` per invocation — at odds
-   with §7's cid = `taskId`.  Worth settling before the task store is
+   with §8's cid = `taskId`.  Worth settling before the task store is
    written, because it is the schema.
-4. **Fan-in.**  Declared out of scope in §6.3.  If it comes back,
+5. **Fan-in.**  Declared out of scope in §7.3.  If it comes back,
    the question is whether a counting barrier belongs in the gate
    registry or in an action script.
-5. **Where the package lives.**  A free core with a premium reactor
+6. **Where the package lives.**  A free core with a premium reactor
    adapter is two distributions; the alternative is one distribution
    that degrades when premium is absent.  `codebase-split-licensing.md`
    presumably already answers this.
 
 ---
 
-## 13. What was verified, and what was not
+## 14. What was verified, and what was not
 
 Because a design doc that does not say this invites its own drift.
 
@@ -458,10 +567,19 @@ schema and the `ActionContext` methods cited; the **absence** of
 auto-completion semantics; premium's cascade handler being
 observability-only.
 
+**Read and verified about the wires**: that jaato is an MCP **client**
+only (`shared/mcp_context_manager.py` imports `ClientSession` /
+`stdio_client`; no server in the tree), and that Anthropic's own surfaces
+expose MCP and not A2A.
+
 **Not verified**: the A2A v1.0 JSON-RPC method-name binding and the
-well-known Agent Card path (§2 — take both from `a2a-sdk`); the event
-bus's cross-session reach (§12.2); anything about how the `a2a-sdk`
-Python package structures a server, which may change the shape of §7.1
-considerably.
+well-known Agent Card path (§3 — take both from `a2a-sdk`); the event
+bus's cross-session reach (§13.3); anything about how the `a2a-sdk`
+Python package structures a server, which may change the shape of §8.1
+considerably.  **§2.2's MCP column** is read off the published
+2026-07-28 specification and the tasks-extension write-up, **not** off the
+`mcp` package installed here — which is open question 2 of §13, and is the
+difference between a table that describes this tree and one that describes
+the protocol.
 
 **Not measured at all**: performance.  Every claim here is structural.
