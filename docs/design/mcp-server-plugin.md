@@ -100,7 +100,7 @@ A tool starts one of two things, and nothing else:
 | Kind | `jaato-mcp` starts | Done when |
 |---|---|---|
 | `session` | one session from a profile | the session completes (`AgentCompletedEvent`, or a terminal `SessionTerminatedEvent`) |
-| `driver` | a **cascade driver script**, the workspace author's own code | the script returns, raises, or hits the tool's deadline |
+| `driver` | a **cascade driver script**, the workspace author's own code | the script returns, raises, or passes its `DEADLINE_SECONDS` |
 
 What a driver script does inside is its own business.  It may orchestrate
 **programmatically** (start stage A, wait for its payload, start B), or
@@ -131,19 +131,17 @@ server:
   workspace: /srv/ws              # or per tool; or `provision`
   max_concurrent_tasks: 4
 defaults:
-  deadline_seconds: 1800
   permission_prompts: refuse      # refuse | elicit
 tools:
   review_pr:
     kind: session
-    profile: reviewer               # budget_control etc. live in the profile
+    profile: reviewer               # budget_control, runtime_limits etc. live in the profile
     description: "Reviews a diff and returns findings."  # never the persona
     task_support: optional
   ship_feature:
     kind: driver
-    script: scripts/ship_feature.py
+    script: scripts/ship_feature.py # its deadline is the script's DEADLINE_SECONDS
     description: "Plans, implements and reviews a feature."
-    deadline_seconds: 3600
     max_concurrent: 1
     task_support: required
 ```
@@ -190,6 +188,7 @@ A driver script is a Python module exposing two schemas and one coroutine:
 ```python
 INPUT_SCHEMA = {...}     # JSON Schema of the tool's arguments
 OUTPUT_SCHEMA = {...}    # JSON Schema of what run() returns
+DEADLINE_SECONDS = 3600  # optional; jaato-mcp cancels the cascade past it
 
 async def run(input: dict, ctx) -> dict:
     # ctx.client     a connected SDK client, workspace already selected
@@ -198,6 +197,9 @@ async def run(input: dict, ctx) -> dict:
     # ctx.progress(message)   -> MCP progress / task statusMessage
     ...
 ```
+
+A session tool needs no deadline here: its profile's
+`runtime_limits.max_session_seconds` (#812) is enforced by the daemon.
 
 `jaato-mcp` keeps everything that is about the *call*, so a script never
 has to:
@@ -208,7 +210,7 @@ has to:
 | registers as the cid's observer (`cascade.register`) **before** `run()` starts | no event from the chain can arrive before the subscription exists |
 | forwards clarifications from **any** session under the cid to the MCP caller (§4.2) | the script should not re-implement MRTR |
 | refuses permission ASKs by default (§4.2) | same rule for every tool |
-| enforces the deadline, and sends `cascade.cancel <cid>` on MCP cancel or deadline | a hung or crashed script must not leave sessions running |
+| enforces the script's `DEADLINE_SECONDS`, and sends `cascade.cancel <cid>` on MCP cancel or deadline | a hung or crashed script must not leave sessions running |
 | validates the return value against `OUTPUT_SCHEMA` | the schema is the published contract |
 
 **The one rule a script must follow: every session it creates carries
