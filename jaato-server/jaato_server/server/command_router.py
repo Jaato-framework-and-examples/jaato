@@ -579,7 +579,7 @@ class CommandRouter:
             elif cmd == "session.profiles":
                 from jaato_sdk.events import SessionProfilesEvent
                 profiles, parse_errors = self._session_manager.list_profiles(
-                    workspace_path=workspace_path,
+                    **self._profile_listing_scope(client_id, workspace_path),
                 )
                 self._event_sink.send_event(client_id, SessionProfilesEvent(
                     profiles=profiles,
@@ -2072,6 +2072,34 @@ class CommandRouter:
         if not isinstance(workspace, str):
             return None
         return effective_config_root(None, workspace)
+
+    def _profile_listing_scope(
+        self, client_id: str, workspace_path: Optional[str],
+    ) -> Dict[str, Optional[str]]:
+        """Where ``session.profiles`` looks for *client_id* (#1593).
+
+        The client's own workspace (the transport's, else its declared
+        ``working_dir``), config root (:meth:`_client_config_root`) and
+        ``.env`` (its declared ``env_file``, else ``<workspace>/.env``).
+        Passed explicitly so discovery never falls back to the process
+        environment another session's turn has overlaid.
+        """
+        declared = getattr(self._session_manager, "client_declared_config", None)
+        cfg = declared(client_id) if callable(declared) else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        workspace = workspace_path
+        if not isinstance(workspace, str) or not workspace:
+            wd = cfg.get("working_dir")
+            workspace = wd if isinstance(wd, str) and wd else None
+        env_file = cfg.get("env_file")
+        if not isinstance(env_file, str) or not env_file:
+            env_file = os.path.join(workspace, ".env") if workspace else None
+        return {
+            "workspace_path": workspace,
+            "config_root": self._client_config_root(client_id),
+            "env_file": env_file,
+        }
 
     def _sessions_visible_to(self, client_id: str) -> list:
         """The daemon's sessions, scoped to what this client may see.

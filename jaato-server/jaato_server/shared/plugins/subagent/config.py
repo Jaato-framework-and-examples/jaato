@@ -9,7 +9,7 @@ import sys
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Protocol, Tuple, Union
 from typing import runtime_checkable
 
 from jaato_sdk.trace import (
@@ -5291,11 +5291,35 @@ def resolve_agent(
     }
 
 
+def _discovery_context(
+    base_path: Optional[str],
+    session_env: Optional[Mapping[str, str]],
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """``(base_path, config_root, profile_set)`` for :func:`discover_profiles`.
+
+    With *session_env* given (#1593) everything comes from the arguments:
+    the profile set from that mapping, no config root, and ``base_path``
+    or the cwd.  Otherwise from the session context, whose helpers fall
+    back to ``os.environ`` (daemon-startup and in-session callers).
+    """
+    from jaato_server.shared.session_context import (
+        get_config_root, get_session_env, get_workspace_root,
+    )
+    if session_env is not None:
+        return (base_path if base_path is not None else os.getcwd(), None,
+                session_env.get(PROFILE_SET_ENV_VAR))
+    profile_set = get_session_env('JAATO_PROFILE_SET')  # env: profile-set directory under <config_root>/profiles/ this workspace resolves profiles from (literal, == PROFILE_SET_ENV_VAR, so the env-scope scan sees it)
+    if base_path is None:
+        base_path = get_workspace_root() or os.getcwd()
+    return base_path, get_config_root(), profile_set
+
+
 def discover_profiles(
     profiles_dir: str,
     base_path: Optional[str] = None,
     config_root: Optional[str] = None,
     force_profile_set: Optional[str] = None,
+    session_env: Optional[Mapping[str, str]] = None,
 ) -> ProfileDiscoveryResult:
     """Discover subagent profiles from multiple sources.
 
@@ -5329,6 +5353,18 @@ def discover_profiles(
             regardless of the per-session env state.  When ``None`` /
             empty, falls back to the env-var read (pre-existing
             behavior).
+        session_env: The caller's own environment, explicitly (#1593).
+            When given (even empty), discovery is resolved from the
+            arguments alone: ``JAATO_PROFILE_SET`` is read from this
+            mapping only, and an omitted ``base_path`` / ``config_root``
+            is NOT filled from :func:`get_workspace_root` /
+            :func:`get_config_root`.  Those helpers fall back to
+            ``os.environ``, which ``JaatoServer._in_workspace`` and
+            ``_with_session_env`` overlay process-wide during ANOTHER
+            session's turn, so a daemon-level read on behalf of a client
+            (``session.profiles``) would otherwise list whichever
+            workspace happened to be mid-turn.  ``None`` keeps the
+            context-derived behaviour, which in-session callers rely on.
 
     Returns:
         ProfileDiscoveryResult with discovered profiles and any parse errors.
@@ -5339,9 +5375,8 @@ def discover_profiles(
     # this read directly from ``os.environ``, which clobbered across
     # concurrent overlapping sessions and made the daemon's profile
     # discovery for client A read client B's workspace.
-    from jaato_server.shared.session_context import get_config_root, get_workspace_root
-    if base_path is None:
-        base_path = get_workspace_root() or os.getcwd()
+    base_path, context_config_root, env_profile_set = _discovery_context(
+        base_path, session_env)
 
     # When no explicit ``config_root`` is provided, fall back to the
     # session-scoped value set by ``JaatoServer._in_workspace`` —
@@ -5349,7 +5384,7 @@ def discover_profiles(
     # the subagent plugin's first call here) pick up the per-session
     # override even though the registry's ``set_config_root`` broadcast
     # hasn't fired yet (broadcasts run AFTER plugin init).
-    effective_config_root = config_root or get_config_root()
+    effective_config_root = config_root or context_config_root
 
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}
@@ -5380,11 +5415,10 @@ def discover_profiles(
     # profile-set selection workspace-scoped — different sessions on
     # the same daemon can run different sets concurrently, and switching
     # sets does NOT require restarting the daemon.
-    from jaato_server.shared.session_context import get_session_env
     # ``force_profile_set`` (explicit kwarg) wins over the env-var read
     # so callers resolving a qualified ``set/name`` path can pin the
     # set without mutating the per-session env contextvar.
-    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')  # env: profile-set directory under <config_root>/profiles/ this workspace resolves profiles from (literal, == PROFILE_SET_ENV_VAR, so the env-scope scan sees it)
+    profile_set = force_profile_set or env_profile_set
     if profile_set and effective_config_root:
         set_path = (
             Path(effective_config_root).expanduser().resolve()
