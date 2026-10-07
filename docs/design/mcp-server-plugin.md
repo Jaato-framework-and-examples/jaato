@@ -321,10 +321,19 @@ layer comes second, through the SDK's extension seam:
 | `tasks/list` | the caller's tasks only, filtered by principal |
 | `notifications/tasks/status` | on the 2025-11-25 wire, pushed from the same event stream |
 
-The task store survives a `jaato-mcp` restart because the daemon's records
-already carry what it needs: a session's `ended_at` / `end_reason`
-(protocol 1.29) is the terminal state, and the store only has to persist
-the task id → session id (or cid) map.
+A `jaato-mcp` restart does not affect both kinds the same way.  The task
+store persists the task id → session id (or cid) map and each finished
+task's result, which no daemon record holds.
+
+- **Session task**: survives.  The session runs in the daemon, and its
+  record carries the terminal state (`ended_at` / `end_reason`, protocol
+  1.29), so a restarted `jaato-mcp` re-attaches and keeps answering
+  `tasks/get` and `tasks/result`.
+- **Driver task**: does not survive.  `run()` lives inside `jaato-mcp` and
+  dies with it.  On startup, every driver task still `working` is marked
+  `failed` and its cid gets `cascade.cancel`, so no orphaned stage keeps
+  running.  Resuming a driver would need it to checkpoint its own
+  progress, which the contract does not ask for.
 
 ### 4.4 Files the agent produced
 
