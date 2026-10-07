@@ -74,11 +74,11 @@ wrong wire.
 | What jaato has | A2A v1.0 | MCP 2026-07-28 + `io.modelcontextprotocol/tasks` |
 |---|---|---|
 | a session that runs for minutes | `Task`, `SUBMITTED` / `WORKING` | a task handle, `working` |
-| `request_clarification` | `INPUT_REQUIRED` | `input_required` + `tasks/update` (Multi Round-Trip Requests) |
+| `request_clarification` | `INPUT_REQUIRED` | Multi Round-Trip Requests: an `InputRequiredResult` on `tools/call`, retried with `inputResponses` (no `tasks/update` exists; see [the MCP sketch](mcp-server-plugin.md) §1) |
 | `completion_payload_schema` | `Artifact` | `Tool.outputSchema`; the result is inlined in `tasks/get` |
 | `cancel_cascade` / `stop_session` | `CancelTask` | `tasks/cancel` |
 | terminal states | `COMPLETED` / `FAILED` / `CANCELED` | `completed` / `failed` / `cancelled` |
-| progress while it runs | SSE `TaskStatusUpdateEvent`, push notifications | **poll** `tasks/get` — no server push |
+| progress while it runs | SSE `TaskStatusUpdateEvent`, push notifications | `notifications/tasks/status` on the 2025-11-25 wire; poll `tasks/get` under the 2026-07-28 tasks extension |
 | what a caller discovers | Agent Card `skills[]`, input/output modes, examples | `tools/list` and a description |
 
 The four rows that matter most to this design are the same on both wires.
@@ -93,8 +93,8 @@ sessions from MCP's protocol core, so a jaato SESSION maps onto an MCP
 
 ### 2.3 jaato is an MCP client and nothing else
 
-`shared/mcp_context_manager.py` imports `ClientSession` and `stdio_client`;
-the `mcp` plugin consumes servers over stdio and there is no server
+`shared/mcp_context_manager.py` and `shared/mcp_remote.py` consume servers
+over stdio, streamable HTTP and SSE (#1580), and there is no server
 implementation anywhere in the tree.  So an MCP server fronting a jaato
 session is **net-new work too** — it is not something already sitting there
 waiting to be pointed at.
@@ -514,9 +514,11 @@ a deployment whose callers speak MCP should read Phase 0-2 with the MCP
 column of §2.2's table substituted — a tool whose call returns a task
 handle, `tasks/get` for status, `input_required` + `tasks/update` for the
 clarification, `Tool.outputSchema` for the artifact.  Phases 3 and 4 are
-unchanged, except that MCP's tasks extension is **poll-only**, so there are
-no push notifications to add: Phase 1's bounded queue still earns its place
-(it bounds what a poll reads), and Phase 4 loses half its content.  The
+unchanged, except that push depends on the caller's wire: the 2025-11-25
+wire has `notifications/tasks/status`, the 2026-07-28 tasks extension is
+poll-only as published.  Phase 1's bounded queue earns its place either way
+(it bounds what a poll reads).  [The MCP sketch](mcp-server-plugin.md) works
+this column through, and puts the clarification first rather than third.  The
 engine and every `Needs` entry are identical either way.
 
 ---
@@ -524,13 +526,10 @@ engine and every `Needs` entry are identical either way.
 ## 13. Open questions
 
 1. **Fork cid inheritance** — default-on or opt-in (§7.1).  Blocks Phase 3.
-2. **Which MCP revision this tree can speak, if MCP is the chosen wire.**
-   `mcp[cli]` is unpinned here, and the SDK generation already moved its
-   decode seam under us once (see CLAUDE.md on mcp 2.x).  Whether the
-   installed SDK implements 2026-07-28 and whether
-   `io.modelcontextprotocol/tasks` is in its Tier 1 support decides whether
-   §2.2's table describes something buildable today or something to wait
-   for.  Answerable in one `pip show` and one import — not answered here.
+2. **Which MCP revision this tree can speak** — answered in
+   [the MCP sketch](mcp-server-plugin.md) §1: the installed `mcp` 2.2.0 speaks
+   2026-07-28, carries the 2025-11-25 task types, and serves no task method
+   itself; an extension adds them through `MethodBinding`.
 3. **`emit_event` scope.**  It publishes to `self.server.event_bus`, the
    *originating session's* bus.  Whether a rule on session B can match
    an event a script emitted from session A decides whether cross-session
@@ -568,18 +567,17 @@ auto-completion semantics; premium's cascade handler being
 observability-only.
 
 **Read and verified about the wires**: that jaato is an MCP **client**
-only (`shared/mcp_context_manager.py` imports `ClientSession` /
-`stdio_client`; no server in the tree), and that Anthropic's own surfaces
+only (stdio, streamable HTTP and SSE since #1580; no server in the tree),
+and that Anthropic's own surfaces
 expose MCP and not A2A.
 
 **Not verified**: the A2A v1.0 JSON-RPC method-name binding and the
 well-known Agent Card path (§3 — take both from `a2a-sdk`); the event
 bus's cross-session reach (§13.3); anything about how the `a2a-sdk`
 Python package structures a server, which may change the shape of §8.1
-considerably.  **§2.2's MCP column** is read off the published
-2026-07-28 specification and the tasks-extension write-up, **not** off the
-`mcp` package installed here — which is open question 2 of §13, and is the
-difference between a table that describes this tree and one that describes
-the protocol.
+considerably.  **§2.2's MCP column** was first written from the
+published specification; its clarification and push rows have since been
+corrected against the installed `mcp` package (see
+[the MCP sketch](mcp-server-plugin.md) §1).
 
 **Not measured at all**: performance.  Every claim here is structural.
