@@ -120,44 +120,34 @@ profile or script that is not listed.  The declaration is
 `jaato-mcp-transport` repository.  It adds no key to jaato's profile schema
 and nothing to the `.jaato/` tree's fixed layout.
 
-Two equivalent forms, one code path (flags become a one-entry config):
+It has **one form**, a YAML file passed as `--config PATH`.  There are no
+per-tool flags, so one tool and ten are declared the same way:
 
-- **flags**, enough for one or two plain tools:
-
-  ```
-  jaato-mcp --connect /tmp/jaato.sock --workspace /srv/ws \
-            --expose-session review_pr=reviewer \
-            --expose-driver  ship_feature=scripts/ship_feature.py
-  ```
-
-- **a config file** (`--config PATH`), once a workspace exposes several
-  tools or any of them needs its own settings:
-
-  ```yaml
-  server:
-    name: acme-agents
-    workspace: /srv/ws              # or per tool; or `provision`
-    max_concurrent_tasks: 4
-  defaults:
-    deadline_seconds: 1800
-    permission_prompts: refuse      # refuse | elicit
-  tools:
-    review_pr:
-      kind: session
-      profile: reviewer
-      description: "Reviews a diff and returns findings."  # never the persona
-      budget_control:
-        limits: {usd: 2.0}
-        degrade: [{at: 100, action: abort}]
-      task_support: optional
-    ship_feature:
-      kind: driver
-      script: scripts/ship_feature.py
-      description: "Plans, implements and reviews a feature."
-      deadline_seconds: 3600
-      max_concurrent: 1
-      task_support: required
-  ```
+```yaml
+server:
+  name: acme-agents
+  workspace: /srv/ws              # or per tool; or `provision`
+  max_concurrent_tasks: 4
+defaults:
+  deadline_seconds: 1800
+  permission_prompts: refuse      # refuse | elicit
+tools:
+  review_pr:
+    kind: session
+    profile: reviewer
+    description: "Reviews a diff and returns findings."  # never the persona
+    budget_control:
+      limits: {usd: 2.0}
+      degrade: [{at: 100, action: abort}]
+    task_support: optional
+  ship_feature:
+    kind: driver
+    script: scripts/ship_feature.py
+    description: "Plans, implements and reviews a feature."
+    deadline_seconds: 3600
+    max_concurrent: 1
+    task_support: required
+```
 
 Rules for a server exposing several tools:
 
@@ -371,7 +361,7 @@ Most of A2A §11 carries over.  What changes or is added:
 ## 6. What the package owns, and what it does not
 
 **Owns**: the MCP server (stdio first, streamable HTTP second), the
-tool configuration (flags and file) and its validation, the driver-script
+tool configuration file and its validation, the driver-script
 loader and the `ctx` it hands over, the task store and `requestState`
 signing, result and resource rendering.
 
@@ -429,7 +419,7 @@ Recorded 2026-10-07:
 4. **Repository**: implementation lives in
    [jaato-mcp-transport](https://github.com/Jaato-framework-and-examples/jaato-mcp-transport),
    and ships separately from any A2A work.
-5. **Configuration**: owned by `jaato-mcp`, as flags or a `--config` file
+5. **Configuration**: owned by `jaato-mcp`, as a YAML `--config` file
    (§3.2); jaato's profile schema and `.jaato/` layout are unchanged.
 
 Still open:
