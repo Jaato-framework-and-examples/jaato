@@ -169,6 +169,13 @@ Where each MCP field comes from:
 | `outputSchema` | the profile's `completion_payload_schema` | the script's `OUTPUT_SCHEMA` |
 | `execution.taskSupport` | the config | the config |
 
+`execution.taskSupport` (config `task_support`) says whether a call may
+run as a task, which returns a handle at once instead of blocking (§4.3):
+`forbidden` = blocking only, `optional` = the client chooses, `required`
+= always a task.  The values are defined by the MCP specification's tasks
+utility (tool-level negotiation, 2025-11-25 revision) and in the SDK as
+`mcp.types.ToolExecution`.
+
 The result is returned as `structuredContent`, with a text rendering beside
 it for clients that ignore structured output.  For a session tool the
 completion gate validates the payload before `signal_completion` succeeds,
