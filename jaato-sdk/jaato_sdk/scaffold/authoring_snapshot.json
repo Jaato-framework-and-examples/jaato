@@ -1569,6 +1569,7 @@
       "base_url",
       "connect_timeout",
       "context_length",
+      "decisions_url",
       "modalities",
       "output_modalities",
       "request_timeout",

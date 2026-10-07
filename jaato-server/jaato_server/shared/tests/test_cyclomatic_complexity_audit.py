@@ -359,7 +359,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/converters.py::message_to_openai": 16,
     "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider._handle_api_error": 14,
     "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider._stream_response": 49,
-    "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider.complete": 27,
+    "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider.complete": 25,
     "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider.initialize": 43,  # 45 -> 43: attribution-knob + identity reads moved to helpers
     "jaato-server/jaato_server/shared/plugins/model_provider/ovhcloud/auth.py::validate_api_key": 16,
     "jaato-server/jaato_server/shared/plugins/model_provider/ovhcloud/provider.py::OVHcloudProvider.verify_auth": 23,

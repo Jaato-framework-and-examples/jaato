@@ -1,6 +1,7 @@
 # Decision Models (System One): `decisions` as an Output Modality
 
-Status: **proposed**, docs only. Nothing here is implemented yet.
+Status: steps 1-2 of §11 are **shipped** (the modality and `decide()` on
+`openrouter`); steps 3-6 are proposed.
 
 ## 1. What a decision model is
 
@@ -333,7 +334,16 @@ allows on an error.
 ## 11. Rollout
 
 1. The modality vocabulary, the text-floor exception and catalog detection on `openrouter` (§4). Small, and testable without a key. **Shipped**: `MODALITY_DECISIONS`, `normalise_output_modalities` / `is_decisions_only_set` in `model_provider/base.py`, `ModalityCapabilityMixin.is_decisions_only`, and `OpenRouterProvider.output_modalities` (listing, then the per-model endpoints document, then the knob). The listing turned out to report `output_modalities` for every model, so the audio models resolve without the knob too. Guard: `jaato_server/shared/tests/test_decisions_is_an_output_modality.py`, four reversions.
-2. The types and `decide()` on `openrouter` against `/api/alpha/decisions`, with the vendor's examples as fixtures and a stand-in server in the capability guard (§5-§6).
+2. The types and `decide()` on `openrouter` against `/api/alpha/decisions`, with the vendor's examples as fixtures and a stand-in server in the capability guard (§5-§6). **Shipped**:
+   - The wire contract is `jaato_sdk/plugins/model_provider/decisions.py`, with no I/O. It holds the types, `build_decision_request` (validates locally, so a malformed question never costs a `422`) and `parse_decision_response`. A question left unanswered, an answer of another type, a choice outside the options, or a probability outside [0, 1] each raise `DecisionResponseError` naming the question. `DecisionResult.raw` keeps the body as received.
+   - `ProviderCapabilities.decisions` is a new column. Only `openrouter` declares it.
+   - `OpenRouterProvider.decide()` posts to the endpoint derived from `base_url` (`…/api/v1` becomes `…/api/alpha/decisions`); `framework_overrides.decisions_url` overrides it. The request carries the chat key and attribution headers (`_attribution_headers`, one definition for both wires) and runs under the connect and request deadlines, on a worker thread so a cancel token stops the wait and closes the client.
+   - Errors and retries: `429` / `5xx` are retried by `with_retry`. `401`, `404` and `422` are not; a `422` is `DecisionRequestRejectedError` carrying the body.
+   - A request estimated over the model's window is refused before sending.
+   - `connect()` records whether the model is decisions-only, and `complete()` then raises `DecisionModelOnlyError`.
+   - Guards: `jaato_server/shared/tests/test_decide_on_openrouter.py` (five reversions) uses the vendor's documented request and response as fixtures. The stand-in is `decision_standin.py`. In `test_provider_capability_conformance.py`, a declaring provider must answer the stand-in and an undeclared one may not expose `decide`.
+   - `examples/provider_smoke_decisions.py` runs the same checks against the stand-in. With `--live-openrouter` it sends one request to `typesafe/jev-1.13` and prints the raw response beside the parse.
+   - Not yet verified against the live endpoint.
 3. `decision_models:` and the tier refusal (§7).
 4. The `decide` tool (§8.1).
 5. The permission gate, with `PolicyDecision.ASK` (§8.2).

@@ -54,7 +54,7 @@ import json
 import logging
 import re
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +167,15 @@ from .errors import (
     UpstreamFinishError,
 )
 from .stall import StreamStallGuard
+from .decisions import decisions_url as _decisions_url, post_decision
+from jaato_sdk.plugins.model_provider.decisions import (
+    DecisionModelOnlyError,
+    DecisionQuestion,
+    DecisionQuestionError,
+    DecisionResult,
+    build_decision_request,
+    parse_decision_response,
+)
 
 
 # Substrings that signal the upstream model exposes reasoning content
@@ -496,6 +505,12 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # Configuration
         self._api_key: Optional[str] = None
         self._base_url: str = DEFAULT_BASE_URL
+        # ``framework_overrides.decisions_url``: where decide() posts when
+        # the decision endpoint cannot be derived from ``base_url``.
+        self._decisions_url: Optional[str] = None
+        # Whether the connected model answers decisions only, decided once
+        # at connect() so complete() does not touch the catalog per turn.
+        self._decisions_only: bool = False
         self._http_referer: str = ""
         self._app_title: str = ""
 
@@ -971,6 +986,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         self._base_url = (
             _knob("base_url", layer=framework_overrides) or resolve_base_url()
         )
+        self._decisions_url = _knob("decisions_url", layer=framework_overrides)
         # App attribution, three tiers (highest first): the profile knob,
         # the OpenRouter-specific env var, then the framework-resolved
         # application identity — which is what makes a product built on the
@@ -1264,15 +1280,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         import httpx
 
         client_class = get_openai_client_class()
-        default_headers: Dict[str, str] = {}
-        if self._http_referer:
-            default_headers[HEADER_HTTP_REFERER] = self._http_referer
-        if self._app_title:
-            default_headers[HEADER_APP_TITLE] = self._app_title
-        if self._app_categories:
-            default_headers[HEADER_APP_CATEGORIES] = ",".join(self._app_categories)
-        if self._extra_headers:
-            default_headers.update(self._extra_headers)
+        default_headers = self._attribution_headers()
 
         return client_class(
             base_url=self._base_url,
@@ -1284,6 +1292,25 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             ),
             max_retries=0,
         )
+
+    def _attribution_headers(self) -> Dict[str, str]:
+        """App-attribution headers plus the profile's ``extra_headers``.
+
+        One definition for both wires: the chat client's
+        ``default_headers`` and the decision endpoint's request headers,
+        so a decision call is attributed to the same application as a
+        chat turn.
+        """
+        headers: Dict[str, str] = {}
+        if self._http_referer:
+            headers[HEADER_HTTP_REFERER] = self._http_referer
+        if self._app_title:
+            headers[HEADER_APP_TITLE] = self._app_title
+        if self._app_categories:
+            headers[HEADER_APP_CATEGORIES] = ",".join(self._app_categories)
+        if self._extra_headers:
+            headers.update(self._extra_headers)
+        return headers
 
     def verify_auth(
         self,
@@ -1422,8 +1449,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                 "JAATO_OPENROUTER_CONTEXT_LENGTH in the environment.  No "
                 "hardcoded fallback exists per the project's no-fallback rule."
             )
+        self._decisions_only = self.is_decisions_only(model)
         self._trace(
             f"[CONNECT] model={model} context_length={self._context_length}"
+            + (" decisions_only" if self._decisions_only else "")
         )
 
     @property
@@ -1635,6 +1664,106 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         )
         return resolved if resolved is not None else {MODALITY_TEXT}
 
+    def _require_chat_model(self) -> None:
+        """Raise unless ``complete()`` can run: connected, and the model
+        writes text.  A decisions-only model raises
+        :class:`DecisionModelOnlyError` (``decide()`` serves it)."""
+        if not self._client or not self._model_name:
+            raise RuntimeError(
+                "Provider not connected. Call initialize() and connect() first."
+            )
+        if self._decisions_only:
+            raise DecisionModelOnlyError(self._model_name, self.name)
+
+    # ==================== Decision models ====================
+
+    def decide(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        *,
+        model: Optional[str] = None,
+        cancel_token: Optional[CancelToken] = None,
+    ) -> DecisionResult:
+        """Ask a decision model typed questions about ``state``.
+
+        Posts to OpenRouter's decision endpoint (``/api/alpha/decisions``,
+        derived from ``base_url`` or set by
+        ``framework_overrides.decisions_url``) with the same key and
+        attribution headers as chat, under the provider's connect and
+        request deadlines.  Not streamed.  ``429`` and ``5xx`` (``529``
+        overloaded) are retried by ``with_retry``; ``401``, ``404`` and a
+        ``422`` are not.  Design: ``docs/design/decision-models.md`` §6.
+
+        Args:
+            state: The text, object or array the questions are about.
+            questions: ``{id: DecisionQuestion}``.  Ids are the caller's
+                and come back as the keys of ``answers``.
+            model: The decision model; defaults to the connected model.
+            cancel_token: Stops waiting and aborts the request.
+
+        Raises:
+            DecisionQuestionError: A question is malformed, or the request
+                is larger than the model's context window.  Nothing sent.
+            DecisionResponseError: The response leaves a question
+                unanswered or answers it in an unreadable shape.
+            RuntimeError: ``initialize()`` has not run, or no model named.
+        """
+        from jaato_server.shared.retry_utils import with_retry
+
+        if not self._api_key:
+            raise RuntimeError("Provider not initialized. Call initialize() first.")
+        model = model or self._model_name
+        if not model:
+            raise RuntimeError("decide() needs a model: pass model= or connect() first.")
+        body = build_decision_request(state, questions, model)
+        self._check_decision_fits(body, model)
+        url = _decisions_url(self._base_url, self._decisions_url)
+        headers = {**self._attribution_headers(),
+                   "Authorization": f"Bearer {self._api_key}"}
+        self._trace(f"DECIDE model={model} questions={list(questions)} url={url}")
+
+        def send() -> Dict[str, Any]:
+            return post_decision(
+                url, headers, body, model=model,
+                connect_timeout=self._connect_timeout,
+                request_timeout=self._request_timeout,
+                cancel_token=cancel_token,
+            )
+
+        def on_retry(message: str, attempt: int, max_attempts: int, delay: float) -> None:
+            self._trace(f"DECIDE_RETRY {attempt}/{max_attempts} in {delay:.1f}s: {message}")
+
+        raw, _stats = with_retry(send, context="decide", on_retry=on_retry,
+                                 cancel_token=cancel_token, provider=self)
+        result = parse_decision_response(raw, questions, model)
+        self._trace(
+            f"DECIDE_DONE model={result.model} answers={len(result.answers)} "
+            f"usage_reported={result.usage.reported}"
+        )
+        return result
+
+    def _check_decision_fits(self, body: Dict[str, Any], model: str) -> None:
+        """Refuse a request larger than the model's window, before sending.
+
+        The estimate is the whole JSON body at ~4 characters a token.  A
+        model whose window is unknown is not checked: the endpoint's own
+        refusal is then the answer.  Nothing is ever truncated.
+        """
+        if model == self._model_name and self._context_length:
+            limit = self._context_length
+        else:
+            limit = self._lookup_context_length(model) or 0
+        if not limit:
+            return
+        estimate = self.count_tokens(json.dumps(body, ensure_ascii=False, default=str))
+        if estimate > limit:
+            raise DecisionQuestionError(
+                None,
+                f"state and questions are ~{estimate} tokens, over the "
+                f"{limit}-token window of {model!r}; shorten the state",
+            )
+
     def _caching_active(self) -> bool:
         """Whether to stamp ``cache_control`` breakpoints on this request.
 
@@ -1718,10 +1847,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         Returns ``TurnResult.from_provider_response(r)`` on success and
         **raises** transient errors so ``with_retry`` can retry.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError(
-                "Provider not connected. Call initialize() and connect() first."
-            )
+        self._require_chat_model()
 
         cache_active = self._caching_active()
         cache_control = make_cache_control(self._cache_ttl) if cache_active else None
