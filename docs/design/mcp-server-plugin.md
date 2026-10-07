@@ -1,6 +1,9 @@
 # Exposing a jaato Session — or a Cascade — as MCP Tools
 
-**Status**: design sketch (no implementation).  Nothing here is built.
+**Status**: phases 0 and 4 and tenant-provisioned workspaces are
+implemented in
+[jaato-mcp-transport](https://github.com/Jaato-framework-and-examples/jaato-mcp-transport)
+(PRs 1-3, drafts as of 2026-10-07); phases 1-3 are design only (§7).
 **Companion to**: [Exposing a session or a reactor workflow as one A2A
 agent](a2a-plugin.md).  That document's §2.4 splits the work into a
 protocol-agnostic **task engine** and a **transport**.  This one is the
@@ -89,6 +92,14 @@ caller then reaches the daemon as its own `app:user`, with attribution,
 workspace ownership (#1113) and the per-application workspace root (#1496)
 working unchanged.  The daemon learns nothing about MCP.
 
+As built, the MCP principal is a bearer JWT from one external issuer:
+`jaato-mcp` is an OAuth resource server (it issues nothing), verifies the
+token against the issuer's JWKS (discovered from OIDC or RFC 8414
+metadata), and takes the jaato user from a configured claim (`sub` by
+default).  A missing or bad token is a 401 pointing at the RFC 9728
+protected-resource metadata; a missing scope is a 403.  Each call binds a
+60-second single-use ticket for that user.
+
 ---
 
 ## 3. What the caller sees
@@ -128,7 +139,10 @@ file does not repeat them:
 ```yaml
 server:
   name: acme-agents
-  workspace: /srv/ws              # required, here or per tool
+  workspace:                      # a path, or a provisioning block (§5.2)
+    root: /srv/mcp/workspaces
+    template: /srv/mcp/template   # its .jaato/ holds the profiles
+    per: task                     # task | caller
   max_concurrent_tasks: 4
 defaults:
   permission_prompts: refuse      # refuse | elicit
@@ -156,8 +170,10 @@ Rules for a server exposing several tools:
   calls to the same tool.
 - **Concurrency is capped per tool and in total**, because one driver call
   may fan out many sessions and must not starve the other tools.
-- **One process per workspace** is the default shape; a per-tool
+- **One workspace setting per process** is the default shape; a per-tool
   `workspace` lets one process serve several, if it can reach all of them.
+  A tool's profiles are read from its fixed path, or from the template of
+  a provisioned workspace (§5.2).
 
 Where each MCP field comes from:
 
@@ -355,15 +371,30 @@ Most of A2A §11 carries over.  What changes or is added:
 1. **Stdio is the safe default.**  The process speaks for the user who
    launched it and nobody else.  HTTP mode is opt-in and refuses to start
    without auth configured (§2.1).
-2. **The workspace comes from the config, never the caller.**  It is a
-   path, required server-wide or per tool.  The daemon does not provision
-   one over IPC: auto-provisioning exists only in the WS server, and
-   `jaato-mcp` is an IPC client, so the daemon only checks that the
-   connecting user can reach the declared path (`SO_PEERCRED`).  A fixed
-   path suits a single-user stdio deployment.  Per-task isolation (HTTP
-   mode, several callers) is an option `jaato-mcp` implements itself: it
-   creates `<workspace>/<task_id>` as the user it runs as and declares
-   that path, so one caller's task cannot read another's.
+2. **The workspace comes from the config, never the caller, and the
+   tenant provisions it.**  Over IPC the daemon trusts the socket's uid and
+   nothing above it; it provisions no workspace for an IPC client (only its
+   WebSocket server does).  `jaato-mcp` authenticated its callers, so it
+   gives them workspaces itself, as the user it runs as, and the daemon's
+   IPC entitlement check then passes by construction.  `workspace` is a
+   fixed path, or a block naming a `root` and a `template`:
+
+   | `per` | Each call runs in | Kept |
+   |---|---|---|
+   | `task` | `<root>/<caller>/tasks/<UTC-time>-<id>`, a fresh copy of the template | `retention_hours` after creation, never while its call runs |
+   | `caller` | `<root>/<caller>/workspace`, copied on first use, reused after | always |
+
+   `<caller>` is the principal, sanitised and suffixed with a digest so it
+   cannot escape the root or collide; `local` over stdio.  The template is
+   workspace-shaped: its `.jaato/` holds the profiles, completion schemas
+   and processor scripts, and tool contracts are read from it.  Runtime
+   state (`.jaato/sessions`, `logs`, `.cache`, `.home`, `.tmp`, `.git`) is
+   never copied.  A provisioned workspace is not a daemon-managed one, so
+   the isolation the daemon applies to its own workspaces is opt-in in the
+   template's profiles (`plugin_configs.cli.workspace_home` #1225,
+   `workspace_venv` #1274; AppArmor through the client's opt-in).  A fixed
+   path suits a single-user stdio deployment; HTTP callers should get
+   provisioned workspaces, or they share one directory.
 3. **Caller input is untrusted.**  It is wrapped the way a wake payload is
    (`_wrap_wake_content`, #845), so text arriving from a remote model reads
    as data to the model that receives it.
@@ -383,7 +414,8 @@ Most of A2A §11 carries over.  What changes or is added:
 ## 6. What the package owns, and what it does not
 
 **Owns**: the MCP server (stdio first, streamable HTTP second), the
-tool configuration file and its validation, the driver-script
+tool configuration file and its validation, caller authentication in HTTP
+mode, workspace provisioning for its callers (§5.2), the driver-script
 loader and the `ctx` it hands over, the task store and `requestState`
 signing, result and resource rendering.
 
@@ -406,11 +438,17 @@ contributes a plugin, that rule does.
 
 | Phase | Deliverable | Needs |
 |---|---|---|
-| 0 | stdio, `kind: session` tools, blocking `tools/call`, `structuredContent` | nothing |
+| 0 (**built**) | stdio, `kind: session` tools, blocking `tools/call`, `structuredContent` | nothing |
 | 1 | MRTR clarification ↔ `ClarificationBatchEvent`; startup refusal of ASK-able profiles | nothing |
 | 2 | tasks through the extension seam; restart-safe task store; `notifications/tasks/status` where the wire has it | nothing |
 | 3 | `kind: driver` tools (§3.3): cid minting, `cascade.register` before `run()`, clarification forwarding across the cid, deadline + `cascade.cancel`; `resource_link` outputs; `jaato_continue` | nothing for programmatic drivers; jaato-premium#79 / #80 for drivers that delegate to reactor rules |
-| 4 | streamable HTTP with app credential + `ticket.bind` per principal | nothing (#1074 exists) |
+| 4 (**built**) | streamable HTTP with app credential + `ticket.bind` per principal | nothing (#1074 exists) |
+
+Built beside them: tenant-provisioned workspaces (§5.2), used by both
+transports.  Phase 0 takes `{prompt: string}` as every tool's input:
+`ProfileSummary` does not carry `spawn_payload_schema`, so the
+`inputSchema` the table in §3.2 names needs that field added to the
+profile listing.
 
 ---
 
@@ -443,6 +481,12 @@ Recorded 2026-10-07:
    and ships separately from any A2A work.
 5. **Configuration**: owned by `jaato-mcp`, as a YAML `--config` file
    (§3.2); jaato's profile schema and `.jaato/` layout are unchanged.
+6. **Workspaces**: the tenant provisions them (§5.2).  No daemon change:
+   making the daemon provision over IPC would put a tenant's concern in
+   the transport that trusts only the socket's uid.
+7. **HTTP callers**: streamable HTTP, bearer JWTs from an external issuer
+   (`jaato-mcp` is a resource server only), and a daemon ticket per call
+   over WebSocket (§2.1).
 
 Still open:
 
@@ -478,5 +522,12 @@ command, not an SDK method; the Python SDK has no `workspace.file.fetch`.
 - that the SDK's cascade-event subscription (`cascade.register`) delivers
   clarification batches from every session under the cid in a form
   `jaato-mcp` can answer, without being attached to each session.
+
+**Found while building phase 4**: over WebSocket, a ticket-authenticated
+client's `ClientConfigRequest.working_dir` is applied after only the
+absolute-path check (#742): it is not checked against the application's
+`workspace_root` (#1496), so a ticket holder can name any directory the
+daemon can read.  `jaato-mcp` provisions under its own root, but the
+daemon does not enforce that.
 
 **Not measured at all**: performance.  Every claim here is structural.
