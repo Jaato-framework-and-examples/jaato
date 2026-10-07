@@ -155,6 +155,10 @@ class DecisionStandIn(ThreadingHTTPServer):
         self.server_close()
 
 
+#: Placeholder chat client; truthy so ``complete()`` gets past "not connected".
+_NO_CHAT_CLIENT = object()
+
+
 def openrouter_against(server: DecisionStandIn, model: str = JEV, **extra: Any):
     """An initialized, connected ``OpenRouterProvider`` aimed at ``server``."""
     from jaato_server.shared.plugins.model_provider.base import ProviderConfig
@@ -163,6 +167,15 @@ def openrouter_against(server: DecisionStandIn, model: str = JEV, **extra: Any):
     )
 
     provider = OpenRouterProvider()
+    try:
+        import openai  # noqa: F401
+    except ImportError:
+        # decide() never uses the chat client, but initialize() builds
+        # one.  Where the SDK is absent (the contract-guards and
+        # reversion-guard jobs) a placeholder stands in, so these tests
+        # run there instead of failing on the import whatever the code
+        # does, which the reversion meta-guard would count as detection.
+        provider._create_client = lambda: _NO_CHAT_CLIENT
     provider.initialize(ProviderConfig(
         api_key="sk-or-test",
         extra={"framework_overrides": {"base_url": server.base_url}, **extra},

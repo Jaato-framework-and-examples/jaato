@@ -570,10 +570,6 @@ def test_every_provider_is_either_conformance_tested_or_explicitly_pending():
 # that drives it.
 
 def _openrouter_at_standin(server):
-    # The provider builds its chat client at initialize(); the
-    # contract-guards job installs no provider SDK, and the shared/tests
-    # leg ([all]) runs this case with it.
-    pytest.importorskip("openai")
     from jaato_server.shared.tests.decision_standin import openrouter_against
     return openrouter_against(server)
 
