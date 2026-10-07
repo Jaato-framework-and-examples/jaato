@@ -366,9 +366,17 @@ def _router(rows):
     """A ``CommandRouter`` whose manager answers with *rows*."""
     manager = MagicMock()
     manager.list_sessions.return_value = rows
+    manager.get_client_session.return_value = None
+    manager.client_declared_config.return_value = {}
     sink = MagicMock(spec=["send_event", "get_client_user",
                            "get_client_workspace", "set_client_session"])
     sink.get_client_user.return_value = None
+    # #1584: an identity-less client sees its config root's sessions, so
+    # the client declares the workspace the rows run in.
+    sink.get_client_workspace.return_value = "/ws"
+    for row in rows:
+        if not hasattr(row, "config_root"):
+            row.config_root = "/ws/.jaato"
     router = CommandRouter.__new__(CommandRouter)
     router._session_manager = manager
     router._event_sink = sink

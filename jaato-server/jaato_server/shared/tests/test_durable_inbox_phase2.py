@@ -385,12 +385,16 @@ def test_the_listing_row_carries_inbox_pending():
         session_id="s", name="s", description=None, created_at="",
         last_activity="", model_provider="", model_name="",
         is_processing=False, is_loaded=False, client_count=0, turn_count=0,
-        inbox_pending=3)
+        inbox_pending=3, config_root="/ws/.jaato")
     manager = MagicMock()
     manager.list_sessions.return_value = [row]
+    manager.get_client_session.return_value = None
+    manager.client_declared_config.return_value = {}
     sink = MagicMock(spec=["send_event", "get_client_user",
                            "get_client_workspace", "set_client_session"])
     sink.get_client_user.return_value = None
+    # #1584: the identity-less client is in the row's config root.
+    sink.get_client_workspace.return_value = "/ws"
     router = CommandRouter.__new__(CommandRouter)
     router._session_manager = manager
     router._event_sink = sink

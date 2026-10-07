@@ -9207,15 +9207,17 @@ and is worded so it cannot be read as "does not exist" — that wording
 invites creating it.
 
 **Sessions follow the same boundary.** The transport reports it through
-`EventSink.visible_workspace_paths` (`None` = no scoping: IPC, or a WS
-connection with no identity — the `client_peer` tolerance shape, so an
-out-of-tree sink contributes "no scoping" rather than raising).
+`EventSink.visible_workspace_paths` (`None` = no identity boundary: IPC, or
+a WS connection with no identity — the `client_peer` tolerance shape, so an
+out-of-tree sink contributes "no identity" rather than raising).
 `CommandRouter._sessions_visible_to` keeps a session that runs **in** one of
 those workspaces or that this user **created** (`created_by`, #859), and
 `session.attach` admits exactly that set — refusing the rest by name as
 `ErrorEvent(error_type="SessionError")`, which is what settles a client's
-`ask()` rather than hanging it (#1007). Persisted-only sessions carry no
-creator in their listing, so for them the workspace rule is the whole rule.
+`ask()` rather than hanging it (#1007). Cold rows carry their creator too
+since #1584. **`None` no longer means the whole daemon**: such a client is
+scoped by its config root — see [A Listing Scoped to Nobody
+(#1584)](#a-listing-scoped-to-nobody-1584).
 
 **And a workspace can be removed.** `workspace.delete` (protocol **1.13**)
 answers with one `WorkspaceDeletedEvent` whatever happened. It removes the
@@ -9230,6 +9232,45 @@ confirms inline before sending.
 
 Stated cost, unchanged in kind: the session still runs as the daemon's uid,
 so this is an entitlement boundary at the verbs, not a filesystem one.
+
+### A Listing Scoped to Nobody (#1584)
+
+A Telegram bot on the shared WS token (no bound identity) asked for its
+sessions and got all 2,092 on the daemon (1,203,006 bytes; 153 were its
+own). The same unscoped listing rode the `SessionInfoEvent` snapshot
+answering `session.new`, crossed the SDK's 1 MiB receive ceiling (#1279),
+the client closed with 1009 and every new conversation timed out. Each row
+also named another application's session id, workspace, model and
+description. #1113 had kept "no identity = unscoped" on purpose; that
+default was the defect.
+
+**A client with no identity sees the sessions of its own config root**, and
+what it created. The boundary is the config root, not the workspace: two
+clients may share a workspace under different roots, and one root serves
+several workspaces (a cascade's runs under `<repo>/tests/runs/` with
+`<repo>/.jaato`).
+
+| Piece | Where |
+|---|---|
+| the client's root: declared `ClientConfigRequest.config_root`, else the attached session's root, else `<workspace>/.jaato` for `resolve_caller_workspace`'s workspace (transport-declared, else `working_dir`); `None` when none of them exists | `CommandRouter._client_config_root` |
+| the filter: a row matches when its root equals the client's, both resolved (`realpath`, `normcase`); a row with an unknown root, or a client with no root, matches nothing but the client user's own `created_by` | `CommandRouter._sessions_in_config_root` |
+| a session's root, on loaded AND cold rows | `RuntimeSessionInfo.config_root`, filled through `session_scope.effective_config_root`; cold rows read `SessionInfo.config_root` off the record (2.4+) |
+| a revived session keeps recording its root | `Session(config_root=restore_config_root)` in the revive; before, a revive carried `None` and its next save erased the record's value |
+
+| Rule | Why |
+|---|---|
+| **a legacy record with no `config_root` but a workspace ran under `<workspace>/.jaato`** | that is the derivation the session itself used: since #1293 every create records exactly that value, and an older record was created with no override, where the config search path appends `<workspace>/.jaato`. Evidence about the session, not a guess. A row with neither is unknown and matches nobody |
+| **attach and delete admit exactly the listed set**, on every transport | `_refuse_foreign_session` has no unscoped early return any more. Cost: the workspace-mismatch prompt no longer offers a session from another config root to an identity-less client; it was not in that client's listing either |
+| **identified clients are unchanged** | the #1113 workspace / `created_by` rule still decides for a WS connection with a bound identity |
+| **the record's root is not a trust decision** | a cold row is shown by what its record says. An unsealed record (#1529) can only show or hide itself; the revive still re-derives its root |
+
+Not done: an admin "every session" verb (it would be gated like
+`pool.resize`, daemon uid or root over `SO_PEERCRED`), and `session.orphans`,
+an operator verb, is still unscoped. Paging and the #1279 ceiling are out of
+scope. Guard:
+`jaato_server/server/tests/test_session_listing_is_scoped_to_config_root_1584.py`,
+seven reversions, on a real `SessionManager` listing with cold records on
+disk.
 
 ### What a Picker Needs to Know About a Workspace (protocol 1.27)
 
@@ -9341,7 +9382,7 @@ both halves, and wires it in a line.
 | Property | Why |
 |---|---|
 | **scoped per RECIPIENT, not per event** | `_emit_session_info_to_attached` builds one snapshot per attached client, because a listing bounded by one recipient's entitlement must not decide what another is shown. It also withholds the snapshot from cascade observers, which is the point: a state snapshot of somebody else's session, scoped to nobody, is what this exists to stop sending |
-| **no client and no resolver both mean UNSCOPED** | IPC, an embedding process and every in-process caller keep the answer they always had |
+| **no client and no resolver both mean UNSCOPED** | an embedding process and every in-process caller, which have no client to leak to. A transport CLIENT with no identity is scoped by its config root since #1584 |
 | **a resolver that RAISES sends none** | failing open on an entitlement decision is the defect; an empty listing costs a client its completions until the next `session.list` |
 
 **And the verb that destroys was outside the boundary.** #1113 wrote it in

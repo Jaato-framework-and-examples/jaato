@@ -454,6 +454,13 @@ class SessionInfo:
     end_reason: Optional[str] = None
     """Why it finished, beside ``ended_at``."""
 
+    config_root: Optional[str] = None
+    """The config root the session ran under (record 2.4+), carried on the
+    LISTING so a COLD row answers the listing boundary (#1584) without the
+    session being loaded.  ``None`` on records predating the field; the
+    listing derives ``<workspace>/.jaato`` for those
+    (``server.session_scope.effective_config_root``)."""
+
     def display_name(self) -> str:
         """Return a display-friendly name for the session."""
         if self.description:

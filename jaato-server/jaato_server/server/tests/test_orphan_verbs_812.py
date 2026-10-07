@@ -142,6 +142,10 @@ class TestSessionListCarriesTheNewFacts:
         row.workspace_path = "/ws"
         row.orphaned = True
         row.runner = {"runner_pid": 4242}
+        # #1584: an identity-less client sees its own config root's rows.
+        row.config_root = "/ws/.jaato"
+        sm.get_client_session.return_value = None
+        sm.client_declared_config.return_value = {}
         sm.list_sessions.return_value = [row]
 
         router._handle_session_list("c1", "other")
