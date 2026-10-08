@@ -181,7 +181,7 @@ class TestJournalRoundTrip:
         # 2.10 runner_identity so the record names the PROCESS running it
         # and an operator who can see a session can act on it (#812);
         # serializer.py).
-        assert data["version"] == "2.11"
+        assert data["version"] == "2.12"
         assert data["session_state"] == {"audit_chain_head": "deadbeef", "n": 3}
         restored = deserialize_session_state(data)
         assert restored.session_state == {"audit_chain_head": "deadbeef", "n": 3}

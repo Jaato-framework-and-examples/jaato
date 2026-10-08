@@ -614,6 +614,81 @@ class RuntimeSessionInfo:
     config_root: Optional[str] = None
 
 
+def _split_profile_ref(
+    profile_name: str,
+) -> Tuple[Optional[str], str, Optional[str]]:
+    """Split a requested profile into ``(set, name, error)`` (#1588).
+
+    ``<set>/<name>`` names the file of profile ``<name>`` in
+    ``<config_root>/profiles/<set>/``; anything else is a bare name looked
+    up through the ordinary tiers.  A set must be one ordinary directory
+    name: ``.`` and ``..`` would make the "set" the profiles root or the
+    config root itself, so they are refused rather than scanned.  A record
+    the daemon did not seal carries this string too (#1529), so the rule
+    is checked here, where every caller passes.
+    """
+    if "/" not in profile_name:
+        return None, profile_name, None
+    head, _, tail = profile_name.partition("/")
+    if head in (".", "..") or "\\" in head:
+        return None, profile_name, (
+            f"Agent profile '{profile_name}': '{head}' is not a profile set "
+            f"(a set is a directory directly under .jaato/profiles/)"
+        )
+    if head and tail and "/" not in tail:
+        return head, tail, None
+    return None, profile_name, None
+
+
+def _bind_discovered_profile(
+    profile_name: str,
+    lookup_name: str,
+    force_profile_set: Optional[str],
+    result: Any,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """The profile *profile_name* binds in *result*, or why none does.
+
+    A qualified ``<set>/<name>`` binds only a file read from that set's
+    directory (#1588).  Discovery scans the set first and then the regular
+    tier, so when the set's own file did not load, or declares another
+    name, a same-named profile from ``profiles/`` used to fill the slot and
+    the session silently ran under it.  That is refused, naming both files.
+    Every bind is logged with the file it read and the files of the same
+    name it shadowed.
+    """
+    profile = result.profiles.get(lookup_name)
+    source = (getattr(result, "sources", None) or {}).get(lookup_name)
+    in_set = (
+        force_profile_set is None
+        or (source is not None
+            and str(pathlib.Path(source).parent) == result.profile_set_dir)
+    )
+    if profile is not None and in_set:
+        logger.info(
+            "  Profile '%s' bound to %s%s", profile_name, source or "(premium)",
+            _shadowed_note(lookup_name, result))
+        return profile, None
+    if lookup_name in result.errors:
+        return None, (
+            f"Profile '{profile_name}' exists but failed to parse: "
+            f"{result.errors[lookup_name]}"
+        )
+    if force_profile_set is not None:
+        outside = f" (a profile named '{lookup_name}' exists at {source}, " \
+                  f"outside the set; it is not used)" if profile is not None else ""
+        return None, (
+            f"Agent profile '{profile_name}' not found in "
+            f".jaato/profiles/{force_profile_set}/{outside}"
+        )
+    return None, f"Agent profile '{profile_name}' not found in .jaato/profiles/"
+
+
+def _shadowed_note(name: str, result: Any) -> str:
+    """``"; shadowing a, b"`` for a bound name other files also declare."""
+    shadowed = (getattr(result, "collisions", None) or {}).get(name)
+    return f"; shadowing {', '.join(shadowed)}" if shadowed else ""
+
+
 def _seccomp_for_record(session: Any) -> Optional[Dict[str, Any]]:
     """The seccomp posture a session record should carry (#1503).
 
@@ -755,6 +830,11 @@ class Session:
     # named-profile sessions.  Set at create (from the BootstrapEnvelope)
     # and at restore (from state.profile_spec) so it survives save cycles.
     inline_profile_spec: Optional[Dict[str, Any]] = None
+    # The profile as the session REQUESTED it (``<set>/<name>`` or a bare
+    # name), persisted as ``SessionState.profile_ref`` so a revive that
+    # re-resolves from disk binds the same file (#1588).  Set at create
+    # (from the BootstrapEnvelope) and at restore (from the record).
+    profile_ref: Optional[str] = None
     # The RESOLVED recipe and the RENDERED prompt this session ran under,
     # frozen at creation and re-persisted unchanged on every save (issue
     # #787).  Both are WRITE-ONCE by intent: ``_save_session`` fills them
@@ -2212,6 +2292,10 @@ class SessionManager:
         """
         from jaato_server.shared.plugins.subagent.config import discover_profiles
 
+        force_profile_set, lookup_name, ref_error = _split_profile_ref(profile_name)
+        if ref_error:
+            return None, ref_error
+
         # Overlay env_file onto the session-scoped ContextVar so
         # ``discover_profiles`` sees the workspace-declared
         # ``JAATO_PROFILE_SET`` (and any other env-affected reads it
@@ -2253,23 +2337,11 @@ class SessionManager:
         # Qualified path support: when the caller asks for
         # ``<set>/<name>``, route the request to the named profile set
         # regardless of the per-session ``JAATO_PROFILE_SET`` env var.
-        # The set's subdirectory under ``<config_root>/profiles/`` (or
-        # ``<workspace>/.jaato/profiles/`` when no config_root override
-        # is in effect) is scanned and the bare name is looked up
-        # within the resulting profile map.  Pre-fix the SDK would hand
-        # back ``Profile not found`` for any qualified path whose set
-        # didn't match the current ``JAATO_PROFILE_SET`` value (or
-        # whose env var was unset), even though the underlying file
-        # existed at ``profiles/<set>/<name>.yaml``.  Symmetric to the
-        # SDK Bug-B fix landed on 2026-06-06.
-        force_profile_set: Optional[str] = None
-        lookup_name = profile_name
-        if "/" in profile_name:
-            head, _, tail = profile_name.partition("/")
-            if head and tail and "/" not in tail:
-                force_profile_set = head
-                lookup_name = tail
-
+        # Since #1588 the request also BINDS that set's file: a profile of
+        # the same name found anywhere else (the regular tier, because the
+        # set's own file failed to load or declares another name) is a
+        # refusal, never a substitute.  See :func:`_split_profile_ref` and
+        # :func:`_bind_discovered_profile`.
         try:
             result = discover_profiles(
                 ".jaato/profiles",
@@ -2280,23 +2352,8 @@ class SessionManager:
         finally:
             if overlay_applied:
                 _session_env_var.set(previous_env)
-        profile = result.profiles.get(lookup_name)
-        if profile is not None:
-            return profile, None
-
-        # Profile not in the successfully parsed set — check if there was
-        # a parse error for a file matching the requested name.
-        if lookup_name in result.errors:
-            return None, (
-                f"Profile '{profile_name}' exists but failed to parse: "
-                f"{result.errors[lookup_name]}"
-            )
-        if force_profile_set is not None:
-            return None, (
-                f"Agent profile '{profile_name}' not found in "
-                f".jaato/profiles/{force_profile_set}/"
-            )
-        return None, f"Agent profile '{profile_name}' not found in .jaato/profiles/"
+        return _bind_discovered_profile(
+            profile_name, lookup_name, force_profile_set, result)
 
     def add_session_hook(self, hook: Callable) -> None:
         """Register a callback invoked after each session is initialized.
@@ -5111,6 +5168,7 @@ class SessionManager:
             created_by=envelope.created_by,
             sandbox_mode=planned_sandbox,
             inline_profile_spec=envelope.inline_profile_spec,
+            profile_ref=getattr(envelope, "profile_ref", None),
             sibling_name=getattr(envelope, "sibling_name", None),
         )
 
@@ -10478,6 +10536,7 @@ class SessionManager:
         # exclusive — a request that supplies both is rejected up
         # front rather than silently picking one.
         profile = None
+        profile_ref = profile_name
         if profile_name and inline_profile_data:
             self._answer_session_new(client_id, ErrorEvent(
                 error=(
@@ -10565,6 +10624,7 @@ class SessionManager:
                     env_file=session_env_file,
                 )
                 if profile:
+                    profile_ref = default_prof
                     logger.info(f"  Using agent's default profile: {default_prof}")
                 else:
                     logger.warning(f"  Agent's default_profile '{default_prof}' not found: {error}")
@@ -10693,6 +10753,8 @@ class SessionManager:
             # stash it for disk-restore (persisted as profile_spec).  Only
             # set for inline-spec sessions; None for named/no-profile.
             inline_profile_spec=inline_profile_data,
+            # #1588: what was requested, so a revive binds the same file.
+            profile_ref=profile_ref,
             sibling_name=sibling_name,
             agent_name=agent_name,
             system_instruction_override=system_instruction_override,
@@ -13405,6 +13467,8 @@ class SessionManager:
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
             inline_profile_spec=getattr(state, "profile_spec", None),
+            # #1588: re-persisted so the next revive binds the same file.
+            profile_ref=getattr(state, "profile_ref", None),
             # #787: carry the frozen recipe + frozen prompt forward so a
             # re-save of the restored session re-persists the ORIGINALS.
             # Without this, the write-once capture in ``_save_session``
@@ -14184,6 +14248,7 @@ class SessionManager:
                     turn_accounting=turn_accounting,
                     user_inputs=session.user_inputs,  # Command history for prompt restoration
                     profile_name=profile_name,
+                    profile_ref=session.profile_ref,  # 2.12+ (#1588)
                     # Persist the UNRESOLVED inline spec (if any) so disk-restore
                     # reconstructs an inline profile's recipe by id alone — the
                     # named-profile ``profile_name`` ("<inline>") isn't
@@ -14271,8 +14336,11 @@ class SessionManager:
            Authoritative and self-contained; an inline session was never a
            named profile, so it is never name-resolved (which could match
            an unrelated same-named profile on disk).
-        3. ``state.profile_name`` -- re-resolved against the profile files
-           AS THEY STAND NOW.  The pre-2.8 behaviour, and still the right
+        3. ``state.profile_ref`` (2.12+, #1588), else ``state.profile_name``
+           -- re-resolved against the profile files AS THEY STAND NOW.  The
+           ref is what the session requested; a qualified ``<set>/<name>``
+           binds that set's file only, where the bare name could be won by
+           a different file declaring the same ``name:``.  The pre-2.8 behaviour, and still the right
            one in two cases: a record with no snapshot (every session
            written before 2.8), and the deliberate
            ``JAATO_REVIVE_PROFILE=disk`` opt-in, which interrogation needs
@@ -14348,11 +14416,14 @@ class SessionManager:
                     "%s failed to rebuild: %s", session_id, exc)
                 return None
 
-        if not state.profile_name:
+        # #1588: the ref the session was created with names the FILE; the
+        # bare ``name:`` may be declared by another file that wins it.
+        requested = getattr(state, "profile_ref", None) or state.profile_name
+        if not requested:
             return None
 
         profile, profile_err = self._resolve_profile(
-            state.profile_name,
+            requested,
             workspace_path=workspace_path,
             config_root=config_root,
             env_file=env_file,
@@ -14364,7 +14435,7 @@ class SessionManager:
                 "(workspace=%s config_root=%s) -- verify the "
                 "profile still exists at "
                 "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
-                state.profile_name, session_id, profile_err,
+                requested, session_id, profile_err,
                 workspace_path, config_root,
             )
         return profile

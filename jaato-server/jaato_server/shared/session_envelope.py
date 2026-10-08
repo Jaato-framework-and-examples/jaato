@@ -814,6 +814,11 @@ class BootstrapEnvelope:
     # (persisted as ``SessionState.profile_spec``).  None for named-profile
     # / no-profile sessions.
     inline_profile_spec: Optional[Dict[str, Any]] = None
+    # The profile as the caller REQUESTED it (``<set>/<name>`` or a bare
+    # name), carried so the created Session persists it as
+    # ``SessionState.profile_ref`` and a revive re-resolves the same file
+    # (#1588).  None for inline / no-profile sessions.
+    profile_ref: Optional[str] = None
     # Cascade-scoped sibling ADDRESS (design §4): the string another session
     # passes to ``send_to_sibling``.  Distinct from ``name`` (free-text
     # display) and ``agent_name`` (persona).  Validated at session.new for

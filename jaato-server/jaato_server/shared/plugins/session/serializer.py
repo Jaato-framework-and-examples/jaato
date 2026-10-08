@@ -573,7 +573,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # 2.11: ended_at / end_reason -- a session the person ended, the
         # agent completed or the budget stopped is FINISHED, and says so
         # (server.session_finished).
-        'version': '2.11',
+        # 2.12: profile_ref -- the profile as the session requested it, so a
+        # revive that re-resolves from disk binds the same FILE, not
+        # whichever file wins its bare name (#1588).
+        'version': '2.12',
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -583,6 +586,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'user_inputs': state.user_inputs,
         'metadata': state.metadata,
         'profile_name': state.profile_name,
+        'profile_ref': state.profile_ref,  # 2.12+ (#1588)
         'profile_spec': state.profile_spec,  # unresolved inline recipe (2.7+)
         # 2.8+ (issue #787).  The frozen recipe and the frozen prompt: a
         # revive reads these rather than re-resolving the profile name and
@@ -659,6 +663,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         user_inputs=data.get('user_inputs', []),
         metadata=data.get('metadata', {}),
         profile_name=data.get('profile_name'),
+        profile_ref=data.get('profile_ref'),  # None on pre-2.12 records
         profile_spec=data.get('profile_spec'),  # None on pre-2.7 records
         profile_snapshot=data.get('profile_snapshot'),  # None pre-2.8
         rendered_instructions=data.get('rendered_instructions'),  # pre-2.8
