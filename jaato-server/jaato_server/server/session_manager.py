@@ -1781,6 +1781,9 @@ class SessionManager:
             Callable[[str], List["RuntimeSessionInfo"]]] = None
         # Set by ``CommandRouter.__init__``; see set_client_peer_resolver.
         self._client_peer_resolver: Optional[Callable[[str], Any]] = None
+        # Set by ``CommandRouter.__init__``; see
+        # set_client_path_scope_resolver (#1592).
+        self._client_path_scope_resolver: Optional[Callable[..., Any]] = None
 
         # Initialize session plugin for persistence.
         # storage_path stays relative (e.g. ".jaato/sessions") — it is
@@ -5517,6 +5520,21 @@ class SessionManager:
             return None
         return resolver.owner_for(workspace_path)
 
+    def set_client_path_scope_resolver(
+        self, resolver: Optional[Callable[..., Any]],
+    ) -> None:
+        """Teach the manager how to ask where a client may declare paths (#1592).
+
+        ``resolver(client_id, [(field, path), ...])`` answers ``None`` when
+        no path scope applies to the connection and a list of refusals
+        otherwise (``event_sink.client_path_refusals``).  The transport
+        owns the answer -- a WS connection's application and its workspace
+        root -- and this manager holds an event callback rather than an
+        ``EventSink``, so the router lends its lookup, as with
+        :meth:`set_client_peer_resolver`.
+        """
+        self._client_path_scope_resolver = resolver
+
     def set_client_peer_resolver(
         self, resolver: Optional[Callable[[str], Any]],
     ) -> None:
@@ -7957,6 +7975,49 @@ class SessionManager:
         ))
         return True
 
+    def _reject_client_paths_outside_scope(
+        self, client_id: str, event: 'ClientConfigRequest',
+    ) -> bool:
+        """Refuse a handshake naming a path outside the connection's scope (#1592).
+
+        The WS sibling of :meth:`_reject_unentitled_client_paths`.  A WS
+        connection has no peer credential, so that check is inert there,
+        and a ticket client could name ANY absolute ``working_dir`` and
+        have ``session.new`` run a session in it with the daemon's
+        credential -- around the application ``workspace_root`` (#1496)
+        every workspace verb enforces.  The transport answers instead
+        (``client_path_refusals``): every path must lie beneath the
+        application's root, in a workspace the caller may see.
+
+        All-or-nothing, like its siblings: when this returns True nothing
+        of the handshake is applied.  A connection the transport does not
+        scope (IPC, the shared token, no resolver lent) passes untouched.
+
+        Returns:
+            True when the config was REJECTED (caller must not apply it).
+        """
+        resolver = getattr(self, "_client_path_scope_resolver", None)
+        if resolver is None:
+            return False
+        violations = resolver(client_id, [
+            (field, getattr(event, field, None) or "")
+            for field in self._CLIENT_CONFIG_PATH_FIELDS
+        ])
+        if not violations:
+            return False
+        error = (
+            "client config rejected — these paths are outside the "
+            "application's workspaces:\n"
+            + "\n".join(f"  - {m}" for m in violations)
+        )
+        logger.error("Client %s: %s", client_id, error)
+        self._emit_to_client(client_id, ErrorEvent(
+            error=error,
+            error_type="ClientPathOutsideWorkspaceRoot",
+            recoverable=True,
+        ))
+        return True
+
     def _apply_client_config(
         self, client_id: str, event: 'ClientConfigRequest',
         *, peer: Optional[Any] = None,
@@ -7970,7 +8031,9 @@ class SessionManager:
         A handshake carrying a RELATIVE path is refused outright and
         nothing is applied — see :meth:`_reject_relative_client_paths` —
         as is one naming a path the connecting account cannot itself
-        reach (:meth:`_reject_unentitled_client_paths`).
+        reach (:meth:`_reject_unentitled_client_paths`), and one naming a
+        path outside the connection's application workspace root
+        (:meth:`_reject_client_paths_outside_scope`, #1592).
 
         Args:
             client_id: The requesting client.
@@ -7982,6 +8045,9 @@ class SessionManager:
             return
 
         if self._reject_unentitled_client_paths(client_id, event, peer):
+            return
+
+        if self._reject_client_paths_outside_scope(client_id, event):
             return
 
         # Apply trace log paths if provided

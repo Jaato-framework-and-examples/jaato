@@ -9,7 +9,7 @@ Each transport silently ignores ``client_id`` values it doesn't own, so
 the composite can safely fan-out to all registered sinks.
 """
 
-from typing import Any, TYPE_CHECKING, List, Optional, Protocol, runtime_checkable
+from typing import Any, TYPE_CHECKING, List, Optional, Protocol, Tuple, runtime_checkable
 
 from jaato_sdk.events import Event
 
@@ -88,6 +88,19 @@ class EventSink(Protocol):
         """
         ...
 
+    def client_path_refusals(
+        self, client_id: str, fields: List[Tuple[str, str]],
+    ) -> Optional[List[str]]:
+        """Which of *fields* (``(field, path)``) this client may not declare.
+
+        ``None`` means no path scope applies to the connection (IPC, whose
+        guard is the peer credential; a WS connection with no application).
+        A list is the verdict: one refusal per path outside the connection's
+        application workspace root or inside another user's workspace
+        (#1592), empty when all may be used.
+        """
+        ...
+
     def get_client_peer(self, client_id: str) -> Optional["PeerCredentials"]:
         """The OS account that opened this client's connection.
 
@@ -125,6 +138,28 @@ def client_visible_workspaces(sink: Any, client_id: str) -> Optional[List[str]]:
     if not all(isinstance(p, str) for p in paths):
         return None
     return list(paths)
+
+
+def client_path_refusals(
+    sink: Any, client_id: str, fields: List[Tuple[str, str]],
+) -> Optional[List[str]]:
+    """``sink.client_path_refusals(...)``, tolerating a sink without it (#1592).
+
+    ``None`` -- "no path scope applies to this connection" -- from a sink
+    predating the method, and from any answer that is not a list of
+    strings: only positive evidence is a refusal, the posture
+    :func:`client_visible_workspaces` takes.  A list (even empty) is the
+    transport's verdict over *fields*.
+    """
+    fn = getattr(sink, "client_path_refusals", None)
+    if fn is None:
+        return None
+    answer = fn(client_id, fields)
+    if not isinstance(answer, (list, tuple)):
+        return None
+    if not all(isinstance(r, str) for r in answer):
+        return None
+    return list(answer)
 
 
 def client_peer(sink: Any, client_id: str) -> Optional["PeerCredentials"]:
@@ -218,6 +253,16 @@ class CompositeEventSink:
             paths = client_visible_workspaces(sink, client_id)
             if paths is not None:
                 return paths
+        return None
+
+    def client_path_refusals(
+        self, client_id: str, fields: List[Tuple[str, str]],
+    ) -> Optional[List[str]]:
+        """The first sink's verdict that scopes this client, else ``None``."""
+        for sink in self._sinks:
+            answer = client_path_refusals(sink, client_id, fields)
+            if answer is not None:
+                return answer
         return None
 
     def get_client_peer(self, client_id: str) -> Optional["PeerCredentials"]:
