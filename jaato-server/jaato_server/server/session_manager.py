@@ -5815,7 +5815,9 @@ class SessionManager:
         """
         _stamp_session_id(event, self._client_to_session.get(client_id))
         logger.debug(f"_emit_to_client: {client_id} <- {type(event).__name__}")
-        ephemeral = self._ephemeral_client_sinks.get(client_id)
+        # ``getattr``: a manager built without ``__init__`` (a test double)
+        # has no synthetic clients and routes as before.
+        ephemeral = getattr(self, "_ephemeral_client_sinks", {}).get(client_id)
         if ephemeral is not None:
             ephemeral(event)
             return
@@ -5857,11 +5859,11 @@ class SessionManager:
         """
         if config_from is not None and config_from in self._client_config:
             self._client_config[client_id] = dict(self._client_config[config_from])
-        self._ephemeral_client_sinks[client_id] = sink
+        self.__dict__.setdefault("_ephemeral_client_sinks", {})[client_id] = sink
 
     def unregister_ephemeral_client(self, client_id: str) -> None:
         """Drop a synthetic client: its sink, its configuration, its mapping."""
-        self._ephemeral_client_sinks.pop(client_id, None)
+        getattr(self, "_ephemeral_client_sinks", {}).pop(client_id, None)
         self._client_config.pop(client_id, None)
         with self._lock:
             self._client_to_session.pop(client_id, None)

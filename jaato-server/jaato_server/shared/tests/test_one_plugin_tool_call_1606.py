@@ -213,15 +213,15 @@ class _Server:
 def test_a_permission_answer_reaches_the_call_waiting_on_it():
     sent = []
     calls = PluginToolCalls(SimpleNamespace(), lambda c, e: sent.append((c, e)),
-                            lambda c: None)
+                            lambda c: {"client-1": "alice"}.get(c))
     server = _Server("perm-1")
     calls._inflight["_plugin_tool:x"] = _InFlight("client-1", "s1", server)
     answer = PermissionResponseRequest(request_id="perm-1", response="y")
-    assert calls.route_permission_response("client-1", "", answer, "alice")
+    assert calls.route_permission_response("client-1", "", answer)
     assert server.answers == [("perm-1", "y", "alice")]
     assert sent == []
     # Another client's answer to the same id is not this call's.
-    assert calls.route_permission_response("client-2", "own", answer, None) is False
+    assert calls.route_permission_response("client-2", "own", answer) is False
 
 
 def test_a_forwarded_ask_names_the_call_it_belongs_to():

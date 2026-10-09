@@ -494,9 +494,11 @@ class CommandRouter:
         try:
             # A permission answer to a plugin tool call's ASK (#1606) belongs
             # to that call's short-lived session, not to the caller's own.
-            if self._plugin_tool_calls.route_permission_response(
-                    client_id, session_id, event,
-                    self._event_sink.get_client_user(client_id)):
+            # ``getattr``: a router built without ``__init__`` (a test
+            # double) has no plugin tool calls to route to.
+            calls = getattr(self, "_plugin_tool_calls", None)
+            if calls is not None and calls.route_permission_response(
+                    client_id, session_id, event):
                 return
             self._dispatch(client_id, session_id, event)
         finally:

@@ -166,7 +166,7 @@ class PluginToolCalls:
         send: Callable[[str, Any], None],
         get_user: Callable[[str], Optional[str]],
     ) -> None:
-        self._sessions = session_manager
+        self._session_manager = session_manager
         self._send = send
         self._get_user = get_user
         self._lock = threading.Lock()
@@ -201,7 +201,7 @@ class PluginToolCalls:
         ).start()
 
     def route_permission_response(
-        self, client_id: str, session_id: str, event: Any, user_id: Optional[str],
+        self, client_id: str, session_id: str, event: Any,
     ) -> bool:
         """Resolve a permission answer that belongs to one of ``client_id``'s calls.
 
@@ -216,10 +216,11 @@ class PluginToolCalls:
         request_id = str(getattr(event, "request_id", "") or "")
         for call in self._calls_of(client_id):
             if call.server is not None and request_id in _pending_prompt_ids(call.server):
+                # The identity is the transport's, never the request's (#859).
                 call.server.respond_to_permission(
                     request_id, event.response,
                     edited_arguments=getattr(event, "edited_arguments", None),
-                    user_id=user_id,
+                    user_id=self._get_user(client_id),
                 )
                 return True
         if session_id:
@@ -249,7 +250,7 @@ class PluginToolCalls:
                          origin_request_id=str(getattr(event, "request_id", "") or ""))
         session_id = ""
         try:
-            self._sessions.register_ephemeral_client(
+            self._session_manager.register_ephemeral_client(
                 synthetic, sink, config_from=client_id)
             session_id, server = self._create(synthetic, client_id, event, workspace)
             if not session_id:
@@ -278,18 +279,18 @@ class PluginToolCalls:
                 self._inflight.pop(synthetic, None)
             if session_id:
                 try:
-                    self._sessions.delete_session(session_id)
+                    self._session_manager.delete_session(session_id)
                 except Exception:  # noqa: BLE001
                     logger.warning("plugin tool call: could not delete session %s",
                                    session_id, exc_info=True)
-            self._sessions.unregister_ephemeral_client(synthetic)
+            self._session_manager.unregister_ephemeral_client(synthetic)
 
     def _create(self, synthetic: str, client_id: str, event: Any,
                 workspace: str) -> Tuple[str, Any]:
         profile = str(getattr(event, "profile", "") or "")
         spec = None if profile else inline_spec(
             event.plugin, getattr(event, "plugin_configs", None) or {})
-        session_id = self._sessions.create_session(
+        session_id = self._session_manager.create_session(
             synthetic, f"plugin-tool:{event.plugin}.{event.tool}",
             workspace_path=workspace,
             profile_name=profile or None,
@@ -298,7 +299,7 @@ class PluginToolCalls:
         )
         if not session_id:
             return "", None
-        session = self._sessions.get_session(session_id)
+        session = self._session_manager.get_session(session_id)
         server = getattr(session, "server", None) if session is not None else None
         if server is None:
             return "", None
