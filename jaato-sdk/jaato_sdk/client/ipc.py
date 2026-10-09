@@ -102,6 +102,11 @@ from jaato_sdk.events import (
     ReferenceCurationRequest,
     ReferenceBundleCreateRequest,
     ReferenceBundleCreateResultEvent,
+    PermissionRequestedEvent,
+    PluginToolDescribeEvent,
+    PluginToolDescribeRequest,
+    PluginToolInvokeRequest,
+    PluginToolInvokeResultEvent,
     ReferenceLinksUpdateRequest,
     ReferenceLinksUpdateResultEvent,
     ReferenceCurationResultEvent,
@@ -2378,6 +2383,109 @@ class IPCClient:
             "create_reference_bundle", ReferenceBundleCreateRequest(name=name),
             timeout, "refb")
 
+    #: Floor for :meth:`describe_plugin_tool` / :meth:`invoke_plugin_tool`
+    #: (1.37, #1606).  NEW verbs (the 1.7 rule): an older daemon ignores them
+    #: and the caller would wait out its timeout for a call nobody ran.
+    MIN_PLUGIN_TOOL_PROTOCOL = "1.37"
+
+    def _require_plugin_tool_protocol(self, method: str) -> None:
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_PLUGIN_TOOL_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"{method}: this daemon speaks protocol {spoken} and does not "
+                f"serve plugin tool calls (needs >= "
+                f"{self.MIN_PLUGIN_TOOL_PROTOCOL}).  It would ignore the "
+                f"request silently.  Upgrade the daemon.")
+
+    async def describe_plugin_tool(
+        self,
+        plugin: str,
+        tool: str,
+        *,
+        profile: str = "",
+        plugin_configs: Optional[Dict[str, Any]] = None,
+        timeout: float = 120.0,
+    ) -> PluginToolDescribeEvent:
+        """A plugin tool's schema as a session would expose it (1.37, #1606).
+
+        The configuration is ``profile`` (a profile the workspace resolves)
+        OR ``plugin_configs`` (a ``plugin_configs`` block; only ``plugin`` is
+        enabled then), never both.  The daemon answers from a runner of this
+        connection's workspace holding those plugins and no session, so the
+        schema is the one a session with that configuration puts on the wire
+        -- the profile's settings and ``narrow_tool_schema`` applied -- and
+        ``exists`` is False (with
+        ``reason`` / ``detail``) when the profile does not enable the
+        plugin, scopes the tool out or hides it.  Needs no attached session.
+
+        Raises:
+            ValueError: Against a daemon below :attr:`MIN_PLUGIN_TOOL_PROTOCOL`.
+            RequestRefused / TimeoutError / ConnectionError: No answer.
+        """
+        self._require_plugin_tool_protocol("describe_plugin_tool")
+        return await self._correlated_request(  # type: ignore[return-value]
+            "describe_plugin_tool",
+            PluginToolDescribeRequest(plugin=plugin, tool=tool, profile=profile,
+                                      plugin_configs=plugin_configs),
+            timeout, "ptd")
+
+    async def invoke_plugin_tool(
+        self,
+        plugin: str,
+        tool: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        profile: str = "",
+        plugin_configs: Optional[Dict[str, Any]] = None,
+        on_permission: Optional[Callable[[PermissionRequestedEvent], Any]] = None,
+        timeout: float = 300.0,
+    ) -> PluginToolInvokeResultEvent:
+        """Run one plugin tool call with no model turn (1.37, #1606).
+
+        The call runs, with no session, in a runner of this connection's
+        workspace, configured by ``profile`` or ``plugin_configs`` (see
+        :meth:`describe_plugin_tool`), under the confinement a session there
+        would get, through an executor wired as a session's: the permission
+        policy, argument coercion,
+        secret redaction and the failure contract all apply.  The answer's
+        ``ok`` says whether the call reached the tool, ``success`` whether
+        the tool succeeded, and ``result`` is what it returned.
+
+        A permission ASK for this call is handed to ``on_permission`` (sync
+        or async), whose return value -- ``"y"``, ``"n"``, ``"a"``, ... -- is
+        sent as the answer.  With no ``on_permission``, or when it returns
+        ``None``, the ASK is answered ``"n"``: the call is refused, never
+        left waiting on nobody.  ``timeout`` bounds the whole call on both
+        sides, a pending ASK included.
+
+        Raises:
+            ValueError: Against a daemon below :attr:`MIN_PLUGIN_TOOL_PROTOCOL`.
+            RequestRefused / TimeoutError / ConnectionError: No answer.
+        """
+        self._require_plugin_tool_protocol("invoke_plugin_tool")
+
+        async def _answer_ask(request_id: str, got: Event) -> bool:
+            if not (isinstance(got, PermissionRequestedEvent)
+                    and got.origin_request_id == request_id):
+                return False
+            response = None
+            if on_permission is not None:
+                response = on_permission(got)
+                if asyncio.iscoroutine(response):
+                    response = await response
+            await self.respond_to_permission(got.request_id, str(response or "n"))
+            return True
+
+        return await self._correlated_request(  # type: ignore[return-value]
+            "invoke_plugin_tool",
+            PluginToolInvokeRequest(plugin=plugin, tool=tool, args=dict(args or {}),
+                                    profile=profile, plugin_configs=plugin_configs,
+                                    timeout=timeout),
+            # The daemon gives up at ``timeout``; wait a little longer for
+            # its ``timeout`` answer rather than racing it.
+            timeout + 30.0, "pti", on_event=_answer_ask)
+
     def _require_reference_curation_protocol(self, method: str) -> None:
         """Refuse a daemon that would ignore the reference-claim verbs.
 
@@ -2805,11 +2913,17 @@ class IPCClient:
 
     async def _correlated_request(
         self, method: str, event: Event, timeout: float, prefix: str,
+        on_event: Optional[Callable[[str, Event], Any]] = None,
     ) -> Event:
         """Send ``event`` with a fresh ``request_id`` and await its answer.
 
         The mechanics :meth:`_memory_request` documents, without the
         protocol gate (each caller checks its own floor first).
+
+        ``on_event(request_id, event)`` is awaited for every other event that
+        arrives while waiting; a truthy return marks it handled, so it is not
+        buffered for later readers (the plugin-tool call answers its own
+        permission ASKs this way, #1606).
 
         Raises:
             RequestRefused: The answer echoing ``request_id`` is an
@@ -2833,6 +2947,8 @@ class IPCClient:
                     if getattr(got, "request_id", None) == request_id and \
                             got.type != event.type:
                         return got
+                    if on_event is not None and await on_event(request_id, got):
+                        continue
                     if len(self._event_subscribers) == 1:
                         incidental.append(got)
 

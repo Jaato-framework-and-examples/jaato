@@ -19,6 +19,7 @@ import {
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_REFERENCE_CURATION_PROTOCOL,
   MIN_REFERENCE_BUNDLE_PROTOCOL,
+  MIN_PLUGIN_TOOL_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_SCAFFOLD_VALIDATE_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
@@ -739,6 +740,62 @@ describe("JaatoClient session management", () => {
     const answer = await pending;
     assert.equal(answer.ok, true);
     assert.equal(answer.indexed, false);
+  });
+
+  test("plugin tool verbs are refused below 1.37", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_REFERENCE_BUNDLE_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(() => client.describePluginTool("template", "t"), /1\.37/);
+    await assert.rejects(() => client.invokePluginTool("template", "t"), /1\.37/);
+    assert.equal(lastInstance!.sent.length, 0);
+  });
+
+  test("invokePluginTool answers its own ASK and correlates its result", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_PLUGIN_TOOL_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const sent = (): Record<string, unknown>[] =>
+      lastInstance!.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
+
+    const asked: string[] = [];
+    const pending = client.invokePluginTool("template", "renderTemplateToFile", { x: 1 }, {
+      profile: "tpl",
+      onPermission: (ev) => {
+        asked.push(ev.request_id ?? "");
+        return "y";
+      },
+    });
+    await tick();
+    const req = sent()[0]!;
+    assert.equal(req.type, EventTypeValue.PLUGIN_TOOL_INVOKE_REQUEST);
+    assert.equal(req.profile, "tpl");
+    assert.deepEqual(req.args, { x: 1 });
+    // Another call's ASK is not this call's to answer.
+    lastInstance!.emit({
+      type: EventTypeValue.PERMISSION_REQUESTED, request_id: "perm-other",
+      origin_request_id: "pti-someone-else", tool_name: "renderTemplateToFile",
+    });
+    lastInstance!.emit({
+      type: EventTypeValue.PERMISSION_REQUESTED, request_id: "perm-1",
+      origin_request_id: req.request_id, tool_name: "renderTemplateToFile",
+    });
+    await tick();
+    await tick();
+    assert.deepEqual(asked, ["perm-1"]);
+    const answers = sent().filter((m) => m.type === EventTypeValue.PERMISSION_RESPONSE);
+    assert.deepEqual(answers.map((m) => [m.request_id, m.response]), [["perm-1", "y"]]);
+    lastInstance!.emit({
+      type: EventTypeValue.PLUGIN_TOOL_INVOKE_RESULT, request_id: req.request_id,
+      ok: true, success: true, result: { path: "o.txt" },
+    });
+    const answer = await pending;
+    assert.equal(answer.success, true);
   });
 
   test("reference catalog verbs correlate their answers", async () => {

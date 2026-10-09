@@ -744,6 +744,24 @@ def session_picker_fields(info: Any) -> Dict[str, Any]:
     }
 
 
+def _existing_env_file(workspace_path: Optional[str],
+                       config_root: Optional[str]) -> Optional[str]:
+    """``<workspace>/.env``, else ``<config_root>/../.env``, when one exists.
+
+    The fallback ``_create_session_impl`` applies when the client declared
+    no ``env_file``; used by the plugin host (#1606), which must resolve the
+    environment a session in that workspace would get.
+    """
+    for candidate in (
+        os.path.join(workspace_path, '.env') if workspace_path else None,
+        os.path.join(os.path.dirname(os.path.abspath(config_root)), '.env')
+        if config_root else None,
+    ):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
 @dataclass
 class Session:
     """A managed session with its JaatoServer."""
@@ -2143,6 +2161,11 @@ class SessionManager:
 
         # Per-client configuration (presentation context, working_dir, etc.)
         self._client_config: Dict[str, Dict[str, Any]] = {}
+        # Plugin-host clients (#1606): a synthetic client id a plugin tool
+        # call is provisioned under, mapped to the real caller whose
+        # connection decides its runner uid (``peer`` policy).  See
+        # :meth:`spawn_plugin_host`.
+        self._plugin_host_callers: Dict[str, str] = {}
         # Client-provided ("host") tool schema dicts buffered by the transport
         # when registered BEFORE session.new (client_id -> [tool_def, ...]).
         # Drained in the session.new flow to seed JaatoServer.client_tool_schemas
@@ -5216,6 +5239,8 @@ class SessionManager:
     def _construct_and_initialize_server(
         self,
         envelope: 'BootstrapEnvelope',
+        *,
+        plugin_host: bool = False,
     ) -> Tuple[Optional[JaatoServer], Optional[str]]:
         """JaatoServer construction + pre-init + initialize, shared
         across IPC and disk-restore bootstrap paths (Phase 3 §3.12).
@@ -5244,6 +5269,12 @@ class SessionManager:
            else None.  Disk-restore passes ``None`` since #1529, so
            the revived Session records what provisioning produced.
 
+        With ``plugin_host`` (#1606) it stops after step 4: the runner was
+        told to bootstrap a plugin host instead of a session, and a plugin
+        tool call needs the runner, not an initialized server.  The server
+        is returned as built, and ``sandbox_mode`` is what IPC provisioning
+        produced.
+
         Returns:
             ``(JaatoServer, sandbox_mode)`` on success;
             ``(None, None)`` on init failure.
@@ -5267,6 +5298,10 @@ class SessionManager:
         # set_config_root notification.
         if envelope.config_root:
             server.config_root = envelope.config_root
+
+        # #1606: a plugin tool call's runner bootstraps a plugin host, not a
+        # session -- ``build_session_envelope`` carries it to the runner.
+        server._plugin_host = plugin_host
 
         # Phase 4 §D: stash agent_params transiently on the per-session
         # JaatoServer so build_session_envelope can pick them up and
@@ -5374,6 +5409,8 @@ class SessionManager:
             envelope.workspace_path,
             envelope.client_id,
         )
+        if plugin_host:
+            return server, ipc_sandbox_mode
 
         # Initialize.  On failure, core.py already emits a
         # ConfigurationError event via the in-init sink — no need
@@ -5619,6 +5656,8 @@ class SessionManager:
         resolver = getattr(self, "_client_peer_resolver", None)
         if resolver is None:
             return None
+        # A plugin host runs as the caller it serves would (#1606).
+        client_id = getattr(self, "_plugin_host_callers", {}).get(client_id, client_id)
         try:
             return resolver(client_id)
         except Exception:  # noqa: BLE001 -- see docstring
@@ -15637,6 +15676,128 @@ class SessionManager:
 
         logger.info(f"Session deleted: {session_id}")
         return deleted or session is not None
+
+    def spawn_plugin_host(
+        self,
+        caller_client_id: str,
+        *,
+        workspace_path: str,
+        profile_name: Optional[str] = None,
+        plugin: str = "",
+        plugin_configs: Optional[Dict[str, Any]] = None,
+        created_by: Optional[str] = None,
+        on_event: Optional[Callable[[Any], None]] = None,
+    ) -> "Tuple[Optional[JaatoServer], str, str]":
+        """A runner holding a profile's plugins, and no session (#1606).
+
+        A plugin tool call needs the plugin initialized with the profile's
+        configuration, the profile's permission policy, and a process inside
+        the workspace's boundary -- not a conversation.  This resolves what
+        the caller's own ``session.new`` would resolve (its client config:
+        env file, config root, the confinement opt-in; the profile, or an
+        inline one enabling only ``plugin`` with ``plugin_configs``), then
+        runs session bootstrap up to the spawn
+        (:meth:`_construct_and_initialize_server` with ``plugin_host``),
+        the runner told to build a plugin host.  No ``Session`` record, no listing, no history, no
+        provider: the server is never initialized.
+
+        The spawn runs under a synthetic client id carrying a copy of the
+        caller's configuration, so the caller's own attachment and buffered
+        host tools are untouched; the id's peer is the caller's, so the
+        ``peer`` runner-uid policy drops to the caller's account.  Events the
+        server emits (a permission ASK) go to ``on_event``.
+
+        Returns:
+            ``(server, host_id, error)``: the server whose ``_runner_rpc``
+            serves ``session.plugin_tool``, the id it was provisioned under,
+            and ``""``; or ``(None, host_id, reason)`` -- every resource is
+            already released then.  Release a live one with
+            :meth:`release_plugin_host`.
+        """
+        host_id = f"plugintool_{uuid.uuid4().hex[:16]}"
+        host_client = f"_plugin_host:{host_id}"
+        self._client_config[host_client] = dict(
+            self._client_config.get(caller_client_id, {}))
+        self._plugin_host_callers[host_client] = caller_client_id
+        client_config = self._client_config[host_client]
+        config_root = self._resolve_restore_config_root(
+            None, client_config.get('config_root'), workspace_path)
+        env_file = client_config.get('env_file') or _existing_env_file(
+            workspace_path, config_root)
+        if profile_name:
+            profile, error = self._resolve_profile(
+                profile_name, workspace_path, config_root=config_root,
+                env_file=env_file)
+            if profile is None:
+                self._forget_plugin_host_client(host_client)
+                return None, host_id, error or f"profile {profile_name!r} not found"
+        else:
+            from jaato_server.shared.plugins.subagent.config import SubagentProfile
+            profile = SubagentProfile(
+                name=f"plugin-tool-{plugin}",
+                description="plugin tool call (#1606)",
+                plugins=[plugin],
+                plugin_configs=dict(plugin_configs or {}),
+            )
+        envelope = BootstrapEnvelope(
+            session_id=host_id,
+            workspace_path=workspace_path,
+            name=f"plugin-tool:{plugin}",
+            client_id=host_client,
+            env_file=env_file,
+            profile=profile,
+            config_root=config_root,
+            instruction_token_cache=self._instruction_token_cache,
+            created_by=created_by,
+            timestamp=datetime.now(),
+            on_event_during_init=on_event,
+        )
+        server: Optional[JaatoServer] = None
+        try:
+            server, _mode = self._construct_and_initialize_server(
+                envelope, plugin_host=True)
+        except Exception as exc:  # noqa: BLE001 -- answered, never raised to a transport
+            logger.exception("plugin host %s: spawn failed", host_id)
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            error = server.runner_bootstrap_error or (
+                "" if getattr(server, "_runner_rpc", None) is not None
+                else "no runner was spawned for the workspace")
+        if error:
+            self.release_plugin_host(server, host_id)
+            return None, host_id, error
+        return server, host_id, ""
+
+    def release_plugin_host(self, server: Optional[JaatoServer], host_id: str) -> None:
+        """Tear down what :meth:`spawn_plugin_host` built (#1606).
+
+        The teardown a session's unload and delete do, minus the record:
+        the runner (closed, never pooled -- a pool slot serves sessions,
+        and this one never had one), the confinement boundary, the egress
+        proxy, and the synthetic client's configuration.
+        """
+        if server is not None:
+            # No pool reference: ``shutdown`` then closes the runner instead
+            # of offering its slot back through ``session.end``, which a
+            # host with no session answers with an error.
+            server._pool_manager_ref = None
+            try:
+                server.shutdown()
+            except Exception:  # noqa: BLE001
+                logger.warning("plugin host %s: shutdown raised", host_id,
+                               exc_info=True)
+        self._release_apparmor_boundary(host_id)
+        try:
+            from jaato_server.server.egress_proxy import wireup as _egress_wireup
+            _egress_wireup.egress_teardown(host_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("egress proxy teardown failed for %s", host_id,
+                           exc_info=True)
+        self._forget_plugin_host_client(f"_plugin_host:{host_id}")
+
+    def _forget_plugin_host_client(self, host_client: str) -> None:
+        self._client_config.pop(host_client, None)
+        self._plugin_host_callers.pop(host_client, None)
 
     def _normalize_workspace(self, path: Optional[str]) -> Optional[str]:
         """Normalize a workspace path for comparison.

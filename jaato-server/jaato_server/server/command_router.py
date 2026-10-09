@@ -62,6 +62,9 @@ _ROUTED_REQUEST_HANDLERS = {
     "ReferenceBundleCreateRequest": "_handle_reference_bundle_create_request",
     # The runner pool (1.35): read or resize it on a running daemon.
     "PoolStatusRequest": "_handle_pool_status_request",
+    # One plugin tool call with no model turn (1.37, #1606).
+    "PluginToolDescribeRequest": "_handle_plugin_tool_request",
+    "PluginToolInvokeRequest": "_handle_plugin_tool_request",
 }
 
 
@@ -380,6 +383,13 @@ class CommandRouter:
         self._session_manager = session_manager
         self._event_sink = event_sink
         self._daemon_plugins = daemon_plugins
+        # The plugin-tool verbs (1.37, #1606): one tool call with no model
+        # turn and no session, in a runner of the caller's workspace.
+        from .plugin_tool_calls import PluginToolCalls
+        self._plugin_tool_calls = PluginToolCalls(
+            session_manager,
+            lambda cid, ev: self._event_sink.send_event(cid, ev),
+            lambda cid: self._event_sink.get_client_user(cid))
 
         # ``SessionInfoEvent.sessions`` is the same listing ``session.list``
         # renders, and it was built unscoped -- so a client the #1113
@@ -482,6 +492,14 @@ class CommandRouter:
             )
 
         try:
+            # A permission answer to a plugin tool call's ASK (#1606) belongs
+            # to that call's runner, not to the caller's own session.
+            # ``getattr``: a router built without ``__init__`` (a test
+            # double) has no plugin tool calls to route to.
+            calls = getattr(self, "_plugin_tool_calls", None)
+            if calls is not None and calls.route_permission_response(
+                    client_id, session_id, event):
+                return
             self._dispatch(client_id, session_id, event)
         finally:
             clear_logging_context()
@@ -692,12 +710,13 @@ class CommandRouter:
             ReferenceLinksUpdateRequest,
             ReferenceBundleCreateRequest,
             PoolStatusRequest,
+            PLUGIN_TOOL_REQUEST_TYPES,
         )
         if isinstance(event, (HistoryRequest, HistoryPageRequest,
                               ReferenceClaimsRequest, ReferenceCurationRequest,
                               ReferenceCatalogRequest, ReferenceLinksUpdateRequest,
                               ReferenceBundleCreateRequest,
-                              PoolStatusRequest)):
+                              PoolStatusRequest) + PLUGIN_TOOL_REQUEST_TYPES):
             getattr(self, _ROUTED_REQUEST_HANDLERS[type(event).__name__])(
                 client_id, event, session_id)
             return
@@ -1095,6 +1114,23 @@ class CommandRouter:
             if ws and os.path.realpath(ws) == target and hasattr(server, "embed_texts"):
                 return server.embed_texts
         return None
+
+    def _handle_plugin_tool_request(
+        self, client_id: str, event, session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``PluginToolDescribeRequest`` / ``PluginToolInvokeRequest`` (1.37).
+
+        The workspace is :meth:`resolve_caller_workspace`'s -- the rule every
+        daemon-level verb uses, entitlement-checked at the handshake (IPC)
+        or by ``resolve_visible`` (WS).  The rest is
+        :class:`~.plugin_tool_calls.PluginToolCalls`, which answers under
+        ``request_id`` from its own thread.
+        """
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, self._event_sink.get_client_workspace(client_id), session_id)
+        self._plugin_tool_calls.start(
+            client_id, event, workspace,
+            no_workspace_detail=_describe_sources(sources))
 
     def _handle_reference_bundle_create_request(
         self, client_id: str, event, session_id: Optional[str] = None,

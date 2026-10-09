@@ -382,9 +382,10 @@ REVERSIONS = [
     Reversion(
         target=_IPC,
         find="""    CommandRequest, ClientConfigRequest, PostAuthSetupResponse,
-    PoolStatusRequest,
+    PoolStatusRequest, PermissionResponseRequest,
 ) + MEMORY_REQUEST_TYPES""",
         replace="""    CommandRequest, ClientConfigRequest, PostAuthSetupResponse,
+    PermissionResponseRequest,
 ) + MEMORY_REQUEST_TYPES""",
         test="test_the_ipc_transport_routes_it_for_a_sessionless_client",
         because=("the IPC server dropping --pool-size's request, which "

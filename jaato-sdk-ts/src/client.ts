@@ -76,6 +76,9 @@ import {
   type ReferenceCatalogEvent,
   type ReferenceLinksUpdateResultEvent,
   type ReferenceBundleCreateResultEvent,
+  type PermissionRequestedEvent,
+  type PluginToolDescribeEvent,
+  type PluginToolInvokeResultEvent,
   type MemoryGetResultEvent,
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
@@ -207,6 +210,23 @@ export const MIN_SCAFFOLD_VALIDATE_PROTOCOL = "1.34";
  * wait out its timeout for a bundle nobody created.
  */
 export const MIN_REFERENCE_BUNDLE_PROTOCOL = "1.36";
+
+/**
+ * Floor for {@link JaatoClient.describePluginTool} and
+ * {@link JaatoClient.invokePluginTool} (protocol 1.37, #1606).  New verbs
+ * (the 1.7 rule): an older daemon ignores them, and the caller would wait out
+ * its timeout for a call nobody ran.
+ */
+export const MIN_PLUGIN_TOOL_PROTOCOL = "1.37";
+
+/** How a plugin tool call is configured: a profile OR a ``plugin_configs`` block. */
+export interface PluginToolOptions {
+  /** A profile the caller's workspace resolves (set-qualified allowed). */
+  profile?: string;
+  /** A ``plugin_configs`` block; the session then enables only the plugin. */
+  pluginConfigs?: Record<string, unknown>;
+  timeoutMs?: number;
+}
 
 /**
  * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
@@ -1730,6 +1750,7 @@ export class JaatoClient {
     minProtocol: string,
     featureLabel: string,
     idPrefix: string,
+    onEvent?: (requestId: string, raw: unknown) => void,
   ): Promise<T> {
     if (
       this._serverProtocolVersion === null ||
@@ -1765,7 +1786,10 @@ export class JaatoClient {
           error_type?: string;
           details?: Record<string, unknown> | null;
         };
-        if (event.request_id !== requestId) return;
+        if (event.request_id !== requestId) {
+          onEvent?.(requestId, raw);
+          return;
+        }
         if (event.type === EventTypeValue.ERROR) {
           // A correlated refusal (#1475): the daemon refused the request
           // before any handler answered it, and echoed its id so the call
@@ -1787,6 +1811,101 @@ export class JaatoClient {
     });
     await this._sendEvent({ ...request, request_id: requestId } as unknown as JaatoEvent);
     return answer;
+  }
+
+  /**
+   * A plugin tool's schema as a session would expose it (protocol 1.37,
+   * #1606).  Configured by ``profile`` OR ``pluginConfigs``, never both.  The
+   * daemon answers from a runner of this connection's workspace holding those
+   * plugins and no session, so the schema is the one a session with that
+   * configuration puts on the wire, and
+   * ``exists === false`` (with ``reason`` / ``detail``) when the profile does
+   * not enable the plugin, scopes the tool out or hides it.  Mirror of Python
+   * ``IPCClient.describe_plugin_tool``.
+   *
+   * @throws Error against a daemon below {@link MIN_PLUGIN_TOOL_PROTOCOL}.
+   */
+  async describePluginTool(
+    plugin: string,
+    tool: string,
+    options: PluginToolOptions = {},
+  ): Promise<PluginToolDescribeEvent> {
+    return this._quietRequest<PluginToolDescribeEvent>(
+      "describePluginTool",
+      {
+        type: EventTypeValue.PLUGIN_TOOL_DESCRIBE_REQUEST,
+        plugin,
+        tool,
+        profile: options.profile ?? "",
+        plugin_configs: options.pluginConfigs ?? null,
+      },
+      EventTypeValue.PLUGIN_TOOL_DESCRIBE_RESULT,
+      options.timeoutMs ?? 120_000,
+      MIN_PLUGIN_TOOL_PROTOCOL,
+      "plugin tool calls (upgrade the daemon)",
+      "ptd",
+    );
+  }
+
+  /**
+   * Run one plugin tool call with no model turn (protocol 1.37, #1606).
+   *
+   * The call runs, with no session, in a runner of this connection's workspace,
+   * under its confinement and through its own executor (permission policy,
+   * argument coercion, secret redaction, the failure contract).  ``ok`` says
+   * whether the call reached the tool, ``success`` whether the tool
+   * succeeded, ``result`` is what it returned.
+   *
+   * A permission ASK for this call goes to ``onPermission``; its return
+   * value (``"y"``, ``"n"``, ``"a"``, ...) is sent as the answer.  With no
+   * ``onPermission``, or when it returns nothing, the ASK is answered
+   * ``"n"``.  Mirror of Python ``IPCClient.invoke_plugin_tool``.
+   *
+   * @throws Error against a daemon below {@link MIN_PLUGIN_TOOL_PROTOCOL}.
+   */
+  async invokePluginTool(
+    plugin: string,
+    tool: string,
+    args: Record<string, unknown> = {},
+    options: PluginToolOptions & {
+      onPermission?: (
+        event: PermissionRequestedEvent,
+      ) => string | undefined | null | Promise<string | undefined | null>;
+    } = {},
+  ): Promise<PluginToolInvokeResultEvent> {
+    const timeoutMs = options.timeoutMs ?? 300_000;
+    const answerAsk = (requestId: string, raw: unknown): void => {
+      const event = raw as PermissionRequestedEvent;
+      if (
+        event.type !== EventTypeValue.PERMISSION_REQUESTED ||
+        event.origin_request_id !== requestId
+      ) {
+        return;
+      }
+      void Promise.resolve(options.onPermission?.(event)).then((response) =>
+        this.respondToPermission(event.request_id ?? "", response || "n"),
+      );
+    };
+    return this._quietRequest<PluginToolInvokeResultEvent>(
+      "invokePluginTool",
+      {
+        type: EventTypeValue.PLUGIN_TOOL_INVOKE_REQUEST,
+        plugin,
+        tool,
+        args,
+        profile: options.profile ?? "",
+        plugin_configs: options.pluginConfigs ?? null,
+        timeout: timeoutMs / 1000,
+      },
+      EventTypeValue.PLUGIN_TOOL_INVOKE_RESULT,
+      // The daemon gives up at ``timeout``; wait a little longer for its
+      // ``timeout`` answer rather than racing it.
+      timeoutMs + 30_000,
+      MIN_PLUGIN_TOOL_PROTOCOL,
+      "plugin tool calls (upgrade the daemon)",
+      "pti",
+      answerAsk,
+    );
   }
 
   /**

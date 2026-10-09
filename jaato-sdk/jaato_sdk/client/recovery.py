@@ -907,6 +907,24 @@ class IPCRecoveryClient:
         return await self._memory_client("create_reference_bundle").create_reference_bundle(
             name, timeout=timeout)
 
+    async def describe_plugin_tool(
+        self, plugin: str, tool: str, *, profile: str = "",
+        plugin_configs=None, timeout: float = 120.0,
+    ):
+        """See :meth:`IPCClient.describe_plugin_tool`."""
+        return await self._memory_client("describe_plugin_tool").describe_plugin_tool(
+            plugin, tool, profile=profile, plugin_configs=plugin_configs,
+            timeout=timeout)
+
+    async def invoke_plugin_tool(
+        self, plugin: str, tool: str, args=None, *, profile: str = "",
+        plugin_configs=None, on_permission=None, timeout: float = 300.0,
+    ):
+        """See :meth:`IPCClient.invoke_plugin_tool`."""
+        return await self._memory_client("invoke_plugin_tool").invoke_plugin_tool(
+            plugin, tool, args, profile=profile, plugin_configs=plugin_configs,
+            on_permission=on_permission, timeout=timeout)
+
     async def update_reference_links(
         self, reference_id: str, links, *, timeout: float = 10.0,
     ):

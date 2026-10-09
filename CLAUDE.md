@@ -587,6 +587,7 @@ await client.create_session(profile="researcher")
 - `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
 - `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 - `workspace.file.fetch` (a `WorkspaceFileFetchRequest`, WS only) — download one file from the caller's workspace (→ `WorkspaceFileContentEvent` + one binary frame; protocol 1.20, see [A File That Could Go In and Not Come Out](#a-file-that-could-go-in-and-not-come-out))
+- `PluginToolDescribeRequest` → `PluginToolDescribeEvent` / `PluginToolInvokeRequest` → `PluginToolInvokeResultEvent` — one plugin tool's schema, or one call of it, with no session, in a runner of the caller's workspace (protocol 1.37, see [One Plugin Tool Call, No Session](#one-plugin-tool-call-no-session-protocol-137-1606))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -1430,6 +1431,71 @@ digest re-check, the discard on non-delivery, and the drive deleting the
 files it just named). Stated limit: delivered files are never pruned
 before the session record is deleted. Design and rollout:
 [Session Group Messaging](docs/design/session-group-messaging.md).
+
+### One Plugin Tool Call, No Session (protocol 1.37, #1606)
+
+jaato-mcp's `kind: plugin` tool calls one jaato plugin tool directly (kbwiki
+offers the `template` plugin's three tools to MCP callers). Before this the
+only routes were a model turn, or importing `jaato_server.shared.plugins.<x>`
+and calling its executor: jaato-server in the client's environment,
+internals as API, and the call outside the profile's confinement.
+
+| Verb | Answers |
+|---|---|
+| `PluginToolDescribeRequest{plugin, tool, profile \| plugin_configs}` → `PluginToolDescribeEvent` | `exists`, `tool_schema` (after `narrow_tool_schema` and the profile's settings such as `allow_inline_template: false`), or `exists: false` with `reason`: `unknown_tool`, `wrong_plugin`, `not_in_surface` (#1513 / #1590), `hidden` |
+| `PluginToolInvokeRequest{plugin, tool, args, profile \| plugin_configs, timeout}` → `PluginToolInvokeResultEvent` | `ok` (the call reached the executor), `success` (the executor's own flag, #1053), `result` (as the executor returned it, redacted) |
+
+**A tool needs no session, so none is built.** What it needs is its plugin
+initialized with the profile's configuration, the profile's permission
+policy and a process inside the workspace's boundary.
+`SessionManager.spawn_plugin_host` resolves what the caller's own
+`session.new` would (its client config, the workspace, the profile; or an
+inline profile enabling only `plugin`) and runs session bootstrap up to the
+spawn (`_construct_and_initialize_server(..., plugin_host=True)` returns
+before `initialize`): the same confinement provisioning,
+runner uid and pool slot. The server is never initialized, nothing is
+recorded, listed or persisted, and no provider exists. The envelope carries
+`SessionInitEnvelope.plugin_host`, so the runner's `bootstrap_session` runs
+every step that sets up the PROCESS (env, redaction, private `/tmp`, uid
+drop, confinement, tmpdir, user tier, plugin discovery, permission plugin)
+and returns at step 2e with a `PluginToolHost`
+(`shared/plugin_tool_call.py`) where it would have built a `JaatoSession`
+(model and provider are not required). The host's `ToolExecutor` is wired
+as `JaatoSession.configure` wires one (surface, executors, registry,
+runtime limits, permission plugin, the `//child` transition), so a call
+takes a model's path: scope check, permission gate, coercion (#1358),
+redaction (#1215). `session.plugin_tool` (work lane) serves it;
+`release_plugin_host` closes the runner (never pooled) and releases the
+confinement boundary and egress proxy.
+
+| Rule | Why |
+|---|---|
+| the spawn runs under a synthetic client id with a copy of the caller's client config; its peer is the caller's (`_plugin_host_callers`) | the caller's attachment and buffered host tools are untouched, and the `peer` runner-uid policy drops to the caller's account |
+| the surface is the profile's, from the envelope's plugin specs: the `plugins:` list plus `introspection` / `permission` / enrichment-only, minus `tools:[...]` scope | `JaatoSession.plugin_enabled` / `tool_in_surface` restated for a host with no session; an invoke of a tool describe says does not exist is refused (`not_in_surface`) and nothing runs |
+| per-session settings resolve to the plugin instance's value | there is no current session; the instance was initialized with the profile's `plugin_configs` |
+| a permission ASK goes from the host's server to the call's sink, which forwards it to the caller tagged `PermissionRequestedEvent.origin_request_id` | the caller is attached to nothing that would carry it |
+| the caller answers with the ordinary `PermissionResponseRequest`; `CommandRouter.handle_request` resolves it on the call's server when it holds that `request_id` | session-less on IPC (`_SESSIONLESS_REQUEST_TYPES`); an unclaimed one from a caller with no session is refused `no_session` |
+| the SDK answers the call's own ASKs: `on_permission` (sync or async), or `"n"` | a call is refused, never left waiting on nobody |
+| the work runs on its own thread | an IPC connection reads its next message only after the previous one was handled, so a blocking call could never receive its permission answer |
+| `timeout` (default 300 s, max 3600) bounds the call, a pending ASK included | the daemon answers `timeout` and releases the runner |
+| a setup failure (unknown profile, refused confinement, failed bootstrap) is `category="host_failed"` with its cause | |
+
+Both SDKs refuse below `MIN_PLUGIN_TOOL_PROTOCOL` (the 1.7 rule):
+`IPCClient.describe_plugin_tool` / `invoke_plugin_tool` (and the recovery
+client), `describePluginTool` / `invokePluginTool`. Costs, stated: every
+call spawns (or takes a pool slot for) a runner and closes it, about 0.3 s
+per call in the conformance run, and leaves a
+`.jaato/logs/runner-plugintool_<id>.log`. The result keeps the executor's
+bookkeeping keys (`_permission`, `_telemetry`). Not served: the standalone
+WS mode (no `CommandRouter`), and streaming a tool's output while it runs.
+
+Guards: `jaato_server/shared/tests/test_one_plugin_tool_call_1606.py` (eight
+reversions; a real registry, `template` and `permission` plugins and no
+`JaatoSession`, plus `bootstrap_session` itself returning a host and no
+session), `jaato_sdk/tests/test_plugin_tool_client_1606.py`, the TS SDK's
+cases, and `jaato_sdk/conformance/test_plugin_tool_calls_1606.py`, which
+drives a real daemon and runner through the SDK and checks no session record
+is written.
 
 ### A Failure the Framework Was Told Was a Success (#1053)
 

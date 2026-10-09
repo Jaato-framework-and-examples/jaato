@@ -96,12 +96,18 @@ class RunnerSessionHost:
             skips runtime construction.
         session: The live :class:`JaatoSession`.  Populated after
             ``configure()`` returns successfully.  ``None`` until
-            then (or in test-stub mode).
+            then (or in test-stub mode), and always ``None`` for a
+            plugin host.
+        plugin_host: The ``PluginToolHost`` of a ``plugin_host`` envelope.
     """
 
     envelope: SessionInitEnvelope
     runtime: Optional["JaatoRuntime"] = None
     session: Optional["JaatoSession"] = None
+    #: The plugin host a ``plugin_host`` envelope builds INSTEAD of a
+    #: session (#1606): ``session`` stays ``None`` and ``is_ready`` False,
+    #: so every session.* handler refuses as before.
+    plugin_host: Optional[Any] = None
 
     @property
     def session_id(self) -> str:
@@ -2069,6 +2075,10 @@ def bootstrap_session(
     # every confined session while the kernel then ran in ``//child``.
     child_cb = _prearm_child_callback(envelope, runtime)
 
+    # ---- 2e. A plugin host stops here: no session (#1606) ----
+    if envelope.plugin_host:
+        return _build_plugin_host(envelope, runtime, child_cb)
+
     # ---- 3. Construct + configure the session ----
     try:
         session = _build_session(runtime, envelope)
@@ -2136,6 +2146,41 @@ def bootstrap_session(
     return RunnerSessionHost(envelope=envelope, runtime=runtime, session=session)
 
 
+def _build_plugin_host(
+    envelope: SessionInitEnvelope, runtime: Any,
+    child_cb: Optional[Callable[[], None]],
+) -> RunnerSessionHost:
+    """The host of a ``plugin_host`` envelope: plugins, no session (#1606).
+
+    Everything above step 2e set up the PROCESS the way a session's runner
+    is set up.  What a session would add on top -- provider, history,
+    prompt, GC -- a tool call does not use, so it is not built.  The
+    executor gets the profile's surface, runtime limits and permission
+    plugin (``PluginToolHost.wire``) and, on a confined runner, the //child
+    transition through the same step-4 install a session's executor gets.
+    """
+    from jaato_server.shared.plugin_tool_call import build_plugin_tool_host
+
+    plugins, _preloaded, scopes = _extract_plugin_specs(envelope.plugins)
+    try:
+        host = build_plugin_tool_host(
+            runtime, plugins, scopes,
+            permission_context={"agent_type": "main",
+                                "session_id": envelope.session_id},
+            runtime_limits=_runtime_limits_from_envelope(envelope),
+        )
+    except Exception as exc:  # noqa: BLE001 -- boundary surface
+        logger.exception("runner plugin-host bootstrap: executor wiring crashed")
+        raise BootstrapError("configure", str(exc)) from exc
+    _maybe_install_child_callback(envelope, host, child_cb)
+    logger.info(
+        "runner plugin-host bootstrap ready: id=%s profile=%s plugins=%s",
+        envelope.session_id, envelope.profile_name,
+        _describe_plugin_selection(envelope.plugins),
+    )
+    return RunnerSessionHost(envelope=envelope, runtime=runtime, plugin_host=host)
+
+
 def _describe_plugin_selection(
     plugins: Optional[List[Dict[str, Any]]],
 ) -> str:
@@ -2165,6 +2210,8 @@ def _validate_envelope(envelope: SessionInitEnvelope) -> None:
     """
     if not envelope.session_id:
         raise ValueError("envelope.session_id is empty")
+    if envelope.plugin_host:
+        return  # a plugin host builds no session, so it binds no model (#1606)
     if not envelope.model_name:
         raise ValueError("envelope.model_name is empty")
     if not envelope.provider_name:

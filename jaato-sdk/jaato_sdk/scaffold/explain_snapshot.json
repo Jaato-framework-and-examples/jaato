@@ -169,6 +169,14 @@
    "PLAN_CLEARED": "PLAN_CLEARED",
    "PLAN_STEP_UPDATED": "PLAN_STEP_UPDATED",
    "PLAN_UPDATED": "PLAN_UPDATED",
+   "PLUGIN.TOOL.DESCRIBE.REQUEST": "PLUGIN_TOOL_DESCRIBE_REQUEST",
+   "PLUGIN.TOOL.DESCRIBE.RESULT": "PLUGIN_TOOL_DESCRIBE_RESULT",
+   "PLUGIN.TOOL.INVOKE.REQUEST": "PLUGIN_TOOL_INVOKE_REQUEST",
+   "PLUGIN.TOOL.INVOKE.RESULT": "PLUGIN_TOOL_INVOKE_RESULT",
+   "PLUGIN_TOOL_DESCRIBE_REQUEST": "PLUGIN_TOOL_DESCRIBE_REQUEST",
+   "PLUGIN_TOOL_DESCRIBE_RESULT": "PLUGIN_TOOL_DESCRIBE_RESULT",
+   "PLUGIN_TOOL_INVOKE_REQUEST": "PLUGIN_TOOL_INVOKE_REQUEST",
+   "PLUGIN_TOOL_INVOKE_RESULT": "PLUGIN_TOOL_INVOKE_RESULT",
    "POOL.STATUS": "POOL_STATUS",
    "POOL.STATUS.REQUEST": "POOL_STATUS_REQUEST",
    "POOL_STATUS": "POOL_STATUS",
@@ -493,6 +501,14 @@
    "plan_cleared": "PLAN_CLEARED",
    "plan_step_updated": "PLAN_STEP_UPDATED",
    "plan_updated": "PLAN_UPDATED",
+   "plugin.tool.describe.request": "PLUGIN_TOOL_DESCRIBE_REQUEST",
+   "plugin.tool.describe.result": "PLUGIN_TOOL_DESCRIBE_RESULT",
+   "plugin.tool.invoke.request": "PLUGIN_TOOL_INVOKE_REQUEST",
+   "plugin.tool.invoke.result": "PLUGIN_TOOL_INVOKE_RESULT",
+   "plugin_tool_describe_request": "PLUGIN_TOOL_DESCRIBE_REQUEST",
+   "plugin_tool_describe_result": "PLUGIN_TOOL_DESCRIBE_RESULT",
+   "plugin_tool_invoke_request": "PLUGIN_TOOL_INVOKE_REQUEST",
+   "plugin_tool_invoke_result": "PLUGIN_TOOL_INVOKE_RESULT",
    "pool.status": "POOL_STATUS",
    "pool.status.request": "POOL_STATUS_REQUEST",
    "pool_status": "POOL_STATUS",
@@ -8317,13 +8333,17 @@
      {
       "name": "tool_class",
       "type": "Optional[str]"
+     },
+     {
+      "name": "origin_request_id",
+      "type": "Optional[str]"
      }
     ],
     "name": "PERMISSION_REQUESTED",
     "note": "",
     "wire": "permission.requested"
    },
-   "text": "PERMISSION_REQUESTED   (permission.requested)\n  direction : Server ↔ Client\n  domain    : Permission flow\n  class     : PermissionRequestedEvent\n  subscribe : event_types=[\"PermissionRequestedEvent\"]   (cascade_events / observer filters match the CLASS name)\n  purpose   : Permission is requested for a tool execution.\n  fields    :\n    agent_id         : str\n    request_id       : str\n    tool_name        : str\n    tool_args        : Dict[str, Any]\n    response_options : List[Dict[str, str]]\n    prompt_lines     : Optional[List[str]]\n    format_hint      : Optional[str]\n    warnings         : Optional[str]\n    warning_level    : Optional[str]\n    tool_class       : Optional[str]"
+   "text": "PERMISSION_REQUESTED   (permission.requested)\n  direction : Server ↔ Client\n  domain    : Permission flow\n  class     : PermissionRequestedEvent\n  subscribe : event_types=[\"PermissionRequestedEvent\"]   (cascade_events / observer filters match the CLASS name)\n  purpose   : Permission is requested for a tool execution.\n  fields    :\n    agent_id          : str\n    request_id        : str\n    tool_name         : str\n    tool_args         : Dict[str, Any]\n    response_options  : List[Dict[str, str]]\n    prompt_lines      : Optional[List[str]]\n    format_hint       : Optional[str]\n    warnings          : Optional[str]\n    warning_level     : Optional[str]\n    tool_class        : Optional[str]\n    origin_request_id : Optional[str]"
   },
   "event PERMISSION_RESOLVED": {
    "data": {
@@ -8538,6 +8558,166 @@
     "wire": "plan.updated"
    },
    "text": "PLAN_UPDATED   (plan.updated)\n  direction : Server → Client\n  domain    : Plan updates\n  class     : PlanUpdatedEvent\n  subscribe : event_types=[\"PlanUpdatedEvent\"]   (cascade_events / observer filters match the CLASS name)\n  purpose   : Plan has been created or updated.\n  fields    :\n    agent_id  : str\n    plan_name : str\n    steps     : List[Dict[str, Any]]"
+  },
+  "event PLUGIN_TOOL_DESCRIBE_REQUEST": {
+   "data": {
+    "direction": "Client → Server",
+    "doc": "Describe one plugin tool as a session would expose it (1.37, #1606).",
+    "domain": "Plugin tool calls, no model turn",
+    "event_class": "PluginToolDescribeRequest",
+    "fields": [
+     {
+      "name": "request_id",
+      "type": "str"
+     },
+     {
+      "name": "plugin",
+      "type": "str"
+     },
+     {
+      "name": "tool",
+      "type": "str"
+     },
+     {
+      "name": "profile",
+      "type": "str"
+     },
+     {
+      "name": "plugin_configs",
+      "type": "Optional[Dict[str, Any]]"
+     }
+    ],
+    "name": "PLUGIN_TOOL_DESCRIBE_REQUEST",
+    "note": "1.37",
+    "wire": "plugin.tool.describe.request"
+   },
+   "text": "PLUGIN_TOOL_DESCRIBE_REQUEST   (plugin.tool.describe.request)\n  direction : Client → Server\n  domain    : Plugin tool calls, no model turn\n  class     : PluginToolDescribeRequest\n  subscribe : event_types=[\"PluginToolDescribeRequest\"]   (cascade_events / observer filters match the CLASS name)\n  note      : 1.37\n  purpose   : Describe one plugin tool as a session would expose it (1.37, #1606).\n  fields    :\n    request_id     : str\n    plugin         : str\n    tool           : str\n    profile        : str\n    plugin_configs : Optional[Dict[str, Any]]"
+  },
+  "event PLUGIN_TOOL_DESCRIBE_RESULT": {
+   "data": {
+    "direction": "Server ↔ Client",
+    "doc": "The schema of one plugin tool, as a session exposes it (1.37, #1606).",
+    "domain": "Plugin tool calls, no model turn",
+    "event_class": "PluginToolDescribeEvent",
+    "fields": [
+     {
+      "name": "request_id",
+      "type": "str"
+     },
+     {
+      "name": "ok",
+      "type": "bool"
+     },
+     {
+      "name": "category",
+      "type": "str"
+     },
+     {
+      "name": "error",
+      "type": "str"
+     },
+     {
+      "name": "exists",
+      "type": "bool"
+     },
+     {
+      "name": "reason",
+      "type": "str"
+     },
+     {
+      "name": "detail",
+      "type": "str"
+     },
+     {
+      "name": "tool_schema",
+      "type": "Optional[Dict[str, Any]]"
+     }
+    ],
+    "name": "PLUGIN_TOOL_DESCRIBE_RESULT",
+    "note": "Answer to PluginToolDescribeRequest (1.37",
+    "wire": "plugin.tool.describe.result"
+   },
+   "text": "PLUGIN_TOOL_DESCRIBE_RESULT   (plugin.tool.describe.result)\n  direction : Server ↔ Client\n  domain    : Plugin tool calls, no model turn\n  class     : PluginToolDescribeEvent\n  subscribe : event_types=[\"PluginToolDescribeEvent\"]   (cascade_events / observer filters match the CLASS name)\n  note      : Answer to PluginToolDescribeRequest (1.37\n  purpose   : The schema of one plugin tool, as a session exposes it (1.37, #1606).\n  fields    :\n    request_id  : str\n    ok          : bool\n    category    : str\n    error       : str\n    exists      : bool\n    reason      : str\n    detail      : str\n    tool_schema : Optional[Dict[str, Any]]"
+  },
+  "event PLUGIN_TOOL_INVOKE_REQUEST": {
+   "data": {
+    "direction": "Client → Server",
+    "doc": "Run one plugin tool call with no model turn (1.37, #1606).",
+    "domain": "Plugin tool calls, no model turn",
+    "event_class": "PluginToolInvokeRequest",
+    "fields": [
+     {
+      "name": "request_id",
+      "type": "str"
+     },
+     {
+      "name": "plugin",
+      "type": "str"
+     },
+     {
+      "name": "tool",
+      "type": "str"
+     },
+     {
+      "name": "args",
+      "type": "Dict[str, Any]"
+     },
+     {
+      "name": "profile",
+      "type": "str"
+     },
+     {
+      "name": "plugin_configs",
+      "type": "Optional[Dict[str, Any]]"
+     },
+     {
+      "name": "timeout",
+      "type": "float"
+     }
+    ],
+    "name": "PLUGIN_TOOL_INVOKE_REQUEST",
+    "note": "1.37",
+    "wire": "plugin.tool.invoke.request"
+   },
+   "text": "PLUGIN_TOOL_INVOKE_REQUEST   (plugin.tool.invoke.request)\n  direction : Client → Server\n  domain    : Plugin tool calls, no model turn\n  class     : PluginToolInvokeRequest\n  subscribe : event_types=[\"PluginToolInvokeRequest\"]   (cascade_events / observer filters match the CLASS name)\n  note      : 1.37\n  purpose   : Run one plugin tool call with no model turn (1.37, #1606).\n  fields    :\n    request_id     : str\n    plugin         : str\n    tool           : str\n    args           : Dict[str, Any]\n    profile        : str\n    plugin_configs : Optional[Dict[str, Any]]\n    timeout        : float"
+  },
+  "event PLUGIN_TOOL_INVOKE_RESULT": {
+   "data": {
+    "direction": "Server ↔ Client",
+    "doc": "What one plugin tool call did (1.37, #1606).",
+    "domain": "Plugin tool calls, no model turn",
+    "event_class": "PluginToolInvokeResultEvent",
+    "fields": [
+     {
+      "name": "request_id",
+      "type": "str"
+     },
+     {
+      "name": "ok",
+      "type": "bool"
+     },
+     {
+      "name": "category",
+      "type": "str"
+     },
+     {
+      "name": "error",
+      "type": "str"
+     },
+     {
+      "name": "success",
+      "type": "bool"
+     },
+     {
+      "name": "result",
+      "type": "Any"
+     }
+    ],
+    "name": "PLUGIN_TOOL_INVOKE_RESULT",
+    "note": "Answer to PluginToolInvokeRequest (1.37",
+    "wire": "plugin.tool.invoke.result"
+   },
+   "text": "PLUGIN_TOOL_INVOKE_RESULT   (plugin.tool.invoke.result)\n  direction : Server ↔ Client\n  domain    : Plugin tool calls, no model turn\n  class     : PluginToolInvokeResultEvent\n  subscribe : event_types=[\"PluginToolInvokeResultEvent\"]   (cascade_events / observer filters match the CLASS name)\n  note      : Answer to PluginToolInvokeRequest (1.37\n  purpose   : What one plugin tool call did (1.37, #1606).\n  fields    :\n    request_id : str\n    ok         : bool\n    category   : str\n    error      : str\n    success    : bool\n    result     : Any"
   },
   "event POOL_STATUS": {
    "data": {
@@ -12230,7 +12410,8 @@
        "format_hint",
        "warnings",
        "warning_level",
-       "tool_class"
+       "tool_class",
+       "origin_request_id"
       ],
       "wire": "permission.requested"
      },
@@ -12305,6 +12486,62 @@
        "steps"
       ],
       "wire": "plan.updated"
+     }
+    },
+    "Plugin tool calls, no model turn": {
+     "PLUGIN_TOOL_DESCRIBE_REQUEST": {
+      "direction": "Client → Server",
+      "event_class": "PluginToolDescribeRequest",
+      "fields": [
+       "request_id",
+       "plugin",
+       "tool",
+       "profile",
+       "plugin_configs"
+      ],
+      "wire": "plugin.tool.describe.request"
+     },
+     "PLUGIN_TOOL_DESCRIBE_RESULT": {
+      "direction": "Server ↔ Client",
+      "event_class": "PluginToolDescribeEvent",
+      "fields": [
+       "request_id",
+       "ok",
+       "category",
+       "error",
+       "exists",
+       "reason",
+       "detail",
+       "tool_schema"
+      ],
+      "wire": "plugin.tool.describe.result"
+     },
+     "PLUGIN_TOOL_INVOKE_REQUEST": {
+      "direction": "Client → Server",
+      "event_class": "PluginToolInvokeRequest",
+      "fields": [
+       "request_id",
+       "plugin",
+       "tool",
+       "args",
+       "profile",
+       "plugin_configs",
+       "timeout"
+      ],
+      "wire": "plugin.tool.invoke.request"
+     },
+     "PLUGIN_TOOL_INVOKE_RESULT": {
+      "direction": "Server ↔ Client",
+      "event_class": "PluginToolInvokeResultEvent",
+      "fields": [
+       "request_id",
+       "ok",
+       "category",
+       "error",
+       "success",
+       "result"
+      ],
+      "wire": "plugin.tool.invoke.result"
      }
     },
     "Post-auth setup flow": {
@@ -13322,7 +13559,7 @@
      }
     }
    },
-   "text": "event protocol — 165 typed events across 40 domains\n  (S→C server→client, C→S client→server, S↔C bidirectional; wire value is the on-the-wire `type`. `explain event <NAME>` for detail)\n  NOTE a cascade/observer subscription filters on the CLASS name (SessionTerminatedEvent),\n       not on the member or the wire value — `cascade_events(event_types=[...])` and the daemon both\n       compare type(event).__name__, so a wire value there matches nothing at all (#821).\n\n  [Agent lifecycle]\n    AGENT_COMPLETED       agent.completed       [S→C]\n    AGENT_CREATED         agent.created         [S→C]\n    AGENT_ERROR           agent.error           [S→C]\n    AGENT_OUTPUT          agent.output          [S→C]\n    AGENT_STATUS_CHANGED  agent.status_changed  [S→C]\n\n  [Agent profiles]\n    SESSION_PROFILES  session.profiles  [S→C]\n\n  [Cascade stage settled]\n    SLOT_SETTLED  slot.settled  [?]\n\n  [Clarification flow]\n    CLARIFICATION_BATCH           clarification.batch           [S→C]\n    CLARIFICATION_BATCH_RESPONSE  clarification.batch_response  [C→S]\n    CLARIFICATION_INPUT_MODE      clarification.input_mode      [S↔C]\n    CLARIFICATION_QUESTION        clarification.question        [S↔C]\n    CLARIFICATION_REQUESTED       clarification.requested       [S↔C]\n    CLARIFICATION_RESOLVED        clarification.resolved        [S↔C]\n    CLARIFICATION_RESPONSE        clarification.response        [C→S]\n\n  [Client configuration]\n    CLIENT_CONFIG  client.config  [C→S]\n\n  [Client requests]\n    COMMAND               command.execute       [C→S]\n    COMMAND_LIST_REQUEST  command.list_request  [C→S]\n    SEND_MESSAGE          message.send          [C→S]\n    STOP                  session.stop          [C→S]\n\n  [Client-side tool execution]\n    TOOLS_REGISTER_CLIENT  tools.register_client  [C→S]\n    TOOL_EXECUTE_REQUEST   tool.execute_request   [S→C]\n    TOOL_EXECUTE_RESULT    tool.execute_result    [C→S]\n\n  [Command list]\n    COMMAND_LIST          command.list          [S→C]\n    COMMAND_LIST_REFRESH  command.list_refresh  [S→C]\n\n  [Connection lifecycle]\n    CONNECTED     connected     [?]\n    DISCONNECTED  disconnected  [?]   (no class — command/marker)\n\n  [Context/token updates]\n    BUDGET_RUNG_FIRED           budget.rung_fired           [S→C]\n    CONTEXT_UPDATED             context.updated             [S→C]\n    GC                          gc                          [S→C]\n    GC_CONFIG                   gc.config                   [S→C]\n    INCIDENT_RAISED             incident.raised             [S→C]\n    INSTRUCTION_BUDGET_UPDATED  instruction_budget.updated  [S→C]\n    TURN_COMPLETED              turn.completed              [S→C]\n    TURN_PROGRESS               turn.progress               [S→C]\n\n  [Event subscription notifications]\n    EVENTS_SUBSCRIBED  events.subscribed  [S→C]\n\n  [External events]\n    EVENT_EXTERNAL  event.external  [C→S]\n\n  [File staging into a workspace]\n    WORKSPACE_FILES_SEARCH_REQUEST  workspace.files.search         [C→S]\n    WORKSPACE_FILES_SEARCH_RESULT   workspace.files.search_result  [S→C]\n    WORKSPACE_FILES_STAGED          workspace.files.staged         [S→C]\n    WORKSPACE_FILES_STAGE_REQUEST   workspace.files.stage_request  [C→S]\n    WORKSPACE_FILE_CONTENT          workspace.file.content         [S→C]\n    WORKSPACE_FILE_FETCH_REQUEST    workspace.file.fetch           [C→S]\n\n  [HandoffGate events]\n    GATES_SNAPSHOT  gates.snapshot  [?]\n    GATE_ANNOUNCED  gate.announced  [?]\n    GATE_RELEASED   gate.released   [?]\n\n  [History]\n    HISTORY               history               [S↔C]\n    HISTORY_PAGE          history.page          [S→C]\n    HISTORY_PAGE_REQUEST  history.page.request  [C→S]\n    HISTORY_REQUEST       history.request       [S↔C]\n\n  [Identity at connect (#1074)]\n    TICKET_BIND_REQUEST    ticket.bind           [C→S]\n    TICKET_BIND_RESULT     ticket.bind.result    [S→C]\n    TICKET_REVOKE_REQUEST  ticket.revoke         [C→S]\n    TICKET_REVOKE_RESULT   ticket.revoke.result  [S→C]\n\n  [Instruction budget]\n    INSTRUCTION_BUDGET_REQUEST  instruction_budget.request  [C→S]\n\n  [Memory management]\n    MEMORY_DELETE_REQUEST  memory.delete.request  [C→S]\n    MEMORY_DELETE_RESULT   memory.delete.result   [S→C]\n    MEMORY_GET_REQUEST     memory.get.request     [C→S]\n    MEMORY_GET_RESULT      memory.get.result      [S→C]\n    MEMORY_LIST            memory.list            [S→C]\n    MEMORY_LIST_REQUEST    memory.list.request    [C→S]\n    MEMORY_UPDATE_REQUEST  memory.update.request  [C→S]\n    MEMORY_UPDATE_RESULT   memory.update.result   [S→C]\n\n  [Mid-turn prompts]\n    MID_TURN_INTERRUPT        mid_turn_prompt.interrupt  [S→C]\n    MID_TURN_PROMPT_INJECTED  mid_turn_prompt.injected   [S→C]\n    MID_TURN_PROMPT_QUEUED    mid_turn_prompt.queued     [S→C]\n\n  [Peer channel events (server-to-server gossip)]\n    PEER_AGENT_COMPLETED    peer.agent_completed    [?]\n    PEER_AGENT_OUTPUT       peer.agent_output       [?]\n    PEER_HEARTBEAT          peer.heartbeat          [?]\n    PEER_SPAWN_ACCEPTED     peer.spawn_accepted     [?]\n    PEER_SPAWN_REJECTED     peer.spawn_rejected     [?]\n    PEER_SPAWN_REQUEST      peer.spawn_request      [?]\n    PEER_STOP_ACKNOWLEDGED  peer.stop_acknowledged  [?]\n    PEER_STOP_REQUEST       peer.stop_request       [?]\n\n  [Permission flow]\n    PERMISSION_INPUT_MODE  permission.input_mode  [S↔C]\n    PERMISSION_REQUESTED   permission.requested   [S↔C]\n    PERMISSION_RESOLVED    permission.resolved    [S↔C]\n    PERMISSION_RESPONSE    permission.response    [C→S]\n    PERMISSION_STATUS      permission.status      [S→C]\n\n  [Plan updates]\n    PLAN_CLEARED       plan.cleared       [S→C]\n    PLAN_STEP_UPDATED  plan.step_updated  [S→C]\n    PLAN_UPDATED       plan.updated       [S→C]\n\n  [Post-auth setup flow]\n    POST_AUTH_SETUP           auth.setup           [S→C]\n    POST_AUTH_SETUP_RESPONSE  auth.setup_response  [C→S]\n\n  [Reference selection flow]\n    REFERENCE_SELECTION_REQUESTED  reference_selection.requested  [S↔C]\n    REFERENCE_SELECTION_RESOLVED   reference_selection.resolved   [S↔C]\n    REFERENCE_SELECTION_RESPONSE   reference_selection.response   [C→S]\n\n  [SDK feature parity]\n    INJECT_PROMPT_REQUEST               inject_prompt.request               [C→S]\n    INJECT_PROMPT_RESULT                inject_prompt.result                [S→C]\n    PERMISSION_ADD_BLACKLIST_REQUEST    permission.add_blacklist            [?]\n    PERMISSION_ADD_WHITELIST_REQUEST    permission.add_whitelist            [?]\n    PERMISSION_CLEAR_REQUEST            permission.clear                    [?]\n    PERMISSION_POLICY_SNAPSHOT          permission.policy_snapshot          [S→C]\n    PERMISSION_POLICY_SNAPSHOT_REQUEST  permission.policy_snapshot.request  [C→S]\n    PERMISSION_REMOVE_REQUEST           permission.remove                   [?]\n    PERMISSION_SET_DEFAULT_REQUEST      permission.set_default              [?]\n    REPLAY_MESSAGES_REQUEST             replay_messages.request             [C→S]\n    REPLAY_MESSAGES_RESULT              replay_messages.result              [S→C]\n    RESOLVE_FORK_POINT_REQUEST          resolve_fork_point.request          [C→S]\n    RESOLVE_FORK_POINT_RESULT           resolve_fork_point.result           [S→C]\n\n  [Sandbox management]\n    SANDBOX_PATHS  sandbox.paths  [S→C]\n\n  [Self-diagnostics (#1294, 1.25)]\n    DIAGNOSTICS_REQUEST  session.diagnostics.request  [C→S]\n    DIAGNOSTICS_RESULT   session.diagnostics.result   [S→C]\n\n  [Service management]\n    SERVICE_LIST  service.list  [S→C]\n\n  [Session lifecycle]\n    SESSION_RESTORED    session.restored    [?]\n    SESSION_TERMINATED  session.terminated  [S→C]\n\n  [Session management]\n    SESSION_DESCRIPTION_UPDATED  session.description_updated  [S→C]\n    SESSION_INFO                 session.info                 [S→C]\n    SESSION_LIST                 session.list                 [S→C]\n\n  [Session recovery]\n    INTERRUPTED_TURN_RECOVERED  session.interrupted_turn_recovered  [S→C]\n\n  [System messages]\n    ERROR           error           [S→C]\n    HELP_TEXT       help.text       [S→C]\n    INIT_PROGRESS   init.progress   [S→C]\n    RETRY           retry           [S→C]\n    SYSTEM_MESSAGE  system.message  [S→C]\n\n  [Tool execution]\n    TOOL_CALL_END         tool.call_end         [S→C]\n    TOOL_CALL_START       tool.call_start       [S→C]\n    TOOL_OUTPUT           tool.output           [S→C]\n    TOOL_RESULT_ENRICHED  tool.result_enriched  [S→C]\n\n  [Tool management]\n    TOOL_DISABLE_REQUEST  tools.disable  [C→S]\n\n  [Tool status]\n    TOOL_ID_REGISTRY  tools.id_registry  [S→C]\n    TOOL_STATUS       tools.status       [S→C]\n\n  [Wake primitive]\n    SESSION_WOKEN     session.woken             [S→C]\n    WAKE_BIND_RESULT  session.wake_bind_result  [S→C]\n\n  [Workspace file monitoring]\n    POOL_STATUS                      pool.status                      [S→C]\n    POOL_STATUS_REQUEST              pool.status.request              [C→S]\n    REFERENCE_BUNDLE_CREATE_REQUEST  reference.bundle.create.request  [C→S]\n    REFERENCE_BUNDLE_CREATE_RESULT   reference.bundle.create.result   [S→C]\n    REFERENCE_CATALOG                reference.catalog                [S→C]\n    REFERENCE_CATALOG_REQUEST        reference.catalog.request        [C→S]\n    REFERENCE_CLAIMS                 reference.claims                 [S→C]\n    REFERENCE_CLAIMS_REQUEST         reference.claims.request         [C→S]\n    REFERENCE_CURATION_REQUEST       reference.curation.request       [C→S]\n    REFERENCE_CURATION_RESULT        reference.curation.result        [S→C]\n    REFERENCE_LINKS_UPDATE_REQUEST   reference.links.request          [C→S]\n    REFERENCE_LINKS_UPDATE_RESULT    reference.links.result           [S→C]\n    SCAFFOLD_EXPLAIN_RESULT          scaffold.explain.result          [S→C]\n    SCAFFOLD_INTEGRATION_RESULT      scaffold.integration.result      [S→C]\n    SCAFFOLD_VALIDATE_RESULT         scaffold.validate.result         [S→C]\n    SESSION_MESSAGE_RESULT           session.message.result           [S→C]\n    WORKSPACE_FILES_CHANGED          workspace.files_changed          [S→C]\n    WORKSPACE_FILES_SNAPSHOT         workspace.files_snapshot         [S→C]\n    WORKSPACE_IGNORE_RESULT          workspace.ignore.result          [S→C]\n\n  [Workspace management]\n    CONFIG_STATUS              config.status             [S→C]\n    CONFIG_UPDATED             config.updated            [S→C]\n    CONFIG_UPDATE_REQUEST      config.update             [C→S]\n    WORKSPACE_CLONE_PROGRESS   workspace.clone_progress  [S→C]\n    WORKSPACE_CLONE_REQUEST    workspace.clone           [C→S]\n    WORKSPACE_CREATED          workspace.created         [S→C]\n    WORKSPACE_CREATE_REQUEST   workspace.create          [C→S]\n    WORKSPACE_DELETED          workspace.deleted         [S→C]\n    WORKSPACE_DELETE_REQUEST   workspace.delete          [C→S]\n    WORKSPACE_INSPECTED        workspace.inspected       [S→C]\n    WORKSPACE_INSPECT_REQUEST  workspace.inspect         [C→S]\n    WORKSPACE_LIST             workspace.list_response   [S→C]\n    WORKSPACE_LIST_REQUEST     workspace.list            [C→S]\n    WORKSPACE_SELECT_REQUEST   workspace.select          [C→S]\n\n  [Workspace mismatch flow]\n    WORKSPACE_MISMATCH_REQUESTED  workspace_mismatch.requested  [S↔C]\n    WORKSPACE_MISMATCH_RESOLVED   workspace_mismatch.resolved   [S↔C]\n    WORKSPACE_MISMATCH_RESPONSE   workspace_mismatch.response   [C→S]\n\n  [app]\n    SECRET_RELOAD_REQUEST        secret.reload               [?]\n    SECRET_RELOAD_RESULT         secret.reload.result        [?]\n    SECRET_RESOLVE_REQUEST       secret.resolve              [?]\n    SECRET_RESOLVE_RESULT        secret.resolve.result       [?]\n    WORKSPACE_APP_WRITE_REQUEST  workspace.app_write         [?]\n    WORKSPACE_APP_WRITE_RESULT   workspace.app_write.result  [?]"
+   "text": "event protocol — 169 typed events across 41 domains\n  (S→C server→client, C→S client→server, S↔C bidirectional; wire value is the on-the-wire `type`. `explain event <NAME>` for detail)\n  NOTE a cascade/observer subscription filters on the CLASS name (SessionTerminatedEvent),\n       not on the member or the wire value — `cascade_events(event_types=[...])` and the daemon both\n       compare type(event).__name__, so a wire value there matches nothing at all (#821).\n\n  [Agent lifecycle]\n    AGENT_COMPLETED       agent.completed       [S→C]\n    AGENT_CREATED         agent.created         [S→C]\n    AGENT_ERROR           agent.error           [S→C]\n    AGENT_OUTPUT          agent.output          [S→C]\n    AGENT_STATUS_CHANGED  agent.status_changed  [S→C]\n\n  [Agent profiles]\n    SESSION_PROFILES  session.profiles  [S→C]\n\n  [Cascade stage settled]\n    SLOT_SETTLED  slot.settled  [?]\n\n  [Clarification flow]\n    CLARIFICATION_BATCH           clarification.batch           [S→C]\n    CLARIFICATION_BATCH_RESPONSE  clarification.batch_response  [C→S]\n    CLARIFICATION_INPUT_MODE      clarification.input_mode      [S↔C]\n    CLARIFICATION_QUESTION        clarification.question        [S↔C]\n    CLARIFICATION_REQUESTED       clarification.requested       [S↔C]\n    CLARIFICATION_RESOLVED        clarification.resolved        [S↔C]\n    CLARIFICATION_RESPONSE        clarification.response        [C→S]\n\n  [Client configuration]\n    CLIENT_CONFIG  client.config  [C→S]\n\n  [Client requests]\n    COMMAND               command.execute       [C→S]\n    COMMAND_LIST_REQUEST  command.list_request  [C→S]\n    SEND_MESSAGE          message.send          [C→S]\n    STOP                  session.stop          [C→S]\n\n  [Client-side tool execution]\n    TOOLS_REGISTER_CLIENT  tools.register_client  [C→S]\n    TOOL_EXECUTE_REQUEST   tool.execute_request   [S→C]\n    TOOL_EXECUTE_RESULT    tool.execute_result    [C→S]\n\n  [Command list]\n    COMMAND_LIST          command.list          [S→C]\n    COMMAND_LIST_REFRESH  command.list_refresh  [S→C]\n\n  [Connection lifecycle]\n    CONNECTED     connected     [?]\n    DISCONNECTED  disconnected  [?]   (no class — command/marker)\n\n  [Context/token updates]\n    BUDGET_RUNG_FIRED           budget.rung_fired           [S→C]\n    CONTEXT_UPDATED             context.updated             [S→C]\n    GC                          gc                          [S→C]\n    GC_CONFIG                   gc.config                   [S→C]\n    INCIDENT_RAISED             incident.raised             [S→C]\n    INSTRUCTION_BUDGET_UPDATED  instruction_budget.updated  [S→C]\n    TURN_COMPLETED              turn.completed              [S→C]\n    TURN_PROGRESS               turn.progress               [S→C]\n\n  [Event subscription notifications]\n    EVENTS_SUBSCRIBED  events.subscribed  [S→C]\n\n  [External events]\n    EVENT_EXTERNAL  event.external  [C→S]\n\n  [File staging into a workspace]\n    WORKSPACE_FILES_SEARCH_REQUEST  workspace.files.search         [C→S]\n    WORKSPACE_FILES_SEARCH_RESULT   workspace.files.search_result  [S→C]\n    WORKSPACE_FILES_STAGED          workspace.files.staged         [S→C]\n    WORKSPACE_FILES_STAGE_REQUEST   workspace.files.stage_request  [C→S]\n    WORKSPACE_FILE_CONTENT          workspace.file.content         [S→C]\n    WORKSPACE_FILE_FETCH_REQUEST    workspace.file.fetch           [C→S]\n\n  [HandoffGate events]\n    GATES_SNAPSHOT  gates.snapshot  [?]\n    GATE_ANNOUNCED  gate.announced  [?]\n    GATE_RELEASED   gate.released   [?]\n\n  [History]\n    HISTORY               history               [S↔C]\n    HISTORY_PAGE          history.page          [S→C]\n    HISTORY_PAGE_REQUEST  history.page.request  [C→S]\n    HISTORY_REQUEST       history.request       [S↔C]\n\n  [Identity at connect (#1074)]\n    TICKET_BIND_REQUEST    ticket.bind           [C→S]\n    TICKET_BIND_RESULT     ticket.bind.result    [S→C]\n    TICKET_REVOKE_REQUEST  ticket.revoke         [C→S]\n    TICKET_REVOKE_RESULT   ticket.revoke.result  [S→C]\n\n  [Instruction budget]\n    INSTRUCTION_BUDGET_REQUEST  instruction_budget.request  [C→S]\n\n  [Memory management]\n    MEMORY_DELETE_REQUEST  memory.delete.request  [C→S]\n    MEMORY_DELETE_RESULT   memory.delete.result   [S→C]\n    MEMORY_GET_REQUEST     memory.get.request     [C→S]\n    MEMORY_GET_RESULT      memory.get.result      [S→C]\n    MEMORY_LIST            memory.list            [S→C]\n    MEMORY_LIST_REQUEST    memory.list.request    [C→S]\n    MEMORY_UPDATE_REQUEST  memory.update.request  [C→S]\n    MEMORY_UPDATE_RESULT   memory.update.result   [S→C]\n\n  [Mid-turn prompts]\n    MID_TURN_INTERRUPT        mid_turn_prompt.interrupt  [S→C]\n    MID_TURN_PROMPT_INJECTED  mid_turn_prompt.injected   [S→C]\n    MID_TURN_PROMPT_QUEUED    mid_turn_prompt.queued     [S→C]\n\n  [Peer channel events (server-to-server gossip)]\n    PEER_AGENT_COMPLETED    peer.agent_completed    [?]\n    PEER_AGENT_OUTPUT       peer.agent_output       [?]\n    PEER_HEARTBEAT          peer.heartbeat          [?]\n    PEER_SPAWN_ACCEPTED     peer.spawn_accepted     [?]\n    PEER_SPAWN_REJECTED     peer.spawn_rejected     [?]\n    PEER_SPAWN_REQUEST      peer.spawn_request      [?]\n    PEER_STOP_ACKNOWLEDGED  peer.stop_acknowledged  [?]\n    PEER_STOP_REQUEST       peer.stop_request       [?]\n\n  [Permission flow]\n    PERMISSION_INPUT_MODE  permission.input_mode  [S↔C]\n    PERMISSION_REQUESTED   permission.requested   [S↔C]\n    PERMISSION_RESOLVED    permission.resolved    [S↔C]\n    PERMISSION_RESPONSE    permission.response    [C→S]\n    PERMISSION_STATUS      permission.status      [S→C]\n\n  [Plan updates]\n    PLAN_CLEARED       plan.cleared       [S→C]\n    PLAN_STEP_UPDATED  plan.step_updated  [S→C]\n    PLAN_UPDATED       plan.updated       [S→C]\n\n  [Plugin tool calls, no model turn]\n    PLUGIN_TOOL_DESCRIBE_REQUEST  plugin.tool.describe.request  [C→S]\n    PLUGIN_TOOL_DESCRIBE_RESULT   plugin.tool.describe.result   [S↔C]\n    PLUGIN_TOOL_INVOKE_REQUEST    plugin.tool.invoke.request    [C→S]\n    PLUGIN_TOOL_INVOKE_RESULT     plugin.tool.invoke.result     [S↔C]\n\n  [Post-auth setup flow]\n    POST_AUTH_SETUP           auth.setup           [S→C]\n    POST_AUTH_SETUP_RESPONSE  auth.setup_response  [C→S]\n\n  [Reference selection flow]\n    REFERENCE_SELECTION_REQUESTED  reference_selection.requested  [S↔C]\n    REFERENCE_SELECTION_RESOLVED   reference_selection.resolved   [S↔C]\n    REFERENCE_SELECTION_RESPONSE   reference_selection.response   [C→S]\n\n  [SDK feature parity]\n    INJECT_PROMPT_REQUEST               inject_prompt.request               [C→S]\n    INJECT_PROMPT_RESULT                inject_prompt.result                [S→C]\n    PERMISSION_ADD_BLACKLIST_REQUEST    permission.add_blacklist            [?]\n    PERMISSION_ADD_WHITELIST_REQUEST    permission.add_whitelist            [?]\n    PERMISSION_CLEAR_REQUEST            permission.clear                    [?]\n    PERMISSION_POLICY_SNAPSHOT          permission.policy_snapshot          [S→C]\n    PERMISSION_POLICY_SNAPSHOT_REQUEST  permission.policy_snapshot.request  [C→S]\n    PERMISSION_REMOVE_REQUEST           permission.remove                   [?]\n    PERMISSION_SET_DEFAULT_REQUEST      permission.set_default              [?]\n    REPLAY_MESSAGES_REQUEST             replay_messages.request             [C→S]\n    REPLAY_MESSAGES_RESULT              replay_messages.result              [S→C]\n    RESOLVE_FORK_POINT_REQUEST          resolve_fork_point.request          [C→S]\n    RESOLVE_FORK_POINT_RESULT           resolve_fork_point.result           [S→C]\n\n  [Sandbox management]\n    SANDBOX_PATHS  sandbox.paths  [S→C]\n\n  [Self-diagnostics (#1294, 1.25)]\n    DIAGNOSTICS_REQUEST  session.diagnostics.request  [C→S]\n    DIAGNOSTICS_RESULT   session.diagnostics.result   [S→C]\n\n  [Service management]\n    SERVICE_LIST  service.list  [S→C]\n\n  [Session lifecycle]\n    SESSION_RESTORED    session.restored    [?]\n    SESSION_TERMINATED  session.terminated  [S→C]\n\n  [Session management]\n    SESSION_DESCRIPTION_UPDATED  session.description_updated  [S→C]\n    SESSION_INFO                 session.info                 [S→C]\n    SESSION_LIST                 session.list                 [S→C]\n\n  [Session recovery]\n    INTERRUPTED_TURN_RECOVERED  session.interrupted_turn_recovered  [S→C]\n\n  [System messages]\n    ERROR           error           [S→C]\n    HELP_TEXT       help.text       [S→C]\n    INIT_PROGRESS   init.progress   [S→C]\n    RETRY           retry           [S→C]\n    SYSTEM_MESSAGE  system.message  [S→C]\n\n  [Tool execution]\n    TOOL_CALL_END         tool.call_end         [S→C]\n    TOOL_CALL_START       tool.call_start       [S→C]\n    TOOL_OUTPUT           tool.output           [S→C]\n    TOOL_RESULT_ENRICHED  tool.result_enriched  [S→C]\n\n  [Tool management]\n    TOOL_DISABLE_REQUEST  tools.disable  [C→S]\n\n  [Tool status]\n    TOOL_ID_REGISTRY  tools.id_registry  [S→C]\n    TOOL_STATUS       tools.status       [S→C]\n\n  [Wake primitive]\n    SESSION_WOKEN     session.woken             [S→C]\n    WAKE_BIND_RESULT  session.wake_bind_result  [S→C]\n\n  [Workspace file monitoring]\n    POOL_STATUS                      pool.status                      [S→C]\n    POOL_STATUS_REQUEST              pool.status.request              [C→S]\n    REFERENCE_BUNDLE_CREATE_REQUEST  reference.bundle.create.request  [C→S]\n    REFERENCE_BUNDLE_CREATE_RESULT   reference.bundle.create.result   [S→C]\n    REFERENCE_CATALOG                reference.catalog                [S→C]\n    REFERENCE_CATALOG_REQUEST        reference.catalog.request        [C→S]\n    REFERENCE_CLAIMS                 reference.claims                 [S→C]\n    REFERENCE_CLAIMS_REQUEST         reference.claims.request         [C→S]\n    REFERENCE_CURATION_REQUEST       reference.curation.request       [C→S]\n    REFERENCE_CURATION_RESULT        reference.curation.result        [S→C]\n    REFERENCE_LINKS_UPDATE_REQUEST   reference.links.request          [C→S]\n    REFERENCE_LINKS_UPDATE_RESULT    reference.links.result           [S→C]\n    SCAFFOLD_EXPLAIN_RESULT          scaffold.explain.result          [S→C]\n    SCAFFOLD_INTEGRATION_RESULT      scaffold.integration.result      [S→C]\n    SCAFFOLD_VALIDATE_RESULT         scaffold.validate.result         [S→C]\n    SESSION_MESSAGE_RESULT           session.message.result           [S→C]\n    WORKSPACE_FILES_CHANGED          workspace.files_changed          [S→C]\n    WORKSPACE_FILES_SNAPSHOT         workspace.files_snapshot         [S→C]\n    WORKSPACE_IGNORE_RESULT          workspace.ignore.result          [S→C]\n\n  [Workspace management]\n    CONFIG_STATUS              config.status             [S→C]\n    CONFIG_UPDATED             config.updated            [S→C]\n    CONFIG_UPDATE_REQUEST      config.update             [C→S]\n    WORKSPACE_CLONE_PROGRESS   workspace.clone_progress  [S→C]\n    WORKSPACE_CLONE_REQUEST    workspace.clone           [C→S]\n    WORKSPACE_CREATED          workspace.created         [S→C]\n    WORKSPACE_CREATE_REQUEST   workspace.create          [C→S]\n    WORKSPACE_DELETED          workspace.deleted         [S→C]\n    WORKSPACE_DELETE_REQUEST   workspace.delete          [C→S]\n    WORKSPACE_INSPECTED        workspace.inspected       [S→C]\n    WORKSPACE_INSPECT_REQUEST  workspace.inspect         [C→S]\n    WORKSPACE_LIST             workspace.list_response   [S→C]\n    WORKSPACE_LIST_REQUEST     workspace.list            [C→S]\n    WORKSPACE_SELECT_REQUEST   workspace.select          [C→S]\n\n  [Workspace mismatch flow]\n    WORKSPACE_MISMATCH_REQUESTED  workspace_mismatch.requested  [S↔C]\n    WORKSPACE_MISMATCH_RESOLVED   workspace_mismatch.resolved   [S↔C]\n    WORKSPACE_MISMATCH_RESPONSE   workspace_mismatch.response   [C→S]\n\n  [app]\n    SECRET_RELOAD_REQUEST        secret.reload               [?]\n    SECRET_RELOAD_RESULT         secret.reload.result        [?]\n    SECRET_RESOLVE_REQUEST       secret.resolve              [?]\n    SECRET_RESOLVE_RESULT        secret.resolve.result       [?]\n    WORKSPACE_APP_WRITE_REQUEST  workspace.app_write         [?]\n    WORKSPACE_APP_WRITE_RESULT   workspace.app_write.result  [?]"
   },
   "gc": {
    "data": {
@@ -13465,7 +13702,7 @@
     "output_marking": {
      "deployer_publishing": "Art. 50(4) -- disclosing that text published to inform the public on matters of public interest was AI-generated -- is a PUBLISHING decision.  The framework cannot see that a transcript was published, and does not attempt to",
      "files": "a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or beside the payload, so it survives leaving jaato.  Installed here: output_marker",
-     "media": "the model's own audio and images carry `generated_by` on the wire (protocol 1.36): kind, provider, model, session_id, agent_id.  That field travels with the DELIVERY EVENT and stops there -- a client that saves the bytes keeps no record of it",
+     "media": "the model's own audio and images carry `generated_by` on the wire (protocol 1.37): kind, provider, model, session_id, agent_id.  That field travels with the DELIVERY EVENT and stops there -- a client that saves the bytes keeps no record of it",
      "text": "NOT marked.  AgentOutputEvent.source attributes it at the event layer (agent / system / permission / user) and that is all; no text watermark ships until the Art. 50(7) code of practice or a harmonised standard names one, because a prefix a client strips is a marking that certifies what it did not find"
     },
     "reversibility": {
@@ -13490,7 +13727,7 @@
     ],
     "who_is_running": "session.orphans (TUI: `session orphans`) lists every LOADED session with no client attached, how long it has been orphaned, whether it is spending right now, and the runner executing it"
    },
-   "text": "human oversight  (Regulation (EU) 2024/1689, Art. 14 -- what the\nframework provides, in the Article's own vocabulary)\n  ----------------------------------------------------------------\nSTOP  (14(4)(e): intervene, or interrupt through a stop button)\n  jaato-server --stop    the whole deployment\n      where: the host shell; needs no client and no session id\n      run:   jaato-server --stop --pid-file /tmp/jaato.pid --ipc-socket /tmp/jaato.sock\n      then: every loaded session is saved to disk, then each is cancelled and\n      shut down and its runner returned or reaped; the pidfile is the handle,\n      the socket the fallback when the pidfile is stale\n  session.stop <id>      one loaded session, whoever created it\n      where: any attached client (TUI: `session stop <id>`; SDK:\n      IPCClient.stop_session); daemon protocol >= 1.7, refused below it\n      run:   session stop <id>\n      then: cancellation, not a kill: the session's cancel token is tripped\n      (the same path budget_control's abort rung uses), a mid-turn session\n      stops at its next check point, and it is then unloaded, which saves it\n\nWHO IS RUNNING\n    session.orphans (TUI: `session orphans`) lists every LOADED session with\n    no client attached, how long it has been orphaned, whether it is spending\n    right now, and the runner executing it\n\nDECIDE / OVERRIDE  (14(4)(d) -- decide not to use, or override, an output)\n    the permission plugin (plugin_configs.permission.policy)\n    approval_channels          console | webhook | queue | file\n    policy.defaultPolicy       allow | deny | ask\n    policy.cwd                 string\n    policy.sanitization        object\n    policy.blacklist           object\n    policy.whitelist           object\n\nBUILT-IN CONSTRAINTS  (14(3)(a): the ones the system cannot override)\n  budget_control degrade ladder\n      limits on usd, tokens, seconds, tool_calls, turns; of the terminal\n      actions (abort, escalate, finalize) only 'abort' stops the run -- limits\n      alone are observed, never enforced\n  session-lifetime watchdog (runtime_limits)\n      daemon-side, so it applies when the client died: max_orphan_seconds\n      defaults to 900s, max_session_seconds is opt-in; 0 disables either\n  completion gate (completion_processors)\n      a validate() script refuses signal_completion until its checks pass;\n      max_refusals bounds how often, budget_control bounds the retries\n\nREVERSIBLE / NOT\n  + file_edit: every write is backed up under\n    <config_root>/sessions/<session_id>/backups/ before it lands\n  - anything a subprocess or a remote call did -- cli, interactive_shell, mcp,\n    service_connector, web_fetch POSTs; the permission gate is the measure\n    that stands in front of them\n\nMARKING GENERATED OUTPUT  (Art. 50(2), 50(4))\n  media\n        the model's own audio and images carry `generated_by` on the wire\n        (protocol 1.36): kind, provider, model, session_id, agent_id.  That\n        field travels with the DELIVERY EVENT and stops there -- a client that\n        saves the bytes keeps no record of it\n  files\n        a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or beside\n        the payload, so it survives leaving jaato.  Installed here:\n        output_marker\n  text\n        NOT marked.  AgentOutputEvent.source attributes it at the event layer\n        (agent / system / permission / user) and that is all; no text\n        watermark ships until the Art. 50(7) code of practice or a harmonised\n        standard names one, because a prefix a client strips is a marking that\n        certifies what it did not find\n  publishing\n        Art. 50(4) -- disclosing that text published to inform the public on\n        matters of public interest was AI-generated -- is a PUBLISHING\n        decision.  The framework cannot see that a transcript was published,\n        and does not attempt to\n\n  `explain oversight <profile> --workspace DIR` shows which of these a\n  named profile has ARMED; `jaato-doctor` prints the exact --stop\n  invocation for the daemon that is running."
+   "text": "human oversight  (Regulation (EU) 2024/1689, Art. 14 -- what the\nframework provides, in the Article's own vocabulary)\n  ----------------------------------------------------------------\nSTOP  (14(4)(e): intervene, or interrupt through a stop button)\n  jaato-server --stop    the whole deployment\n      where: the host shell; needs no client and no session id\n      run:   jaato-server --stop --pid-file /tmp/jaato.pid --ipc-socket /tmp/jaato.sock\n      then: every loaded session is saved to disk, then each is cancelled and\n      shut down and its runner returned or reaped; the pidfile is the handle,\n      the socket the fallback when the pidfile is stale\n  session.stop <id>      one loaded session, whoever created it\n      where: any attached client (TUI: `session stop <id>`; SDK:\n      IPCClient.stop_session); daemon protocol >= 1.7, refused below it\n      run:   session stop <id>\n      then: cancellation, not a kill: the session's cancel token is tripped\n      (the same path budget_control's abort rung uses), a mid-turn session\n      stops at its next check point, and it is then unloaded, which saves it\n\nWHO IS RUNNING\n    session.orphans (TUI: `session orphans`) lists every LOADED session with\n    no client attached, how long it has been orphaned, whether it is spending\n    right now, and the runner executing it\n\nDECIDE / OVERRIDE  (14(4)(d) -- decide not to use, or override, an output)\n    the permission plugin (plugin_configs.permission.policy)\n    approval_channels          console | webhook | queue | file\n    policy.defaultPolicy       allow | deny | ask\n    policy.cwd                 string\n    policy.sanitization        object\n    policy.blacklist           object\n    policy.whitelist           object\n\nBUILT-IN CONSTRAINTS  (14(3)(a): the ones the system cannot override)\n  budget_control degrade ladder\n      limits on usd, tokens, seconds, tool_calls, turns; of the terminal\n      actions (abort, escalate, finalize) only 'abort' stops the run -- limits\n      alone are observed, never enforced\n  session-lifetime watchdog (runtime_limits)\n      daemon-side, so it applies when the client died: max_orphan_seconds\n      defaults to 900s, max_session_seconds is opt-in; 0 disables either\n  completion gate (completion_processors)\n      a validate() script refuses signal_completion until its checks pass;\n      max_refusals bounds how often, budget_control bounds the retries\n\nREVERSIBLE / NOT\n  + file_edit: every write is backed up under\n    <config_root>/sessions/<session_id>/backups/ before it lands\n  - anything a subprocess or a remote call did -- cli, interactive_shell, mcp,\n    service_connector, web_fetch POSTs; the permission gate is the measure\n    that stands in front of them\n\nMARKING GENERATED OUTPUT  (Art. 50(2), 50(4))\n  media\n        the model's own audio and images carry `generated_by` on the wire\n        (protocol 1.37): kind, provider, model, session_id, agent_id.  That\n        field travels with the DELIVERY EVENT and stops there -- a client that\n        saves the bytes keeps no record of it\n  files\n        a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or beside\n        the payload, so it survives leaving jaato.  Installed here:\n        output_marker\n  text\n        NOT marked.  AgentOutputEvent.source attributes it at the event layer\n        (agent / system / permission / user) and that is all; no text\n        watermark ships until the Art. 50(7) code of practice or a harmonised\n        standard names one, because a prefix a client strips is a marking that\n        certifies what it did not find\n  publishing\n        Art. 50(4) -- disclosing that text published to inform the public on\n        matters of public interest was AI-generated -- is a PUBLISHING\n        decision.  The framework cannot see that a transcript was published,\n        and does not attempt to\n\n  `explain oversight <profile> --workspace DIR` shows which of these a\n  named profile has ARMED; `jaato-doctor` prints the exact --stop\n  invocation for the daemon that is running."
   },
   "paths": {
    "data": {

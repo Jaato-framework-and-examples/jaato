@@ -2550,6 +2550,39 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_plugin_tool(
+        self,
+        op: str,
+        args: "Dict[str, Any]",
+        *,
+        timeout: Optional[float] = 300.0,
+    ) -> "Dict[str, Any]":
+        """Describe or run one plugin tool in the runner's session (#1606).
+
+        Work lane: an ``invoke`` runs plugin code and may wait on a
+        permission answer.  ``args`` is ``{"plugin", "tool", "args",
+        "call_id"}``; see ``shared/plugin_tool_call.py`` for the answer.
+
+        Raises:
+            RunnerCallError on transport failure or a runner-side refusal.
+        """
+        return await self._call_named(
+            "session.plugin_tool", {"op": op, **dict(args or {})},
+            timeout=timeout,
+        )
+
+    def session_plugin_tool_threadsafe(
+        self,
+        op: str,
+        args: "Dict[str, Any]",
+        *,
+        timeout: Optional[float] = 300.0,
+    ) -> "Dict[str, Any]":
+        return self._run_threadsafe(
+            self.session_plugin_tool(op, args, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_embed_texts(
         self,
         texts: "List[str]",

@@ -5618,6 +5618,44 @@ class JaatoServer:
             )
         return {**answer, "source": "runner"}
 
+    def plugin_tool_op(
+        self,
+        op: str,
+        args: Dict[str, Any],
+        *,
+        timeout: float = 300.0,
+    ) -> Dict[str, Any]:
+        """Describe or run one plugin tool on this server's plugin host (#1606).
+
+        ``SessionManager.spawn_plugin_host`` builds a server whose runner
+        bootstrapped a ``PluginToolHost`` instead of a session; the plugins,
+        their configuration and the executor live there, so the runner is
+        asked (``session.plugin_tool``, work lane).  A server with no runner
+        has nothing to run the call in and says so.
+
+        Returns:
+            ``shared/plugin_tool_call.py``'s answer, or ``{"error",
+            "category": "runner_unreachable"}`` when the runner did not
+            answer -- never a guessed result.  A ``concurrent.futures``
+            timeout is reported as ``category="timeout"``.
+        """
+        import concurrent.futures
+
+        rpc = getattr(self, "_runner_rpc", None)
+        if rpc is not None:
+            try:
+                return rpc.session_plugin_tool_threadsafe(op, args, timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                return {"category": "timeout",
+                        "error": f"the tool call did not finish within {timeout:g}s"}
+            except Exception as exc:  # noqa: BLE001 -- reported, never a guess
+                logger.warning("plugin_tool_op(%s): the runner did not answer (%s)",
+                               op, exc)
+                return {"category": "runner_unreachable",
+                        "error": f"the session's runner did not answer: {exc}"}
+        return {"category": "runner_unreachable",
+                "error": "this session has no runner to run the tool in"}
+
     def embed_texts(
         self, texts: List[str], *, timeout: float = 120.0,
     ) -> Dict[str, Any]:
