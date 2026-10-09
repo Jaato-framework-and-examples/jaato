@@ -10394,6 +10394,33 @@ real `RunnerRPC`, with the enforcer built by the bootstrap's own function:
 decide through the command path on runner A, save, revive on runner B, and
 B enforces both decisions and announces `allow`.
 
+### A Default That Changed and Decided Nothing (#1403)
+
+An `all` answer on a permission card sets the enforcer's `_allow_all`
+(`suspension_scope: session`), and `check_permission` asks the three
+suspensions BEFORE the policy. So `permissions default ask` changed the
+default and nothing else: the reply said `Session default policy: ask`,
+the status bar (correctly) kept `allow (session)`, and the next
+`writeNewFile` ran with `method=allow_all` and no prompt. Reproduced on a
+live daemon (echo provider, runner-served path); the
+`PermissionStatusEvent` after the command was right, the enforcer was the
+problem.
+
+| `permissions default` | Suspensions (`all`, `suspend`, `suspend --turn`) | Session whitelist (`always`, `permissions allow`) |
+|---|---|---|
+| `ask` / `deny` | cleared; the reply names which | kept; the reply names each tool and `permissions clear` |
+| `allow` | left alone (widening cannot be contradicted) | left alone |
+
+Tightening the default is a request to be asked, so the suspension that
+would answer for the operator goes. A whitelist entry is a separate
+per-tool decision, so it stays and is said. Not done: the web tool row
+saying "auto-allowed by …" (the issue's other ask) and commands drawn as
+turns; both are client changes.
+
+Guard: `jaato_server/server/tests/test_a_tightened_default_clears_the_suspension_1403.py`,
+three reversions, on #1412's harness (real `RunnerRPC`, the bootstrap's
+enforcer, the command through the runner).
+
 ### A Record the Session Could Rewrite (#1529)
 
 A session record is `<ws>/.jaato/sessions/<id>.json`, inside the workspace

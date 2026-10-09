@@ -1566,6 +1566,8 @@ class PermissionPlugin(RunnerForwardingMixin):
             ("", ""),
             ("    default <policy>  Set the session default policy", "dim"),
             ("                      Options: allow, deny, ask", "dim"),
+            ("                      ask/deny also clear any suspension (an 'all' answer,", "dim"),
+            ("                      suspend); per-tool 'always' entries are kept", "dim"),
             ("", ""),
             ("    suspend           Suspend permission prompts until session goes idle", "dim"),
             ("    suspend --turn    Suspend prompts for the current turn only", "dim"),
@@ -1677,7 +1679,23 @@ class PermissionPlugin(RunnerForwardingMixin):
         return f"- Added to session blacklist: {pattern}"
 
     def _permissions_default(self, policy: str) -> str:
-        """Set the session default policy."""
+        """Set the session default policy.
+
+        ``ask`` and ``deny`` TIGHTEN the session, and the three
+        suspensions (``_allow_all`` from an ``all`` answer, ``_idle_
+        suspended``, ``_turn_suspended``) are checked BEFORE the policy
+        in ``check_permission``, so leaving one in force would make the
+        new default decide nothing: every call would still be approved
+        with ``method=allow_all`` and no prompt (#1403).  So a tightening
+        default also clears every suspension, and the reply says which
+        one it cleared.
+
+        Session whitelist entries (``always`` answers, ``permissions
+        allow <tool>``) are per-tool decisions the operator made one by
+        one; they are kept, and the reply names how many still approve
+        without a prompt and how to remove them.  ``allow`` changes the
+        default only: it widens, so no suspension can contradict it.
+        """
         if not self._policy:
             return "Error: Permission plugin not initialized."
 
@@ -1686,7 +1704,28 @@ class PermissionPlugin(RunnerForwardingMixin):
 
         old_effective = self._policy.session_default_policy or self._policy.default_policy
         self._policy.set_session_default_policy(policy)
-        return f"Session default policy: {policy} (was: {old_effective})"
+        lines = [f"Session default policy: {policy} (was: {old_effective})"]
+        if policy == "allow":
+            return lines[0]
+        cleared = [scope for scope, held in (
+            ("session", self._allow_all),
+            ("idle", self._idle_suspended),
+            ("turn", self._turn_suspended),
+        ) if held]
+        if cleared:
+            self.clear_all_suspensions()
+            self._allow_all = False
+            lines.append(
+                f"Cleared suspension ({', '.join(cleared)}) that was "
+                f"approving every tool without asking."
+            )
+        kept = sorted(self._policy.session_whitelist)
+        if kept:
+            lines.append(
+                f"Still approved without asking (session whitelist): "
+                f"{', '.join(kept)}. Use 'permissions clear' to remove them."
+            )
+        return "\n".join(lines)
 
     def _permissions_clear(self) -> str:
         """Clear all session permission modifications."""
