@@ -130,6 +130,104 @@ class WorkspaceOwnershipError(ValueError):
     """
 
 
+def _strictly_under(root: Path, resolved: Path) -> bool:
+    """Whether an already-resolved path lies strictly beneath *root*.
+
+    The root itself is NOT beneath the root (see
+    :meth:`WorkspaceManager._is_under_root` for what accepting it cost).
+    """
+    return root in resolved.parents
+
+
+def resolve_contained(root: Path, candidate: Path, *, label: str) -> Path:
+    """Resolve *candidate* and require it to lie strictly beneath *root*.
+
+    The ONE containment rule for anything a client names under a
+    workspace root: a workspace NAME (:meth:`WorkspaceManager.
+    _resolve_under_root`, joined onto the root first) and a declared PATH
+    (:func:`client_path_refusal`, #1592).  Symlinks are resolved BEFORE the
+    comparison, so a link planted under the root is judged by its target,
+    and existence is never consulted, so a refusal is not an oracle for
+    what exists outside the root.
+
+    Args:
+        root: The already-resolved workspace root.
+        candidate: The path to judge (absolute, or already joined onto
+            *root*).
+        label: How the refusal names the thing judged (``"Workspace
+            'x'"``, ``"working_dir"``).
+
+    Raises:
+        WorkspaceContainmentError: *candidate* cannot be resolved, resolves
+            to *root* itself, or resolves outside it.
+    """
+    try:
+        resolved = candidate.resolve()
+    except OSError as e:          # symlink loop, ELOOP, name too long
+        raise WorkspaceContainmentError(f"Cannot resolve {label}: {e}") from e
+    if resolved == root:
+        raise WorkspaceContainmentError(
+            f"{label} resolves to the workspace root {root} itself, "
+            f"which is not a workspace"
+        )
+    if not _strictly_under(root, resolved):
+        raise WorkspaceContainmentError(
+            f"{label} resolves to {resolved}, which is outside "
+            f"the workspace root {root}"
+        )
+    return resolved
+
+
+def client_path_refusal(
+    root: Path, field: str, value: str, user: Optional[str],
+    owner_of: Optional[Any] = None,
+) -> Optional[str]:
+    """Why a path a client DECLARED may not be used, or ``None`` (#1592).
+
+    The declared-path half of what the workspace verbs already enforce
+    through :meth:`WorkspaceManager.resolve_visible`: a connection whose
+    application has its own workspace root (#1496) may name a
+    ``working_dir`` / ``config_root`` / ``env_file`` / trace path only
+    beneath that root, and only inside a workspace it may see.
+
+    Two checks, in the order ``resolve_visible`` applies them:
+
+    1. **containment** -- :func:`resolve_contained`, so a ``..``, an
+       absolute path elsewhere and a symlink out are refused alike and
+       before existence is asked;
+    2. **ownership** -- the workspace is the first path component under
+       the root (workspace names are one flat component), judged by
+       :meth:`WorkspaceManager.visible_to`: the caller's own or unowned.
+
+    Args:
+        root: The application's resolved workspace root.
+        field: The handshake field, named in the refusal.
+        value: The path the client declared (absolute -- #742 already
+            refused a relative one).
+        user: The connection's qualified identity (``app:user``).
+        owner_of: ``owner_for_path`` of the manager holding the root's
+            registry, or ``None`` when there is none (every workspace then
+            reads as unowned).
+
+    Returns:
+        A one-line refusal naming the field, or ``None`` when the path may
+        be used.
+    """
+    try:
+        resolved = resolve_contained(root, Path(value), label=field)
+    except WorkspaceContainmentError as e:
+        return str(e)
+    workspace = root / resolved.relative_to(root).parts[0]
+    owner = owner_of(str(workspace)) if owner_of is not None else None
+    if not WorkspaceManager.visible_to(
+            WorkspaceInfo(name=workspace.name, path=str(workspace),
+                          configured=False, owner=owner),
+            user):
+        return (f"{field} lies in workspace {workspace.name!r}, which belongs "
+                f"to another user")
+    return None
+
+
 @dataclass
 class WorkspaceInfo:
     """Information about a workspace."""
@@ -311,7 +409,7 @@ class WorkspaceManager:
         ``workspace.list`` showed a row -- ``workspaces`` on the live
         daemon -- that ``select`` and ``delete`` then refused by name.
         """
-        return self.workspace_root in path.parents
+        return _strictly_under(self.workspace_root, path)
 
     @staticmethod
     def _check_name(name: str) -> None:
@@ -359,25 +457,10 @@ class WorkspaceManager:
         Raises:
             WorkspaceContainmentError: the name resolves outside the root.
         """
-        candidate = (self.workspace_root / name).expanduser()
-        try:
-            resolved = candidate.resolve()
-        except OSError as e:          # symlink loop, ELOOP, name too long
-            raise WorkspaceContainmentError(
-                f"Cannot resolve workspace name {name!r}: {e}"
-            ) from e
-
-        if resolved == self.workspace_root:
-            raise WorkspaceContainmentError(
-                f"Workspace {name!r} resolves to the workspace root "
-                f"{self.workspace_root} itself, which is not a workspace"
-            )
-        if not self._is_under_root(resolved):
-            raise WorkspaceContainmentError(
-                f"Workspace {name!r} resolves to {resolved}, which is outside "
-                f"the workspace root {self.workspace_root}"
-            )
-        return resolved
+        return resolve_contained(
+            self.workspace_root, (self.workspace_root / name).expanduser(),
+            label=f"Workspace {name!r}",
+        )
 
     def discover_workspaces(self) -> List[WorkspaceInfo]:
         """Discover workspaces under the root directory.

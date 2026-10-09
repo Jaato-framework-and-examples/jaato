@@ -102,7 +102,7 @@ from jaato_sdk.events import (
     WorkspaceAppWriteResultEvent,
 )
 from .app_secret import AppSecretAnswer, AppSecretResolver
-from .workspace_manager import WorkspaceManager
+from .workspace_manager import WorkspaceManager, client_path_refusal
 from .event_sink import EventSink
 
 
@@ -684,6 +684,12 @@ class WSEventSinkAdapter:
     def set_client_user(self, client_id: str, user_id: str) -> None:
         """Associate a user identity with a WS client."""
         self._ws.set_client_user(client_id, user_id)
+
+    def client_path_refusals(
+        self, client_id: str, fields: List[Tuple[str, str]],
+    ) -> Optional[List[str]]:
+        """See ``JaatoWSServer.client_path_refusals`` (#1592)."""
+        return self._ws.client_path_refusals(client_id, fields)
 
     def get_client_peer(self, client_id: str) -> None:
         """No peer credential on a WebSocket — always ``None``.
@@ -1777,6 +1783,42 @@ class JaatoWSServer:
             if real == root or real.startswith(root + os.sep):
                 return root
         return None
+
+    def client_path_refusals(
+        self, client_id: str, fields: List[Tuple[str, str]],
+    ) -> Optional[List[str]]:
+        """Which declared paths *client_id* may not use (#1592), or ``None``.
+
+        A connection authenticated with a ticket of an application that
+        declares a ``workspace_root`` (#1496 makes the root mandatory for
+        every entry, so that is every ticket connection) may name a path
+        only beneath that root and inside a workspace it may see --
+        :func:`~.workspace_manager.client_path_refusal`, the same
+        containment and ownership rule ``workspace.select`` applies to a
+        name.  The root comes from the credential store rather than from a
+        manager, so the rule holds on a daemon running no workspace mode of
+        its own (``_app_managers`` is then empty and every workspace reads
+        as unowned).
+
+        Returns:
+            ``None`` -- no scope applies (the shared token, an unknown
+            client, an application with no root): the caller keeps
+            today's behaviour.  Otherwise a list of refusals, empty when
+            every non-empty path may be used.
+        """
+        client = self._clients.get(client_id)
+        app_id = getattr(client, "app_id", None) if client else None
+        app_ws = self._app_credentials.workspaces().get(app_id) if app_id else None
+        if app_ws is None:
+            return None
+        manager = self._app_managers.get(app_id)
+        owner_of = manager.owner_for_path if manager is not None else None
+        root = Path(app_ws.workspace_root)
+        refusals = (
+            client_path_refusal(root, field, value, client.user_id, owner_of)
+            for field, value in fields if value
+        )
+        return [r for r in refusals if r]
 
     def visible_workspace_paths(self, client_id: str) -> Optional[List[str]]:
         """See ``WSEventSinkAdapter.visible_workspace_paths``."""

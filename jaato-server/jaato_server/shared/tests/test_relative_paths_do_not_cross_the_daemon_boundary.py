@@ -266,6 +266,12 @@ def _apply_client_config(manager: _FakeManager, event: Any) -> None:
     manager._reject_unentitled_client_paths = (
         SessionManager._reject_unentitled_client_paths.__get__(
             manager, SessionManager))
+    # Same for the application-root guard (#1592): with no resolver lent
+    # (no router, as for an IPC-only manager) it answers "not applicable".
+    manager._client_path_scope_resolver = None
+    manager._reject_client_paths_outside_scope = (
+        SessionManager._reject_client_paths_outside_scope.__get__(
+            manager, SessionManager))
     # Bound rather than stubbed: the live-session push is the other half
     # of "apply", and a stub would let a reversion that skipped validation
     # still look clean here.

@@ -8499,6 +8499,7 @@ workspaces live:
 | the entry: exactly these three keys; the account must exist, the root must exist, be a directory owned by the account and searchable by it; a non-root daemon may name only its own account; two applications' roots may not be equal or nested | `ws_tickets._validated_entries`, `_app_workspace`, `_refuse_shared_roots` (`AppCredentialStore.workspace(app_id)`) |
 | one `WorkspaceManager` and `WorkspaceProvisioner` per application, its registry at `~/.jaato/workspaces-<app_id>.json` (daemon-side: the rows carry the `owner` that decides visibility); a root overlapping the daemon's own refuses startup | `JaatoWSServer._init_app_workspaces` |
 | a connection whose `app_id` has a root is served from it by every workspace verb, staging, inspect, clone, delete and provisioning; any other connection keeps the daemon's root | `_workspace_manager_for`, `_provisioner_for` |
+| the paths such a connection DECLARES (`ClientConfigRequest` path fields, `set_workspace`) are held to that root too (#1592, next section) | `client_path_refusal` |
 | "is this a daemon-managed workspace" (AppArmor/cgroup gates, workspace HOME #1225, venv #1274, private `/tmp` #1381) is asked per workspace | `JaatoWSServer.managed_root_for`, `SessionManager.set_managed_root_resolver` |
 
 **What the daemon writes in a workspace takes the owner of its tree**
@@ -8526,6 +8527,37 @@ the daemon's root are not moved; moving them is an operator step.
 Guard: `jaato_server/server/tests/test_an_applications_workspaces_belong_to_its_account_1496.py`,
 eleven reversions. Ownership is exercised through a view of `os` as a root
 daemon sees it (the suite does not run as root).
+
+### A Path a Ticket Client Declared, Held to Its Root (#1592)
+
+The table above held a ticket connection to its application's root on
+every verb that takes a workspace NAME. Two routes take a PATH instead,
+and checked only that it was absolute (#742): `ClientConfigRequest`
+(`working_dir`, `config_root`, `env_file`, the two trace paths) and
+`set_workspace <path>`. On IPC the same fields answer to the peer
+credential (see [Two Principals on One Socket](#two-principals-on-one-socket)),
+which a WS connection does not have, so a ticket client could name any
+directory and `session.new` ran a session there with the daemon's
+credential. Found by reading the code, not reproduced live.
+
+| Piece | Where |
+|---|---|
+| the rule: `resolve_contained` (the containment `_resolve_under_root` now delegates to: symlinks resolved first, strictly beneath the root, existence never asked), then the workspace (the first component under the root) through `visible_to` | `workspace_manager.client_path_refusal` |
+| the scope: a connection whose `app_id` has an `AppWorkspace` in the credential store, i.e. every ticket connection (#1496 makes the root mandatory). Read from the store, not from a manager, so it holds on a daemon with no workspace mode of its own (no app managers; every workspace then reads unowned) | `JaatoWSServer.client_path_refusals` |
+| the transport question: `None` = no scope applies, a list = the verdict; tolerant of sinks without it; the composite returns the first verdict | `event_sink.client_path_refusals` |
+| the handshake: after the relative and peer checks, all-or-nothing, one `ErrorEvent(error_type="ClientPathOutsideWorkspaceRoot")` naming each field | `SessionManager._reject_client_paths_outside_scope`, lent by the router (`_lend_path_scope`) |
+| `set_workspace` | `CommandRouter._handle_set_workspace` |
+
+Unchanged: IPC, the shared token, an embedded `SessionManager` with no
+router. `session.new` reads its workspace from what these two routes
+store (or auto-provisions under the app root), `workspace.select` was
+already contained, staging and `session.attach` resolve through the
+router's `resolve_caller_workspace` and #1113 scoping. Not covered: the
+standalone WS mode, which has no `ClientConfigRequest` handler.
+
+Guard: `jaato_server/server/tests/test_a_ticket_client_cannot_name_a_path_outside_its_root_1592.py`,
+seven reversions, through the real WS dispatch, router, manager and
+ticket bind.
 
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 

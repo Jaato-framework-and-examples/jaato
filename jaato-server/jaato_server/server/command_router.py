@@ -18,7 +18,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.events import Event
 from jaato_server.server import pool_admin
-from jaato_server.server.event_sink import EventSink, client_peer
+from jaato_server.server.event_sink import (
+    EventSink, client_path_refusals, client_peer,
+)
 from jaato_server.server.session_manager import SessionManager, session_picker_fields
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
 from jaato_server.shared.workspace_ownership import inherit_owner, inherit_owner_files
@@ -328,6 +330,20 @@ def _lend_peer_lookup(session_manager: Any, sink: Any) -> None:
         lend(lambda client_id: client_peer(sink, client_id))
 
 
+def _lend_path_scope(session_manager: Any, sink: Any) -> None:
+    """Give the manager a way to ask where a client may declare paths (#1592).
+
+    The WS transport knows a ticket connection's application and its
+    workspace root; the manager holds no sink.  Same shape as
+    :func:`_lend_peer_lookup`, and the same tolerance for a manager
+    predating the setter (a test double).
+    """
+    lend = getattr(session_manager, "set_client_path_scope_resolver", None)
+    if lend is not None:
+        lend(lambda client_id, fields: client_path_refusals(
+            sink, client_id, fields))
+
+
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
 
@@ -390,6 +406,7 @@ class CommandRouter:
         else:
             lend(self._sessions_visible_to)
         _lend_peer_lookup(session_manager, self._event_sink)
+        _lend_path_scope(session_manager, self._event_sink)
 
         # Pending workspace mismatch requests: client_id -> {request_id, session_id, ...}
         self._pending_workspace_mismatch: dict = {}
@@ -514,21 +531,35 @@ class CommandRouter:
             client_peer(self._event_sink, client_id),
         )
         if refusals:
-            error = (
-                "set_workspace refused — the connecting account cannot "
-                "reach that path:\n" + "\n".join(f"  - {m}" for m in refusals)
-            )
-            logger.error("Client %s: %s", client_id, error)
-            from jaato_sdk.events import ErrorEvent
-            self._event_sink.send_event(client_id, ErrorEvent(
-                error=error,
-                error_type="PeerPathNotReachable",
-                recoverable=True,
-            ))
+            self._refuse_set_workspace(
+                client_id, "the connecting account cannot reach that path",
+                refusals, "PeerPathNotReachable")
+            return
+        # A WS ticket connection names no OS account, so the check above is
+        # inert there; its application's workspace root is the boundary
+        # (#1592), the same one ClientConfigRequest.working_dir answers to.
+        refusals = client_path_refusals(
+            self._event_sink, client_id, [("workspace", workspace_path)])
+        if refusals:
+            self._refuse_set_workspace(
+                client_id, "that path is outside the application's workspaces",
+                refusals, "ClientPathOutsideWorkspaceRoot")
             return
 
         self._event_sink.set_client_workspace(client_id, workspace_path)
         logger.debug(f"Client {client_id} workspace set to: {workspace_path}")
+
+    def _refuse_set_workspace(
+        self, client_id: str, why: str, refusals: List[str], error_type: str,
+    ) -> None:
+        """Answer a refused ``set_workspace`` with one ``ErrorEvent``."""
+        error = (f"set_workspace refused — {why}:\n"
+                 + "\n".join(f"  - {m}" for m in refusals))
+        logger.error("Client %s: %s", client_id, error)
+        from jaato_sdk.events import ErrorEvent
+        self._event_sink.send_event(client_id, ErrorEvent(
+            error=error, error_type=error_type, recoverable=True,
+        ))
 
     def _dispatch(
         self,
