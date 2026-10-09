@@ -263,6 +263,7 @@ WORK_LANE_METHODS = frozenset({
     "session.replay_messages",   # re-runs the model loop
     "session.execute_user_command",   # runs a user command
     "session.embed_texts",       # runs the embedding model (may load it)
+    "session.plugin_tool",       # runs one plugin tool call (#1606)
     "echo",                      # §8.3 RPC-overhead benchmark; deliberately
                                  # in the work lane so a benchmark cannot
                                  # measure the control lane's latency
@@ -311,6 +312,13 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # WORK lane (``WORK_LANE_METHODS``): the first call may load the model.
     # A stopgap for #1422: goes once the runner may write its own catalog.
     "session.embed_texts": "_handle_session_embed_texts",
+    # One plugin tool call with no model turn (#1606): ``describe`` answers
+    # the tool's schema as THIS session exposes it, ``invoke`` runs one call
+    # through the session's own executor (scope, permission gate, coercion,
+    # redaction).  The daemon builds a short-lived session for it.  WORK
+    # lane (``WORK_LANE_METHODS``): an invoke runs plugin code and may wait
+    # on a permission answer.
+    "session.plugin_tool": "_handle_session_plugin_tool",
 }
 
 #: How many recently-registered request ids the reader thread remembers,
@@ -1986,6 +1994,47 @@ class RunnerRPC:
                 "stage": "call",
             }
         return True, answer
+
+    def _handle_session_plugin_tool(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
+        """``session.plugin_tool`` -- describe or run one plugin tool (#1606).
+
+        ``args = {"op": "describe"|"invoke", "plugin", "tool", "args",
+        "call_id"}``.  The body is :mod:`jaato_server.shared.plugin_tool_call`,
+        which asks this session the questions its wire asks it and, for an
+        invoke, hands the call to the session's ``ToolExecutor``.
+
+        Returns:
+            ``(True, <answer>)`` -- ``describe_plugin_tool`` /
+            ``invoke_plugin_tool``'s dict.  ``(False, {"error", "stage"})``
+            for ``no_host`` / ``no_session``, an unknown ``op`` and a raise,
+            which the daemon reports as ``runner_unreachable``.
+        """
+        from jaato_server.shared.plugin_tool_call import (
+            describe_plugin_tool,
+            invoke_plugin_tool,
+        )
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        op = str(args.get("op") or "")
+        plugin = str(args.get("plugin") or "")
+        tool = str(args.get("tool") or "")
+        try:
+            if op == "describe":
+                return True, describe_plugin_tool(session, plugin, tool)
+            if op == "invoke":
+                return True, invoke_plugin_tool(
+                    session, plugin, tool, dict(args.get("args") or {}),
+                    call_id=str(args.get("call_id") or "") or None,
+                )
+        except Exception as exc:  # noqa: BLE001 -- boundary
+            return False, {
+                "error": f"session.plugin_tool: {type(exc).__name__}: {exc}",
+                "stage": "call",
+            }
+        return False, {"error": f"session.plugin_tool: unknown op {op!r}",
+                       "stage": "call"}
 
     def _handle_session_embed_texts(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
         """``session.embed_texts`` -- vectors from THIS runner's references plugin.

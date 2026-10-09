@@ -105,7 +105,11 @@ from jaato_sdk.events import (
     ToolOutputEvent,
     PoolStatusRequest,
 )
-from jaato_sdk.events import REFERENCE_CURATION_REQUEST_TYPES
+from jaato_sdk.events import (
+    PLUGIN_TOOL_REQUEST_TYPES,
+    REFERENCE_CURATION_REQUEST_TYPES,
+    PermissionResponseRequest,
+)
 from .memory_verbs import MEMORY_REQUEST_TYPES
 from . import session_new_timing
 
@@ -116,11 +120,14 @@ from . import session_new_timing
 #: which resolve the caller's workspace from the connection and answer
 #: ``no_workspace`` themselves when there is none.  ``PoolStatusRequest``
 #: (1.35) is about the daemon's runner pool and is sent by ``--pool-size``,
-#: which attaches to no session by design.
+#: which attaches to no session by design.  The plugin-tool verbs (1.37,
+#: #1606) run in a session of their own, and a ``PermissionResponseRequest``
+#: may answer one of their ASKs from a caller attached to nothing; the router
+#: refuses such an answer as ``no_session`` when no call is waiting on it.
 _SESSIONLESS_REQUEST_TYPES = (
     CommandRequest, ClientConfigRequest, PostAuthSetupResponse,
-    PoolStatusRequest,
-) + MEMORY_REQUEST_TYPES + REFERENCE_CURATION_REQUEST_TYPES
+    PoolStatusRequest, PermissionResponseRequest,
+) + MEMORY_REQUEST_TYPES + REFERENCE_CURATION_REQUEST_TYPES + PLUGIN_TOOL_REQUEST_TYPES
 
 
 logger = logging.getLogger(__name__)

@@ -619,7 +619,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # carries the workspace's ``bundles`` after the create (the listing
 # ``ReferenceClaimsEvent.bundles`` already gives).  A NEW verb (the 1.7
 # rule): the SDKs refuse below ``MIN_REFERENCE_BUNDLE_PROTOCOL``.
-PROTOCOL_VERSION = "1.36"
+# 1.37 -- one plugin tool call with no model turn (#1606).
+# ``PluginToolDescribeRequest`` -> ``PluginToolDescribeEvent`` answers a
+# plugin tool's schema as a session with that profile (or that
+# ``plugin_configs`` block) would expose it, ``exists: false`` when the
+# profile does not enable the plugin, scopes the tool out or hides it.
+# ``PluginToolInvokeRequest`` -> ``PluginToolInvokeResultEvent`` runs one call
+# of it in a short-lived session of the caller's workspace, through the
+# session's own ``ToolExecutor`` (permission policy, argument coercion,
+# secret redaction, the failure contract), and answers the result and
+# whether the tool failed.  A permission ASK reaches the caller as a
+# ``PermissionRequestedEvent`` and is answered with the usual
+# ``PermissionResponseRequest``.  Both are session-less on IPC.  NEW verbs
+# (the 1.7 rule): the SDKs refuse below ``MIN_PLUGIN_TOOL_PROTOCOL``.
+PROTOCOL_VERSION = "1.37"
 
 
 # =============================================================================
@@ -857,6 +870,12 @@ class EventType(str, Enum):
     SCAFFOLD_VALIDATE_RESULT = "scaffold.validate.result"  # Answer to `scaffold.validate [set] [profile]` (1.34)
     POOL_STATUS_REQUEST = "pool.status.request"  # Client -> Server: read / resize the runner pool (1.35)
     POOL_STATUS = "pool.status"  # Answer to PoolStatusRequest and to `pool.status` / `pool.resize` (1.35)
+
+    # Plugin tool calls, no model turn (Client <-> Server, 1.37)
+    PLUGIN_TOOL_DESCRIBE_REQUEST = "plugin.tool.describe.request"  # Client -> Server (1.37)
+    PLUGIN_TOOL_DESCRIBE_RESULT = "plugin.tool.describe.result"  # Answer to PluginToolDescribeRequest (1.37)
+    PLUGIN_TOOL_INVOKE_REQUEST = "plugin.tool.invoke.request"  # Client -> Server (1.37)
+    PLUGIN_TOOL_INVOKE_RESULT = "plugin.tool.invoke.result"  # Answer to PluginToolInvokeRequest (1.37)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -1527,6 +1546,11 @@ class PermissionRequestedEvent(Event):
     # permission card show a risk tag without its own name table.  Additive,
     # no protocol bump.
     tool_class: Optional[str] = None
+    # Set when the ASK belongs to a plugin tool call (1.37, #1606): the
+    # ``request_id`` of that ``PluginToolInvokeRequest``.  The call runs in a
+    # short-lived session the caller is not attached to, so ``session_id``
+    # alone does not say which of the caller's calls is asking.
+    origin_request_id: Optional[str] = None
 
 
 class PermissionInputModeEvent(Event):
@@ -3202,6 +3226,121 @@ class ReferenceBundleCreateResultEvent(Event):
     bundle: str = ""
     indexed: bool = False
     bundles: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class PluginToolDescribeRequest(Event):
+    """Describe one plugin tool as a session would expose it (1.37, #1606).
+
+    Answered by :class:`PluginToolDescribeEvent` carrying this ``request_id``.
+    The configuration is EITHER ``profile`` (a profile name the caller's
+    workspace resolves, set-qualified allowed) OR ``plugin_configs`` (a
+    ``plugin_configs`` block; the session then enables only ``plugin``).
+    Both empty means ``plugin_configs={}``.  The answer comes from a
+    short-lived session of the caller's workspace, so what it says is what a
+    session with that configuration would expose, ``narrow_tool_schema``
+    and per-session settings included.
+    """
+    type: EventType = Field(default=EventType.PLUGIN_TOOL_DESCRIBE_REQUEST)
+    request_id: str = ""
+    plugin: str = ""
+    tool: str = ""
+    profile: str = ""
+    plugin_configs: Optional[Dict[str, Any]] = None
+
+
+class PluginToolDescribeEvent(Event):
+    """The schema of one plugin tool, as a session exposes it (1.37, #1606).
+
+    Fields:
+        request_id: Echoed from the request.
+        ok: Whether a session could be built to answer.  ``exists`` is
+            meaningful only when ``ok``.
+        category: ``""`` on success; else ``invalid_request``,
+            ``no_workspace``, ``session_failed``, ``runner_unreachable`` or
+            ``timeout``.
+        error: The reason, for a person.
+        exists: Whether a session with this configuration has the tool.
+        reason: Why not, when ``exists`` is False: ``unknown_tool`` (no
+            enabled plugin provides it), ``wrong_plugin`` (another plugin
+            does), ``not_in_surface`` (the profile does not enable the
+            plugin, or scopes the tool out) or ``hidden`` (the plugin hides
+            it for this session).
+        detail: The refusal sentence behind ``reason``.
+        tool_schema: The tool's schema when it exists: ``name``, ``description``,
+            ``parameters`` (JSON Schema), ``category``, ``discoverability``,
+            ``traits``.
+    """
+    type: EventType = Field(default=EventType.PLUGIN_TOOL_DESCRIBE_RESULT)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    exists: bool = False
+    reason: str = ""
+    detail: str = ""
+    tool_schema: Optional[Dict[str, Any]] = None
+
+
+class PluginToolInvokeRequest(Event):
+    """Run one plugin tool call with no model turn (1.37, #1606).
+
+    Answered by :class:`PluginToolInvokeResultEvent` carrying this
+    ``request_id``.  ``profile`` / ``plugin_configs`` as on
+    :class:`PluginToolDescribeRequest`.  The call runs in a short-lived
+    session of the caller's workspace, under that session's confinement and
+    permission policy; a permission ASK is sent to the caller as a
+    ``PermissionRequestedEvent`` and answered with ``PermissionResponseRequest``.
+    ``timeout`` bounds the whole call, a pending ASK included (seconds;
+    ``0`` or less means the daemon's default).
+    """
+    type: EventType = Field(default=EventType.PLUGIN_TOOL_INVOKE_REQUEST)
+    request_id: str = ""
+    plugin: str = ""
+    tool: str = ""
+    args: Dict[str, Any] = Field(default_factory=dict)
+    profile: str = ""
+    plugin_configs: Optional[Dict[str, Any]] = None
+    timeout: float = 0.0
+
+
+class PluginToolInvokeResultEvent(Event):
+    """What one plugin tool call did (1.37, #1606).
+
+    Fields:
+        request_id: Echoed from the request.
+        ok: Whether the call reached the tool's executor.  ``False`` means
+            nothing ran (or, for ``timeout`` / ``runner_unreachable``, that
+            nobody can say whether it finished).
+        category: ``""`` when the call ran; else ``invalid_request``,
+            ``no_workspace``, ``session_failed``, ``not_in_surface``,
+            ``runner_unreachable`` or ``timeout``.
+        error: The reason, for a person.
+        success: The tool's own verdict (the executor's ``ok`` flag, #1053),
+            meaningful only when ``ok``.  A permission denial is
+            ``success=False`` with the denial as ``result``.
+        result: What the tool returned, after secret redaction: the
+            executor's payload, bookkeeping keys (``_permission``,
+            ``_telemetry``) included, as a session receives it.
+        session_id: The short-lived session the call ran in (deleted when
+            the answer is sent), for reading the daemon log.
+    """
+    type: EventType = Field(default=EventType.PLUGIN_TOOL_INVOKE_RESULT)
+    request_id: str = ""
+    ok: bool = True
+    category: str = ""
+    error: str = ""
+    success: bool = False
+    result: Any = None
+    session_id: str = ""
+
+
+#: The plugin-tool verbs (1.37).  Daemon-level: they resolve the caller's
+#: workspace from the CONNECTION and run in a session of their own, so a
+#: transport routes them without an attached session.
+PLUGIN_TOOL_REQUEST_TYPES = (
+    PluginToolDescribeRequest,
+    PluginToolInvokeRequest,
+)
 
 
 #: The reference-curation requests (1.33).  Daemon-level: each handler
@@ -5676,6 +5815,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REFERENCE_LINKS_UPDATE_RESULT.value: ReferenceLinksUpdateResultEvent,
     EventType.REFERENCE_BUNDLE_CREATE_REQUEST.value: ReferenceBundleCreateRequest,
     EventType.REFERENCE_BUNDLE_CREATE_RESULT.value: ReferenceBundleCreateResultEvent,
+    EventType.PLUGIN_TOOL_DESCRIBE_REQUEST.value: PluginToolDescribeRequest,
+    EventType.PLUGIN_TOOL_DESCRIBE_RESULT.value: PluginToolDescribeEvent,
+    EventType.PLUGIN_TOOL_INVOKE_REQUEST.value: PluginToolInvokeRequest,
+    EventType.PLUGIN_TOOL_INVOKE_RESULT.value: PluginToolInvokeResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,

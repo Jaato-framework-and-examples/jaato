@@ -2143,6 +2143,11 @@ class SessionManager:
 
         # Per-client configuration (presentation context, working_dir, etc.)
         self._client_config: Dict[str, Dict[str, Any]] = {}
+        # Synthetic clients owned by the daemon itself (#1606): a plugin tool
+        # call runs in a short-lived session created under one of these ids,
+        # and every event addressed to it goes to this callback instead of a
+        # transport -- see :meth:`register_ephemeral_client`.
+        self._ephemeral_client_sinks: Dict[str, Callable[[Any], None]] = {}
         # Client-provided ("host") tool schema dicts buffered by the transport
         # when registered BEFORE session.new (client_id -> [tool_def, ...]).
         # Drained in the session.new flow to seed JaatoServer.client_tool_schemas
@@ -5810,6 +5815,10 @@ class SessionManager:
         """
         _stamp_session_id(event, self._client_to_session.get(client_id))
         logger.debug(f"_emit_to_client: {client_id} <- {type(event).__name__}")
+        ephemeral = self._ephemeral_client_sinks.get(client_id)
+        if ephemeral is not None:
+            ephemeral(event)
+            return
         if self._event_callback:
             logger.debug(f"  calling event_callback")
             self._event_callback(client_id, event)
@@ -5823,6 +5832,39 @@ class SessionManager:
     # 2026-05-21; Phase 1 adds the daemon-side registry + dispatch +
     # default lifecycle policy + GC backstop.  Phase 2 adds the
     # IPC-RPC variant for SDK clients.
+
+    def register_ephemeral_client(
+        self,
+        client_id: str,
+        sink: Callable[[Any], None],
+        *,
+        config_from: Optional[str] = None,
+    ) -> None:
+        """Register a daemon-owned synthetic client (#1606).
+
+        A session created under ``client_id`` is attached to it like to any
+        client, and every event addressed to it reaches ``sink`` instead of a
+        transport -- which is how the plugin-tool verbs read the creation
+        error of the session they made, and forward a permission ASK to the
+        real caller.  ``sink`` runs inside :meth:`_emit_to_client`, so it
+        must be quick and must not take ``_lock``.
+
+        ``config_from`` copies that client's configuration (``working_dir``,
+        ``config_root``, ``env_file``, the AppArmor opt-in, ...), so a
+        session this client creates is the one ``config_from``'s
+        ``session.new`` would have created: same config search path, same
+        confinement decision.  Undone by :meth:`unregister_ephemeral_client`.
+        """
+        if config_from is not None and config_from in self._client_config:
+            self._client_config[client_id] = dict(self._client_config[config_from])
+        self._ephemeral_client_sinks[client_id] = sink
+
+    def unregister_ephemeral_client(self, client_id: str) -> None:
+        """Drop a synthetic client: its sink, its configuration, its mapping."""
+        self._ephemeral_client_sinks.pop(client_id, None)
+        self._client_config.pop(client_id, None)
+        with self._lock:
+            self._client_to_session.pop(client_id, None)
 
     def register_in_process_client(
         self,

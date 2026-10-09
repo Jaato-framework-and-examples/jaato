@@ -129,6 +129,10 @@ export type JaatoEvents =
   | ReferenceLinksUpdateResultEvent
   | ReferenceBundleCreateRequest
   | ReferenceBundleCreateResultEvent
+  | PluginToolDescribeRequest
+  | PluginToolDescribeEvent
+  | PluginToolInvokeRequest
+  | PluginToolInvokeResultEvent
   | ScaffoldExplainEvent
   | SessionMessageResultEvent
   | ScaffoldIntegrationEvent
@@ -308,6 +312,10 @@ export type EventType =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -480,6 +488,10 @@ export type EventType1 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -657,6 +669,10 @@ export type EventType2 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -832,6 +848,10 @@ export type EventType3 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1006,6 +1026,10 @@ export type EventType4 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1188,6 +1212,10 @@ export type EventType5 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1367,6 +1395,10 @@ export type EventType6 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1545,6 +1577,10 @@ export type EventType7 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1717,6 +1753,10 @@ export type EventType8 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1893,6 +1933,10 @@ export type EventType9 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2068,6 +2112,10 @@ export type EventType10 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2254,6 +2302,10 @@ export type EventType11 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2430,6 +2482,10 @@ export type EventType12 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2612,6 +2668,10 @@ export type EventType13 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2663,6 +2723,7 @@ export type FormatHint = string | null;
 export type Warnings = string | null;
 export type WarningLevel = string | null;
 export type ToolClass1 = string | null;
+export type OriginRequestId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -2794,6 +2855,10 @@ export type EventType14 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2978,6 +3043,10 @@ export type EventType15 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3157,6 +3226,10 @@ export type EventType16 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3331,6 +3404,10 @@ export type EventType17 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3507,6 +3584,10 @@ export type EventType18 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3683,6 +3764,10 @@ export type EventType19 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3865,6 +3950,10 @@ export type EventType20 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4040,6 +4129,10 @@ export type EventType21 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4219,6 +4312,10 @@ export type EventType22 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4393,6 +4490,10 @@ export type EventType23 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4568,6 +4669,10 @@ export type EventType24 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4743,6 +4848,10 @@ export type EventType25 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4916,6 +5025,10 @@ export type EventType26 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5094,6 +5207,10 @@ export type EventType27 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5268,6 +5385,10 @@ export type EventType28 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5441,6 +5562,10 @@ export type EventType29 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5622,6 +5747,10 @@ export type EventType30 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5797,6 +5926,10 @@ export type EventType31 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5973,6 +6106,10 @@ export type EventType32 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6164,6 +6301,10 @@ export type EventType33 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6336,6 +6477,10 @@ export type EventType34 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6527,6 +6672,10 @@ export type EventType35 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6703,6 +6852,10 @@ export type EventType36 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6875,6 +7028,10 @@ export type EventType37 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7055,6 +7212,10 @@ export type EventType38 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7231,6 +7392,10 @@ export type EventType39 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7404,6 +7569,10 @@ export type EventType40 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7576,6 +7745,10 @@ export type EventType41 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7752,6 +7925,10 @@ export type EventType42 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7930,6 +8107,10 @@ export type EventType43 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8106,6 +8287,10 @@ export type EventType44 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8280,6 +8465,10 @@ export type EventType45 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8464,6 +8653,10 @@ export type EventType46 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8658,6 +8851,10 @@ export type EventType47 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8838,6 +9035,10 @@ export type EventType48 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9018,6 +9219,10 @@ export type EventType49 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9198,6 +9403,10 @@ export type EventType50 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9375,6 +9584,10 @@ export type EventType51 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9570,6 +9783,10 @@ export type EventType52 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9744,6 +9961,10 @@ export type EventType53 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9918,6 +10139,10 @@ export type EventType54 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10090,6 +10315,10 @@ export type EventType55 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10287,6 +10516,10 @@ export type EventType56 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10463,6 +10696,10 @@ export type EventType57 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10639,6 +10876,10 @@ export type EventType58 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10813,6 +11054,10 @@ export type EventType59 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10985,6 +11230,10 @@ export type EventType60 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11157,6 +11406,10 @@ export type EventType61 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11330,6 +11583,10 @@ export type EventType62 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11506,6 +11763,10 @@ export type EventType63 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11678,6 +11939,10 @@ export type EventType64 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11850,6 +12115,10 @@ export type EventType65 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12023,6 +12292,10 @@ export type EventType66 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12200,6 +12473,10 @@ export type EventType67 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12373,6 +12650,10 @@ export type EventType68 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12545,6 +12826,10 @@ export type EventType69 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12716,6 +13001,10 @@ export type EventType70 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12890,6 +13179,10 @@ export type EventType71 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13061,6 +13354,10 @@ export type EventType72 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13236,6 +13533,10 @@ export type EventType73 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13407,6 +13708,10 @@ export type EventType74 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13579,6 +13884,10 @@ export type EventType75 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13753,6 +14062,10 @@ export type EventType76 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13927,6 +14240,10 @@ export type EventType77 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14101,6 +14418,10 @@ export type EventType78 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14273,6 +14594,10 @@ export type EventType79 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14451,6 +14776,10 @@ export type EventType80 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14626,6 +14955,10 @@ export type EventType81 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14808,6 +15141,10 @@ export type EventType82 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14989,6 +15326,10 @@ export type EventType83 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15162,6 +15503,10 @@ export type EventType84 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15334,6 +15679,10 @@ export type EventType85 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15513,6 +15862,10 @@ export type EventType86 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15691,6 +16044,10 @@ export type EventType87 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15864,6 +16221,10 @@ export type EventType88 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -16038,6 +16399,10 @@ export type EventType89 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -16209,6 +16574,10 @@ export type EventType90 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -16384,6 +16753,10 @@ export type EventType91 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -16556,6 +16929,10 @@ export type EventType92 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -16729,6 +17106,10 @@ export type EventType93 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -16902,6 +17283,10 @@ export type EventType94 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -17076,6 +17461,10 @@ export type EventType95 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -17249,6 +17638,10 @@ export type EventType96 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -17429,6 +17822,10 @@ export type EventType97 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -17605,6 +18002,10 @@ export type EventType98 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -17785,6 +18186,10 @@ export type EventType99 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -17957,6 +18362,10 @@ export type EventType100 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -18134,6 +18543,10 @@ export type EventType101 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -18309,6 +18722,10 @@ export type EventType102 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -18485,6 +18902,10 @@ export type EventType103 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -18661,6 +19082,10 @@ export type EventType104 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -18838,6 +19263,10 @@ export type EventType105 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -19014,6 +19443,10 @@ export type EventType106 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -19198,6 +19631,10 @@ export type EventType107 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -19381,6 +19818,10 @@ export type EventType108 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -19553,6 +19994,10 @@ export type EventType109 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -19728,6 +20173,10 @@ export type EventType110 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -19908,6 +20357,10 @@ export type EventType111 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -20080,6 +20533,10 @@ export type EventType112 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -20256,6 +20713,10 @@ export type EventType113 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -20437,6 +20898,10 @@ export type EventType114 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -20610,6 +21075,10 @@ export type EventType115 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -20790,6 +21259,10 @@ export type EventType116 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -20830,14 +21303,13 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type Topic = string;
-export type Ok14 = boolean;
-export type Text4 = string;
-export type Topics = {
+export type RequestId48 = string;
+export type Plugin1 = string;
+export type Tool = string;
+export type Profile = string;
+export type PluginConfigs1 = {
   [k: string]: unknown;
-}[];
-export type Error23 = string;
-export type ServerVersion1 = string;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -20969,6 +21441,10 @@ export type EventType117 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -21009,22 +21485,16 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type RequestId48 = string | null;
-export type Target = string;
-export type Status3 = string;
-export type Ok15 = boolean;
-export type MessageId = string;
-export type TargetSessionId = string;
-export type SiblingName = string;
-export type GroupKey = string;
-export type Woken = boolean;
-export type Headless = boolean;
-export type Spooled = boolean;
-export type Candidates = string[];
-export type Files1 = {
+export type RequestId49 = string;
+export type Ok14 = boolean;
+export type Category10 = string;
+export type Error23 = string;
+export type Exists = boolean;
+export type Reason1 = string;
+export type Detail = string;
+export type ToolSchema = {
   [k: string]: unknown;
-}[];
-export type Error24 = string;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -21156,6 +21626,10 @@ export type EventType118 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -21196,17 +21670,14 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type Integration = string;
-export type Ok16 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target1 = string;
-export type Text5 = string;
-export type Error25 = string;
-export type Available = string[];
-export type ServerVersion2 = string;
+export type RequestId50 = string;
+export type Plugin2 = string;
+export type Tool1 = string;
+export type Profile1 = string;
+export type PluginConfigs2 = {
+  [k: string]: unknown;
+} | null;
+export type Timeout = number;
 /**
  * All event types in the protocol.
  */
@@ -21338,6 +21809,10 @@ export type EventType119 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -21378,18 +21853,11 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type Ok17 = boolean;
-export type Workspace3 = string;
-export type ProfileSet = string;
-export type Profile = string;
-export type Scope = string;
-export type Findings = {
-  [k: string]: unknown;
-}[];
-export type Errors = number;
-export type Warnings3 = number;
-export type Error26 = string;
-export type ServerVersion3 = string;
+export type RequestId51 = string;
+export type Ok15 = boolean;
+export type Category11 = string;
+export type Error24 = string;
+export type Success4 = boolean;
 /**
  * All event types in the protocol.
  */
@@ -21521,6 +21989,10 @@ export type EventType120 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -21561,12 +22033,14 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type WorkspaceId = string;
-export type Name13 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files2 = StagedFileSpec[];
+export type Topic = string;
+export type Ok16 = boolean;
+export type Text4 = string;
+export type Topics = {
+  [k: string]: unknown;
+}[];
+export type Error25 = string;
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -21698,6 +22172,10 @@ export type EventType121 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -21738,11 +22216,22 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
+export type RequestId52 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok17 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
 }[];
+export type Error26 = string;
 /**
  * All event types in the protocol.
  */
@@ -21874,6 +22363,10 @@ export type EventType122 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -21914,9 +22407,17 @@ export type EventType122 =
   | "gates.snapshot";
 export type Timestamp122 = string;
 export type SessionId122 = string;
-export type RequestId49 = string;
-export type Path4 = string;
-export type MetadataOnly = boolean;
+export type Integration = string;
+export type Ok18 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error27 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
 /**
  * All event types in the protocol.
  */
@@ -22048,6 +22549,10 @@ export type EventType123 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -22088,15 +22593,18 @@ export type EventType123 =
   | "gates.snapshot";
 export type Timestamp123 = string;
 export type SessionId123 = string;
-export type RequestId50 = string;
-export type Ok18 = boolean;
-export type Path5 = string;
-export type Name14 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category10 = string;
-export type Error27 = string;
+export type Ok19 = boolean;
+export type Workspace3 = string;
+export type ProfileSet = string;
+export type Profile2 = string;
+export type Scope = string;
+export type Findings = {
+  [k: string]: unknown;
+}[];
+export type Errors = number;
+export type Warnings3 = number;
+export type Error28 = string;
+export type ServerVersion3 = string;
 /**
  * All event types in the protocol.
  */
@@ -22228,6 +22736,10 @@ export type EventType124 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -22268,9 +22780,12 @@ export type EventType124 =
   | "gates.snapshot";
 export type Timestamp124 = string;
 export type SessionId124 = string;
-export type RequestId51 = string;
-export type Query = string;
-export type MaxResults = number;
+export type WorkspaceId = string;
+export type Name13 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -22402,6 +22917,10 @@ export type EventType125 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -22442,16 +22961,11 @@ export type EventType125 =
   | "gates.snapshot";
 export type Timestamp125 = string;
 export type SessionId125 = string;
-export type RequestId52 = string;
-export type Ok19 = boolean;
-export type Query1 = string;
-export type Matches = {
-  [k: string]: unknown;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
 }[];
-export type Total2 = number;
-export type Truncated = boolean;
-export type Category11 = string;
-export type Error28 = string;
 /**
  * All event types in the protocol.
  */
@@ -22583,6 +23097,10 @@ export type EventType126 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -22623,20 +23141,9 @@ export type EventType126 =
   | "gates.snapshot";
 export type Timestamp126 = string;
 export type SessionId126 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion4 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags1 = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId53 = string;
+export type Path4 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -22768,6 +23275,10 @@ export type EventType127 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -22808,17 +23319,15 @@ export type EventType127 =
   | "gates.snapshot";
 export type Timestamp127 = string;
 export type SessionId127 = string;
-export type RequestId53 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type RequestId54 = string;
+export type Ok20 = boolean;
+export type Path5 = string;
+export type Name14 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category12 = string;
+export type Error29 = string;
 /**
  * All event types in the protocol.
  */
@@ -22950,6 +23459,10 @@ export type EventType128 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -22990,8 +23503,9 @@ export type EventType128 =
   | "gates.snapshot";
 export type Timestamp128 = string;
 export type SessionId128 = string;
-export type RequestId54 = string;
-export type RemoteAgentId = string;
+export type RequestId55 = string;
+export type Query = string;
+export type MaxResults = number;
 /**
  * All event types in the protocol.
  */
@@ -23123,6 +23637,10 @@ export type EventType129 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -23163,8 +23681,16 @@ export type EventType129 =
   | "gates.snapshot";
 export type Timestamp129 = string;
 export type SessionId129 = string;
-export type RequestId55 = string;
-export type Reason1 = string;
+export type RequestId56 = string;
+export type Ok21 = boolean;
+export type Query1 = string;
+export type Matches = {
+  [k: string]: unknown;
+}[];
+export type Total2 = number;
+export type Truncated = boolean;
+export type Category13 = string;
+export type Error30 = string;
 /**
  * All event types in the protocol.
  */
@@ -23296,6 +23822,10 @@ export type EventType130 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -23336,10 +23866,20 @@ export type EventType130 =
   | "gates.snapshot";
 export type Timestamp130 = string;
 export type SessionId130 = string;
-export type RequestId56 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source6 = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion4 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -23471,6 +24011,10 @@ export type EventType131 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -23512,11 +24056,16 @@ export type EventType131 =
 export type Timestamp131 = string;
 export type SessionId131 = string;
 export type RequestId57 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error29 = string;
-export type WorkspaceModified = boolean;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -23648,6 +24197,10 @@ export type EventType132 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -23689,7 +24242,7 @@ export type EventType132 =
 export type Timestamp132 = string;
 export type SessionId132 = string;
 export type RequestId58 = string;
-export type RemoteAgentId3 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -23821,6 +24374,10 @@ export type EventType133 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -23862,7 +24419,7 @@ export type EventType133 =
 export type Timestamp133 = string;
 export type SessionId133 = string;
 export type RequestId59 = string;
-export type RemoteAgentId4 = string;
+export type Reason2 = string;
 /**
  * All event types in the protocol.
  */
@@ -23994,6 +24551,10 @@ export type EventType134 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -24034,10 +24595,10 @@ export type EventType134 =
   | "gates.snapshot";
 export type Timestamp134 = string;
 export type SessionId134 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId60 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -24169,6 +24730,10 @@ export type EventType135 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -24209,14 +24774,12 @@ export type EventType135 =
   | "gates.snapshot";
 export type Timestamp135 = string;
 export type SessionId135 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId61 = string;
+export type RemoteAgentId2 = string;
+export type Success5 = boolean;
+export type Summary = string;
+export type Error31 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -24348,6 +24911,10 @@ export type EventType136 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -24388,17 +24955,8 @@ export type EventType136 =
   | "gates.snapshot";
 export type Timestamp136 = string;
 export type SessionId136 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State1 = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type RequestId62 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -24530,6 +25088,10 @@ export type EventType137 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -24570,13 +25132,8 @@ export type EventType137 =
   | "gates.snapshot";
 export type Timestamp137 = string;
 export type SessionId137 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId60 = string | null;
+export type RequestId63 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -24708,6 +25265,10 @@ export type EventType138 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -24748,9 +25309,10 @@ export type EventType138 =
   | "gates.snapshot";
 export type Timestamp138 = string;
 export type SessionId138 = string;
-export type RequestId61 = string;
-export type Status4 = string;
-export type Detail = string | null;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -24882,6 +25444,10 @@ export type EventType139 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -24922,13 +25488,14 @@ export type EventType139 =
   | "gates.snapshot";
 export type Timestamp139 = string;
 export type SessionId139 = string;
-export type RequestId62 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -25060,6 +25627,10 @@ export type EventType140 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -25100,9 +25671,17 @@ export type EventType140 =
   | "gates.snapshot";
 export type Timestamp140 = string;
 export type SessionId140 = string;
-export type RequestId63 = string;
-export type ResponseText = string;
-export type Error30 = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -25234,6 +25813,10 @@ export type EventType141 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -25274,10 +25857,13 @@ export type EventType141 =
   | "gates.snapshot";
 export type Timestamp141 = string;
 export type SessionId141 = string;
-export type RequestId64 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId64 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -25409,6 +25995,10 @@ export type EventType142 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -25450,8 +26040,8 @@ export type EventType142 =
 export type Timestamp142 = string;
 export type SessionId142 = string;
 export type RequestId65 = string;
-export type ForkIndex = number;
-export type Error31 = string;
+export type Status4 = string;
+export type Detail1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -25583,6 +26173,10 @@ export type EventType143 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -25623,11 +26217,13 @@ export type EventType143 =
   | "gates.snapshot";
 export type Timestamp143 = string;
 export type SessionId143 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId66 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -25759,6 +26355,10 @@ export type EventType144 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -25799,8 +26399,9 @@ export type EventType144 =
   | "gates.snapshot";
 export type Timestamp144 = string;
 export type SessionId144 = string;
-export type WakeRef1 = string;
-export type Source7 = string;
+export type RequestId67 = string;
+export type ResponseText = string;
+export type Error32 = string;
 /**
  * All event types in the protocol.
  */
@@ -25932,6 +26533,10 @@ export type EventType145 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -25972,8 +26577,10 @@ export type EventType145 =
   | "gates.snapshot";
 export type Timestamp145 = string;
 export type SessionId145 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId68 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -26105,6 +26712,10 @@ export type EventType146 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -26145,8 +26756,9 @@ export type EventType146 =
   | "gates.snapshot";
 export type Timestamp146 = string;
 export type SessionId146 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId69 = string;
+export type ForkIndex = number;
+export type Error33 = string;
 /**
  * All event types in the protocol.
  */
@@ -26278,6 +26890,10 @@ export type EventType147 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -26318,9 +26934,11 @@ export type EventType147 =
   | "gates.snapshot";
 export type Timestamp147 = string;
 export type SessionId147 = string;
-export type Target2 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail2 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -26452,6 +27070,10 @@ export type EventType148 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -26492,7 +27114,8 @@ export type EventType148 =
   | "gates.snapshot";
 export type Timestamp148 = string;
 export type SessionId148 = string;
-export type Target3 = string;
+export type WakeRef1 = string;
+export type Source7 = string;
 /**
  * All event types in the protocol.
  */
@@ -26624,6 +27247,10 @@ export type EventType149 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -26664,7 +27291,8 @@ export type EventType149 =
   | "gates.snapshot";
 export type Timestamp149 = string;
 export type SessionId149 = string;
-export type Policy = string;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -26796,6 +27424,10 @@ export type EventType150 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -26836,7 +27468,8 @@ export type EventType150 =
   | "gates.snapshot";
 export type Timestamp150 = string;
 export type SessionId150 = string;
-export type RequestId66 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -26968,6 +27601,10 @@ export type EventType151 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -27008,15 +27645,9 @@ export type EventType151 =
   | "gates.snapshot";
 export type Timestamp151 = string;
 export type SessionId151 = string;
-export type RequestId67 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -27148,6 +27779,10 @@ export type EventType152 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -27188,10 +27823,7 @@ export type EventType152 =
   | "gates.snapshot";
 export type Timestamp152 = string;
 export type SessionId152 = string;
-export type RequestId68 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -27323,6 +27955,10 @@ export type EventType153 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -27363,13 +27999,7 @@ export type EventType153 =
   | "gates.snapshot";
 export type Timestamp153 = string;
 export type SessionId153 = string;
-export type RequestId69 = string;
-export type Status5 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -27501,6 +28131,10 @@ export type EventType154 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -27542,8 +28176,6 @@ export type EventType154 =
 export type Timestamp154 = string;
 export type SessionId154 = string;
 export type RequestId70 = string;
-export type Ticket1 = string;
-export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -27675,6 +28307,10 @@ export type EventType155 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -27716,9 +28352,14 @@ export type EventType155 =
 export type Timestamp155 = string;
 export type SessionId155 = string;
 export type RequestId71 = string;
-export type Status6 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -27850,6 +28491,10 @@ export type EventType156 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -27891,9 +28536,9 @@ export type EventType156 =
 export type Timestamp156 = string;
 export type SessionId156 = string;
 export type RequestId72 = string;
-export type User2 = string;
-export type Workspace4 = string;
-export type Name15 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -28025,6 +28670,10 @@ export type EventType157 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -28066,10 +28715,12 @@ export type EventType157 =
 export type Timestamp157 = string;
 export type SessionId157 = string;
 export type RequestId73 = string;
-export type Status7 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail3 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -28201,6 +28852,10 @@ export type EventType158 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -28242,7 +28897,8 @@ export type EventType158 =
 export type Timestamp158 = string;
 export type SessionId158 = string;
 export type RequestId74 = string;
-export type User3 = string;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -28374,6 +29030,10 @@ export type EventType159 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -28415,9 +29075,9 @@ export type EventType159 =
 export type Timestamp159 = string;
 export type SessionId159 = string;
 export type RequestId75 = string;
-export type Status8 = string;
-export type Reloaded = number;
-export type Detail5 = string | null;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail4 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -28549,6 +29209,10 @@ export type EventType160 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -28590,11 +29254,9 @@ export type EventType160 =
 export type Timestamp160 = string;
 export type SessionId160 = string;
 export type RequestId76 = string;
-export type User4 = string;
-export type Workspace5 = string;
-export type Files3 = {
-  [k: string]: unknown;
-}[];
+export type User2 = string;
+export type Workspace4 = string;
+export type Name15 = string;
 /**
  * All event types in the protocol.
  */
@@ -28726,6 +29388,10 @@ export type EventType161 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -28767,11 +29433,10 @@ export type EventType161 =
 export type Timestamp161 = string;
 export type SessionId161 = string;
 export type RequestId77 = string;
-export type Status9 = string;
-export type Files4 = {
-  [k: string]: unknown;
-}[];
-export type Detail6 = string | null;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail5 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -28903,6 +29568,10 @@ export type EventType162 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -28944,8 +29613,7 @@ export type EventType162 =
 export type Timestamp162 = string;
 export type SessionId162 = string;
 export type RequestId78 = string;
-export type TargetSize = number | null;
-export type MaxSize = number | null;
+export type User3 = string;
 /**
  * All event types in the protocol.
  */
@@ -29077,6 +29745,10 @@ export type EventType163 =
   | "scaffold.validate.result"
   | "pool.status.request"
   | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -29118,9 +29790,728 @@ export type EventType163 =
 export type Timestamp163 = string;
 export type SessionId163 = string;
 export type RequestId79 = string;
-export type Ok20 = boolean;
-export type Category12 = string;
-export type Error32 = string;
+export type Status8 = string;
+export type Reloaded = number;
+export type Detail6 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType164 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp164 = string;
+export type SessionId164 = string;
+export type RequestId80 = string;
+export type User4 = string;
+export type Workspace5 = string;
+export type Files3 = {
+  [k: string]: unknown;
+}[];
+/**
+ * All event types in the protocol.
+ */
+export type EventType165 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp165 = string;
+export type SessionId165 = string;
+export type RequestId81 = string;
+export type Status9 = string;
+export type Files4 = {
+  [k: string]: unknown;
+}[];
+export type Detail7 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType166 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp166 = string;
+export type SessionId166 = string;
+export type RequestId82 = string;
+export type TargetSize = number | null;
+export type MaxSize = number | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType167 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp167 = string;
+export type SessionId167 = string;
+export type RequestId83 = string;
+export type Ok22 = boolean;
+export type Category14 = string;
+export type Error34 = string;
 export type Changed1 = boolean;
 export type PreviousTargetSize = number | null;
 export type PreviousMaxSize = number | null;
@@ -29563,6 +30954,7 @@ export interface PermissionRequestedEvent {
   warnings?: Warnings;
   warning_level?: WarningLevel;
   tool_class?: ToolClass1;
+  origin_request_id?: OriginRequestId;
 }
 export interface ToolArgs1 {
   [k: string]: unknown;
@@ -31740,6 +33132,125 @@ export interface ReferenceBundleCreateResultEvent {
   bundles?: Bundles1;
 }
 /**
+ * Describe one plugin tool as a session would expose it (1.37, #1606).
+ *
+ * Answered by :class:`PluginToolDescribeEvent` carrying this ``request_id``.
+ * The configuration is EITHER ``profile`` (a profile name the caller's
+ * workspace resolves, set-qualified allowed) OR ``plugin_configs`` (a
+ * ``plugin_configs`` block; the session then enables only ``plugin``).
+ * Both empty means ``plugin_configs={}``.  The answer comes from a
+ * short-lived session of the caller's workspace, so what it says is what a
+ * session with that configuration would expose, ``narrow_tool_schema``
+ * and per-session settings included.
+ */
+export interface PluginToolDescribeRequest {
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
+  request_id?: RequestId48;
+  plugin?: Plugin1;
+  tool?: Tool;
+  profile?: Profile;
+  plugin_configs?: PluginConfigs1;
+}
+/**
+ * The schema of one plugin tool, as a session exposes it (1.37, #1606).
+ *
+ * Fields:
+ *     request_id: Echoed from the request.
+ *     ok: Whether a session could be built to answer.  ``exists`` is
+ *         meaningful only when ``ok``.
+ *     category: ``""`` on success; else ``invalid_request``,
+ *         ``no_workspace``, ``session_failed``, ``runner_unreachable`` or
+ *         ``timeout``.
+ *     error: The reason, for a person.
+ *     exists: Whether a session with this configuration has the tool.
+ *     reason: Why not, when ``exists`` is False: ``unknown_tool`` (no
+ *         enabled plugin provides it), ``wrong_plugin`` (another plugin
+ *         does), ``not_in_surface`` (the profile does not enable the
+ *         plugin, or scopes the tool out) or ``hidden`` (the plugin hides
+ *         it for this session).
+ *     detail: The refusal sentence behind ``reason``.
+ *     tool_schema: The tool's schema when it exists: ``name``, ``description``,
+ *         ``parameters`` (JSON Schema), ``category``, ``discoverability``,
+ *         ``traits``.
+ */
+export interface PluginToolDescribeEvent {
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
+  request_id?: RequestId49;
+  ok?: Ok14;
+  category?: Category10;
+  error?: Error23;
+  exists?: Exists;
+  reason?: Reason1;
+  detail?: Detail;
+  tool_schema?: ToolSchema;
+}
+/**
+ * Run one plugin tool call with no model turn (1.37, #1606).
+ *
+ * Answered by :class:`PluginToolInvokeResultEvent` carrying this
+ * ``request_id``.  ``profile`` / ``plugin_configs`` as on
+ * :class:`PluginToolDescribeRequest`.  The call runs in a short-lived
+ * session of the caller's workspace, under that session's confinement and
+ * permission policy; a permission ASK is sent to the caller as a
+ * ``PermissionRequestedEvent`` and answered with ``PermissionResponseRequest``.
+ * ``timeout`` bounds the whole call, a pending ASK included (seconds;
+ * ``0`` or less means the daemon's default).
+ */
+export interface PluginToolInvokeRequest {
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
+  request_id?: RequestId50;
+  plugin?: Plugin2;
+  tool?: Tool1;
+  args?: Args1;
+  profile?: Profile1;
+  plugin_configs?: PluginConfigs2;
+  timeout?: Timeout;
+}
+export interface Args1 {
+  [k: string]: unknown;
+}
+/**
+ * What one plugin tool call did (1.37, #1606).
+ *
+ * Fields:
+ *     request_id: Echoed from the request.
+ *     ok: Whether the call reached the tool's executor.  ``False`` means
+ *         nothing ran (or, for ``timeout`` / ``runner_unreachable``, that
+ *         nobody can say whether it finished).
+ *     category: ``""`` when the call ran; else ``invalid_request``,
+ *         ``no_workspace``, ``session_failed``, ``not_in_surface``,
+ *         ``runner_unreachable`` or ``timeout``.
+ *     error: The reason, for a person.
+ *     success: The tool's own verdict (the executor's ``ok`` flag, #1053),
+ *         meaningful only when ``ok``.  A permission denial is
+ *         ``success=False`` with the denial as ``result``.
+ *     result: What the tool returned, after secret redaction: the
+ *         executor's payload, bookkeeping keys (``_permission``,
+ *         ``_telemetry``) included, as a session receives it.
+ *     session_id: The short-lived session the call ran in (deleted when
+ *         the answer is sent), for reading the daemon log.
+ */
+export interface PluginToolInvokeResultEvent {
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  request_id?: RequestId51;
+  ok?: Ok15;
+  category?: Category11;
+  error?: Error24;
+  success?: Success4;
+  result?: Result2;
+}
+export interface Result2 {
+  [k: string]: unknown;
+}
+/**
  * One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
  *
  * ``explain`` introspects the framework installed in the CALLING process,
@@ -31782,15 +33293,15 @@ export interface ReferenceBundleCreateResultEvent {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   topic?: Topic;
-  ok?: Ok14;
+  ok?: Ok16;
   text?: Text4;
   data?: Data2;
   topics?: Topics;
-  error?: Error23;
+  error?: Error25;
   server_version?: ServerVersion1;
 }
 export interface Data2 {
@@ -31858,13 +33369,13 @@ export interface Data2 {
  *     error: Why not, when ``ok`` is ``False``.
  */
 export interface SessionMessageResultEvent {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  request_id?: RequestId48;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
+  request_id?: RequestId52;
   target?: Target;
   status?: Status3;
-  ok?: Ok15;
+  ok?: Ok17;
   message_id?: MessageId;
   target_session_id?: TargetSessionId;
   sibling_name?: SiblingName;
@@ -31874,7 +33385,7 @@ export interface SessionMessageResultEvent {
   spooled?: Spooled;
   candidates?: Candidates;
   files?: Files1;
-  error?: Error24;
+  error?: Error26;
 }
 /**
  * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
@@ -31923,18 +33434,18 @@ export interface SessionMessageResultEvent {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
   integration?: Integration;
-  ok?: Ok16;
+  ok?: Ok18;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
   target?: Target1;
   text?: Text5;
-  error?: Error25;
+  error?: Error27;
   available?: Available;
   server_version?: ServerVersion2;
 }
@@ -31970,18 +33481,18 @@ export interface ScaffoldIntegrationEvent {
  *         says whose install produced the findings.
  */
 export interface ScaffoldValidateEvent {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
-  ok?: Ok17;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
+  ok?: Ok19;
   workspace?: Workspace3;
   profile_set?: ProfileSet;
-  profile?: Profile;
+  profile?: Profile2;
   scope?: Scope;
   findings?: Findings;
   errors?: Errors;
   warnings?: Warnings3;
-  error?: Error26;
+  error?: Error28;
   server_version?: ServerVersion3;
 }
 /**
@@ -32024,9 +33535,9 @@ export interface ScaffoldValidateEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
   workspace_id?: WorkspaceId;
   files?: Files2;
 }
@@ -32074,9 +33585,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -32102,10 +33613,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId49;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
+  request_id?: RequestId53;
   path?: Path4;
   metadata_only?: MetadataOnly;
 }
@@ -32131,18 +33642,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
-  request_id?: RequestId50;
-  ok?: Ok18;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId54;
+  ok?: Ok20;
   path?: Path5;
   name?: Name14;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
-  category?: Category10;
-  error?: Error27;
+  category?: Category12;
+  error?: Error29;
 }
 /**
  * Find files in the caller's workspace by name (WS only, protocol 1.32).
@@ -32155,10 +33666,10 @@ export interface WorkspaceFileContentEvent {
  * :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
  */
 export interface WorkspaceFilesSearchRequest {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
-  request_id?: RequestId51;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId55;
   query?: Query;
   max_results?: MaxResults;
 }
@@ -32178,17 +33689,17 @@ export interface WorkspaceFilesSearchRequest {
  * (this connection is in no workspace).
  */
 export interface WorkspaceFilesSearchResultEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
-  request_id?: RequestId52;
-  ok?: Ok19;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId56;
+  ok?: Ok21;
   query?: Query1;
   matches?: Matches;
   total?: Total2;
   truncated?: Truncated;
-  category?: Category11;
-  error?: Error28;
+  category?: Category13;
+  error?: Error30;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -32198,9 +33709,9 @@ export interface WorkspaceFilesSearchResultEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion4;
@@ -32225,10 +33736,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
-  request_id?: RequestId53;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
+  request_id?: RequestId57;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -32247,10 +33758,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
-  request_id?: RequestId54;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
+  request_id?: RequestId58;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -32260,11 +33771,11 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
-  request_id?: RequestId55;
-  reason?: Reason1;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
+  request_id?: RequestId59;
+  reason?: Reason2;
 }
 /**
  * Streamed output chunk from a remote subagent.
@@ -32274,10 +33785,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType130;
-  timestamp?: Timestamp130;
-  session_id?: SessionId130;
-  request_id?: RequestId56;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
+  request_id?: RequestId60;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source6;
@@ -32290,14 +33801,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType131;
-  timestamp?: Timestamp131;
-  session_id?: SessionId131;
-  request_id?: RequestId57;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
+  request_id?: RequestId61;
   remote_agent_id?: RemoteAgentId2;
-  success?: Success4;
+  success?: Success5;
   summary?: Summary;
-  error?: Error29;
+  error?: Error31;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -32307,20 +33818,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType132;
-  timestamp?: Timestamp132;
-  session_id?: SessionId132;
-  request_id?: RequestId58;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
+  request_id?: RequestId62;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType133;
-  timestamp?: Timestamp133;
-  session_id?: SessionId133;
-  request_id?: RequestId59;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
+  request_id?: RequestId63;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -32332,9 +33843,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType134;
-  timestamp?: Timestamp134;
-  session_id?: SessionId134;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -32354,9 +33865,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType135;
-  timestamp?: Timestamp135;
-  session_id?: SessionId135;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -32372,9 +33883,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType136;
-  timestamp?: Timestamp136;
-  session_id?: SessionId136;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -32425,14 +33936,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType137;
-  timestamp?: Timestamp137;
-  session_id?: SessionId137;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId60;
+  request_id?: RequestId64;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -32484,12 +33995,12 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType138;
-  timestamp?: Timestamp138;
-  session_id?: SessionId138;
-  request_id?: RequestId61;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
+  request_id?: RequestId65;
   status?: Status4;
-  detail?: Detail;
+  detail?: Detail1;
 }
 /**
  * Re-run the model loop against an explicit message list.
@@ -32506,10 +34017,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType139;
-  timestamp?: Timestamp139;
-  session_id?: SessionId139;
-  request_id?: RequestId62;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
+  request_id?: RequestId66;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -32517,12 +34028,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType140;
-  timestamp?: Timestamp140;
-  session_id?: SessionId140;
-  request_id?: RequestId63;
+  type?: EventType144;
+  timestamp?: Timestamp144;
+  session_id?: SessionId144;
+  request_id?: RequestId67;
   response_text?: ResponseText;
-  error?: Error30;
+  error?: Error32;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -32540,10 +34051,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType141;
-  timestamp?: Timestamp141;
-  session_id?: SessionId141;
-  request_id?: RequestId64;
+  type?: EventType145;
+  timestamp?: Timestamp145;
+  session_id?: SessionId145;
+  request_id?: RequestId68;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -32552,12 +34063,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType142;
-  timestamp?: Timestamp142;
-  session_id?: SessionId142;
-  request_id?: RequestId65;
+  type?: EventType146;
+  timestamp?: Timestamp146;
+  session_id?: SessionId146;
+  request_id?: RequestId69;
   fork_index?: ForkIndex;
-  error?: Error31;
+  error?: Error33;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -32569,12 +34080,12 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType143;
-  timestamp?: Timestamp143;
-  session_id?: SessionId143;
+  type?: EventType147;
+  timestamp?: Timestamp147;
+  session_id?: SessionId147;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
-  detail?: Detail1;
+  detail?: Detail2;
   expires_at?: ExpiresAt1;
   endpoint?: Endpoint;
 }
@@ -32598,9 +34109,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType144;
-  timestamp?: Timestamp144;
-  session_id?: SessionId144;
+  type?: EventType148;
+  timestamp?: Timestamp148;
+  session_id?: SessionId148;
   wake_ref?: WakeRef1;
   source?: Source7;
 }
@@ -32613,9 +34124,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType145;
-  timestamp?: Timestamp145;
-  session_id?: SessionId145;
+  type?: EventType149;
+  timestamp?: Timestamp149;
+  session_id?: SessionId149;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -32627,9 +34138,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType146;
-  timestamp?: Timestamp146;
-  session_id?: SessionId146;
+  type?: EventType150;
+  timestamp?: Timestamp150;
+  session_id?: SessionId150;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -32640,9 +34151,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType147;
-  timestamp?: Timestamp147;
-  session_id?: SessionId147;
+  type?: EventType151;
+  timestamp?: Timestamp151;
+  session_id?: SessionId151;
   target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -32656,9 +34167,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType148;
-  timestamp?: Timestamp148;
-  session_id?: SessionId148;
+  type?: EventType152;
+  timestamp?: Timestamp152;
+  session_id?: SessionId152;
   target?: Target3;
 }
 /**
@@ -32669,19 +34180,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType149;
-  timestamp?: Timestamp149;
-  session_id?: SessionId149;
+  type?: EventType153;
+  timestamp?: Timestamp153;
+  session_id?: SessionId153;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType150;
-  timestamp?: Timestamp150;
-  session_id?: SessionId150;
-  request_id?: RequestId66;
+  type?: EventType154;
+  timestamp?: Timestamp154;
+  session_id?: SessionId154;
+  request_id?: RequestId70;
 }
 /**
  * Structured permission policy snapshot.
@@ -32692,10 +34203,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType151;
-  timestamp?: Timestamp151;
-  session_id?: SessionId151;
-  request_id?: RequestId67;
+  type?: EventType155;
+  timestamp?: Timestamp155;
+  session_id?: SessionId155;
+  request_id?: RequestId71;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -32744,10 +34255,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType152;
-  timestamp?: Timestamp152;
-  session_id?: SessionId152;
-  request_id?: RequestId68;
+  type?: EventType156;
+  timestamp?: Timestamp156;
+  session_id?: SessionId156;
+  request_id?: RequestId72;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -32795,16 +34306,16 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType153;
-  timestamp?: Timestamp153;
-  session_id?: SessionId153;
-  request_id?: RequestId69;
+  type?: EventType157;
+  timestamp?: Timestamp157;
+  session_id?: SessionId157;
+  request_id?: RequestId73;
   status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
   app_id?: AppId;
   expires_at?: ExpiresAt2;
-  detail?: Detail2;
+  detail?: Detail3;
 }
 /**
  * Revoke one outstanding ticket, or every ticket of one user.
@@ -32835,10 +34346,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType154;
-  timestamp?: Timestamp154;
-  session_id?: SessionId154;
-  request_id?: RequestId70;
+  type?: EventType158;
+  timestamp?: Timestamp158;
+  session_id?: SessionId158;
+  request_id?: RequestId74;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -32864,13 +34375,13 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType155;
-  timestamp?: Timestamp155;
-  session_id?: SessionId155;
-  request_id?: RequestId71;
+  type?: EventType159;
+  timestamp?: Timestamp159;
+  session_id?: SessionId159;
+  request_id?: RequestId75;
   status?: Status6;
   revoked?: Revoked;
-  detail?: Detail3;
+  detail?: Detail4;
 }
 /**
  * Ask the owning application to resolve an ``app://`` secret reference (#1226).
@@ -32909,10 +34420,10 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType156;
-  timestamp?: Timestamp156;
-  session_id?: SessionId156;
-  request_id?: RequestId72;
+  type?: EventType160;
+  timestamp?: Timestamp160;
+  session_id?: SessionId160;
+  request_id?: RequestId76;
   user?: User2;
   workspace?: Workspace4;
   name?: Name15;
@@ -32951,14 +34462,14 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType157;
-  timestamp?: Timestamp157;
-  session_id?: SessionId157;
-  request_id?: RequestId73;
+  type?: EventType161;
+  timestamp?: Timestamp161;
+  session_id?: SessionId161;
+  request_id?: RequestId77;
   status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
-  detail?: Detail4;
+  detail?: Detail5;
 }
 /**
  * The application asks the daemon to re-resolve a user's loaded sessions (#1226 §6.4).
@@ -32979,10 +34490,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType158;
-  timestamp?: Timestamp158;
-  session_id?: SessionId158;
-  request_id?: RequestId74;
+  type?: EventType162;
+  timestamp?: Timestamp162;
+  session_id?: SessionId162;
+  request_id?: RequestId78;
   user?: User3;
 }
 /**
@@ -33003,13 +34514,13 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType159;
-  timestamp?: Timestamp159;
-  session_id?: SessionId159;
-  request_id?: RequestId75;
+  type?: EventType163;
+  timestamp?: Timestamp163;
+  session_id?: SessionId163;
+  request_id?: RequestId79;
   status?: Status8;
   reloaded?: Reloaded;
-  detail?: Detail5;
+  detail?: Detail6;
 }
 /**
  * The application asks the daemon to write a binding's files into a workspace (1.30).
@@ -33052,10 +34563,10 @@ export interface SecretReloadResultEvent {
  *         copy the user made their own survives.  A removal requires it.
  */
 export interface WorkspaceAppWriteRequest {
-  type?: EventType160;
-  timestamp?: Timestamp160;
-  session_id?: SessionId160;
-  request_id?: RequestId76;
+  type?: EventType164;
+  timestamp?: Timestamp164;
+  session_id?: SessionId164;
+  request_id?: RequestId80;
   user?: User4;
   workspace?: Workspace5;
   env?: Env;
@@ -33083,14 +34594,14 @@ export interface Env {
  *     detail: Human-readable elaboration.
  */
 export interface WorkspaceAppWriteResultEvent {
-  type?: EventType161;
-  timestamp?: Timestamp161;
-  session_id?: SessionId161;
-  request_id?: RequestId77;
+  type?: EventType165;
+  timestamp?: Timestamp165;
+  session_id?: SessionId165;
+  request_id?: RequestId81;
   status?: Status9;
   env?: Env1;
   files?: Files4;
-  detail?: Detail6;
+  detail?: Detail7;
 }
 export interface Env1 {
   [k: string]: string;
@@ -33109,10 +34620,10 @@ export interface Env1 {
  * daemon process, never of a session or a remote client.
  */
 export interface PoolStatusRequest {
-  type?: EventType162;
-  timestamp?: Timestamp162;
-  session_id?: SessionId162;
-  request_id?: RequestId78;
+  type?: EventType166;
+  timestamp?: Timestamp166;
+  session_id?: SessionId166;
+  request_id?: RequestId82;
   target_size?: TargetSize;
   max_size?: MaxSize;
 }
@@ -33155,13 +34666,13 @@ export interface PoolStatusRequest {
  *         friends), the numbers a resize is decided from.
  */
 export interface PoolStatusEvent {
-  type?: EventType163;
-  timestamp?: Timestamp163;
-  session_id?: SessionId163;
-  request_id?: RequestId79;
-  ok?: Ok20;
-  category?: Category12;
-  error?: Error32;
+  type?: EventType167;
+  timestamp?: Timestamp167;
+  session_id?: SessionId167;
+  request_id?: RequestId83;
+  ok?: Ok22;
+  category?: Category14;
+  error?: Error34;
   changed?: Changed1;
   previous_target_size?: PreviousTargetSize;
   previous_max_size?: PreviousMaxSize;
@@ -33329,6 +34840,10 @@ export const EventTypeValue = {
   SCAFFOLD_VALIDATE_RESULT: "scaffold.validate.result",
   POOL_STATUS_REQUEST: "pool.status.request",
   POOL_STATUS: "pool.status",
+  PLUGIN_TOOL_DESCRIBE_REQUEST: "plugin.tool.describe.request",
+  PLUGIN_TOOL_DESCRIBE_RESULT: "plugin.tool.describe.result",
+  PLUGIN_TOOL_INVOKE_REQUEST: "plugin.tool.invoke.request",
+  PLUGIN_TOOL_INVOKE_RESULT: "plugin.tool.invoke.result",
   EVENT_EXTERNAL: "event.external",
   INJECT_PROMPT_REQUEST: "inject_prompt.request",
   INJECT_PROMPT_RESULT: "inject_prompt.result",
