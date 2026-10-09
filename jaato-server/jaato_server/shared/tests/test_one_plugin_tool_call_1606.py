@@ -261,21 +261,40 @@ def test_a_request_must_name_one_configuration():
 
 def test_the_runner_bootstraps_a_plugin_host_and_no_session(tmp_path):
     """``plugin_host`` stops ``bootstrap_session`` before the session: no
-    model is named, none is needed, and the host answers for the profile."""
-    from jaato_server.server.runner.session import bootstrap_session
-    from jaato_server.shared.session_envelope import SessionInitEnvelope
+    model is named, none is needed, and the host answers for the profile.
+
+    Run in a child interpreter: a bootstrap sets process state (the session
+    env, the workspace root, ``tempfile.tempdir``, the sandbox temp roots)
+    the way a runner process is meant to, and none of it may leak into the
+    rest of the suite.
+    """
+    import json
+    import subprocess
+    import sys
 
     ws = tmp_path / "ws"
     ws.mkdir()
-    host = bootstrap_session(SessionInitEnvelope(
-        session_id="plugintool_test", workspace_path=str(ws),
-        profile_name="", provider_name="", model_name="",
-        plugins=[{"name": "template"}],
-        plugin_configs={"template": {"allow_inline_template": False}},
-        plugin_host=True,
-    ))
-    assert host.session is None
-    assert host.plugin_host is not None
-    answer = host.plugin_host.describe("template", "renderTemplateToFile")
-    assert answer["exists"], answer
+    script = (
+        "import json, sys\n"
+        "from jaato_server.server.runner.session import bootstrap_session\n"
+        "from jaato_server.shared.session_envelope import SessionInitEnvelope\n"
+        "host = bootstrap_session(SessionInitEnvelope(\n"
+        "    session_id='plugintool_test', workspace_path=sys.argv[1],\n"
+        "    profile_name='', provider_name='', model_name='',\n"
+        "    plugins=[{'name': 'template'}],\n"
+        "    plugin_configs={'template': {'allow_inline_template': False}},\n"
+        "    plugin_host=True))\n"
+        "answer = host.plugin_host.describe('template', 'renderTemplateToFile') "
+        "if host.plugin_host is not None else None\n"
+        "print('RESULT ' + json.dumps({'session': host.session is None, "
+        "'answer': answer}))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script, str(ws)],
+                          capture_output=True, text=True, timeout=120)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert lines, proc.stdout[-2000:] + proc.stderr[-4000:]
+    out = json.loads(lines[-1][len("RESULT "):])
+    assert out["session"] is True
+    answer = out["answer"]
+    assert answer is not None and answer["exists"], answer
     assert "template" not in answer["tool_schema"]["parameters"]["properties"]

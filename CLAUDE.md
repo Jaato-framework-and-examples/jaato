@@ -1409,9 +1409,9 @@ initialized with the profile's configuration, the profile's permission
 policy and a process inside the workspace's boundary.
 `SessionManager.spawn_plugin_host` resolves what the caller's own
 `session.new` would (its client config, the workspace, the profile; or an
-inline profile enabling only `plugin`) and runs the spawn half of session
-bootstrap (`_construct_and_spawn`, split out of
-`_construct_and_initialize_server`): the same confinement provisioning,
+inline profile enabling only `plugin`) and runs session bootstrap up to the
+spawn (`_construct_and_initialize_server(..., plugin_host=True)` returns
+before `initialize`): the same confinement provisioning,
 runner uid and pool slot. The server is never initialized, nothing is
 recorded, listed or persisted, and no provider exists. The envelope carries
 `SessionInitEnvelope.plugin_host`, so the runner's `bootstrap_session` runs

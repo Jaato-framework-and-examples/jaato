@@ -5239,35 +5239,11 @@ class SessionManager:
     def _construct_and_initialize_server(
         self,
         envelope: 'BootstrapEnvelope',
+        *,
+        plugin_host: bool = False,
     ) -> Tuple[Optional[JaatoServer], Optional[str]]:
         """JaatoServer construction + pre-init + initialize, shared
         across IPC and disk-restore bootstrap paths (Phase 3 §3.12).
-
-        :meth:`_construct_and_spawn` (steps 1-4: construct, resolve the
-        session env, discover the registry, provision confinement and spawn
-        the runner, run the pre-init hooks), then
-        :meth:`_initialize_constructed_server` (steps 5-6).  Split so a
-        plugin tool call (#1606) can stop after the spawn: it needs the
-        runner, not a session.
-
-        Returns:
-            ``(JaatoServer, sandbox_mode)`` on success;
-            ``(None, None)`` on init failure.
-        """
-        server, ipc_sandbox_mode = self._construct_and_spawn(envelope)
-        return self._initialize_constructed_server(server, envelope, ipc_sandbox_mode)
-
-    def _construct_and_spawn(
-        self,
-        envelope: 'BootstrapEnvelope',
-        *,
-        plugin_host: bool = False,
-    ) -> Tuple[JaatoServer, Optional[str]]:
-        """Construct the JaatoServer and spawn its runner, up to ``initialize``.
-
-        Steps 1-4 of :meth:`_construct_and_initialize_server`.  With
-        ``plugin_host`` the runner bootstraps a plugin host instead of a
-        session (#1606) and the caller never initializes the server.
 
         Splits out from :meth:`_bootstrap_session` so the
         disk-restore path (which assembles a different Session
@@ -5286,11 +5262,22 @@ class SessionManager:
            inline relocation) — clean no-op when ``client_id`` is
            ``None`` or no apparmor opt-in.
         4. Run remaining pre-init hooks (WS + third-party).
+        5. ``server.initialize()`` — return ``(None, None)`` on
+           failure.
+        6. Resolve sandbox_mode: ``envelope.sandbox_mode`` wins
+           when a caller pre-resolved one; else IPC method result;
+           else None.  Disk-restore passes ``None`` since #1529, so
+           the revived Session records what provisioning produced.
+
+        With ``plugin_host`` (#1606) it stops after step 4: the runner was
+        told to bootstrap a plugin host instead of a session, and a plugin
+        tool call needs the runner, not an initialized server.  The server
+        is returned as built, and ``sandbox_mode`` is what IPC provisioning
+        produced.
 
         Returns:
-            ``(JaatoServer, ipc_sandbox_mode)`` -- the server, its runner
-            spawned (or a recorded refusal), and what IPC provisioning
-            produced (``None`` when it did not run).
+            ``(JaatoServer, sandbox_mode)`` on success;
+            ``(None, None)`` on init failure.
         """
         server = JaatoServer(
             env_file=envelope.env_file,
@@ -5422,22 +5409,9 @@ class SessionManager:
             envelope.workspace_path,
             envelope.client_id,
         )
-        return server, ipc_sandbox_mode
+        if plugin_host:
+            return server, ipc_sandbox_mode
 
-    def _initialize_constructed_server(
-        self,
-        server: JaatoServer,
-        envelope: 'BootstrapEnvelope',
-        ipc_sandbox_mode: Optional[str],
-    ) -> Tuple[Optional[JaatoServer], Optional[str]]:
-        """Steps 5-6 of :meth:`_construct_and_initialize_server`.
-
-        5. ``server.initialize()`` — return ``(None, None)`` on failure.
-        6. Resolve sandbox_mode: ``envelope.sandbox_mode`` wins when a
-           caller pre-resolved one; else the IPC provisioning result; else
-           None.  Disk-restore passes ``None`` since #1529, so the revived
-           Session records what provisioning produced.
-        """
         # Initialize.  On failure, core.py already emits a
         # ConfigurationError event via the in-init sink — no need
         # for a redundant SessionError here.
@@ -15722,9 +15696,9 @@ class SessionManager:
         the caller's own ``session.new`` would resolve (its client config:
         env file, config root, the confinement opt-in; the profile, or an
         inline one enabling only ``plugin`` with ``plugin_configs``), then
-        runs the spawn half of session bootstrap
-        (:meth:`_construct_and_spawn`) with the runner told to build a
-        plugin host.  No ``Session`` record, no listing, no history, no
+        runs session bootstrap up to the spawn
+        (:meth:`_construct_and_initialize_server` with ``plugin_host``),
+        the runner told to build a plugin host.  No ``Session`` record, no listing, no history, no
         provider: the server is never initialized.
 
         The spawn runs under a synthetic client id carrying a copy of the
@@ -15780,7 +15754,8 @@ class SessionManager:
         )
         server: Optional[JaatoServer] = None
         try:
-            server, _mode = self._construct_and_spawn(envelope, plugin_host=True)
+            server, _mode = self._construct_and_initialize_server(
+                envelope, plugin_host=True)
         except Exception as exc:  # noqa: BLE001 -- answered, never raised to a transport
             logger.exception("plugin host %s: spawn failed", host_id)
             error = f"{type(exc).__name__}: {exc}"
