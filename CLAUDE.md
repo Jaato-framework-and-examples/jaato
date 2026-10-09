@@ -2931,14 +2931,56 @@ pool state. Nothing proves the kernel behaves as #1023 describes; it proves
 the framework stops handing the kernel a slot it cannot re-confine, and
 that when it refuses one it says which threads it refused.
 
-Also not addressed: the comment on #1100 records that the WS path
-**provisions the AppArmor profile ~370 ms AFTER** the first runner has
-already spawned unconfined, so a session that asked for confinement gets an
-unconfined first runner by construction — which is what poisons the slot on
-a deployment that believes it runs confined throughout. The admission gate
-is still the right place for the fix, because it protects against ANY
-unconfined session sharing a daemon; whether the first runner should wait
-for provisioning is its own change.
+The comment on #1100 records that the WS path **provisioned the AppArmor
+profile ~370 ms AFTER** the first runner had already spawned unconfined, so a
+session that asked for confinement got an unconfined first runner by
+construction, which is what poisoned the slot. The admission gate above is
+still right, because it protects against ANY unconfined session sharing a
+daemon. The first runner itself is #1253, next section: a confinement-wanting
+session now runs only once its runner reports wearing the boundary.
+
+### A Session Confined Only on Its Runner's Word (#1253)
+
+#1253 measured the #1100 race on a live root daemon: a WS session's first
+runner, a pool slot, spawned ~3 s before its profile was provisioned,
+bootstrapped with an empty `profile_name`, skipped self-confinement, and
+served the session unconfined for 27 minutes, while the post-init hook
+provisioned the profile afterwards and recorded `sandbox_mode: apparmor`.
+In that trace the WS pre-init hook had found no daemon loop (fixed by
+#1299) and returned without provisioning or spawning, and the
+SessionManager spawn path, which did not then know the workspace was
+WS-managed (fixed by #1280), spawned the runner unconfined. #1260 and its
+follow-up then ordered each path (provision, then spawn) and refused the
+failures each could see.
+
+What was missing is the end-to-end check: nothing asked the runner what it
+wears, so any path that returned early, raised inside a hook (the hook
+runner swallows the exception), or spawned elsewhere still reached
+`initialize()`, and the record stated what the daemon provisioned.
+
+| Piece | Where |
+|---|---|
+| the runner reports its own `attr/current` in the `session.bootstrap` answer (`confinement: {label}`), after step 1c | `RunnerRPC._handle_session_bootstrap`, `_own_label` |
+| the spawn path records the decision before it can exit: `note_confinement_required` | WS pre-init hook (`_ws_confinement_required`, now before the daemon-loop check), `SessionManager._confinement_required_for` (after provisioning, before the spawn), `dispatch_bootstrap_envelope` |
+| the dispatch records the boundary it sent and the label reported | `runner_spawn._note_runner_confinement` → `JaatoServer.note_runner_confinement` |
+| the comparison | `server/confinement_evidence.py`: AppArmor by profile name, mode-tolerant (#1014; a stack with `unconfined` is its profile, #1509); SELinux by exact context |
+| the door | `JaatoServer.runner_bootstrap_error` also answers `confinement_shortfall`, so `initialize_or_refuse` and the plugin host (#1606) refuse with `RunnerBootstrapFailed` |
+| the record | `recorded_sandbox_mode`: the mode the runner reported (`(complain)` → `apparmor-complain`) over the render's, in the WS post-init hook and the IPC funnel |
+
+A session that wanted confinement is refused when no runner bootstrapped
+into a provisioned boundary, when the runner reported nothing, or when it
+reported another label (`unconfined` above all). A session that did not
+want confinement (no opt-in, a host without the LSM) is unchanged: no
+evidence is asked for.
+
+Not verified on an enforcing kernel: the guard fabricates the manager and
+the runner's answer. `tests/integration/test_phase2_multitenant_apparmor.py`
+(enforcing hosts only) now reads `/proc/<runner_pid>/task/*/attr/current` for
+the session's first runner before any turn and requires its profile in
+enforce mode on every thread. Guard:
+`jaato_server/server/tests/test_a_session_runs_only_in_the_boundary_its_runner_wears_1253.py`,
+five reversions, through the real WS pre-init hook, the real hook runner,
+the real `dispatch_bootstrap_envelope` and the real `initialize_or_refuse`.
 
 ### A Profile Reloaded That the Kernel Already Had (#1501)
 

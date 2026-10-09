@@ -378,6 +378,18 @@ def slot_retire_reasons(registry: Any) -> List[str]:
     return reasons
 
 
+def _own_label() -> Optional[str]:
+    """This runner's raw ``attr/current`` label, for the bootstrap answer (#1253).
+
+    The daemon compares it with the boundary it provisioned and refuses a
+    confinement-required session that does not wear it
+    (``server.confinement_evidence``).  ``None`` when unreadable, which the
+    daemon reads as "no evidence" and so, for such a session, as a refusal.
+    """
+    from jaato_server.shared.lsm_label import read_own_context
+    return read_own_context()
+
+
 class RunnerRPC:
     """Bidirectional dispatcher serving on a blocking Unix socket.
 
@@ -1787,6 +1799,8 @@ class RunnerRPC:
                         "ready": existing.is_ready,
                         "session_id": existing.session_id,
                         "note": "already bootstrapped (idempotent re-call)",
+                        # #1253: what it wears, as the first answer said.
+                        "confinement": {"label": _own_label()},
                     }
                 return False, {
                     "error": (
@@ -1857,6 +1871,12 @@ class RunnerRPC:
             "seccomp": current_posture(),
             # #1543: the capability drop, beside it.
             "capabilities": capability_drop.current_posture(),
+            # #1253: the label this runner wears now that the bootstrap
+            # has confined it (step 1c), read from the kernel rather than
+            # from what the envelope asked for.  The daemon refuses a
+            # confinement-required session unless this names the boundary
+            # it provisioned (``server.confinement_evidence``).
+            "confinement": {"label": _own_label()},
         }
 
     def _handle_session_health_check(self) -> "tuple[bool, Any]":

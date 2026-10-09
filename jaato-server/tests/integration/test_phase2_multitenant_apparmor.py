@@ -224,6 +224,11 @@ async def _drive_two_workspaces(tmp_path: Path) -> None:
         )
         sid_a = await client_a.create_session(profile="cli_test")
         assert sid_a, "session.new for client A returned no session_id"
+        # #1253: the session's FIRST runner wears its profile from the
+        # start, read from the kernel before any turn has run -- not the
+        # runner a later turn or a revive gets.
+        _assert_runner_wears_its_profile(
+            await _runner_identity(client_a, sid_a))
 
         # Write a workspace-A file via cli — exercises the runner.
         await _drive_turn(
@@ -466,6 +471,52 @@ async def _runner_profile(client, session_id: str,
     gate treats as a failure: everything after it would be measuring an
     unconfined runner.
     """
+    identity = await _runner_identity(client, session_id, timeout)
+    profile = identity.get("apparmor_profile") or ""
+    assert profile.startswith("jaato-ws-"), (
+        f"session {session_id}'s runner is not AppArmor-confined "
+        f"(runner identity: {identity!r})"
+    )
+    return profile
+
+
+def _assert_runner_wears_its_profile(identity: dict) -> None:
+    """Every thread of the runner wears its recorded profile, enforced (#1253).
+
+    #1100 / #1253: a session's first runner (a pool slot) spawned before
+    the profile was provisioned and served the session unconfined while
+    the daemon recorded ``apparmor``.  The daemon now refuses a session
+    whose runner does not report the profile; this reads the KERNEL's
+    answer for the process the daemon named, so a run on an enforcing
+    host checks the fix rather than the daemon's account of it.
+    """
+    pid = identity.get("runner_pid")
+    profile = identity.get("apparmor_profile") or ""
+    assert pid and profile.startswith("jaato-ws-"), (
+        f"no confined runner recorded: {identity!r}"
+    )
+    task_dir = Path(f"/proc/{pid}/task")
+    labels = {}
+    for task in sorted(task_dir.iterdir()):
+        raw = (task / "attr" / "current").read_text(errors="replace")
+        labels[task.name] = raw.replace("\x00", "").strip()
+    # Through the one label parser (#1014 / #1509): a stack with
+    # ``unconfined`` is its profile, the mode must be enforce.
+    from jaato_server.shared.apparmor_label import parse_label
+    wrong = {
+        tid: label for tid, label in labels.items()
+        if parse_label(label).profile != profile
+        or not parse_label(label).enforced
+    }
+    assert not wrong, (
+        f"runner pid={pid} should wear {profile!r} (enforce) on every "
+        f"thread; these do not: {wrong!r}"
+    )
+
+
+async def _runner_identity(client, session_id: str,
+                           timeout: float = 30.0) -> dict:
+    """The #812 runner identity the daemon recorded for *session_id*."""
     from jaato_sdk.events import SessionListEvent
 
     async def collect():
@@ -484,12 +535,7 @@ async def _runner_profile(client, session_id: str,
         raise AssertionError(f"no SessionListEvent within {timeout}s")
     row = next((r for r in rows if r.get("id") == session_id), None)
     assert row is not None, f"session {session_id} not in session.list"
-    profile = ((row.get("runner") or {}).get("apparmor_profile") or "")
-    assert profile.startswith("jaato-ws-"), (
-        f"session {session_id}'s runner is not AppArmor-confined "
-        f"(runner identity: {row.get('runner')!r})"
-    )
-    return profile
+    return dict(row.get("runner") or {})
 
 
 async def _history(client, timeout: float = 30.0) -> list:
