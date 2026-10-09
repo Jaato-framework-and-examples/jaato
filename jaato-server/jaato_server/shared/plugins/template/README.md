@@ -341,6 +341,32 @@ path-only; `fields` is a body section with item_keys.  Variables
 appearing in both body and directive keep their body-parsed kind
 (body precedence) — only path-only vars get `kind: "scalar"`.
 
+### Describing variables in the catalog index (#1619)
+
+A catalog `index.json` entry may say what each variable is for, beside
+`variables`:
+
+```json
+{
+  "name": "component.md.tpl",
+  "variables": ["title", "purpose", "usage"],
+  "variable_descriptions": {
+    "title": "The page's H1: the component's name",
+    "purpose": "One paragraph: what the component is for"
+  }
+}
+```
+
+`listTemplateVariables` then adds `description` to each variable that has
+one (`{"name": "title", "kind": "scalar", "description": "..."}`); a
+variable with none is returned exactly as before, and a description
+naming a variable the template does not use is ignored.
+`validateTemplateIndex` refuses a non-object, a non-string or a blank
+description, and warns when a described name is missing from
+`variables`.  At load a malformed field is dropped, never the template.
+`jaato-scaffold explain plugin template` lists these rules from
+`VARIABLE_DESCRIPTION_RULES`.
+
 ### Surfaced via `listAvailableTemplates`
 
 The directive value is captured into `TemplateIndexEntry.output_path_template`

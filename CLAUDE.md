@@ -5681,6 +5681,23 @@ in memory, and claims are written where they always were.
 Guard: `shared/tests/test_pages_come_from_catalog_templates.py`, seven
 reversions.
 
+### A Template Variable That Says What It Is For (#1619)
+
+`listTemplateVariables` answered a variable's name and shape and nothing
+about what to put in it. A catalog `index.json` entry may now carry
+`variable_descriptions: {name: text}` beside `variables`
+(`TemplateIndexEntry.variable_descriptions`): `listTemplateVariables`
+adds `description` to each variable that has one, for Jinja2 and
+Mustache alike; an undescribed variable keeps its old shape, and a
+description for a name the template does not use is ignored.
+`validateTemplateIndex` refuses a non-object, non-string or blank
+description and warns on a name missing from `variables`; the loader
+drops a malformed field without losing the entry. The rules live in
+`VARIABLE_DESCRIPTION_RULES` (plugin module) and `explain plugin
+template` renders them from there. Guard:
+`jaato_server/shared/tests/test_template_variable_descriptions_1619.py`,
+five reversions.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
