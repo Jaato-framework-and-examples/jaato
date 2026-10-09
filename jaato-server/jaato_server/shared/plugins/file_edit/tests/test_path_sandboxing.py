@@ -209,9 +209,10 @@ class TestReadFileSandboxing:
         plugin, workspace, _ = plugin_with_workspace
 
         # Try to read a file outside /tmp - should be blocked
-        result = plugin._execute_read_file({
+        ok, result = plugin._execute_read_file({
             "path": "/etc/passwd",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "denied by sandbox" in result["error"].lower()

@@ -1651,20 +1651,20 @@ Backups are automatically created for file modifications."""
         self._trace(f"readFile: path={path}, offset={offset}, limit={limit}")
 
         if not path:
-            return {"error": "path is required"}
+            return False, {"error": "path is required"}
 
         # Resolve path first, then check if allowed
         file_path = self._resolve_path(path)
 
         # Check if resolved path is allowed (within workspace or authorized for reading)
         if not self._is_path_allowed(str(file_path), mode="read"):
-            return {"error": f"Path denied by sandbox: {path}"}
+            return False, {"error": f"Path denied by sandbox: {path}"}
 
         if not file_path.exists():
-            return {"error": f"File not found: {path}"}
+            return False, {"error": f"File not found: {path}"}
 
         if not file_path.is_file():
-            return {"error": f"Not a file: {path}"}
+            return False, {"error": f"Not a file: {path}"}
 
         # Check if file is an image - return as multimodal content
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg'}
@@ -1698,7 +1698,7 @@ Backups are automatically created for file modifications."""
                     "type": "image",
                 }
             except OSError as e:
-                return {"error": f"Failed to read image: {e}"}
+                return False, {"error": f"Failed to read image: {e}"}
 
         if ext == '.pdf':
             self._trace("readFile: detected PDF, returning as multimodal file")
@@ -1717,16 +1717,16 @@ Backups are automatically created for file modifications."""
                     "type": "file",
                 }
             except OSError as e:
-                return {"error": f"Failed to read PDF: {e}"}
+                return False, {"error": f"Failed to read PDF: {e}"}
 
         # Validate offset and limit if provided
         if offset is not None:
             if not isinstance(offset, int) or offset < 1:
-                return {"error": "offset must be a positive integer (1-indexed)"}
+                return False, {"error": "offset must be a positive integer (1-indexed)"}
 
         if limit is not None:
             if not isinstance(limit, int) or limit < 1:
-                return {"error": "limit must be a positive integer"}
+                return False, {"error": "limit must be a positive integer"}
 
         try:
             content = read_text_verified(
@@ -1770,7 +1770,7 @@ Backups are automatically created for file modifications."""
                 )
                 return f"{header}\n\n{content}"
         except OSError as e:
-            return {"error": f"Failed to read file: {e}"}
+            return False, {"error": f"Failed to read file: {e}"}
 
     def _write_line_ending(
         self,
@@ -1857,7 +1857,7 @@ Backups are automatically created for file modifications."""
         if diff_truncated:
             result["diff_total_lines"] = diff_total_lines
 
-    def _execute_update_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_update_file(self, args: Dict[str, Any]) -> Any:
         """Execute updateFile tool.
 
         Supports two modes determined by which parameters are present:
@@ -1872,19 +1872,19 @@ Backups are automatically created for file modifications."""
         old_text = args.get("old")
 
         if not path:
-            return {"error": "path is required"}
+            return False, {"error": "path is required"}
 
         file_path = self._resolve_path(path)
 
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
-            return {"error": f"Path denied by sandbox (write): {path}"}
+            return False, {"error": f"Path denied by sandbox (write): {path}"}
 
         if not file_path.exists():
-            return {"error": f"File not found: {path}. Use writeNewFile for new files."}
+            return False, {"error": f"File not found: {path}. Use writeNewFile for new files."}
 
         if not file_path.is_file():
-            return {"error": f"Not a file: {path}"}
+            return False, {"error": f"Not a file: {path}"}
 
         # Determine mode and compute final content.  ``existing_eol`` is
         # only meaningful once the old content has actually been read;
@@ -1897,7 +1897,7 @@ Backups are automatically created for file modifications."""
             # Targeted mode
             new_text = args.get("new")
             if new_text is None:
-                return {"error": "'new' is required when 'old' is provided"}
+                return False, {"error": "'new' is required when 'old' is provided"}
             prologue = args.get("prologue")
             epilogue = args.get("epilogue")
 
@@ -1911,7 +1911,7 @@ Backups are automatically created for file modifications."""
                     f"old_len={len(old_text)}, new_len={len(new_text)}, "
                     f"cap={self._max_edit_span_chars}"
                 )
-                return {"error": span_error}
+                return False, {"error": span_error}
 
             try:
                 # LF-normalised for matching, with the file's own ending
@@ -1921,7 +1921,7 @@ Backups are automatically created for file modifications."""
                 )
                 content_loaded = True
             except OSError as e:
-                return {"error": f"Failed to read file: {e}"}
+                return False, {"error": f"Failed to read file: {e}"}
 
             self._trace(f"updateFile(targeted): path={path}, old_len={len(old_text)}, new_len={len(new_text)}")
 
@@ -1931,7 +1931,7 @@ Backups are automatically created for file modifications."""
                 # One arm for all three: each exception already carries the
                 # message specific to its own remedy, so the only job here
                 # is to pass it through unrewritten (#813, #814).
-                return {"error": f"Targeted edit failed: {e}"}
+                return False, {"error": f"Targeted edit failed: {e}"}
         else:
             # Full replacement mode
             # Gate: a profile with allow_full_replace=False has no whole-file
@@ -1940,7 +1940,7 @@ Backups are automatically created for file modifications."""
             # absent from the schema on this profile.)
             if not self._allow_full_replace:
                 self._trace(f"updateFile(full) REJECTED — allow_full_replace=False: path={path}")
-                return {"error": self._full_replace_gate_error()}
+                return False, {"error": self._full_replace_gate_error()}
             # Accept both 'new_content' (canonical) and 'content' (alias).
             # Absent is NOT empty: a call that names no content is malformed
             # and must be rejected before any backup or write, or it silently
@@ -1949,7 +1949,7 @@ Backups are automatically created for file modifications."""
             new_content = self._full_replacement_content(args)
             if new_content is None:
                 self._trace(f"updateFile(full) REJECTED - no content: path={path}")
-                return {"error": self._missing_content_error()}
+                return False, {"error": self._missing_content_error()}
             self._trace(f"updateFile(full): path={path}, content_len={len(new_content)}")
 
         new_content = restore(
@@ -2008,25 +2008,25 @@ Backups are automatically created for file modifications."""
             }
             return result
         except OSError as e:
-            return {"error": f"Failed to write file: {e}"}
+            return False, {"error": f"Failed to write file: {e}"}
 
-    def _execute_write_new_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_write_new_file(self, args: Dict[str, Any]) -> Any:
         """Execute writeNewFile tool."""
         path = args.get("path", "")
         content = args.get("content", "")
         self._trace(f"writeNewFile: path={path}, content_len={len(content)}")
 
         if not path:
-            return {"error": "path is required"}
+            return False, {"error": "path is required"}
 
         file_path = self._resolve_path(path)
 
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
-            return {"error": f"Path denied by sandbox (write): {path}"}
+            return False, {"error": f"Path denied by sandbox (write): {path}"}
 
         if file_path.exists():
-            return {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
+            return False, {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
 
         # A new file has no convention of its own to preserve, so only the
         # repository can have an opinion; absent one this is LF, as before.
@@ -2071,27 +2071,27 @@ Backups are automatically created for file modifications."""
                 result["diff_total_lines"] = diff_total_lines
             return result
         except OSError as e:
-            return {"error": f"Failed to create file: {e}"}
+            return False, {"error": f"Failed to create file: {e}"}
 
-    def _execute_remove_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_remove_file(self, args: Dict[str, Any]) -> Any:
         """Execute removeFile tool."""
         path = args.get("path", "")
         self._trace(f"removeFile: path={path}")
 
         if not path:
-            return {"error": "path is required"}
+            return False, {"error": "path is required"}
 
         file_path = self._resolve_path(path)
 
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
-            return {"error": f"Path denied by sandbox (write): {path}"}
+            return False, {"error": f"Path denied by sandbox (write): {path}"}
 
         if not file_path.exists():
-            return {"error": f"File not found: {path}"}
+            return False, {"error": f"File not found: {path}"}
 
         if not file_path.is_file():
-            return {"error": f"Not a file: {path}"}
+            return False, {"error": f"Not a file: {path}"}
 
         # Create backup before deletion
         backup_path = None
@@ -2116,9 +2116,9 @@ Backups are automatically created for file modifications."""
             }
             return result
         except OSError as e:
-            return {"error": f"Failed to delete file: {e}"}
+            return False, {"error": f"Failed to delete file: {e}"}
 
-    def _execute_move_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_move_file(self, args: Dict[str, Any]) -> Any:
         """Execute moveFile/renameFile tool."""
         source_path = args.get("source_path", "")
         destination_path = args.get("destination_path", "")
@@ -2126,28 +2126,28 @@ Backups are automatically created for file modifications."""
         self._trace(f"moveFile: source={source_path}, dest={destination_path}, overwrite={overwrite}")
 
         if not source_path:
-            return {"error": "source_path is required", "source": source_path}
+            return False, {"error": "source_path is required", "source": source_path}
 
         if not destination_path:
-            return {"error": "destination_path is required", "source": source_path}
+            return False, {"error": "destination_path is required", "source": source_path}
 
         source = self._resolve_path(source_path)
         destination = self._resolve_path(destination_path)
 
         # Check if both paths are allowed for writing (move = write on both ends)
         if not self._is_path_allowed(str(source), mode="write"):
-            return {"error": f"Path denied by sandbox (write): {source_path}", "source": source_path}
+            return False, {"error": f"Path denied by sandbox (write): {source_path}", "source": source_path}
         if not self._is_path_allowed(str(destination), mode="write"):
-            return {"error": f"Path denied by sandbox (write): {destination_path}", "source": source_path}
+            return False, {"error": f"Path denied by sandbox (write): {destination_path}", "source": source_path}
 
         if not source.exists():
-            return {"error": "Source file does not exist", "source": source_path}
+            return False, {"error": "Source file does not exist", "source": source_path}
 
         if not source.is_file():
-            return {"error": f"Source is not a file: {source_path}", "source": source_path}
+            return False, {"error": f"Source is not a file: {source_path}", "source": source_path}
 
         if destination.exists() and not overwrite:
-            return {
+            return False, {
                 "error": "Destination file already exists. Use overwrite=True to replace it.",
                 "source": source_path,
                 "destination": destination_path
@@ -2197,28 +2197,28 @@ Backups are automatically created for file modifications."""
             }
             return result
         except OSError as e:
-            return {
+            return False, {
                 "error": f"Failed to move file: {e}",
                 "source": normalize_result_path(source_path),
                 "destination": normalize_result_path(destination_path)
             }
 
-    def _execute_undo_file_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_undo_file_change(self, args: Dict[str, Any]) -> Any:
         """Execute undoFileChange tool."""
         path = args.get("path", "")
         self._trace(f"undoFileChange: path={path}")
 
         if not path:
-            return {"error": "path is required"}
+            return False, {"error": "path is required"}
 
         if not self._backup_manager:
-            return {"error": "Backup manager not initialized"}
+            return False, {"error": "Backup manager not initialized"}
 
         file_path = self._resolve_path(path)
 
         # Check if backup exists
         if not self._backup_manager.has_backup(file_path):
-            return {"error": f"No backup found for: {path}"}
+            return False, {"error": f"No backup found for: {path}"}
 
         # Get the backup path for reporting
         backup_path = self._backup_manager.get_latest_backup(file_path)
@@ -2237,18 +2237,18 @@ Backups are automatically created for file modifications."""
                 },
             }
         else:
-            return {"error": f"Failed to restore file from backup"}
+            return False, {"error": f"Failed to restore file from backup"}
 
-    def _execute_multi_file_edit(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_multi_file_edit(self, args: Dict[str, Any]) -> Any:
         """Execute multiFileEdit tool for atomic multi-file operations."""
         operations = args.get("operations", [])
         self._trace(f"multiFileEdit: {len(operations)} operations")
 
         if not operations:
-            return {"error": "operations array is required and cannot be empty"}
+            return False, {"error": "operations array is required and cannot be empty"}
 
         if not isinstance(operations, list):
-            return {"error": "operations must be an array"}
+            return False, {"error": "operations must be an array"}
 
         # Create executor with plugin's path resolution and sandbox checking
         executor = MultiFileExecutor(
@@ -2268,9 +2268,13 @@ Backups are automatically created for file modifications."""
             'jaato.file.files_count': len(operations),
             'jaato.file.all_succeeded': result_dict.get('success', False),
         }
+        if not result.success:
+            # A batch that failed (and was rolled back) is a failed call
+            # (#1614, #1053's rule: failures explicit, successes bare).
+            return False, result_dict
         return result_dict
 
-    def _execute_find_and_replace(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_find_and_replace(self, args: Dict[str, Any]) -> Any:
         """Execute findAndReplace tool for regex-based find/replace across files."""
         pattern = args.get("pattern", "")
         replacement = args.get("replacement", "")
@@ -2281,13 +2285,13 @@ Backups are automatically created for file modifications."""
         self._trace(f"findAndReplace: pattern='{pattern}', paths='{paths}', dry_run={dry_run}")
 
         if not pattern:
-            return {"error": "pattern is required"}
+            return False, {"error": "pattern is required"}
 
         if replacement is None:
-            return {"error": "replacement is required"}
+            return False, {"error": "replacement is required"}
 
         if not paths:
-            return {"error": "paths glob pattern is required"}
+            return False, {"error": "paths glob pattern is required"}
 
         # Create backup function that uses our backup manager
         def backup_fn(file_path: Path) -> Optional[Path]:
@@ -2325,9 +2329,13 @@ Backups are automatically created for file modifications."""
             'jaato.file.replacements': result_dict.get('total_replacements', 0),
             'jaato.file.dry_run': dry_run,
         }
+        if not result.success:
+            # An invalid regex or a failed write (rolled back) is a failed
+            # call (#1614, #1053's rule: failures explicit, successes bare).
+            return False, result_dict
         return result_dict
 
-    def _execute_restore_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_restore_file(self, args: Dict[str, Any]) -> Any:
         """Execute restoreFile tool to restore from a specific backup."""
         path = args.get("path", "")
         backup_path_str = args.get("backup_path")
@@ -2335,10 +2343,10 @@ Backups are automatically created for file modifications."""
         self._trace(f"restoreFile: path={path}, backup_path={backup_path_str}")
 
         if not path:
-            return {"error": "path is required"}
+            return False, {"error": "path is required"}
 
         if not self._backup_manager:
-            return {"error": "Backup manager not initialized"}
+            return False, {"error": "Backup manager not initialized"}
 
         file_path = self._resolve_path(path)
 
@@ -2346,15 +2354,15 @@ Backups are automatically created for file modifications."""
         if backup_path_str:
             backup_path = Path(backup_path_str)
             if not backup_path.exists():
-                return {"error": f"Backup file not found: {backup_path_str}"}
+                return False, {"error": f"Backup file not found: {backup_path_str}"}
         else:
             backup_path = self._backup_manager.get_latest_backup(file_path)
             if not backup_path:
                 # List available backups
                 backups = self._backup_manager.list_backups(file_path)
                 if not backups:
-                    return {"error": f"No backups found for: {path}"}
-                return {
+                    return False, {"error": f"No backups found for: {path}"}
+                return False, {
                     "error": f"No backup specified. Available backups for {path}:",
                     "available_backups": [str(b) for b in backups]
                 }
@@ -2373,16 +2381,16 @@ Backups are automatically created for file modifications."""
                 },
             }
         else:
-            return {"error": "Failed to restore file from backup"}
+            return False, {"error": "Failed to restore file from backup"}
 
-    def _execute_list_backups(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_list_backups(self, args: Dict[str, Any]) -> Any:
         """Execute listBackups tool to list available backups."""
         path = args.get("path")
 
         self._trace(f"listBackups: path={path}")
 
         if not self._backup_manager:
-            return {"error": "Backup manager not initialized"}
+            return False, {"error": "Backup manager not initialized"}
 
         if path:
             # List backups for specific file

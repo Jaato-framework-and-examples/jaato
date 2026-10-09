@@ -124,11 +124,12 @@ class TestUpdateFileExecutionWithCap:
         original = "alpha\nbeta\ngamma\n" * 5
         f.write_text(original)
 
-        result = plugin._execute_update_file({
+        ok, result = plugin._execute_update_file({
             "path": str(f),
             "old": original,             # whole-file old → over cap
             "new": original.upper(),     # whole-file new → over cap
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "each be ≤ 20 characters" in result["error"]
@@ -275,10 +276,11 @@ class TestFullReplaceGate:
         plugin = _make_plugin(tmp_path, allow_full_replace=False)
         f = tmp_path / "f.txt"
         f.write_text("original")
-        result = plugin._execute_update_file({
+        ok, result = plugin._execute_update_file({
             "path": str(f),
             "new_content": "wholesale rewrite",
         })
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert "disabled for this profile" in result["error"]
         assert f.read_text() == "original"  # nothing written

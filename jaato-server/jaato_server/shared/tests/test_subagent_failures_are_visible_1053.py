@@ -33,6 +33,19 @@ model-facing payload is therefore identical either way, which
 SCOPE.  Failure returns become explicit; SUCCESS returns stay bare, which is
 the documented contract (``split_executor_result``: a bare value is ``ok=True``)
 and what 144 sites elsewhere in the tree rely on.
+
+#1614 WIDENED IT to ``file_edit`` and ``filesystem_query``.  Their executors
+answered every failure with a bare ``{"error": ...}`` dict, so a readFile the
+kernel refused was persisted with ``is_error: false``.  Those plugins never
+declare ``success=False``; their failure shape is a returned dict literal
+carrying an ``error`` key, so the guard gained that rule, scoped to the
+``_execute_*`` executors (a non-executor helper may return an ``error`` dict
+that its own caller reads, which is not a tool result).  One guard, one rule
+-- a failure return must carry the flag -- over every module listed in
+``_PLUGINS``.  Unlike the subagent payloads, many of these ARE ``error``-only,
+so ``normalize_result_dict`` now collapses them to the bare error string:
+the text the model reads is unchanged, the JSON wrapper around it is not
+(see ``test_file_tool_failures_are_failures_1614``).
 """
 
 from __future__ import annotations
@@ -44,6 +57,10 @@ from jaato_server.shared.tests.reversion import Reversion
 from jaato_server.shared.tool_result_builder import normalize_result_dict, split_executor_result
 
 _PLUGIN = "jaato-server/jaato_server/shared/plugins/subagent/plugin.py"
+_FILE_EDIT = "jaato-server/jaato_server/shared/plugins/file_edit/plugin.py"
+_FS_QUERY = "jaato-server/jaato_server/shared/plugins/filesystem_query/plugin.py"
+#: Every plugin whose executors this guard holds to the explicit contract.
+_PLUGINS = (_PLUGIN, _FILE_EDIT, _FS_QUERY)
 _ROOT = pathlib.Path(__file__).resolve().parents[4]
 
 
@@ -72,6 +89,32 @@ REVERSIONS = [
             "ToolExecutor reports ok=True and the reliability plugin's "
             "error-retry loop detector never sees the failure that #1052's "
             "spawn loop was made of"
+        ),
+    ),
+    Reversion(
+        target=_FILE_EDIT,
+        find=(
+            '            return False, {"error": f"Failed to read file: {e}"}\n'
+            "\n    def _write_line_ending("
+        ),
+        replace=(
+            '            return {"error": f"Failed to read file: {e}"}\n'
+            "\n    def _write_line_ending("
+        ),
+        test="test_no_failure_return_is_a_bare_value",
+        because=(
+            "readFile's OSError path returns a bare dict again -- the "
+            "kernel-refused read #1614 found persisted as is_error=false"
+        ),
+    ),
+    Reversion(
+        target=_FS_QUERY,
+        find='            return False, {"error": "Pattern is required", "files": [], "total": 0}',
+        replace='            return {"error": "Pattern is required", "files": [], "total": 0}',
+        test="test_no_failure_return_is_a_bare_value",
+        because=(
+            "glob_files' missing-pattern path returns a bare dict again, so "
+            "ToolExecutor reports the refusal as a success"
         ),
     ),
 ]
@@ -121,6 +164,20 @@ def _is_literal_dict_failure(value: ast.expr) -> bool:
     return False
 
 
+def _is_error_dict(value: ast.expr) -> bool:
+    """``{"error": <not None>, ...}`` -- the file tools' failure shape (#1614).
+
+    An ``error`` key whose value is the literal ``None`` is the ABSENCE of
+    one (``tool_result_is_error`` reads it that way), so it is not counted.
+    """
+    if not isinstance(value, ast.Dict):
+        return False
+    for key, val in zip(value.keys, value.values):
+        if isinstance(key, ast.Constant) and key.value == "error":
+            return not (isinstance(val, ast.Constant) and val.value is None)
+    return False
+
+
 def _returned_values(tree: ast.AST):
     """Every ``return`` in *tree* that returns something, as (lineno, value)."""
     for node in ast.walk(tree):
@@ -128,13 +185,26 @@ def _returned_values(tree: ast.AST):
             yield node.lineno, node.value
 
 
+def _executor_lines(tree: ast.AST) -> set:
+    """Line numbers of the returns inside ``_execute_*`` executors."""
+    lines = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and fn.name.startswith("_execute_"):
+            lines.update(lineno for lineno, _ in _returned_values(fn))
+    return lines
+
+
 def _failure_returns(tree: ast.AST):
     """Split self-declared failure returns into (bare, contract) line lists."""
     bare, contract = [], []
+    in_executor = _executor_lines(tree)
     for lineno, value in _returned_values(tree):
         if _is_contract_failure(value):
             contract.append(lineno)
         elif _is_result_type_failure(value) or _is_literal_dict_failure(value):
+            bare.append(lineno)
+        elif lineno in in_executor and _is_error_dict(value):
             bare.append(lineno)
     return bare, contract
 
@@ -146,14 +216,21 @@ def test_no_failure_return_is_a_bare_value():
     covered whether or not its author remembers the contract, which is the
     one property a hand-written list of executors does not have.
     """
-    tree = ast.parse((_ROOT / _PLUGIN).read_text())
-    bare, contract = _failure_returns(tree)
-    assert not bare, (
-        f"{len(bare)} failure return(s) at lines {bare} are bare values. "
+    problems = []
+    for plugin in _PLUGINS:
+        tree = ast.parse((_ROOT / plugin).read_text())
+        bare, contract = _failure_returns(tree)
+        if bare:
+            problems.append(f"{plugin}: lines {bare}")
+        assert contract, (
+            f"the scan found no failure returns at all in {plugin} — it is "
+            "broken")
+    assert not problems, (
+        "failure return(s) are bare values: " + "; ".join(problems) + ". "
         "ToolExecutor reports those as ok=True, so the reliability plugin's "
-        "retry and circuit-breaker policies cannot see them (#1053)."
+        "retry and circuit-breaker policies, telemetry and the persisted "
+        "is_error cannot see them (#1053, #1614)."
     )
-    assert contract, "the scan found no failure returns at all — it is broken"
 
 
 def test_the_guard_can_see_the_shape_it_forbids():
@@ -161,6 +238,19 @@ def test_the_guard_can_see_the_shape_it_forbids():
     bare, _ = _failure_returns(ast.parse(
         "def f():\n"
         "    return {'success': False, 'error': 'x'}\n"
+    ))
+    assert bare == [2]
+
+
+def test_the_guard_sees_an_executor_error_dict_and_nothing_else():
+    """The #1614 rule: an ``error`` dict, in an executor, not ``error: None``."""
+    bare, _ = _failure_returns(ast.parse(
+        "def _execute_x():\n"
+        "    return {'error': 'boom'}\n"
+        "def _execute_y():\n"
+        "    return {'error': None, 'result': 1}\n"
+        "def _helper():\n"
+        "    return {'ok': False, 'error': 'not a tool result'}\n"
     ))
     assert bare == [2]
 
