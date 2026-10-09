@@ -145,6 +145,11 @@ def _text_map(value: Any) -> Optional[Dict[str, str]]:
             if isinstance(k, str) and isinstance(v, str)}
 
 
+def _secret_map(value: Any) -> Dict[str, str]:
+    """*value* as ``{str: str}``, ``{}`` when absent or malformed (#1605)."""
+    return _text_map(value) or {}
+
+
 def _optional_dict(value: Any) -> Optional[Dict[str, Any]]:
     """*value* when it is a dict, else ``None`` (a malformed field means absent)."""
     return value if isinstance(value, dict) else None
@@ -559,6 +564,17 @@ class SessionInitEnvelope:
     # is what an older daemon's envelope means; same-build daemon+runner, so
     # no schema_version bump.
     plugin_host: bool = False
+    # #1605: secret URI -> plaintext the DAEMON resolved for this session
+    # (workspace ``.env``, profile ``env:``, profile ``plugin_configs``).
+    # The runner installs it (``set_inherited_secrets``) so a subagent whose
+    # profile names the same URI gets the parent's value instead of
+    # re-resolving inside a sandbox where ``pass`` / ``vault`` cannot run.
+    # Same trust posture as ``session_env``: wire-only, never logged,
+    # persisted or forwarded; and only URIs the session itself named, so
+    # the runner gains no secret it did not already hold.  ``repr=False``
+    # keeps it out of any repr of the envelope.  Additive: an older daemon
+    # sends none, and the runner then resolves as before.
+    inherited_secrets: Dict[str, str] = field(default_factory=dict, repr=False)
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -658,6 +674,7 @@ class SessionInitEnvelope:
                 dict(self.seccomp_program) if self.seccomp_program else None
             ),
             "plugin_host": self.plugin_host,
+            "inherited_secrets": dict(self.inherited_secrets),
         }
 
     @classmethod
@@ -749,6 +766,7 @@ class SessionInitEnvelope:
             runner_log_path=_optional_str(d.get("runner_log_path")),
             seccomp_program=_optional_dict(d.get("seccomp_program")),
             plugin_host=bool(d.get("plugin_host", False)),
+            inherited_secrets=_secret_map(d.get("inherited_secrets")),
         )
 
 

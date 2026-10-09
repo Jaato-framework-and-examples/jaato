@@ -1040,6 +1040,47 @@ silently, and "reloaded" would be reported about a session still on its
 old credential). `IPCClient.reload_session_env()` / `reloadSessionEnv()`;
 from a prompt, `session reload_env`.
 
+### A Subagent's Credential, Inherited From Its Parent (#1605)
+
+A session's `pass://` / `vault://` URIs are resolved DAEMON-side (the
+daemon is unconfined and can run `pass`) and reach the runner in
+plaintext on the envelope. A subagent the runner spawns re-expanded its
+own profile's `plugin_configs` and `env:` inside the runner, where a
+confined process cannot run the resolver's backend: `PassResolver`
+failed to construct, discovery cached an empty registry, and the URI the
+parent had resolved 26 s earlier reached the provider boundary literally
+and was refused. Granting the sandbox `pass`, `gpg` and
+`~/.password-store` would expose every secret the account owns to
+deliver one.
+
+| Piece | Where |
+|---|---|
+| the daemon records each URI it resolves (`capture_resolved_secrets`, a `ContextVar` sink) | `JaatoServer._resolve_session_env` (`.env`, profile `env:`), `build_session_envelope`'s `expand_plugin_configs` |
+| the map travels as `SessionInitEnvelope.inherited_secrets` (`repr=False`, additive, no version bump) | `runner_spawn._inherited_secrets_of` |
+| the runner installs it at bootstrap step 1b, REPLACING the previous session's (a pool slot) | `runner/session._install_inherited_secrets` |
+| `_resolve_secret_uri` answers an installed URI before discovery | `subagent/config.py` |
+| each inherited value is redacted under its URI | `configure_redaction_sources(inherited_secrets=)` |
+
+Only URIs the session's own configuration named are shipped, so the
+runner holds no secret it did not already hold. A subagent naming a URI
+the parent never resolved still goes to discovery and, confined, is
+refused at the provider boundary as before; that refusal is unchanged.
+
+**An empty registry says why.** No `secret_resolvers` entry point is
+"NOT INSTALLED"; entry points that raised are summarised beside their
+#1188 warnings; an entry point that LOADED and constructed nothing is
+named as installed, with each construction failure it reported. A
+factory reports them by accepting an `errors` keyword and appending
+`(resolver_name, exc)` (`_call_resolver_factory`); a zero-argument
+factory is called as before.
+
+Stated limits: `session.reload_env` does not refresh the map, so a
+subagent spawned after a reload that re-resolved a URI to a new value
+inherits the value from bootstrap; and a subagent's distinct URI is not
+resolved daemon-side. Guard:
+`jaato_server/shared/tests/test_a_subagent_inherits_its_parents_secret_1605.py`,
+six reversions.
+
 ### A Reset Nobody Answered (#1573)
 
 `reset` ("Clear conversation history") was advertised by the TUI's

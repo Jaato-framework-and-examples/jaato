@@ -799,6 +799,29 @@ def apply_session_env(
     return applied
 
 
+def _install_inherited_secrets(envelope: SessionInitEnvelope) -> None:
+    """Install the secret URI -> value map the daemon resolved (#1605).
+
+    A subagent the runner spawns re-expands its own profile's
+    ``plugin_configs`` / ``env:`` here; a URI in this map is answered with
+    the value the parent session received instead of going to resolver
+    discovery, which a confined runner cannot satisfy (``pass`` / ``gpg``
+    are not granted, and must not be: the grant would expose the whole
+    password store to get one credential).  Always called, so an envelope
+    with no map (an older daemon) CLEARS the previous session's.
+    """
+    from jaato_server.shared.plugins.subagent.config import set_inherited_secrets
+
+    inherited = dict(envelope.inherited_secrets or {})
+    set_inherited_secrets(inherited)
+    if inherited:
+        logger.info(
+            "runner-session bootstrap: %d secret URI(s) resolved by the "
+            "daemon are available to this session's subagents (#1605)",
+            len(inherited),
+        )
+
+
 def _configure_output_redaction(
     envelope: SessionInitEnvelope, session_env: Dict[str, str],
 ) -> None:
@@ -829,6 +852,7 @@ def _configure_output_redaction(
             workspace_path=envelope.workspace_path,
             config_root=envelope.config_root,
             confined=confined,
+            inherited_secrets=dict(envelope.inherited_secrets or {}),
         )
     except Exception:  # noqa: BLE001 -- boundary, reported
         logger.exception(
@@ -1905,6 +1929,11 @@ def bootstrap_session(
     # ``shared/session_envelope.py:SessionInitEnvelope.session_env``
     # docstring for the full security contract.
     resolved_session_env: Dict[str, str] = _apply_envelope_session_env(envelope)
+    # #1605: the secret URIs the daemon resolved for this session, so a
+    # subagent naming one gets the same value rather than re-resolving here,
+    # where a confined runner cannot run the resolver's backend.  Replaces
+    # the previous session's map on a reused pool slot.
+    _install_inherited_secrets(envelope)
     # #1215: build the output redactor from the same env, before any
     # plugin runs a tool that could print a value out of it.
     _configure_output_redaction(envelope, resolved_session_env)

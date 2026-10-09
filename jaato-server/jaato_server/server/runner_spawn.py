@@ -1147,6 +1147,8 @@ def build_session_envelope(
     # ``jaato_session._should_drop_introspection`` dropped even that.
     plugin_specs: Optional[list] = None
     plugin_configs_dict: dict = {}
+    # #1605: secret URI -> value resolved for this envelope's plugin_configs.
+    plugin_config_secrets: Dict[str, str] = {}
     preloaded: set = set()
     system_instructions: Optional[str] = None
     gc_dict: Optional[dict] = None
@@ -1261,16 +1263,21 @@ def build_session_envelope(
         # (PR #91 → #92).  Same trust posture: resolved plaintext on
         # the daemon↔runner socketpair, never logged or forwarded.
         from jaato_server.shared.plugins.subagent.config import (
-            expand_plugin_configs, inject_scrub_secret_env,
+            capture_resolved_secrets, expand_plugin_configs,
+            inject_scrub_secret_env,
         )
         raw_plugin_configs = {
             k: dict(v)
             for k, v in (getattr(profile, "plugin_configs", {}) or {}).items()
         }
-        plugin_configs_dict = expand_plugin_configs(
-            raw_plugin_configs,
-            workspace_root_override=getattr(server, "_workspace_path", None),
-        )
+        # #1605: the URIs resolved here ride the envelope as
+        # ``inherited_secrets``, so a subagent naming the same credential
+        # gets this value instead of re-resolving inside the sandbox.
+        with capture_resolved_secrets(plugin_config_secrets):
+            plugin_configs_dict = expand_plugin_configs(
+                raw_plugin_configs,
+                workspace_root_override=getattr(server, "_workspace_path", None),
+            )
         # Quirks injection (server 0.6.194+).  Top-level
         # ``profile.quirks`` is threaded into the provider's
         # plugin_configs namespace under the ``"quirks"`` key so the
@@ -1577,7 +1584,30 @@ def build_session_envelope(
         runner_log_path=runner_log_path(workspace_path, session_id),
         # #1606: a plugin-tool call bootstraps a plugin host, not a session.
         plugin_host=bool(getattr(server, "_plugin_host", False)),
+        # #1605: the secret URIs resolved for this session (its .env, its
+        # profile's env: and plugin_configs), so a subagent the runner spawns
+        # naming one of them gets the parent's value, not a second resolution
+        # inside the sandbox where the resolver's backend cannot run.
+        inherited_secrets=_inherited_secrets_of(server, plugin_config_secrets),
     )
+
+
+def _inherited_secrets_of(
+    server: Any, plugin_config_secrets: Dict[str, str],
+) -> Dict[str, str]:
+    """The secret URI -> value map this envelope ships to the runner (#1605).
+
+    Union of what :meth:`JaatoServer._resolve_session_env` recorded and what
+    the envelope's own ``expand_plugin_configs`` resolved.  Only URIs this
+    session's own configuration named, so the runner holds no secret it did
+    not already hold in plaintext.
+    """
+    merged: Dict[str, str] = {}
+    session_side = getattr(server, "_resolved_secret_uris", None)
+    if isinstance(session_side, dict):
+        merged.update(session_side)
+    merged.update(plugin_config_secrets)
+    return merged
 
 
 def seccomp_program_of(

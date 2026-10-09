@@ -1804,13 +1804,24 @@ class JaatoServer:
         # sibling entries; secret URIs (pass://, vault://, awssm://,
         # sops://, keyring://) resolve via the registered
         # SecretResolver.
-        self._session_env = expand_variables(raw_filtered, context=raw_filtered)
+        # #1605: record the secret URIs resolved here, so the runner can
+        # answer them for a subagent that names the same URI (a confined
+        # runner cannot run the resolver's backend itself).
+        from jaato_server.shared.plugins.subagent.config import (
+            capture_resolved_secrets,
+        )
+        captured = getattr(self, "_resolved_secret_uris", None)
+        if not isinstance(captured, dict):
+            captured = {}
+            self._resolved_secret_uris = captured
+        with capture_resolved_secrets(captured):
+            self._session_env = expand_variables(raw_filtered, context=raw_filtered)
 
-        # Profile env: block — higher precedence than .env, supports
-        # ${VAR} expansion and secret URI resolution.
-        if self._profile and self._profile.env:
-            expanded_env = expand_variables(self._profile.env)
-            self._session_env.update(expanded_env)
+            # Profile env: block — higher precedence than .env, supports
+            # ${VAR} expansion and secret URI resolution.
+            if self._profile and self._profile.env:
+                expanded_env = expand_variables(self._profile.env)
+                self._session_env.update(expanded_env)
 
         # Typed `trace:` block (issue #775) — outranks both the
         # workspace .env and the profile's own `env:` map, because it is
