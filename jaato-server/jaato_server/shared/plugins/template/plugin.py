@@ -177,6 +177,49 @@ PATH_ROUTING_RULES_KEY = "output_path_routing"
 # ``renderTemplateToFile`` to catalog templates.  Default ``true``.
 INLINE_TEMPLATE_CONFIG_KEY = "allow_inline_template"
 
+# A catalog index entry may describe its variables (#1619): an object
+# mapping a variable name to what a caller should put in it, beside
+# ``variables``.  The provisioner (kbwiki writes page templates from a
+# plan that gives every section guidance) is the one party that knows
+# this; the template body only says a name exists.
+VARIABLE_DESCRIPTIONS_KEY = "variable_descriptions"
+
+# Longest description ``validateTemplateIndex`` accepts without a warning.
+# Not a refusal: the text reaches a tool result, and a cap that dropped it
+# would lose the guidance the field exists to carry.
+VARIABLE_DESCRIPTION_WARN_CHARS = 2000
+
+# What ``explain plugin template`` says about the field.  The loader, the
+# validator and ``listTemplateVariables`` are written against these rules;
+# the explain page reads them from here so it cannot describe another.
+VARIABLE_DESCRIPTION_RULES: Tuple[str, ...] = (
+    f"an index entry may carry `{VARIABLE_DESCRIPTIONS_KEY}`: an object "
+    "{variable name: description text}, beside `variables`",
+    "listTemplateVariables adds `description` to each variable that has one; "
+    "a variable with none is returned as before (name, kind, ...)",
+    "a description naming a variable the template does not use is ignored "
+    "by listTemplateVariables; validateTemplateIndex warns when the name is "
+    "missing from the entry's `variables`",
+    "validateTemplateIndex refuses a non-object, a non-string or blank "
+    "description; at load a malformed entry is dropped, never the template",
+)
+
+
+def _coerce_variable_descriptions(raw: Any) -> Dict[str, str]:
+    """Read ``variable_descriptions`` off an index entry, leniently.
+
+    Load must never cost a template its entry, so anything that is not a
+    ``{str: non-blank str}`` pair is dropped here (``validateTemplateIndex``
+    is where it is reported).  Text is stripped.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for name, text in raw.items():
+        if isinstance(name, str) and name and isinstance(text, str) and text.strip():
+            out[name] = text.strip()
+    return out
+
 
 @dataclass
 class TemplateIndexEntry:
@@ -302,6 +345,12 @@ class TemplateIndexEntry:
     # flag — fires whenever ``_looks_like_helper`` matches anywhere
     # in the template body.
     template_evaluation_kind: str = "substitution"
+    # What each variable is for, from the catalog index's
+    # ``variable_descriptions`` (#1619).  Name -> text.  Empty for a
+    # runtime-discovered template, whose body names its variables and
+    # says nothing about them.  ``listTemplateVariables`` attaches each
+    # text to the variable of that name.
+    variable_descriptions: Dict[str, str] = field(default_factory=dict)
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -1063,6 +1112,9 @@ class TemplatePlugin(RunnerForwardingMixin):
                     template_evaluation_kind=entry_data.get(
                         "template_evaluation_kind", "substitution",
                     ),
+                    variable_descriptions=_coerce_variable_descriptions(
+                        entry_data.get(VARIABLE_DESCRIPTIONS_KEY),
+                    ),
                 )
                 loaded += 1
             if loaded:
@@ -1416,7 +1468,9 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "List all variables required by a template, with structural type info "
                     "for each one. Call this before renderTemplateToFile to know exactly "
                     "what variables to provide AND what shape each variable needs.\n\n"
-                    "Returns ``variables: list[{name, kind, item_keys?}]`` where:\n"
+                    "Returns ``variables: list[{name, kind, item_keys?, description?}]`` "
+                    "where ``description``, when present, is the catalog's guidance on "
+                    "what to put in that variable, and:\n"
                     "  - ``kind == 'scalar'``: provide a string/number/bool — used as ``{{name}}``.\n"
                     "  - ``kind == 'section'``: provide a list of dicts — used as "
                     "    ``{{#name}}...{{/name}}``. Each dict in the list MUST contain the "
@@ -4759,6 +4813,8 @@ Template rendering writes files to the workspace."""
                 elif not all(isinstance(v, str) for v in variables):
                     errors.append(f"{prefix}: 'variables' must contain only strings")
 
+            self._validate_variable_descriptions(entry, prefix, errors, warnings)
+
             # Warn if source_path doesn't exist for standalone entries
             source_path = entry.get("source_path", "")
             if origin == "standalone" and source_path and os.path.isabs(source_path):
@@ -4766,6 +4822,47 @@ Template rendering writes files to the workspace."""
                     warnings.append(f"{prefix}: source_path does not exist: {source_path}")
 
         return len(errors) == 0, errors, warnings
+
+    @staticmethod
+    def _validate_variable_descriptions(
+        entry: Dict[str, Any], prefix: str,
+        errors: List[str], warnings: List[str],
+    ) -> None:
+        """Check one entry's ``variable_descriptions`` (#1619).
+
+        Absent is fine.  Present, it must be an object of non-blank
+        strings keyed by variable name.  A name the entry's ``variables``
+        does not list is a WARNING, not an error: ``variables`` may be
+        incomplete (path-only variables, a hand-written index), and the
+        loader ignores a description for a name the template never uses.
+        """
+        key = VARIABLE_DESCRIPTIONS_KEY
+        if key not in entry:
+            return
+        raw = entry[key]
+        if not isinstance(raw, dict):
+            errors.append(f"{prefix}: '{key}' must be an object "
+                          "{variable name: description}")
+            return
+        listed = entry.get("variables")
+        listed_names = (set(v for v in listed if isinstance(v, str))
+                        if isinstance(listed, list) else None)
+        for name, text in raw.items():
+            where = f"{prefix}: '{key}'['{name}']"
+            if not isinstance(text, str):
+                errors.append(f"{where} must be a string")
+                continue
+            if not text.strip():
+                errors.append(f"{where} must not be blank")
+                continue
+            if len(text) > VARIABLE_DESCRIPTION_WARN_CHARS:
+                warnings.append(
+                    f"{where} is {len(text)} characters (over "
+                    f"{VARIABLE_DESCRIPTION_WARN_CHARS}); it is returned whole "
+                    "to every listTemplateVariables caller")
+            if listed_names is not None and name not in listed_names:
+                warnings.append(
+                    f"{where} describes a variable not listed in 'variables'")
 
     def _execute_validate_template_index(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Validate a template index JSON file against the expected schema.
@@ -5699,6 +5796,26 @@ Template rendering writes files to the workspace."""
             result.append(entry)
         return result
 
+    @staticmethod
+    def _attach_variable_descriptions(
+        variables: List[Dict[str, Any]],
+        entry: Optional["TemplateIndexEntry"],
+    ) -> None:
+        """Add ``description`` to each variable the index describes (#1619).
+
+        In place.  A variable with no description keeps exactly the shape
+        it had before; a description naming no variable of the template
+        is ignored (the template body, not the index, decides what the
+        variables are).
+        """
+        descriptions = entry.variable_descriptions if entry else None
+        if not descriptions:
+            return
+        for var in variables:
+            text = descriptions.get(var.get("name", ""))
+            if text:
+                var["description"] = text
+
     def _execute_list_template_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Extract all undeclared variables from a template.
 
@@ -5850,6 +5967,7 @@ Template rendering writes files to the workspace."""
                     if v not in merged:
                         merged[v] = {"name": v, "kind": "scalar"}
                 final_list = [merged[k] for k in sorted(merged.keys())]
+                self._attach_variable_descriptions(final_list, template_entry)
                 return {
                     "variables": final_list,
                     "syntax": "jinja2",
@@ -5882,6 +6000,7 @@ Template rendering writes files to the workspace."""
             # Re-sort for stable output regardless of where each var
             # came from.
             structured.sort(key=lambda v: v["name"])
+            self._attach_variable_descriptions(structured, template_entry)
             result = {
                 "variables": structured,
                 "syntax": "mustache",

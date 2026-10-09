@@ -1650,7 +1650,8 @@ def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
 
 
 def _template_id_lines() -> Tuple[List[str], Dict[str, Any]]:
-    """How a template's ``template_id`` is derived (#1611).
+    """How a template's ``template_id`` is derived (#1611), and how a
+    catalog index describes its variables (#1619).
 
     Read from ``jaato_sdk.templates`` -- the function the plugin is
     guarded against -- so an application listing templates itself can
@@ -1662,6 +1663,14 @@ def _template_id_lines() -> Tuple[List[str], Dict[str, Any]]:
     lines.extend(f"    - {rule}" for rule in T.TEMPLATE_ID_DERIVATION)
     data = {"template_id": {"prefix": T.TEMPLATE_ID_PREFIX,
                             "derivation": list(T.TEMPLATE_ID_DERIVATION)}}
+    # Per-variable descriptions in a catalog index (#1619), read from the
+    # plugin's own rule table.
+    from jaato_server.shared.plugins.template import plugin as TP
+    lines.append("  variable descriptions (catalog index.json):")
+    lines.extend(f"    - {rule}" for rule in TP.VARIABLE_DESCRIPTION_RULES)
+    data["variable_descriptions"] = {
+        "key": TP.VARIABLE_DESCRIPTIONS_KEY,
+        "rules": list(TP.VARIABLE_DESCRIPTION_RULES)}
     return lines, data
 
 
