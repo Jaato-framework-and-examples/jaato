@@ -102,6 +102,7 @@ from jaato_sdk.plugins.base import (
 )
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, DISCOVERABILITY_DEFERRED
 from jaato_sdk.framework_note import framework_note
+from jaato_sdk.templates import TEMPLATE_ID_PREFIX
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.tool_id_map import name_to_id, id_to_name
 from jaato_server.shared.session_context import session_plugin_setting
@@ -119,8 +120,16 @@ def _template_id(name: str) -> str:
     disk.  Closes the semantic-prior class that v112 evidence exposed
     (codegen agent skipped ``listTemplateVariables`` calls on templates
     whose name matched Spring Boot training priors).
+
+    The derivation is a public contract (#1611):
+    :func:`jaato_sdk.templates.template_id` computes the same value
+    outside a session, so an application listing templates itself can
+    hand out ids these tools accept.  ``name_to_id`` is still the call
+    here because it also records the reverse mapping
+    :func:`_template_name_from_id` reads;
+    ``test_template_id_is_a_public_contract_1611`` holds the two equal.
     """
-    return name_to_id(name, prefix="tpl")
+    return name_to_id(name, prefix=TEMPLATE_ID_PREFIX)
 
 
 def _template_name_from_id(template_id: str) -> str:
@@ -1696,7 +1705,7 @@ Template rendering writes files to the workspace."""
         # the id itself rather than an empty string.
         template_id = arguments.get("template_id")
         template_name = (
-            _template_name_from_id(template_id) if template_id else None
+            self._name_for_template_id(template_id) if template_id else None
         )
         variables = arguments.get("variables", {})
         overwrite = arguments.get("overwrite", False)
@@ -2409,8 +2418,11 @@ Template rendering writes files to the workspace."""
             index_data = {
                 "generated_at": datetime.now().isoformat(),
                 "template_count": len(self._template_index),
+                # ``id`` beside each entry (#1611): the value
+                # renderTemplateToFile accepts, so a reader of this file
+                # need not derive it.  The loader ignores the key.
                 "templates": {
-                    name: asdict(entry)
+                    name: {**asdict(entry), "id": _template_id(name)}
                     for name, entry in self._template_index.items()
                 }
             }
@@ -3449,6 +3461,26 @@ Template rendering writes files to the workspace."""
 
     # ==================== Path Resolution ====================
 
+    def _name_for_template_id(self, template_id: str) -> str:
+        """Resolve a ``template_id`` to the index name it was derived from.
+
+        The process-wide reverse map (:func:`_template_name_from_id`)
+        knows only ids this process has already issued.  An id derived
+        OUTSIDE it -- by an application calling
+        :func:`jaato_sdk.templates.template_id` and handing the id to a
+        fresh runner, e.g. a session-less plugin-tool call (#1606) --
+        has never been issued here, so the index is searched for the
+        name whose id it is (#1611).  Unknown ids still come back
+        unchanged and fail as "template not found".
+        """
+        name = _template_name_from_id(template_id)
+        if name != template_id:
+            return name
+        for candidate in list(self._template_index):
+            if _template_id(candidate) == template_id:
+                return candidate
+        return template_id
+
     def _resolve_template_path(self, template_path: str) -> Tuple[Optional[Path], List[str]]:
         """Resolve template path, supporting index lookup and multiple base locations.
 
@@ -4414,7 +4446,7 @@ Template rendering writes files to the workspace."""
         # name then fails ``_resolve_template_path`` below with a clear
         # "template not found" error.
         template_name_arg = (
-            _template_name_from_id(template_id_arg) if template_id_arg else None
+            self._name_for_template_id(template_id_arg) if template_id_arg else None
         )
         variables = self._coerce_variables(args.get("variables"))
         overwrite = args.get("overwrite", False)
@@ -5721,7 +5753,7 @@ Template rendering writes files to the workspace."""
         # ids back to human names before dispatching.  Unknown ids
         # round-trip unchanged via ``id_to_name`` and fall through to
         # the normal "template not found" error path below.
-        template_name = _template_name_from_id(template_id)
+        template_name = self._name_for_template_id(template_id)
 
         # Resolve the template name via index or filesystem
         resolved_path, paths_tried = self._resolve_template_path(template_name)

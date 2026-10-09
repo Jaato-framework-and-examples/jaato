@@ -1644,7 +1644,25 @@ def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
         return _permission_policy_layers()
     if name == "mcp":
         return _mcp_transport_lines()
+    if name == "template":
+        return _template_id_lines()
     return [], {}
+
+
+def _template_id_lines() -> Tuple[List[str], Dict[str, Any]]:
+    """How a template's ``template_id`` is derived (#1611).
+
+    Read from ``jaato_sdk.templates`` -- the function the plugin is
+    guarded against -- so an application listing templates itself can
+    hand out the ids ``renderTemplateToFile`` accepts.
+    """
+    from jaato_sdk import templates as T
+    lines = ["  template_id (what listAvailableTemplates reports and "
+             "renderTemplateToFile / listTemplateVariables accept):"]
+    lines.extend(f"    - {rule}" for rule in T.TEMPLATE_ID_DERIVATION)
+    data = {"template_id": {"prefix": T.TEMPLATE_ID_PREFIX,
+                            "derivation": list(T.TEMPLATE_ID_DERIVATION)}}
+    return lines, data
 
 
 def _mcp_transport_lines() -> Tuple[List[str], Dict[str, Any]]:

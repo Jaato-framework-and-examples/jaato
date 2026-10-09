@@ -20,8 +20,57 @@ Server 0.6.58+.
 
 from __future__ import annotations
 
+import hashlib
 import re
-from typing import FrozenSet
+from typing import FrozenSet, Tuple
+
+# ---------------------------------------------------------------------
+# Template ids (#1611)
+# ---------------------------------------------------------------------
+# ``listAvailableTemplates`` reports each template by an opaque id, and
+# ``renderTemplateToFile`` / ``listTemplateVariables`` accept only that
+# id.  An application that lists a workspace's templates itself (and
+# lets a caller render one through jaato's tools) must hand out the same
+# id, without opening a session.  This is the derivation, as a contract:
+# the server's template plugin is guarded against it, and
+# ``jaato-scaffold explain plugin template`` renders the lines below.
+
+TEMPLATE_ID_PREFIX = "tpl"
+"""Prefix of every template id: ``tpl_<8 lowercase hex>``."""
+
+TEMPLATE_ID_DERIVATION: Tuple[str, ...] = (
+    "template_id = \"tpl_\" + the first 8 hex digits (lowercase) of "
+    "SHA-256 over the template's name, UTF-8 encoded",
+    "the name is the template's index name: the `name` of its entry in "
+    "the catalog's index.json, or the file's basename for a template "
+    "discovered at runtime",
+    "a pure function of the name: no session, workspace or configuration "
+    "enters it, so it is stable across sessions and deployments",
+    "outside a session: `from jaato_sdk.templates import template_id`",
+)
+"""The derivation, one rule per line, as ``explain plugin template`` shows it."""
+
+
+def template_id(name: str) -> str:
+    """Return the id jaato's template tools use for the template ``name``.
+
+    ``"tpl_" + sha256(name.encode("utf-8")).hexdigest()[:8]``.  ``name``
+    is the template's index name (the catalog ``index.json`` entry's
+    ``name``, or a runtime-discovered file's basename), never a path.
+
+    This is a stable contract (#1611): the server's template plugin
+    produces exactly this value for ``listAvailableTemplates`` and
+    resolves exactly this value in ``renderTemplateToFile`` and
+    ``listTemplateVariables``, and a guard test holds the two together.
+
+    Args:
+        name: The template's index name.
+
+    Returns:
+        The template id, e.g. ``"tpl_9e8a395d"``.
+    """
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"{TEMPLATE_ID_PREFIX}_{digest}"
 
 # ---------------------------------------------------------------------
 # Mustache / Handlebars syntax markers

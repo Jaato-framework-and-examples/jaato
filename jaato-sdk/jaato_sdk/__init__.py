@@ -57,7 +57,9 @@ from jaato_sdk.helpers import (
 )
 from jaato_sdk.templates import (
     HELPER_KEYWORDS,
+    TEMPLATE_ID_PREFIX,
     classify_template_evaluation_kind,
+    template_id,
 )
 from jaato_sdk.completion_processors import ToolCallEntry
 from jaato_sdk.cascade_authoring import ProcessorResult
@@ -118,6 +120,8 @@ __all__ = [
     # Template walker helpers (server 0.6.58+)
     "HELPER_KEYWORDS",
     "classify_template_evaluation_kind",
+    "TEMPLATE_ID_PREFIX",
+    "template_id",
     # Completion-processor context shape (server 0.6.158+ / SDK 0.14.0+)
     "ToolCallEntry",
     # Completion-processor return contract (server 0.6.160+ / SDK 0.14.2+)
