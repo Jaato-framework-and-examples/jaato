@@ -454,12 +454,13 @@ class TestMultiFileEdit:
         target = tmp_path / "a.txt"
         target.write_bytes(b"one\r\ntwo\r\n")
 
-        result = make_plugin(tmp_path)._execute_multi_file_edit({
+        ok, result = make_plugin(tmp_path)._execute_multi_file_edit({
             "operations": [
                 {"action": "edit", "path": "a.txt", "old": "two", "new": "TWO"},
                 {"action": "edit", "path": "a.txt", "old": "absent", "new": "x"},
             ]
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert result.get("success") is False
         assert target.read_bytes() == b"one\r\ntwo\r\n"

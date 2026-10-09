@@ -131,7 +131,8 @@ class TestReadFileContainment:
         ws, outside = workspace
         (ws / "escape.txt").symlink_to(outside / "secret.txt")
 
-        result = plugin._execute_read_file({"path": "escape.txt"})
+        ok, result = plugin._execute_read_file({"path": "escape.txt"})
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert "TOPSECRET" not in str(result)
 
@@ -157,7 +158,8 @@ class TestReadFileContainment:
         ws, _ = workspace
         os.mkfifo(str(ws / "pipe.txt"))
 
-        result = plugin._execute_read_file({"path": "pipe.txt"})
+        ok, result = plugin._execute_read_file({"path": "pipe.txt"})
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
 
 
@@ -168,9 +170,10 @@ class TestWriteContainment:
         ws, outside = workspace
         (ws / "escape.txt").symlink_to(outside / "secret.txt")
 
-        result = plugin._execute_update_file(
+        ok, result = plugin._execute_update_file(
             {"path": "escape.txt", "new_content": "pwned\n"}
         )
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert (outside / "secret.txt").read_text() == "TOPSECRET\n"
 
@@ -190,9 +193,10 @@ class TestWriteContainment:
         ws, outside = workspace
         (ws / "vendor").symlink_to(outside, target_is_directory=True)
 
-        result = plugin._execute_write_new_file(
+        ok, result = plugin._execute_write_new_file(
             {"path": "vendor/planted.txt", "content": "pwned\n"}
         )
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert not (outside / "planted.txt").exists()
 
@@ -242,7 +246,8 @@ class TestDeleteAndMoveContainment:
         ws, outside = workspace
         (ws / "vendor").symlink_to(outside, target_is_directory=True)
 
-        result = plugin._execute_remove_file({"path": "vendor/secret.txt"})
+        ok, result = plugin._execute_remove_file({"path": "vendor/secret.txt"})
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert (outside / "secret.txt").exists()
 
@@ -290,9 +295,10 @@ class TestDeleteAndMoveContainment:
         (ws / "vendor").symlink_to(outside, target_is_directory=True)
         (ws / "payload.txt").write_text("payload\n")
 
-        result = plugin._execute_move_file(
+        ok, result = plugin._execute_move_file(
             {"source_path": "payload.txt", "destination_path": "vendor/payload.txt"}
         )
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert not (outside / "payload.txt").exists()
 

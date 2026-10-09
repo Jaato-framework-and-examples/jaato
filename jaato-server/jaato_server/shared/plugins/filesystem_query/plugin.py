@@ -708,7 +708,7 @@ Tips:
 
     # --- Tool implementations ---
 
-    def _execute_glob_files(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_glob_files(self, args: Dict[str, Any]) -> Any:
         """Execute the glob_files tool.
 
         Args:
@@ -726,10 +726,10 @@ Tips:
         include_hidden = args.get("include_hidden", False)
 
         if not pattern:
-            return {"error": "Pattern is required", "files": [], "total": 0}
+            return False, {"error": "Pattern is required", "files": [], "total": 0}
 
         if not root:
-            return {"error": "No root specified and no workspace configured", "files": [], "total": 0}
+            return False, {"error": "No root specified and no workspace configured", "files": [], "total": 0}
 
         # Normalize trailing ** — Python pathlib.glob("dir/**") only matches
         # the directory itself, not files inside it. Append /* to match files.
@@ -738,7 +738,7 @@ Tips:
 
         # Sandbox check: ensure root path is within allowed workspace (with /tmp support)
         if not self._is_path_allowed(root):
-            return {
+            return False, {
                 "error": f"Path not allowed: {root}",
                 "files": [],
                 "total": 0,
@@ -746,21 +746,21 @@ Tips:
 
         root_path = self._resolve_path(root).resolve()
         if not root_path.exists():
-            return {
+            return False, {
                 "error": f"Root path does not exist: {root}",
                 "files": [],
                 "total": 0,
             }
 
         if not root_path.is_dir():
-            return {
+            return False, {
                 "error": f"Root path is not a directory: {root}",
                 "files": [],
                 "total": 0,
             }
 
         if not _is_relative_pattern(pattern):
-            return {
+            return False, {
                 "error": (
                     f"Absolute patterns are not supported in glob_files. "
                     f"The pattern must be relative to the root directory. "
@@ -835,7 +835,7 @@ Tips:
             }
 
         except NotImplementedError:
-            return {
+            return False, {
                 "error": (
                     f"Absolute patterns are not supported in glob_files. "
                     f"The pattern must be relative to the root directory. "
@@ -849,13 +849,13 @@ Tips:
             }
         except Exception as e:
             logger.exception("Error in glob_files: %s", e)
-            return {
+            return False, {
                 "error": f"Search failed: {str(e)}",
                 "files": [],
                 "total": 0,
             }
 
-    def _execute_grep_content(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_grep_content(self, args: Dict[str, Any]) -> Any:
         """Execute the grep_content tool.
 
         Args:
@@ -875,25 +875,25 @@ Tips:
         max_results = args.get("max_results", self._config.max_results)
 
         if not pattern:
-            return {"error": "Pattern is required", "matches": [], "total_matches": 0}
+            return False, {"error": "Pattern is required", "matches": [], "total_matches": 0}
 
         # Compile regex early to catch syntax errors before path validation
         try:
             flags = 0 if case_sensitive else re.IGNORECASE
             regex = re.compile(pattern, flags)
         except re.error as e:
-            return {
+            return False, {
                 "error": f"Invalid regex pattern: {e}",
                 "matches": [],
                 "total_matches": 0,
             }
 
         if not path:
-            return {"error": "No path specified and no workspace configured", "matches": [], "total_matches": 0}
+            return False, {"error": "No path specified and no workspace configured", "matches": [], "total_matches": 0}
 
         # Sandbox check: ensure search path is within allowed workspace (with /tmp support)
         if not self._is_path_allowed(path):
-            return {
+            return False, {
                 "error": f"Path not allowed: {path}",
                 "matches": [],
                 "total_matches": 0,
@@ -901,7 +901,7 @@ Tips:
 
         search_path = self._resolve_path(path).resolve()
         if not search_path.exists():
-            return {
+            return False, {
                 "error": f"Path does not exist: {path}",
                 "matches": [],
                 "total_matches": 0,
@@ -911,7 +911,7 @@ Tips:
         glob_patterns = file_glob if file_glob else ["**/*"]
         bad = [p for p in glob_patterns if not _is_relative_pattern(p)]
         if bad and not search_path.is_file():
-            return {
+            return False, {
                 "error": (
                     f"file_glob patterns must be relative, not absolute paths. "
                     f"Got absolute pattern(s): {bad}. "

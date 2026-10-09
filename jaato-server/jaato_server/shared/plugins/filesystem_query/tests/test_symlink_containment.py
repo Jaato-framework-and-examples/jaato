@@ -96,9 +96,10 @@ class TestGlobFilesResultContainment:
     def test_pointing_root_at_the_symlink_is_refused(self, plugin, escape_workspace):
         """The pre-existing root check still rejects the direct approach."""
         workspace, _ = escape_workspace
-        result = plugin._execute_glob_files(
+        ok, result = plugin._execute_glob_files(
             {"pattern": "*", "root": str(workspace / "data" / "logs")}
         )
+        assert ok is False  # an explicit failure (#1614)
         assert "error" in result
         assert "not allowed" in result["error"]
 

@@ -1547,6 +1547,30 @@ out of a bare dict. That shape survives at 9 more sites across `telepathy`,
 result whose `success` key means something else, and wants those enumerated
 first.
 
+**#1614 applied the same rule to `file_edit` and `filesystem_query`**, whose
+executors answered every failure with a bare `{"error": ...}` dict, so a
+`readFile` the kernel refused was persisted with `is_error: false`. All 67
+failure returns (53 + 14, plus `multiFileEdit` / `findAndReplace` when their
+result says `success: False`) are now `(False, payload)` with the payload
+unchanged, and the #1053 AST guard covers all three plugins, with a second
+rule for those two: a dict literal with an `error` key returned from an
+`_execute_*` executor. One difference from #1053: many of these payloads ARE
+`error`-only, so `normalize_result_dict` collapses them to the bare string.
+The error text is unchanged; a text-content wire (Anthropic, the
+OpenAI-compatible family) now sends that text rather than
+`{"error": "<text>"}` JSON, while a dict-response wire (Google, GitHub
+Models) sends the same bytes as before. The auto-background path had to
+learn the contract too: `glob_files` / `grep_content` are
+BackgroundCapable, and the wait reported every completed task as
+`(True, result)`, so `background.mixin._split_explicit_contract` unpacks an
+explicit failure and marks the task FAILED. Not covered: the `-stream`
+variants (they yield `chunk_type="error"` chunks, judged by the streaming
+path), `grep_content` skipping a file it cannot read (a directory search
+treats that as "no match", which a single-file search inherits), and the
+daemon-side `_forward_via_runner`, which returns a runner's `ok=False` dict
+bare. Guard: `test_file_tool_failures_are_failures_1614.py`, two
+reversions, through a real `ToolExecutor`.
+
 ### Marking Generated Output (#1117)
 
 `ToolOutputEvent.generated_by` (protocol 1.14) is the machine-readable

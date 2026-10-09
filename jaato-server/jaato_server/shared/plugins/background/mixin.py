@@ -21,6 +21,31 @@ from .protocol import BackgroundCapable, TaskHandle, TaskInfo, TaskOutput, TaskR
 DEFAULT_MAX_OUTPUT_BUFFER = 1024 * 1024
 
 
+
+def _split_explicit_contract(result: Any) -> "tuple[bool, Any]":
+    """Unpack an executor's explicit ``(ok, payload)`` return (#1614).
+
+    ``ToolExecutor`` reads a 2-tuple as the ``(ok, payload)`` contract on
+    the synchronous path (``_normalize_executor_return``).  A background
+    task stores what the executor returned, and the auto-background wait
+    reported every COMPLETED task as ``(True, result)`` -- so an executor
+    that returns ``(False, {"error": ...})`` would have reached the model
+    as a successful call whose payload is a tuple.  Unpacking here keeps
+    the two paths agreeing about what a return means; anything other than
+    a 2-tuple is a bare result and means success, as it does there.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        return bool(result[0]), result[1]
+    return True, result
+
+
+def _failure_message(payload: Any) -> str:
+    """The ``error`` text of an explicit failure payload, for task state."""
+    if isinstance(payload, dict) and payload.get("error") is not None:
+        return str(payload["error"])
+    return str(payload)
+
+
 class BackgroundCapableMixin:
     """Mixin providing default implementation for BackgroundCapable protocol.
 
@@ -316,12 +341,17 @@ class BackgroundCapableMixin:
                 # Fall back to non-streaming execution
                 result = executor_fn(arguments)
 
+            ok, result = _split_explicit_contract(result)
             done_callback = None
             duration = None
             with self._bg_lock:
                 if task_id in self._bg_tasks:
-                    self._bg_tasks[task_id]["status"] = TaskStatus.COMPLETED
+                    self._bg_tasks[task_id]["status"] = (
+                        TaskStatus.COMPLETED if ok else TaskStatus.FAILED
+                    )
                     self._bg_tasks[task_id]["result"] = result
+                    if not ok:
+                        self._bg_tasks[task_id]["error"] = _failure_message(result)
                     self._bg_tasks[task_id]["completed_at"] = datetime.now()
                     done_callback = self._bg_tasks[task_id].get("done_callback")
                     started = self._bg_tasks[task_id].get("started_at")
@@ -330,7 +360,10 @@ class BackgroundCapableMixin:
 
             if done_callback:
                 try:
-                    done_callback(task_id, True, None, duration)
+                    done_callback(
+                        task_id, ok,
+                        None if ok else _failure_message(result), duration,
+                    )
                 except Exception:
                     logger.debug("Background task done callback failed", exc_info=True)
 

@@ -433,7 +433,8 @@ class TestReadFileExecution:
         plugin = FileEditPlugin()
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
-        result = plugin._execute_read_file({"path": str(tmp_path / "nonexistent.txt")})
+        ok, result = plugin._execute_read_file({"path": str(tmp_path / "nonexistent.txt")})
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "not found" in result["error"].lower()
@@ -442,7 +443,8 @@ class TestReadFileExecution:
         plugin = FileEditPlugin()
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
-        result = plugin._execute_read_file({})
+        ok, result = plugin._execute_read_file({})
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "required" in result["error"].lower()
@@ -491,10 +493,11 @@ class TestUpdateFileExecution:
         plugin = FileEditPlugin()
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
-        result = plugin._execute_update_file({
+        ok, result = plugin._execute_update_file({
             "path": str(tmp_path / "nonexistent.txt"),
             "new_content": "Content"
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "not found" in result["error"].lower()
@@ -538,7 +541,8 @@ class TestUpdateFileExecution:
         original = "line one\nline two\nline three\n"
         test_file.write_text(original)
 
-        result = plugin._execute_update_file({"path": str(test_file)})
+        ok, result = plugin._execute_update_file({"path": str(test_file)})
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "success" not in result
@@ -591,7 +595,8 @@ class TestUpdateFileExecution:
         test_file = tmp_path / "test.txt"
         test_file.write_text("content\n")
 
-        result = plugin._execute_update_file({"path": str(test_file)})
+        ok, result = plugin._execute_update_file({"path": str(test_file)})
+        assert ok is False  # an explicit failure (#1614)
 
         error = result["error"].lower()
         assert "old" in error and "new" in error
@@ -670,11 +675,12 @@ class TestUpdateFileTargetedEdit:
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello, World!\n")
 
-        result = plugin._execute_update_file({
+        ok, result = plugin._execute_update_file({
             "path": str(test_file),
             "old": "nonexistent text",
             "new": "replacement",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "not found" in result["error"].lower()
@@ -689,11 +695,12 @@ class TestUpdateFileTargetedEdit:
         test_file = tmp_path / "test.txt"
         test_file.write_text("x = 1\nx = 1\n")
 
-        result = plugin._execute_update_file({
+        ok, result = plugin._execute_update_file({
             "path": str(test_file),
             "old": "x = 1",
             "new": "x = 2",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "matched 2 times" in result["error"].lower()
@@ -708,10 +715,11 @@ class TestUpdateFileTargetedEdit:
         test_file = tmp_path / "test.txt"
         test_file.write_text("content\n")
 
-        result = plugin._execute_update_file({
+        ok, result = plugin._execute_update_file({
             "path": str(test_file),
             "old": "content",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "'new' is required" in result["error"]
@@ -890,10 +898,11 @@ class TestWriteNewFileExecution:
         existing_file = tmp_path / "existing.txt"
         existing_file.write_text("Existing content")
 
-        result = plugin._execute_write_new_file({
+        ok, result = plugin._execute_write_new_file({
             "path": str(existing_file),
             "content": "New content"
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "already exists" in result["error"].lower()
@@ -936,7 +945,8 @@ class TestRemoveFileExecution:
         plugin = FileEditPlugin()
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
-        result = plugin._execute_remove_file({"path": str(tmp_path / "nonexistent.txt")})
+        ok, result = plugin._execute_remove_file({"path": str(tmp_path / "nonexistent.txt")})
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "not found" in result["error"].lower()
@@ -997,7 +1007,8 @@ class TestUndoFileChangeExecution:
         test_file.write_text("Content")
 
         # Try to undo without any backup
-        result = plugin._execute_undo_file_change({"path": str(test_file)})
+        ok, result = plugin._execute_undo_file_change({"path": str(test_file)})
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "no backup" in result["error"].lower()
@@ -1209,10 +1220,11 @@ class TestMoveFileExecution:
         plugin = FileEditPlugin()
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
-        result = plugin._execute_move_file({
+        ok, result = plugin._execute_move_file({
             "source_path": str(tmp_path / "nonexistent.txt"),
             "destination_path": str(tmp_path / "dest.txt")
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "does not exist" in result["error"]
@@ -1228,10 +1240,11 @@ class TestMoveFileExecution:
         dest_file = tmp_path / "dest.txt"
         dest_file.write_text("Existing content")
 
-        result = plugin._execute_move_file({
+        ok, result = plugin._execute_move_file({
             "source_path": str(source_file),
             "destination_path": str(dest_file)
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "already exists" in result["error"]
@@ -1271,9 +1284,10 @@ class TestMoveFileExecution:
         plugin = FileEditPlugin()
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
-        result = plugin._execute_move_file({
+        ok, result = plugin._execute_move_file({
             "destination_path": str(tmp_path / "dest.txt")
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "source_path is required" in result["error"]
@@ -1286,9 +1300,10 @@ class TestMoveFileExecution:
         source_file = tmp_path / "source.txt"
         source_file.write_text("Content")
 
-        result = plugin._execute_move_file({
+        ok, result = plugin._execute_move_file({
             "source_path": str(source_file)
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "destination_path is required" in result["error"]
@@ -1319,10 +1334,11 @@ class TestMoveFileExecution:
         source_dir = tmp_path / "source_dir"
         source_dir.mkdir()
 
-        result = plugin._execute_move_file({
+        ok, result = plugin._execute_move_file({
             "source_path": str(source_dir),
             "destination_path": str(tmp_path / "dest")
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "not a file" in result["error"]

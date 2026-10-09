@@ -211,10 +211,11 @@ class TestGlobFiles:
         plugin = FilesystemQueryPlugin()
         plugin.initialize()
 
-        result = plugin._execute_glob_files({
+        ok, result = plugin._execute_glob_files({
             "pattern": "*.py",
             "root": "/nonexistent/path/12345",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert result["total"] == 0
@@ -224,9 +225,10 @@ class TestGlobFiles:
         plugin = FilesystemQueryPlugin()
         plugin.initialize()
 
-        result = plugin._execute_glob_files({
+        ok, result = plugin._execute_glob_files({
             "pattern": "",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
 
@@ -238,10 +240,11 @@ class TestGlobFiles:
             plugin = FilesystemQueryPlugin()
             plugin.initialize()
 
-            result = plugin._execute_glob_files({
+            ok, result = plugin._execute_glob_files({
                 "pattern": "/home/user/project/**/*.py",
                 "root": tmpdir,
             })
+            assert ok is False  # an explicit failure (#1614)
 
             assert "error" in result
             assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
@@ -255,10 +258,11 @@ class TestGlobFiles:
             plugin = FilesystemQueryPlugin()
             plugin.initialize()
 
-            result = plugin._execute_glob_files({
+            ok, result = plugin._execute_glob_files({
                 "pattern": "C:/Users/me/project/**/*.py",
                 "root": tmpdir,
             })
+            assert ok is False  # an explicit failure (#1614)
 
             assert "error" in result
             assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
@@ -412,9 +416,10 @@ class TestGrepContent:
         plugin = FilesystemQueryPlugin()
         plugin.initialize()
 
-        result = plugin._execute_grep_content({
+        ok, result = plugin._execute_grep_content({
             "pattern": "[invalid",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
         assert "Invalid regex" in result["error"]
@@ -424,10 +429,11 @@ class TestGrepContent:
         plugin = FilesystemQueryPlugin()
         plugin.initialize()
 
-        result = plugin._execute_grep_content({
+        ok, result = plugin._execute_grep_content({
             "pattern": "test",
             "path": "/nonexistent/path/12345",
         })
+        assert ok is False  # an explicit failure (#1614)
 
         assert "error" in result
 
@@ -504,11 +510,12 @@ class TestGrepContent:
             plugin = FilesystemQueryPlugin()
             plugin.initialize()
 
-            result = plugin._execute_grep_content({
+            ok, result = plugin._execute_grep_content({
                 "pattern": "hello",
                 "path": tmpdir,
                 "file_glob": ["/home/user/project/**/*.py"],
             })
+            assert ok is False  # an explicit failure (#1614)
 
             assert "error" in result
             assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
@@ -523,11 +530,12 @@ class TestGrepContent:
             plugin = FilesystemQueryPlugin()
             plugin.initialize()
 
-            result = plugin._execute_grep_content({
+            ok, result = plugin._execute_grep_content({
                 "pattern": "hello",
                 "path": tmpdir,
                 "file_glob": ["C:/Users/me/project/**/*.py"],
             })
+            assert ok is False  # an explicit failure (#1614)
 
             assert "error" in result
             assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
@@ -725,9 +733,10 @@ class TestPathScopeValidation:
             plugin.initialize(config={"workspace_root": tmpdir})
 
             for outside in ("/etc", "/"):
-                result = plugin._execute_glob_files({
+                ok, result = plugin._execute_glob_files({
                     "pattern": "*", "root": outside,
                 })
+                assert ok is False  # an explicit failure (#1614)
                 assert "error" in result, f"{outside} was not refused"
                 assert "not allowed" in result["error"].lower()
                 assert result["total"] == 0
@@ -749,9 +758,10 @@ class TestPathScopeValidation:
             plugin = FilesystemQueryPlugin()
             plugin.initialize(config={"workspace_root": tmpdir})
 
-            result = plugin._execute_grep_content({
+            ok, result = plugin._execute_grep_content({
                 "pattern": "root", "path": f"{tmpdir}/../../../etc",
             })
+            assert ok is False  # an explicit failure (#1614)
             assert "error" in result
             assert "not allowed" in result["error"].lower()
             assert result["total_matches"] == 0
@@ -762,9 +772,10 @@ class TestPathScopeValidation:
             plugin = FilesystemQueryPlugin()
             plugin.initialize(config={"workspace_root": tmpdir})
 
-            result = plugin._execute_grep_content({
+            ok, result = plugin._execute_grep_content({
                 "pattern": "root", "path": "/etc",
             })
+            assert ok is False  # an explicit failure (#1614)
             assert "error" in result
             assert "not allowed" in result["error"].lower()
 
