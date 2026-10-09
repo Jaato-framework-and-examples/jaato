@@ -145,6 +145,11 @@ def _text_map(value: Any) -> Optional[Dict[str, str]]:
             if isinstance(k, str) and isinstance(v, str)}
 
 
+def _secret_map(value: Any) -> Dict[str, str]:
+    """*value* as ``{str: str}``, ``{}`` when absent or malformed (#1605)."""
+    return _text_map(value) or {}
+
+
 def _optional_dict(value: Any) -> Optional[Dict[str, Any]]:
     """*value* when it is a dict, else ``None`` (a malformed field means absent)."""
     return value if isinstance(value, dict) else None
@@ -550,6 +555,17 @@ class SessionInitEnvelope:
     # runner then records ``absent`` (or refuses spawns when confinement is
     # required).  Additive, same-build daemon+runner: no schema_version bump.
     seccomp_program: Optional[Dict[str, Any]] = None
+    # #1605: secret URI -> plaintext the DAEMON resolved for this session
+    # (workspace ``.env``, profile ``env:``, profile ``plugin_configs``).
+    # The runner installs it (``set_inherited_secrets``) so a subagent whose
+    # profile names the same URI gets the parent's value instead of
+    # re-resolving inside a sandbox where ``pass`` / ``vault`` cannot run.
+    # Same trust posture as ``session_env``: wire-only, never logged,
+    # persisted or forwarded; and only URIs the session itself named, so
+    # the runner gains no secret it did not already hold.  ``repr=False``
+    # keeps it out of any repr of the envelope.  Additive: an older daemon
+    # sends none, and the runner then resolves as before.
+    inherited_secrets: Dict[str, str] = field(default_factory=dict, repr=False)
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -648,6 +664,7 @@ class SessionInitEnvelope:
             "seccomp_program": (
                 dict(self.seccomp_program) if self.seccomp_program else None
             ),
+            "inherited_secrets": dict(self.inherited_secrets),
         }
 
     @classmethod
@@ -738,6 +755,7 @@ class SessionInitEnvelope:
             gc_file=_optional_dict(d.get("gc_file")),
             runner_log_path=_optional_str(d.get("runner_log_path")),
             seccomp_program=_optional_dict(d.get("seccomp_program")),
+            inherited_secrets=_secret_map(d.get("inherited_secrets")),
         )
 
 

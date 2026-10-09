@@ -7,6 +7,8 @@ import os
 import re
 import sys
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Protocol, Set, Tuple, Union
@@ -285,10 +287,18 @@ def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
         matches = [ep for ep in eps.get("jaato.premium", [])
                    if ep.name == "secret_resolvers"]
 
+    matches = list(matches)
+    #: (entry point, construction failures it reported) for every entry
+    #: point that LOADED.  An entry point that loaded and yielded nothing
+    #: is "installed, no backend usable here", never "not installed".
+    loaded: List[Tuple[Any, List[str]]] = []
+
     for ep in matches:
         try:
             provider_fn = ep.load()
-            provider_fn_result = provider_fn()
+            errors: List[Any] = []
+            provider_fn_result = list(_call_resolver_factory(provider_fn, errors))
+            loaded.append((ep, [_describe_construction_error(e) for e in errors]))
             for resolver in provider_fn_result:
                 for scheme in resolver.schemes:
                     if scheme in resolvers:
@@ -326,25 +336,94 @@ def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
             ", ".join(sorted(resolvers.keys())),
         )
     else:
-        # #1188: an empty registry is cached for the process lifetime, so
-        # every pass:// / vault:// URI thereafter reports "no resolver
-        # registered" with no other signal.  Say so ONCE, here, where the
-        # cause (nothing was discovered) is known — rather than leaving an
-        # operator to infer it from a run of downstream "no resolver" errors.
-        # Fires only when discovery actually runs (lazily, on first secret-URI
-        # use), and once per process because the result is cached.
-        logger.warning(
-            "No secret resolvers were discovered from the jaato.premium "
-            "'secret_resolvers' entry point. pass:// / vault:// (and any "
-            "other scheme://) secret URIs cannot be resolved and will be "
-            "used literally, which is almost certainly wrong. Install the "
-            "package that provides the resolver (jaato-premium for pass://). "
-            "If it was installed AFTER this process started, call "
-            "reset_secret_resolvers() (or restart the daemon) to force "
-            "re-discovery — the empty result is cached for the process."
-        )
+        _warn_empty_registry(matches, loaded)
 
     return resolvers
+
+
+def _call_resolver_factory(provider_fn: Callable[..., Any], errors: List[Any]) -> Any:
+    """Call the ``secret_resolvers`` entry point, offering it an error list.
+
+    A factory that drops a resolver it could not construct (premium's
+    ``get_resolvers`` does, so one broken backend does not cost the others)
+    may accept an ``errors`` keyword and append ``(resolver_name, exc)``
+    pairs or plain strings to it; they are named in the empty-registry
+    warning (#1605).  A factory with the original zero-argument signature
+    is called exactly as before.
+    """
+    import inspect
+    try:
+        params = inspect.signature(provider_fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    accepts = "errors" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    return provider_fn(errors=errors) if accepts else provider_fn()
+
+
+def _describe_construction_error(entry: Any) -> str:
+    """Render one reported construction failure as ``Name: message``."""
+    if isinstance(entry, tuple) and len(entry) == 2:
+        name, exc = entry
+        return f"{name}: {exc}"
+    return str(entry)
+
+
+def _warn_empty_registry(matches: List[Any], loaded: List[Tuple[Any, List[str]]]) -> None:
+    """Say WHY the registry is empty, once per process (#1188, #1605).
+
+    Three causes, three messages, because the remedies differ:
+
+    - no ``secret_resolvers`` entry point at all: the package is not
+      installed;
+    - entry points found, none loaded: covered by the per-entry-point
+      warning already logged, so this line only summarises;
+    - an entry point LOADED and constructed no resolver: the package IS
+      installed and its backend cannot run in THIS process (a confined
+      runner may not exec ``pass``).  Each construction failure the
+      factory reported is named; the install is never blamed.
+    """
+    if not matches:
+        logger.warning(
+            "No secret resolvers were discovered: no installed package "
+            "provides a "
+            "jaato.premium 'secret_resolvers' entry point (NOT INSTALLED). "
+            "pass:// / vault:// (and any other scheme://) secret URIs cannot be "
+            "resolved and will be used literally, which is almost certainly "
+            "wrong. Install the package that provides the resolver "
+            "(jaato-premium for pass://). If it was installed AFTER this "
+            "process started, call reset_secret_resolvers() (or restart the "
+            "daemon) to force re-discovery — the empty result is cached for "
+            "the process."
+        )
+        return
+    if not loaded:
+        logger.warning(
+            "No secret resolvers were discovered: every jaato.premium "
+            "'secret_resolvers' entry point raised while loading (see the "
+            "warning above for each). The empty result is cached for the process; "
+            "call reset_secret_resolvers() (or restart the daemon) once the "
+            "cause is fixed."
+        )
+        return
+    parts = []
+    for ep, errors in loaded:
+        dist = getattr(getattr(ep, "dist", None), "name", None)
+        origin = f"{getattr(ep, 'value', '<unknown>')}" + (f" [{dist}]" if dist else "")
+        detail = "; ".join(errors) if errors else (
+            "the factory reported no construction error")
+        parts.append(f"{origin}: {detail}")
+    logger.warning(
+        "No secret resolvers were discovered: the provider is INSTALLED "
+        "and loaded, but constructed no resolver in this process (pid %d): "
+        "%s. The package is present; the resolver's "
+        "backend is not usable HERE — a confined runner, for example, may "
+        "not run `pass` / `gpg`. Secret URIs the daemon resolved for this "
+        "session are still answered from the session envelope; any other "
+        "will be used literally. The empty result is cached for the process "
+        "(reset_secret_resolvers() forces re-discovery).",
+        os.getpid(), " | ".join(parts),
+    )
 
 
 def _resolve_secret_uri(
@@ -414,6 +493,15 @@ def _resolve_secret_uri(
     if scheme == APP_SECRET_SCHEME:
         return value
 
+    # #1605: a URI this session's daemon already resolved is answered from
+    # what it shipped, BEFORE discovery.  In a confined runner discovery
+    # cannot work (the resolver's backend may not run inside the sandbox),
+    # and a subagent naming its parent's credential must get the value the
+    # parent got, not a second resolution attempt.
+    inherited = inherited_secret(value)
+    if inherited is not None:
+        return inherited
+
     resolvers = _discover_secret_resolvers()
     resolver = resolvers.get(scheme)
     if resolver is None:
@@ -429,11 +517,13 @@ def _resolve_secret_uri(
     key = m.group('key')  # May be None
 
     try:
-        return _call_resolver(resolver, scheme, path, key, context)
+        resolved = _call_resolver(resolver, scheme, path, key, context)
     except SecretResolutionError:
         raise
     except Exception as exc:
         raise SecretResolutionError(value, str(exc)) from exc
+    _note_captured_secret(value, resolved)
+    return resolved
 
 
 def _call_resolver(
@@ -554,6 +644,92 @@ def reset_secret_resolvers() -> None:
     global _resolvers
     with _resolvers_lock:
         _resolvers = None
+
+
+# ---------------------------------------------------------------------------
+# Secrets resolved on the daemon, handed to the runner (#1605).
+#
+# A session's secret URIs are resolved DAEMON-side (the daemon is unconfined
+# and can run ``pass`` / ``vault``); the plaintext reaches the runner on the
+# session envelope.  A subagent the runner spawns re-expands ITS profile's
+# ``plugin_configs`` / ``env`` inside the runner, where a confined process
+# cannot run the resolver's backend, so the same ``pass://`` URI that worked
+# for the parent failed for the child.
+#
+# Two halves:
+#
+# - :func:`capture_resolved_secrets` -- the daemon records each URI it
+#   resolved while building a session's envelope (URI -> value);
+# - :func:`set_inherited_secrets` -- the runner installs that map at
+#   bootstrap, and :func:`_resolve_secret_uri` answers those URIs from it
+#   before trying discovery.
+#
+# Only URIs the session's own profile and ``.env`` named are shipped, so the
+# runner gains no secret it did not already hold in plaintext.  A subagent
+# naming a URI the parent never resolved still goes through discovery (and,
+# confined, fails loudly at the provider boundary, as before).
+# ---------------------------------------------------------------------------
+
+_secret_capture: "ContextVar[Optional[Dict[str, str]]]" = ContextVar(
+    "jaato_secret_capture", default=None,
+)
+
+#: URI -> plaintext the daemon resolved for THIS runner's session.  Replaced
+#: whole at every bootstrap, so a pool slot never answers with the previous
+#: session's values.
+_inherited_secrets: Dict[str, str] = {}
+_inherited_lock = threading.Lock()
+
+
+@contextmanager
+def capture_resolved_secrets(into: Dict[str, str]):
+    """Record every secret URI resolved inside this block into *into*.
+
+    Used daemon-side around the expansions whose results ship to the runner
+    (``JaatoServer._resolve_session_env``, ``build_session_envelope``'s
+    ``expand_plugin_configs``).  Nested blocks record into the innermost
+    dict.  Values only: ``${VAR}`` expansion and unresolved URIs are not
+    recorded.
+    """
+    token = _secret_capture.set(into)
+    try:
+        yield into
+    finally:
+        _secret_capture.reset(token)
+
+
+def _note_captured_secret(uri: str, value: str) -> None:
+    sink = _secret_capture.get()
+    if sink is not None and isinstance(value, str):
+        sink[uri] = value
+
+
+def set_inherited_secrets(mapping: Optional[Mapping[str, str]]) -> None:
+    """Install the URI -> value map the daemon resolved for this session.
+
+    REPLACES what a previous call installed; ``None`` or ``{}`` clears it.
+    Non-string entries and keys that are not secret URIs are dropped.
+    """
+    cleaned = {
+        k: v for k, v in (mapping or {}).items()
+        if isinstance(k, str) and isinstance(v, str)
+        and _SECRET_URI_RE.match(k)
+    }
+    global _inherited_secrets
+    with _inherited_lock:
+        _inherited_secrets = cleaned
+
+
+def inherited_secret(uri: str) -> Optional[str]:
+    """The value the daemon resolved for *uri* for this session, or ``None``."""
+    with _inherited_lock:
+        return _inherited_secrets.get(uri)
+
+
+def inherited_secret_items() -> List[Tuple[str, str]]:
+    """``(uri, value)`` pairs currently installed (for output redaction)."""
+    with _inherited_lock:
+        return sorted(_inherited_secrets.items())
 
 
 # Valid values for the ``mode`` modifier knob.  ``discover`` (the
