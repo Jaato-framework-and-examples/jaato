@@ -23,26 +23,24 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("jinja2")
-
-from jaato_sdk.events import (  # noqa: E402
+from jaato_sdk.events import (
     PermissionRequestedEvent,
     PermissionResponseRequest,
     PluginToolInvokeRequest,
 )
 
-from jaato_server.server.plugin_tool_calls import (  # noqa: E402
+from jaato_server.server.plugin_tool_calls import (
     PluginToolCalls,
     _CallSink,
     _InFlight,
     request_problem,
 )
-from jaato_server.shared.jaato_runtime import JaatoRuntime  # noqa: E402
-from jaato_server.shared.plugin_tool_call import build_plugin_tool_host  # noqa: E402
-from jaato_server.shared.plugins.permission.plugin import PermissionPlugin  # noqa: E402
-from jaato_server.shared.plugins.registry import PluginRegistry  # noqa: E402
-from jaato_server.shared.plugins.template.plugin import TemplatePlugin  # noqa: E402
-from jaato_server.shared.tests.reversion import Reversion  # noqa: E402
+from jaato_server.shared.jaato_runtime import JaatoRuntime
+from jaato_server.shared.plugin_tool_call import build_plugin_tool_host
+from jaato_server.shared.plugins.permission.plugin import PermissionPlugin
+from jaato_server.shared.plugins.registry import PluginRegistry
+from jaato_server.shared.plugins.template.plugin import TemplatePlugin
+from jaato_server.shared.tests.reversion import Reversion
 
 _CALL = "jaato-server/jaato_server/shared/plugin_tool_call.py"
 _CALLS = "jaato-server/jaato_server/server/plugin_tool_calls.py"
