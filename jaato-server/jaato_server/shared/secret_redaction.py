@@ -446,6 +446,7 @@ def configure_redaction_sources(
     config_root: Optional[str] = None,
     profile_scrub: Any = None,
     confined: Optional[bool] = None,
+    inherited_secrets: Optional[Mapping[str, str]] = None,
 ) -> SecretRedactor:
     """Record where this session's secrets come from, then build and install.
 
@@ -457,6 +458,12 @@ def configure_redaction_sources(
     ``apply_session_env``), except the provider credentials already noted,
     which describe providers that still exist until they are rebuilt.
     ``session_env=None`` keeps the previous env.
+
+    *inherited_secrets*: the secret URI -> value map the daemon resolved for
+    this session (#1605), each value redacted under its URI.  Most are
+    already covered by another source (a session-env name, a provider key);
+    this covers a resolved value in any other plugin config.  ``None`` keeps
+    the previous map.
     """
     global _sources
     with _sources_lock:
@@ -474,6 +481,10 @@ def configure_redaction_sources(
             "profile_scrub": profile_scrub if profile_scrub is not None
             else previous.get("profile_scrub"),
             "provider_secrets": list(previous.get("provider_secrets") or []),
+            "inherited_secrets": dict(
+                inherited_secrets if inherited_secrets is not None
+                else previous.get("inherited_secrets") or {}
+            ),
             "confined": bool(confined if confined is not None
                              else previous.get("confined", False)),
         }
@@ -525,6 +536,9 @@ def _rebuild_locked() -> SecretRedactor:
     secrets.extend(env_secrets(src.get("session_env"), patterns))
     secrets.extend(provider_config_secrets(plugin_configs, src.get("provider_name")))
     secrets.extend(src.get("provider_secrets") or [])
+    # Last, so a more specific name (an env var, ``<provider>.api_key``)
+    # wins for a value both name.
+    secrets.extend(sorted((src.get("inherited_secrets") or {}).items()))
     secrets.extend(stored_auth_secrets(stored_auth_directories(
         src.get("workspace_path"), src.get("config_root"),
         include_home=not src.get("confined", False),
