@@ -1686,6 +1686,8 @@ same code path as before, byte for byte.
 | header values resolved at CONNECT time through `expand_variables` (`${VAR}`, then a whole-value `pass://` / `vault://`); an unresolved value refuses the server, naming the header and never the value | `resolve_headers` |
 | configured headers sent only to the url's host: an httpx request hook removes them from any request to another host (a redirect), `web_fetch`'s `host_matches` rule | `bind_headers_to_host`, `bound_client_factory` |
 | a 404 to our `Mcp-Session-Id` (seen by a response hook, since the SDK's error text depends on the server's body), or a transport that died, reconnects ONCE and retries the call once | `SessionWatch`, `MCPClientManager._call_remote` / `_reconnect_once` |
+| a **401** reconnects ONCE with headers re-resolved and retries once (#1609): a rotated token written into the session env reaches the server; on SSE the refused POST ends the transport, so the call is raced against the watch rather than left waiting; a server that keeps refusing fails the call | `SessionWatch.unauthorized` / `.tripped`, `MCPClientManager._call_watched` |
+| `session.reload_env` reopens the connected remote servers whose header templates read a `${VAR}` the reload changed (others keep their connection); the answer's `refreshed` names them. Plugins opt in with `on_session_env_reloaded(changed_env_names)` | `runner/rpc.py::notify_env_reloaded`, `MCPToolPlugin.on_session_env_reloaded`, `header_env_names` |
 | the transport opened and closed by one task (its anyio task group demands it) | `MCPClientManager._own_remote`, `_OwnedTransport` |
 | both SDK generations: 1.x `streamablehttp_client(headers=, httpx_client_factory=)`, 2.x `streamable_http_client(http_client=)`; imported lazily | `open_remote_streams` |
 
@@ -1708,6 +1710,14 @@ Rules the implementation holds to:
 - Tool names (`mcp__<server>__<tool>`), `TRAIT_UNTRUSTED_SCHEMA`
   sanitization and untrusted-content wrapping are unchanged for remote
   servers.
+
+Not covered (#1609 gap 1): a session the daemon starts on its own
+(reactor stage, a `session.wake` from elsewhere, a revive) re-resolves its
+env without asking the application, and over IPC an `app://` reference
+has no resolver, so a per-user token reaches such a session only through
+`pass://` / `vault://`. Guard for the 401 and reload halves:
+`jaato_server/shared/tests/test_a_rotated_mcp_credential_reaches_the_server_1609.py`,
+five reversions.
 
 Found on the way: under mcp 2.x a `Tool` exposes `input_schema` (the
 camelCase name is only the wire alias), so `get_tool_schemas` raised for

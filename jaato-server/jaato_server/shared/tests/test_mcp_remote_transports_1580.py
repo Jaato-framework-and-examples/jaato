@@ -80,6 +80,7 @@ REVERSIONS = [
     Reversion(
         target=_MANAGER,
         find=("                if not (connection.session_stale or is_stale_session(exc)\n"
+              "                        or connection.credential_refused\n"
               "                        or connection.transport_closed):\n"),
         replace="                if True:\n",
         test="test_a_restarted_server_reconnects_once_on_the_next_call",
