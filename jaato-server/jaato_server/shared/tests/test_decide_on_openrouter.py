@@ -124,6 +124,28 @@ VENDOR_RESPONSE = {
 }
 
 
+#: What the real endpoint returned on 2026-10-09 for the smoke script's
+#: request (``examples/provider_smoke_decisions.py --live-openrouter``).
+#: It differs from the documented example: integer probabilities, a
+#: ``cost`` in usage, and ``id`` / ``provider`` keys the parser ignores.
+LIVE_RESPONSE = {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+        "is_urgent": {"type": "noul", "noul": 0.98},
+        "department": {"type": "choice", "choice": "billing",
+                       "probabilities": {"billing": 1, "technical": 0, "sales": 0},
+                       "confidence": 1},
+        "frustration": {"type": "score", "score": 1.31,
+                        "legend": {"0": "Calm", "1": "Frustrated", "2": "Very angry"},
+                        "probabilities": {"0": 0, "1": 0.69, "2": 0.31},
+                        "confidence": 0.53},
+    },
+    "usage": {"input_tokens": 438, "output_tokens": 73, "cost": 1.8396e-05},
+    "id": "gen-dec-1791541710-RCxBgWIHSHvT2r6QUwhW",
+    "provider": "TypeSafe",
+}
+
+
 def _vendor_questions():
     return {
         qid: DecisionQuestion(q["type"], q["instructions"], q.get("criteria"))
@@ -148,6 +170,18 @@ def test_the_vendors_response_parses():
     assert frust.value == 1.05 and frust.legend["2"] == "Very angry"
     assert result.usage.reported and result.usage.prompt_tokens == 296
     assert result.usage.output_tokens == 20
+
+
+def test_the_live_response_parses():
+    result = parse_decision_response(LIVE_RESPONSE, _vendor_questions(), "x")
+    assert result.model == "typesafe/jev-1.13-20260917"
+    dept = result.answers["department"]
+    assert dept.value == "billing" and dept.confidence == 1
+    assert dept.probabilities == {"billing": 1.0, "technical": 0.0, "sales": 0.0}
+    assert result.answers["frustration"].value == 1.31
+    assert result.usage.cost_usd == 1.8396e-05
+    assert result.usage.prompt_tokens == 438
+    assert result.raw["provider"] == "TypeSafe"
 
 
 def test_an_unanswered_question_is_an_error_naming_it():

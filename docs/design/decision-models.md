@@ -343,7 +343,7 @@ allows on an error.
    - `connect()` records whether the model is decisions-only, and `complete()` then raises `DecisionModelOnlyError`.
    - Guards: `jaato_server/shared/tests/test_decide_on_openrouter.py` (five reversions) uses the vendor's documented request and response as fixtures. The stand-in is `decision_standin.py`. In `test_provider_capability_conformance.py`, a declaring provider must answer the stand-in and an undeclared one may not expose `decide`.
    - `examples/provider_smoke_decisions.py` runs the same checks against the stand-in. With `--live-openrouter` it sends one request to `typesafe/jev-1.13` and prints the raw response beside the parse.
-   - Not yet verified against the live endpoint.
+   - Verified against the live endpoint on 2026-10-09: the response matched the documented shape, with integer probabilities, a `cost` in usage (kept as `cost_usd`) and `id` / `provider` keys the parser ignores. That response is a fixture (`LIVE_RESPONSE`).
 3. `decision_models:` and the tier refusal (§7).
 4. The `decide` tool (§8.1).
 5. The permission gate, with `PolicyDecision.ASK` (§8.2).
