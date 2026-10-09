@@ -123,7 +123,7 @@ def test_the_mark_survives_the_record():
         ended_at="2026-09-27T10:00:00+00:00", end_reason="budget_exhausted",
     )
     data = serialize_session_state(state)
-    assert data["version"] == "2.11"
+    assert data["version"] == "2.12"
     back = deserialize_session_state(data)
     assert (back.ended_at, back.end_reason) == (
         "2026-09-27T10:00:00+00:00", "budget_exhausted")

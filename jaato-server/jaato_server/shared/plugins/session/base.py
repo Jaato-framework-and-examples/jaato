@@ -67,6 +67,25 @@ class SessionState:
     recipe source.
     """
 
+    profile_ref: Optional[str] = None
+    """The profile as the session REQUESTED it (record version 2.12, #1588).
+
+    ``profile_name`` is the resolved profile's ``name:``, and a name is not
+    an identity: a set leaf at ``profiles/<set>/x.yaml`` and a flat
+    ``profiles/x.yaml`` may both declare ``name: x``.  A session created
+    with the qualified ``<set>/x`` therefore recorded only ``x``, and every
+    revive that re-resolved the profile from disk -- an unsealed record
+    (#1529), a record with no snapshot, ``JAATO_REVIVE_PROFILE=disk`` --
+    resolved the bare name and bound whichever file won it, which was not
+    the one the session was created with.
+
+    This field is what the session asked for, verbatim (``<set>/x`` or
+    ``x``), and the revive resolves it in preference to ``profile_name``.
+    A qualified ref binds that set's file and nothing else.  ``None`` on
+    records written before 2.12 and on inline / profile-less sessions; the
+    revive then falls back to ``profile_name`` exactly as before.
+    """
+
     profile_spec: Optional[Dict[str, Any]] = None
     """The UNRESOLVED inline-profile spec, when the session was created
     from an inline profile (``profile_name == "<inline>"``) rather than a

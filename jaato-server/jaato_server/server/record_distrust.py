@@ -17,7 +17,9 @@ it, and returns a :class:`DistrustOutcome` saying what it changed.
 Record field                On an unverified record
 ==========================  ===============================================
 ``profile_snapshot``        dropped: the profile is re-resolved from disk by
-                            ``profile_name`` (the ``JAATO_REVIVE_PROFILE=disk``
+                            ``profile_ref`` (#1588; a qualified ref binds
+                            only that set's file), else ``profile_name``
+                            (the ``JAATO_REVIVE_PROFILE=disk``
                             path), so plugins, plugin configs (the permission
                             policy among them), AppArmor fragments,
                             ``runtime_limits`` (seccomp, pids, memory, cpu,
@@ -142,7 +144,7 @@ def _distrust_profile(state: Any, out: DistrustOutcome) -> None:
     if getattr(state, "profile_snapshot", None) is not None:
         out.changes.append("profile_snapshot (re-resolved from disk)")
         state.profile_snapshot = None
-    if getattr(state, "profile_name", None):
+    if getattr(state, "profile_name", None) or getattr(state, "profile_ref", None):
         out.require_disk_profile = True
     if getattr(state, "config_root", None) is not None:
         out.changes.append("config_root")

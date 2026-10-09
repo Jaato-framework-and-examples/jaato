@@ -185,7 +185,7 @@ class TestIdentityPersistence:
 
         state.runner_identity = RunnerIdentity(runner_pid=7).to_dict()
         blob = serialize_session_state(state)
-        assert blob["version"] == "2.11"
+        assert blob["version"] == "2.12"
         assert blob["runner_identity"]["runner_pid"] == 7
 
         # ...and the 2.10 record round-trips.

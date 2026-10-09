@@ -9,7 +9,7 @@ import sys
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Protocol, Set, Tuple, Union
 from typing import runtime_checkable
 
 from jaato_sdk.trace import (
@@ -4806,6 +4806,58 @@ class ProfileDiscoveryResult:
     #: report about a resolved profile (``jaato-scaffold explain profile``)
     #: can name its file without a second resolver that might pick another.
     sources: Dict[str, str] = field(default_factory=dict)
+    #: Every file that declared a name ANOTHER file had already registered
+    #: (#1588), keyed by the name, in scan order.  The winner is
+    #: ``sources[name]``; these are the files it shadowed.  Shadowing across
+    #: tiers is the design (a selected set's file over ``profiles/``, the
+    #: workspace tier over the user tier); two files in ONE directory are
+    #: not, because nothing but the directory listing decides between them.
+    collisions: Dict[str, List[str]] = field(default_factory=dict)
+    #: The profile-set directory this discovery scanned first, or ``None``
+    #: when no set applied.  What lets a caller tell a profile read from the
+    #: set (``sources[name]`` directly inside it) from one the regular tier
+    #: supplied under the same name -- the distinction a qualified
+    #: ``<set>/<name>`` request depends on (#1588).
+    profile_set_dir: Optional[str] = None
+
+
+#: Profile names already warned about as same-directory duplicates, so the
+#: warning is said once per daemon rather than on every discovery (#1588).
+_WARNED_DUPLICATES: Set[Tuple[str, str]] = set()
+
+
+def _already_registered(
+    name: str,
+    file_path: Path,
+    profiles: Dict[str, 'SubagentProfile'],
+    sources: Dict[str, str],
+    collisions: Optional[Dict[str, List[str]]],
+) -> bool:
+    """Whether *name* is taken, recording the collision when it is (#1588).
+
+    First writer wins, as it always has: a higher-precedence directory
+    scanned earlier keeps the name.  What changed is that the loser is no
+    longer forgotten.  It is recorded in *collisions*, and when the winner
+    sits in the SAME directory the duplicate is announced at WARNING (once
+    per directory and name): nothing but the directory listing chose
+    between the two files, so a request for that name binds a file the
+    author cannot predict.
+    """
+    if name not in profiles:
+        return False
+    if collisions is not None:
+        collisions.setdefault(name, []).append(str(file_path))
+    winner = sources.get(name)
+    key = (str(file_path.parent), name)
+    if winner and Path(winner).parent == file_path.parent and key not in _WARNED_DUPLICATES:
+        _WARNED_DUPLICATES.add(key)
+        logger.warning(
+            "Two profile files in %s declare name '%s': %s is used and %s "
+            "is ignored. Rename one (jaato-scaffold validate reports this "
+            "as profile_name_duplicate).",
+            file_path.parent, name, Path(winner).name, file_path.name,
+        )
+    return True
 
 
 #: Every key :func:`_scan_profiles_dir` reads out of a profile FILE.
@@ -4891,11 +4943,15 @@ def _scan_profiles_dir(
     profiles: Dict[str, 'SubagentProfile'],
     errors: Dict[str, str],
     sources: Dict[str, str],
+    collisions: Optional[Dict[str, List[str]]] = None,
 ) -> None:
     """Scan a directory for profile files and populate profiles/errors dicts.
 
     Existing entries in ``profiles`` are never overwritten, so earlier
-    directories (higher precedence) win over later ones.
+    directories (higher precedence) win over later ones.  Files are read in
+    sorted order, so when two files in ONE directory declare the same name
+    the winner no longer depends on the filesystem's listing order (#1588);
+    the loser is recorded in *collisions* (see :func:`_already_registered`).
 
     Args:
         directory: Directory to scan for .json/.yaml/.yml profile files.
@@ -4904,11 +4960,13 @@ def _scan_profiles_dir(
         sources: Accumulator dict — the file each profile registered in
             THIS pass was read from (see
             :attr:`ProfileDiscoveryResult.sources`).
+        collisions: Optional accumulator for files whose name was already
+            registered (see :attr:`ProfileDiscoveryResult.collisions`).
     """
     try:
         if not directory.is_dir():
             return
-        entries = list(directory.iterdir())
+        entries = sorted(directory.iterdir())
     except OSError as exc:
         # The directory is inaccessible: missing, or a confined session
         # correctly denied this tier (e.g. ~/.jaato/profiles under AppArmor —
@@ -4940,7 +4998,7 @@ def _scan_profiles_dir(
             continue
         if name is None or data is None:
             continue
-        if name in profiles:
+        if _already_registered(name, file_path, profiles, sources, collisions):
             continue  # higher-precedence source already registered this name
 
         # The validating block parsers, guarded TOGETHER: each raises
@@ -5389,6 +5447,8 @@ def discover_profiles(
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}
     sources: Dict[str, str] = {}
+    collisions: Dict[str, List[str]] = {}
+    set_dir: Optional[Path] = None
 
     # 1.a Workspace profile-set overlay (optional).
     #
@@ -5420,11 +5480,10 @@ def discover_profiles(
     # set without mutating the per-session env contextvar.
     profile_set = force_profile_set or env_profile_set
     if profile_set and effective_config_root:
-        set_path = (
+        set_dir = (
             Path(effective_config_root).expanduser().resolve()
             / PROFILES_SUBDIR / profile_set
         )
-        _scan_profiles_dir(set_path, profiles, errors, sources)
     elif profile_set and not effective_config_root:
         # No ``config_root`` override — fall back to scanning
         # ``<base_path>/<profiles_dir>/<set>/`` so qualified resolution
@@ -5433,7 +5492,9 @@ def discover_profiles(
         fallback_set_path = Path(profiles_dir)
         if not fallback_set_path.is_absolute():
             fallback_set_path = Path(base_path) / fallback_set_path
-        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors, sources)
+        set_dir = fallback_set_path / profile_set
+    if set_dir is not None:
+        _scan_profiles_dir(set_dir, profiles, errors, sources, collisions)
 
     # 1.b Workspace tier — config_root override takes precedence; fall
     #    back to <base_path>/<profiles_dir> when no override is in effect.
@@ -5443,12 +5504,12 @@ def discover_profiles(
         profiles_path = Path(profiles_dir)
         if not profiles_path.is_absolute():
             profiles_path = Path(base_path) / profiles_path
-    _scan_profiles_dir(profiles_path, profiles, errors, sources)
+    _scan_profiles_dir(profiles_path, profiles, errors, sources, collisions)
 
     # 2. User-level profiles from ~/.jaato/profiles/
     #    Workspace profiles take precedence.
     user_profiles_path = Path.home() / ".jaato" / PROFILES_SUBDIR
-    _scan_profiles_dir(user_profiles_path, profiles, errors, sources)
+    _scan_profiles_dir(user_profiles_path, profiles, errors, sources, collisions)
 
     # 3. Premium entry-point profiles (if installed).
     #    Workspace and user profiles take precedence over premium ones.
@@ -5462,7 +5523,9 @@ def discover_profiles(
     errors.update(inheritance_errors)
 
     return ProfileDiscoveryResult(
-        profiles=resolved, errors=errors, sources=sources)
+        profiles=resolved, errors=errors, sources=sources,
+        collisions=collisions,
+        profile_set_dir=str(set_dir) if set_dir is not None else None)
 
 
 def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:

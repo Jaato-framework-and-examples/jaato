@@ -10370,6 +10370,40 @@ six reversions. It writes records to disk and drives the real
 server construction; the kernel half checks the rendered profiles with the
 #1348 rule matcher.
 
+### A Qualified Profile Binds That File (#1588)
+
+A session created with `profile="openrouter/telegram_chat"` (a set leaf
+at `profiles/openrouter/telegram_chat.yaml`) came back on every revive
+under a flat `profiles/telegram_chat.yaml` that declares the same
+`name:`. Creation resolved the path correctly. The record kept only
+`profile_name`, the resolved profile's `name:`, and every revive that
+re-resolves from disk (`_resolve_revive_profile`'s third source) resolved
+that bare name, which the flat file wins whenever `JAATO_PROFILE_SET` is
+not the set. The reported record was written before #1529, so the next
+daemon treated it as unsealed, dropped its snapshot, bound the flat file,
+and its next save snapshotted the flat profile into the emptied
+write-once field.
+
+| Piece | Where |
+|---|---|
+| `SessionState.profile_ref` (**record 2.12**): the profile as requested, `<set>/<name>` or a bare name | `Session.profile_ref`, `BootstrapEnvelope.profile_ref`, set by `_create_session_impl` (the agent's `default_profile` too), persisted by `_save_session`, carried by a revive |
+| a revive resolves `profile_ref`, else `profile_name` | `_resolve_revive_profile`; `record_distrust` re-derives an unsealed record by it as well |
+| a qualified ref binds only a file read from that set's directory | `_bind_discovered_profile`: when the set file fails to load or declares another name, the same-named flat profile is refused, naming both files. `.` / `..` are not a set (`_split_profile_ref`), since an unsealed record carries the string |
+| collisions are recorded, and a same-directory duplicate is announced | `ProfileDiscoveryResult.collisions` / `.profile_set_dir`; files are read in sorted order, and two files in one directory declaring one name log a WARNING once per daemon. Every bind logs its file and what it shadowed |
+| `validate` | `profile_name_duplicate` (**error**, one directory) and `profile_name_collision` (warn, a set file and a flat file). Two SETS defining one agent is what sets are for and is not reported |
+
+The profile-set design is unchanged: with a set selected, its file wins a
+bare name. A qualified request ignores `JAATO_PROFILE_SET`, so a
+`JAATO_REVIVE_PROFILE=disk` revive of a qualified session re-reads that
+set's file rather than following a set switch.
+
+**Existing records are not migrated.** A record written before 2.12 has
+no ref and revives by its bare name as before; one already snapshotted
+with the wrong profile keeps it, and recovers only as a new session.
+
+Guard: `jaato_server/server/tests/test_a_qualified_profile_binds_that_file_1588.py`,
+seven reversions.
+
 ### A Policy File Read and Thrown Away (#1474)
 
 `PermissionPlugin.initialize` loaded `permissions.json` and then let an

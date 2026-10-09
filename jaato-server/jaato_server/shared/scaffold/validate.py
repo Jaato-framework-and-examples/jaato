@@ -2818,6 +2818,74 @@ def _check_profile_file_keys(config_root: str, out: List[Diagnostic]) -> None:
         out.extend(_profile_key_findings(data, name or fp.stem))
 
 
+def _workspace_profile_names(root: Path) -> Dict[str, List[Path]]:
+    """``name -> files`` for every profile under *root* and its set dirs.
+
+    The flat ``profiles/`` directory and each set directory directly under
+    it, which is every place :func:`discover_profiles` reads in a
+    workspace.  A file that does not parse is left to ``parse_error``.
+    """
+    from jaato_server.shared.plugins.subagent.config import _parse_profile_file
+
+    names: Dict[str, List[Path]] = {}
+    dirs = [root] + sorted(d for d in root.iterdir() if d.is_dir())
+    for d in dirs:
+        for fp in sorted(d.iterdir()):
+            if not fp.is_file() or fp.suffix not in _PROFILE_SUFFIXES:
+                continue
+            name, data, err = _parse_profile_file(fp)
+            if name and not err:
+                names.setdefault(name, []).append(fp)
+    return names
+
+
+def _check_profile_name_collisions(
+    config_root: str, out: List[Diagnostic],
+) -> None:
+    """Two profile files that declare one ``name:`` (#1588).
+
+    * Two files in ONE directory: ``profile_name_duplicate``, an **error**.
+      Discovery keeps the first by sorted file name and ignores the other,
+      so whichever the author edits may not be the one that runs.
+    * Files in two SETS are not reported: each set defining the agent is
+      what a set is for, and only one set is ever selected.
+    * A set's file and a flat ``profiles/`` file: ``profile_name_collision``,
+      a **warning**.  It is the profile-set design when deliberate (with the
+      set selected, the set's file wins), and the shape behind #1588 when
+      the flat file is a leftover: a bare ``name`` binds a different file
+      depending on ``JAATO_PROFILE_SET``, and a session created before the
+      fix recorded only the bare name, so a revive re-derived the other one.
+
+    Workspace tier only, like :func:`_check_profile_file_keys`.
+    """
+    root = Path(config_root) / "profiles"
+    if not root.is_dir():
+        return
+    for name, files in sorted(_workspace_profile_names(root).items()):
+        if len(files) < 2:
+            continue
+        rel = [str(f.relative_to(root.parent)) for f in files]
+        dirs = [f.parent for f in files]
+        if len(set(dirs)) < len(dirs):
+            out.append(Diagnostic(
+                "error", "profile_name_duplicate",
+                f"files in one directory declare name '{name}' ({', '.join(rel)}); "
+                f"discovery uses the first by file name and ignores the "
+                f"others -- rename or remove one",
+                profile=name, where="name"))
+            continue
+        if root not in dirs:
+            continue            # one file per set: each set defines the agent
+        out.append(Diagnostic(
+            "warn", "profile_name_collision",
+            f"name '{name}' is declared by {', '.join(rel)}; a bare '{name}' "
+            f"binds the set's file only while that set is selected "
+            f"(JAATO_PROFILE_SET), and the flat file otherwise. A session "
+            f"created with '<set>/{name}' binds the set's file. If the flat "
+            f"file is a leftover, remove it",
+            profile=name, where="name"))
+
+
 def _check_prefetch_directives(
     ws: Path, config_root: str, out: List[Diagnostic],
 ) -> None:
@@ -3208,6 +3276,7 @@ def validate_workspace(
     # workspace-tier assets.
     _before = len(out)
     _check_profile_file_keys(config_root, out)
+    _check_profile_name_collisions(config_root, out)
     _check_prefetch_directives(ws, config_root, out)
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
     _check_completion_assets(result.profiles, ws, config_root, out)
