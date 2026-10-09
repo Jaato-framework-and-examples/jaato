@@ -2666,8 +2666,8 @@ class SessionManager:
         # ``_provision_apparmor_for_session`` just created.  This is the exact
         # posture #1260 put in the WS pre-init hook, now on the SessionManager
         # spawn path that a WS ``session.new`` actually takes.
-        confinement_required = False
         from jaato_server.server.runner_spawn import resolve_session_private_tmp
+        confinement_required = False
         confinement = None
         if opt_in_apparmor:
             profile_name, sandbox_mode, confinement = self._provision_session_boundary(
@@ -2685,7 +2685,9 @@ class SessionManager:
                     server, workspace_path,
                     self._managed_workspace_root_for_spawn(workspace_path)),
             )
-            confinement_required = self._kernel_confinement_available()
+            # Asked AFTER provisioning: the AppArmor manager it reads is
+            # created lazily by ``_provision_apparmor_for_session``.
+            confinement_required = self._confinement_required_for(server)
 
         # Seed client-provided ("host") tool SCHEMAS the transport buffered for
         # this client BEFORE session.new, so spawn_session_runner's
@@ -2946,6 +2948,23 @@ class SessionManager:
             )
             return "", SANDBOX_MODE_SOFT, None
         return "", sandbox_mode_for_selinux(permissive=handle.complain), handle
+
+    def _confinement_required_for(self, server: 'JaatoServer') -> bool:
+        """#1253: an opted-in session on a host that confines; record it on *server*.
+
+        Recorded before the spawn (``note_confinement_required``), so any
+        exit between here and a runner that reports wearing the boundary
+        leaves a refused session (``JaatoServer.runner_bootstrap_error``)
+        rather than an unconfined one.  Asked after provisioning, because
+        :meth:`_kernel_confinement_available` reads the manager
+        provisioning creates.
+        """
+        from jaato_server.server.runner_spawn import _note_confinement_required
+
+        required = self._kernel_confinement_available()
+        if required:
+            _note_confinement_required(server)
+        return required
 
     def _apparmor_available(self) -> bool:
         """#1253: does THIS host support kernel-enforced AppArmor?
@@ -5461,7 +5480,12 @@ class SessionManager:
         # 3. None — no opt-in / non-confined.
         planned_sandbox = envelope.sandbox_mode
         if planned_sandbox is None:
-            planned_sandbox = ipc_sandbox_mode
+            # #1253: the mode the runner reported wearing, over the one
+            # provisioning implied (``confinement_evidence``).
+            from jaato_server.server.confinement_evidence import (
+                recorded_sandbox_mode,
+            )
+            planned_sandbox = recorded_sandbox_mode(server, ipc_sandbox_mode)
         return server, planned_sandbox
 
     def _run_pre_initialize_hooks(

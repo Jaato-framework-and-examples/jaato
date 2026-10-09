@@ -151,6 +151,22 @@ def _ws_confinement_available(ws_server: Any) -> bool:
     return apparmor is not None and apparmor.is_available()
 
 
+def _ws_confinement_required(ws_server: Any, server: Any) -> bool:
+    """#1253: decide whether a WS session must be confined, and record it.
+
+    The decision is :func:`_ws_confinement_available`; when it is yes the
+    session's server is told at once (``note_confinement_required``), so
+    the session is refused unless a runner later reports wearing the
+    boundary.  Called by the pre-init hook before anything that can return
+    early or raise.
+    """
+    required = _ws_confinement_available(ws_server)
+    if required:
+        from jaato_server.server.runner_spawn import _note_confinement_required
+        _note_confinement_required(server)
+    return required
+
+
 def _record_ws_mode_without_apparmor(
     ws_server: Any, server: Any, session_id: str, sess: Any,
 ) -> bool:
@@ -1243,6 +1259,17 @@ class JaatoWSServer:
                 )
                 return  # IPC or user-CWD session — not WS-provisioned
 
+            # #1253: decided FIRST, before anything below can return or
+            # raise.  ``note_confinement_required`` makes the session's own
+            # ``runner_bootstrap_error`` a refusal until a runner reports
+            # wearing the provisioned boundary, so every early exit of this
+            # hook (no daemon loop, a provisioning failure, a spawn failure,
+            # an exception the hook runner swallows) leaves a REFUSED
+            # session rather than one served unconfined while the post-init
+            # hook records ``apparmor``.  Before this, the "no daemon loop"
+            # exit below was exactly that (#1253's live trace).
+            confinement_required = _ws_confinement_required(ws_server, server)
+
             # #1299: see ``_ws_daemon_loop``'s docstring for why this must
             # not read ``ws_server._event_loop`` directly.
             daemon_loop = _ws_daemon_loop(ws_server)
@@ -1269,8 +1296,8 @@ class JaatoWSServer:
             # ``confinement_required`` is the invariant's discriminator: it
             # rides the envelope to the runner (defence in depth), and below
             # it turns a provisioning/spawn failure into a REFUSED session
-            # rather than an unconfined one.
-            confinement_required = _ws_confinement_available(ws_server)
+            # rather than an unconfined one.  (Computed and recorded above,
+            # before the daemon-loop check.)
             confinement = None  # an SELinux handle; AppArmor rides profile_name
             if confinement_required:
                 # Phase 0/1 (template v20+, 2026-05-16): resolve plugin-
@@ -1624,9 +1651,17 @@ class JaatoWSServer:
             # session is a durable false claim of enforcement.  Same
             # vocabulary as the IPC path
             # (``SessionManager._provision_apparmor_for_session``).
-            sess.sandbox_mode = sandbox_mode_for_profile(
-                complain=apparmor.profile_is_complain_mode(session_id),
+            # #1253: and the mode the RUNNER reported wearing, where it did,
+            # over the one the render implies -- the record says what the
+            # runner wears, not what the daemon provisioned.  A session that
+            # wanted confinement and whose runner did not report the profile
+            # was refused before this hook could run.
+            from jaato_server.server.confinement_evidence import (
+                recorded_sandbox_mode,
             )
+            sess.sandbox_mode = recorded_sandbox_mode(server, sandbox_mode_for_profile(
+                complain=apparmor.profile_is_complain_mode(session_id),
+            ))
             # Record mapping so the workspace reaper can teardown
             # the profile by workspace ID.  (Uses the module-level ``os``
             # imported at the top — a local ``import os`` here would make

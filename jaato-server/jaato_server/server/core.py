@@ -972,6 +972,15 @@ class JaatoServer:
         # nobody, so session creation carried on and discovered the dead
         # runner at whichever ``session.*`` verb happened to come first.
         self._runner_bootstrap_error: Optional[str] = None
+        # #1253: whether this session was configured for kernel confinement,
+        # the boundary its bootstrap was dispatched with, and what the runner
+        # reported wearing.  ``runner_bootstrap_error`` refuses a session
+        # whose runner is not positively known to wear the boundary.  See
+        # :mod:`server.confinement_evidence`.
+        self._confinement_required: bool = False
+        self._confinement_expected: Optional[Tuple[str, str]] = None
+        self._runner_confinement_report: Optional[Dict[str, Any]] = None
+        self._runner_confinement_reported: bool = False
         # #1503: the seccomp posture the runner reported in its
         # ``session.bootstrap`` answer, ``None`` until one did (or with no
         # runner at all).  See :meth:`note_seccomp_posture`.
@@ -8363,6 +8372,67 @@ class JaatoServer:
         """
         self._runner_ready.set()
 
+    def note_confinement_required(self) -> None:
+        """Record that this session must run inside a kernel boundary (#1253).
+
+        Called by the spawn path at the moment it decides a session wants
+        confinement, BEFORE it provisions or spawns anything.  From then on
+        :meth:`runner_bootstrap_error` answers with a refusal until a runner
+        reports wearing the provisioned boundary
+        (:meth:`note_runner_confinement`).  So a path that returns, raises
+        or spawns elsewhere between the decision and the bootstrap leaves a
+        refused session rather than an unconfined one.  Never cleared: a
+        session does not stop wanting confinement.
+        """
+        self._confinement_required = True
+
+    def note_runner_confinement(
+        self, expected: Optional[Tuple[str, str]], report: Any,
+    ) -> None:
+        """Record the boundary a bootstrap was dispatched with and the runner's answer (#1253).
+
+        Called from ``runner_spawn.dispatch_bootstrap_envelope`` once the
+        runner acknowledged ``session.bootstrap``.
+
+        Args:
+            expected: ``(backend, label)`` the runner was told to wear, or
+                ``None`` when the envelope carried no boundary.
+            report: The ``confinement`` key of the runner's answer
+                (``{"label": <raw attr/current>}``), or ``None``.
+        """
+        self._confinement_expected = expected
+        self._runner_confinement_report = (
+            dict(report) if isinstance(report, dict) else None)
+        self._runner_confinement_reported = True
+
+    @property
+    def confinement_required(self) -> bool:
+        """Whether :meth:`note_confinement_required` was called for this session."""
+        return self._confinement_required
+
+    @property
+    def confinement_shortfall(self) -> Optional[str]:
+        """Why this session may not run for want of a boundary, or ``None`` (#1253)."""
+        from jaato_server.server.confinement_evidence import shortfall
+        return shortfall(
+            required=self._confinement_required,
+            expected=self._confinement_expected,
+            report=self._runner_confinement_report,
+            reported=self._runner_confinement_reported,
+        )
+
+    def runner_reported_sandbox_mode(self) -> Optional[str]:
+        """The AppArmor ``sandbox_mode`` the runner's reported label supports, or ``None``.
+
+        The mode the kernel itself reported (``(enforce)`` / ``(complain)``,
+        #1014) for a runner confirmed to wear the session's profile.  The
+        record is written from this where it exists, so it says what the
+        runner wears rather than what the daemon provisioned.
+        """
+        from jaato_server.server.confinement_evidence import reported_sandbox_mode
+        return reported_sandbox_mode(
+            self._confinement_expected, self._runner_confinement_report)
+
     def note_runner_bootstrap_outcome(self, error: Optional[str]) -> None:
         """Record whether ``session.bootstrap`` installed a runner-side host.
 
@@ -8417,8 +8487,14 @@ class JaatoServer:
         paths construct a server with no runner).  Both are "nothing known
         to be wrong", which is what the consumer — the session-creation
         refusal in ``SessionManager._initialize_or_refuse`` — needs.
+
+        #1253: a session that wanted kernel confinement also has an answer
+        here until its runner reported wearing the provisioned boundary
+        (:attr:`confinement_shortfall`).  Both consumers -- session creation
+        and the plugin host (#1606) -- read this one property, so neither
+        can run such a session on a runner of unknown confinement.
         """
-        return self._runner_bootstrap_error
+        return self._runner_bootstrap_error or self.confinement_shortfall
 
     def set_runner_rpc(
         self,

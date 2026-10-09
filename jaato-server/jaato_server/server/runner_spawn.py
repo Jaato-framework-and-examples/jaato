@@ -1751,6 +1751,10 @@ def dispatch_bootstrap_envelope(
             than serving work unconfined.  ``False`` (the default, and
             every non-confined session) leaves that gate inert.
     """
+    if confinement_required:
+        # #1253: recorded before anything can fail, so a dispatch that never
+        # reaches the runner leaves a refused session, not an unconfined one.
+        _note_confinement_required(server)
     rpc = server.runner_rpc
     if rpc is None:
         # Defensive: a caller invoking this without spawn_session_runner
@@ -1803,6 +1807,9 @@ def dispatch_bootstrap_envelope(
         _note_bootstrap_outcome(server, None)
         _note_seccomp_posture(server, result, session_id)
         _note_capability_posture(server, result, session_id)
+        _note_runner_confinement(
+            server, result, session_id, profile_name, confinement,
+            confinement_required)
         session_new_timing.mark("bootstrap_acked", session_id=session_id)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
@@ -1868,6 +1875,53 @@ def dispatch_bootstrap_envelope(
                 "post-bootstrap tool-id re-emit failed for %s",
                 session_id, exc_info=True,
             )
+
+
+def _note_confinement_required(server: Any) -> None:
+    """Tell *server* its session must run inside a kernel boundary (#1253).
+
+    Best-effort on the server's shape: a test double without the method
+    records nothing.  Called by every spawn path at the moment it decides a
+    session wants confinement, before it provisions or spawns, and again by
+    :func:`dispatch_bootstrap_envelope`.
+    """
+    note = getattr(server, "note_confinement_required", None)
+    if callable(note):
+        note()
+
+
+def _note_runner_confinement(
+    server: Any,
+    result: Any,
+    session_id: str,
+    profile_name: str,
+    confinement: Any,
+    confinement_required: bool,
+) -> None:
+    """Record the boundary dispatched and the label the runner reported (#1253).
+
+    The runner's ``session.bootstrap`` answer carries ``confinement:
+    {"label": <its own attr/current>}``.  The server compares it with the
+    boundary the envelope named (:mod:`server.confinement_evidence`) and,
+    for a session that wanted confinement, answers
+    ``runner_bootstrap_error`` with a refusal unless the two agree.  Said
+    in the DAEMON log too, at ERROR, because a runner that does not wear
+    the boundary it was handed is the silent bypass #1253 measured.
+    """
+    from jaato_server.server.confinement_evidence import (
+        REPORT_KEY, expected_boundary,
+    )
+    note = getattr(server, "note_runner_confinement", None)
+    if not callable(note):
+        return
+    report = result.get(REPORT_KEY) if isinstance(result, dict) else None
+    note(expected_boundary(profile_name, confinement), report)
+    shortfall = getattr(server, "confinement_shortfall", None)
+    if confinement_required and shortfall:
+        logger.error(
+            "session %s: runner bootstrap acknowledged but the runner is not "
+            "confined as provisioned — %s", session_id, shortfall,
+        )
 
 
 def _note_seccomp_posture(
