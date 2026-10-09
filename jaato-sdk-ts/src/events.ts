@@ -33137,11 +33137,11 @@ export interface ReferenceBundleCreateResultEvent {
  * Answered by :class:`PluginToolDescribeEvent` carrying this ``request_id``.
  * The configuration is EITHER ``profile`` (a profile name the caller's
  * workspace resolves, set-qualified allowed) OR ``plugin_configs`` (a
- * ``plugin_configs`` block; the session then enables only ``plugin``).
- * Both empty means ``plugin_configs={}``.  The answer comes from a
- * short-lived session of the caller's workspace, so what it says is what a
- * session with that configuration would expose, ``narrow_tool_schema``
- * and per-session settings included.
+ * ``plugin_configs`` block; only ``plugin`` is enabled then).  Both empty
+ * means ``plugin_configs={}``.  The answer comes from a runner of the
+ * caller's workspace holding that configuration's plugins (no session),
+ * so it is what a session with that configuration would expose,
+ * ``narrow_tool_schema`` and the profile's settings included.
  */
 export interface PluginToolDescribeRequest {
   type?: EventType116;
@@ -33158,11 +33158,12 @@ export interface PluginToolDescribeRequest {
  *
  * Fields:
  *     request_id: Echoed from the request.
- *     ok: Whether a session could be built to answer.  ``exists`` is
+ *     ok: Whether a runner could be set up to answer.  ``exists`` is
  *         meaningful only when ``ok``.
  *     category: ``""`` on success; else ``invalid_request``,
- *         ``no_workspace``, ``session_failed``, ``runner_unreachable`` or
- *         ``timeout``.
+ *         ``no_workspace``, ``host_failed`` (no runner could be set up:
+ *         an unknown profile, a refused confinement, a failed bootstrap;
+ *         ``error`` says which), ``runner_unreachable`` or ``timeout``.
  *     error: The reason, for a person.
  *     exists: Whether a session with this configuration has the tool.
  *     reason: Why not, when ``exists`` is False: ``unknown_tool`` (no
@@ -33193,9 +33194,9 @@ export interface PluginToolDescribeEvent {
  *
  * Answered by :class:`PluginToolInvokeResultEvent` carrying this
  * ``request_id``.  ``profile`` / ``plugin_configs`` as on
- * :class:`PluginToolDescribeRequest`.  The call runs in a short-lived
- * session of the caller's workspace, under that session's confinement and
- * permission policy; a permission ASK is sent to the caller as a
+ * :class:`PluginToolDescribeRequest`.  The call runs in a runner of the
+ * caller's workspace (no session), under the confinement and permission
+ * policy a session there would get; a permission ASK is sent to the caller as a
  * ``PermissionRequestedEvent`` and answered with ``PermissionResponseRequest``.
  * ``timeout`` bounds the whole call, a pending ASK included (seconds;
  * ``0`` or less means the daemon's default).
@@ -33224,7 +33225,7 @@ export interface Args1 {
  *         nothing ran (or, for ``timeout`` / ``runner_unreachable``, that
  *         nobody can say whether it finished).
  *     category: ``""`` when the call ran; else ``invalid_request``,
- *         ``no_workspace``, ``session_failed``, ``not_in_surface``,
+ *         ``no_workspace``, ``host_failed``, ``not_in_surface``,
  *         ``runner_unreachable`` or ``timeout``.
  *     error: The reason, for a person.
  *     success: The tool's own verdict (the executor's ``ok`` flag, #1053),
@@ -33233,8 +33234,6 @@ export interface Args1 {
  *     result: What the tool returned, after secret redaction: the
  *         executor's payload, bookkeeping keys (``_permission``,
  *         ``_telemetry``) included, as a session receives it.
- *     session_id: The short-lived session the call ran in (deleted when
- *         the answer is sent), for reading the daemon log.
  */
 export interface PluginToolInvokeResultEvent {
   type?: EventType119;

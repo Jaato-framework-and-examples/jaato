@@ -2410,11 +2410,12 @@ class IPCClient:
         """A plugin tool's schema as a session would expose it (1.37, #1606).
 
         The configuration is ``profile`` (a profile the workspace resolves)
-        OR ``plugin_configs`` (a ``plugin_configs`` block; the session then
-        enables only ``plugin``), never both.  The daemon answers from a
-        short-lived session of this connection's workspace, so the schema
-        is the one that session puts on the wire -- per-session settings
-        and ``narrow_tool_schema`` applied -- and ``exists`` is False (with
+        OR ``plugin_configs`` (a ``plugin_configs`` block; only ``plugin`` is
+        enabled then), never both.  The daemon answers from a runner of this
+        connection's workspace holding those plugins and no session, so the
+        schema is the one a session with that configuration puts on the wire
+        -- the profile's settings and ``narrow_tool_schema`` applied -- and
+        ``exists`` is False (with
         ``reason`` / ``detail``) when the profile does not enable the
         plugin, scopes the tool out or hides it.  Needs no attached session.
 
@@ -2442,10 +2443,11 @@ class IPCClient:
     ) -> PluginToolInvokeResultEvent:
         """Run one plugin tool call with no model turn (1.37, #1606).
 
-        The call runs in a short-lived session of this connection's
+        The call runs, with no session, in a runner of this connection's
         workspace, configured by ``profile`` or ``plugin_configs`` (see
-        :meth:`describe_plugin_tool`), under that session's confinement,
-        through its own executor: the permission policy, argument coercion,
+        :meth:`describe_plugin_tool`), under the confinement a session there
+        would get, through an executor wired as a session's: the permission
+        policy, argument coercion,
         secret redaction and the failure contract all apply.  The answer's
         ``ok`` says whether the call reached the tool, ``success`` whether
         the tool succeeded, and ``result`` is what it returned.

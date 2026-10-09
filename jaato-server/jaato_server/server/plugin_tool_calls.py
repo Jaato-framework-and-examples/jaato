@@ -1,4 +1,4 @@
-"""One plugin tool call with no model turn: the daemon half (#1606).
+"""One plugin tool call with no session: the daemon half (#1606).
 
 ``PluginToolDescribeRequest`` / ``PluginToolInvokeRequest`` (protocol 1.37)
 let a client reach one plugin tool directly -- jaato-mcp's ``kind: plugin``
@@ -7,38 +7,30 @@ alternative the issue names, importing ``jaato_server.shared.plugins.<x>`` and
 calling its executor, needs jaato-server in the client's environment, treats
 internals as an API, and runs the call outside the profile's confinement.
 
-WHAT THE CALL RUNS IN.  A short-lived session, because then everything a
-session already does applies and nothing is re-implemented here:
+WHAT THE CALL RUNS IN.  A runner, and no session.  A tool needs its plugin
+initialized with the profile's configuration, the profile's permission
+policy and a process inside the workspace's boundary; it does not need a
+conversation, a provider or a model.  :meth:`SessionManager.spawn_plugin_host`
+resolves what the caller's own ``session.new`` would (its client config,
+the workspace, the profile), runs the spawn half of session bootstrap --
+the same confinement provisioning, runner uid and pool slot -- and the runner
+builds a ``PluginToolHost`` (``shared/plugin_tool_call.py``) where it would
+have built a ``JaatoSession``.  Nothing is recorded, listed or persisted;
+:meth:`SessionManager.release_plugin_host` closes the runner when the answer
+is sent.
 
-* it is created by :meth:`SessionManager.create_session`, from a copy of the
-  CALLER's client configuration, in the caller's workspace
-  (``resolve_caller_workspace``, the rule every daemon-level verb uses) --
-  so the config search path, the profile resolution, the runner, its
-  AppArmor / SELinux boundary and its uid are the ones the caller's own
-  ``session.new`` would get;
-* the runner answers against that session
-  (``shared/plugin_tool_call.py``): the schema after ``narrow_tool_schema``
-  and the session's surface, and the call through the session's own
-  ``ToolExecutor`` (permission policy, coercion, redaction, the failure
-  contract);
-* it is deleted when the answer is sent, record and all.
+A permission ASK the call raises is emitted by the host's daemon-side server
+to :class:`_CallSink`, which FORWARDS it to the caller tagged with the
+request's id (``PermissionRequestedEvent.origin_request_id``) and keeps any
+``ErrorEvent`` so a failed setup is answered with its cause.  The caller
+answers with the ordinary ``PermissionResponseRequest``;
+:meth:`PluginToolCalls.route_permission_response` finds the call whose
+server holds that ``request_id`` and resolves it there.
 
-The session is created under a SYNTHETIC client id
-(``_plugin_tool:<hex>``) registered with
-:meth:`SessionManager.register_ephemeral_client`, so the caller's own
-attachment (``_client_to_session``) is untouched and every event addressed
-to the session reaches :class:`_CallSink` instead of a transport.  That sink
-keeps the creation error, so ``session_failed`` names its cause rather than
-the empty session id a headless create returns, and FORWARDS a permission
-ASK to the caller.  The caller answers with the ordinary
-``PermissionResponseRequest``; :meth:`PluginToolCalls.route_permission_response`
-finds the call whose session holds that ``request_id`` and resolves it there.
-
-The verbs block for as long as session creation and the call take, and an
-IPC connection reads its next message only when the previous one was
-handled -- so the work runs on its own thread and the answer is sent when it
-is ready.  Otherwise a caller could not send the permission answer the call
-is waiting on.
+Setting up a runner and the call take seconds, and an IPC connection reads
+its next message only when the previous one was handled -- so the work runs
+on its own thread and the answer is sent when it is ready.  Otherwise a
+caller could not send the permission answer the call is waiting on.
 """
 
 from __future__ import annotations
@@ -47,7 +39,7 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -58,39 +50,16 @@ DEFAULT_TIMEOUT = 300.0
 #: The longest ``timeout`` a request may ask for.
 MAX_TIMEOUT = 3600.0
 
-#: Seconds a ``describe`` may take once its session exists.
+#: Seconds a ``describe`` may take once its runner is up.
 DESCRIBE_TIMEOUT = 60.0
 
-#: Prefix of the synthetic client ids the calls run under.
-CLIENT_ID_PREFIX = "_plugin_tool:"
-
-#: Events forwarded from the call's session to the caller: what a client
+#: Events forwarded from the call's runner to the caller: what a client
 #: needs to show a permission ASK and to clear it.
 FORWARDED_EVENTS = frozenset({
     "PermissionRequestedEvent",
     "PermissionInputModeEvent",
     "PermissionResolvedEvent",
 })
-
-#: The provider the profile-less (``plugin_configs``) form binds.  A session
-#: must name a model, and a tool call needs none: ``echo`` is in-tree, needs
-#: no credential and makes no network call, and no turn ever reaches it.
-INLINE_PROVIDER = "echo"
-
-
-def inline_spec(plugin: str, plugin_configs: Dict[str, Any]) -> Dict[str, Any]:
-    """The inline profile the ``plugin_configs`` form runs under.
-
-    Enables ``plugin`` and nothing else (plus what every session has), with
-    the caller's block as its ``plugin_configs``.
-    """
-    return {
-        "name": f"plugin-tool-{plugin}",
-        "model": INLINE_PROVIDER,
-        "provider": INLINE_PROVIDER,
-        "plugins": [plugin],
-        "plugin_configs": dict(plugin_configs),
-    }
 
 
 def effective_timeout(requested: float) -> float:
@@ -120,7 +89,7 @@ def request_problem(event: Any) -> str:
 
 @dataclass
 class _CallSink:
-    """Where the events of one call's session go (see the module docstring)."""
+    """Where the events of one call's runner go (see the module docstring)."""
 
     caller: str
     send: Callable[[str, Any], None]
@@ -147,7 +116,7 @@ class _CallSink:
 @dataclass
 class _InFlight:
     caller: str
-    session_id: str
+    host_id: str
     server: Any = None
 
 
@@ -155,7 +124,7 @@ class PluginToolCalls:
     """The two plugin-tool verbs, owned by the :class:`CommandRouter`.
 
     Args:
-        session_manager: Creates, finds and deletes the call's session.
+        session_manager: Spawns and releases the call's plugin host.
         send: ``(client_id, event)`` to the caller's transport.
         get_user: The identity the transport authenticated for a client.
     """
@@ -181,7 +150,7 @@ class PluginToolCalls:
         """Validate ``event`` and run it on its own thread.
 
         Answers at once (on this thread) for a malformed request or a caller
-        with no workspace; anything that needs a session is answered from
+        with no workspace; anything that needs a runner is answered from
         the worker thread when it is ready.
         """
         op = "invoke" if type(event).__name__ == "PluginToolInvokeRequest" else "describe"
@@ -206,7 +175,7 @@ class PluginToolCalls:
         """Resolve a permission answer that belongs to one of ``client_id``'s calls.
 
         Returns True when the request was handled here: resolved on the
-        call's session, or -- when the client is attached to no session of
+        call's runner, or -- when the client is attached to no session of
         its own -- refused as ``no_session`` the way the IPC transport
         refuses any request that needs a session.  False hands it on to the
         ordinary routing.
@@ -245,22 +214,26 @@ class PluginToolCalls:
             return [c for c in self._inflight.values() if c.caller == client_id]
 
     def _run(self, client_id: str, op: str, event: Any, workspace: str) -> None:
-        synthetic = f"{CLIENT_ID_PREFIX}{uuid.uuid4().hex[:12]}"
         sink = _CallSink(caller=client_id, send=self._send,
                          origin_request_id=str(getattr(event, "request_id", "") or ""))
-        session_id = ""
+        server, host_id, key = None, "", uuid.uuid4().hex
         try:
-            self._session_manager.register_ephemeral_client(
-                synthetic, sink, config_from=client_id)
-            session_id, server = self._create(synthetic, client_id, event, workspace)
-            if not session_id:
-                cause = "; ".join(e for e in sink.errors if e) or "see the daemon log"
-                self._answer(client_id, op, event, category="session_failed",
-                             error=f"plugin tool {op}: the session could not be "
-                                   f"created: {cause}")
+            server, host_id, error = self._session_manager.spawn_plugin_host(
+                client_id, workspace_path=workspace,
+                profile_name=str(getattr(event, "profile", "") or "") or None,
+                plugin=event.plugin,
+                plugin_configs=getattr(event, "plugin_configs", None),
+                created_by=self._get_user(client_id),
+                on_event=sink,
+            )
+            if server is None:
+                cause = "; ".join([error] + [e for e in sink.errors if e])
+                self._answer(client_id, op, event, category="host_failed",
+                             error=f"plugin tool {op}: no runner could be set up "
+                                   f"for the call: {cause}")
                 return
             with self._lock:
-                self._inflight[synthetic] = _InFlight(client_id, session_id, server)
+                self._inflight[key] = _InFlight(client_id, host_id, server)
             answer = server.plugin_tool_op(
                 op, {"plugin": event.plugin, "tool": event.tool,
                      "args": dict(getattr(event, "args", None) or {}),
@@ -268,54 +241,27 @@ class PluginToolCalls:
                 timeout=(effective_timeout(event.timeout) if op == "invoke"
                          else DESCRIBE_TIMEOUT),
             )
-            self._answer_from(client_id, op, event, answer, session_id)
+            self._answer_from(client_id, op, event, answer)
         except Exception as exc:  # noqa: BLE001 -- the caller is always answered
             logger.exception("plugin tool %s failed", op)
-            self._answer(client_id, op, event, category="session_failed",
-                         error=f"plugin tool {op}: {type(exc).__name__}: {exc}",
-                         session_id=session_id)
+            self._answer(client_id, op, event, category="host_failed",
+                         error=f"plugin tool {op}: {type(exc).__name__}: {exc}")
         finally:
             with self._lock:
-                self._inflight.pop(synthetic, None)
-            if session_id:
-                try:
-                    self._session_manager.delete_session(session_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning("plugin tool call: could not delete session %s",
-                                   session_id, exc_info=True)
-            self._session_manager.unregister_ephemeral_client(synthetic)
-
-    def _create(self, synthetic: str, client_id: str, event: Any,
-                workspace: str) -> Tuple[str, Any]:
-        profile = str(getattr(event, "profile", "") or "")
-        spec = None if profile else inline_spec(
-            event.plugin, getattr(event, "plugin_configs", None) or {})
-        session_id = self._session_manager.create_session(
-            synthetic, f"plugin-tool:{event.plugin}.{event.tool}",
-            workspace_path=workspace,
-            profile_name=profile or None,
-            inline_profile_data=spec,
-            created_by=self._get_user(client_id),
-        )
-        if not session_id:
-            return "", None
-        session = self._session_manager.get_session(session_id)
-        server = getattr(session, "server", None) if session is not None else None
-        if server is None:
-            return "", None
-        return session_id, server
+                self._inflight.pop(key, None)
+            if server is not None:
+                self._session_manager.release_plugin_host(server, host_id)
 
     # ------------------------------------------------------------------
     # Answers
     # ------------------------------------------------------------------
 
     def _answer_from(self, client_id: str, op: str, event: Any,
-                     answer: Dict[str, Any], session_id: str) -> None:
+                     answer: Dict[str, Any]) -> None:
         category = str(answer.get("category") or "")
         if category:
             self._answer(client_id, op, event, category=category,
-                         error=f"plugin tool {op}: {answer.get('error') or category}",
-                         session_id=session_id)
+                         error=f"plugin tool {op}: {answer.get('error') or category}")
             return
         if op == "describe":
             self._answer(client_id, op, event, exists=bool(answer.get("exists")),
@@ -325,11 +271,10 @@ class PluginToolCalls:
             return
         if not answer.get("ran"):
             self._answer(client_id, op, event, category="not_in_surface",
-                         error=f"plugin tool invoke: {answer.get('detail') or answer.get('reason')}",
-                         session_id=session_id)
+                         error=f"plugin tool invoke: {answer.get('detail') or answer.get('reason')}")
             return
         self._answer(client_id, op, event, success=bool(answer.get("success")),
-                     result=answer.get("result"), session_id=session_id)
+                     result=answer.get("result"))
 
     def _answer(self, client_id: str, op: str, event: Any, *,
                 category: str = "", error: str = "", **fields: Any) -> None:
@@ -341,7 +286,6 @@ class PluginToolCalls:
         if not client_id:
             return
         if op == "describe":
-            fields.pop("session_id", None)
             answer: Any = PluginToolDescribeEvent(
                 request_id=event.request_id, ok=not category, category=category,
                 error=error, **fields)

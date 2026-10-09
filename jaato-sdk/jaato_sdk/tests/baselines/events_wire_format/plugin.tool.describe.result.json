@@ -1,0 +1,13 @@
+{
+  "type": "plugin.tool.describe.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "ok": true,
+  "category": "",
+  "error": "",
+  "exists": false,
+  "reason": "",
+  "detail": "",
+  "tool_schema": null
+}

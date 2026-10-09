@@ -5614,12 +5614,13 @@ class JaatoServer:
         *,
         timeout: float = 300.0,
     ) -> Dict[str, Any]:
-        """Describe or run one plugin tool in THIS session, no model turn (#1606).
+        """Describe or run one plugin tool on this server's plugin host (#1606).
 
-        The tool's plugin, its configuration and the executor that must run
-        it live in the RUNNER, so the runner is asked (``session.plugin_tool``,
-        work lane).  The daemon holds no session of its own (§7c), so a
-        server with no runner has nothing to run the call in and says so.
+        ``SessionManager.spawn_plugin_host`` builds a server whose runner
+        bootstrapped a ``PluginToolHost`` instead of a session; the plugins,
+        their configuration and the executor live there, so the runner is
+        asked (``session.plugin_tool``, work lane).  A server with no runner
+        has nothing to run the call in and says so.
 
         Returns:
             ``shared/plugin_tool_call.py``'s answer, or ``{"error",

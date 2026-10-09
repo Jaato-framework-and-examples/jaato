@@ -625,10 +625,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ``plugin_configs`` block) would expose it, ``exists: false`` when the
 # profile does not enable the plugin, scopes the tool out or hides it.
 # ``PluginToolInvokeRequest`` -> ``PluginToolInvokeResultEvent`` runs one call
-# of it in a short-lived session of the caller's workspace, through the
-# session's own ``ToolExecutor`` (permission policy, argument coercion,
+# of it in the caller's workspace, through a ``ToolExecutor`` wired as a
+# session's would be (permission policy, argument coercion,
 # secret redaction, the failure contract), and answers the result and
-# whether the tool failed.  A permission ASK reaches the caller as a
+# whether the tool failed.  Neither builds a session: the daemon spawns a
+# runner for the workspace that holds the profile's plugins and no
+# conversation, and closes it after answering.  A permission ASK reaches the
+# caller as a
 # ``PermissionRequestedEvent`` and is answered with the usual
 # ``PermissionResponseRequest``.  Both are session-less on IPC.  NEW verbs
 # (the 1.7 rule): the SDKs refuse below ``MIN_PLUGIN_TOOL_PROTOCOL``.
@@ -1548,8 +1551,8 @@ class PermissionRequestedEvent(Event):
     tool_class: Optional[str] = None
     # Set when the ASK belongs to a plugin tool call (1.37, #1606): the
     # ``request_id`` of that ``PluginToolInvokeRequest``.  The call runs in a
-    # short-lived session the caller is not attached to, so ``session_id``
-    # alone does not say which of the caller's calls is asking.
+    # runner the caller is not attached to, so nothing else on the event
+    # says which of the caller's calls is asking.
     origin_request_id: Optional[str] = None
 
 
@@ -3234,11 +3237,11 @@ class PluginToolDescribeRequest(Event):
     Answered by :class:`PluginToolDescribeEvent` carrying this ``request_id``.
     The configuration is EITHER ``profile`` (a profile name the caller's
     workspace resolves, set-qualified allowed) OR ``plugin_configs`` (a
-    ``plugin_configs`` block; the session then enables only ``plugin``).
-    Both empty means ``plugin_configs={}``.  The answer comes from a
-    short-lived session of the caller's workspace, so what it says is what a
-    session with that configuration would expose, ``narrow_tool_schema``
-    and per-session settings included.
+    ``plugin_configs`` block; only ``plugin`` is enabled then).  Both empty
+    means ``plugin_configs={}``.  The answer comes from a runner of the
+    caller's workspace holding that configuration's plugins (no session),
+    so it is what a session with that configuration would expose,
+    ``narrow_tool_schema`` and the profile's settings included.
     """
     type: EventType = Field(default=EventType.PLUGIN_TOOL_DESCRIBE_REQUEST)
     request_id: str = ""
@@ -3253,11 +3256,12 @@ class PluginToolDescribeEvent(Event):
 
     Fields:
         request_id: Echoed from the request.
-        ok: Whether a session could be built to answer.  ``exists`` is
+        ok: Whether a runner could be set up to answer.  ``exists`` is
             meaningful only when ``ok``.
         category: ``""`` on success; else ``invalid_request``,
-            ``no_workspace``, ``session_failed``, ``runner_unreachable`` or
-            ``timeout``.
+            ``no_workspace``, ``host_failed`` (no runner could be set up:
+            an unknown profile, a refused confinement, a failed bootstrap;
+            ``error`` says which), ``runner_unreachable`` or ``timeout``.
         error: The reason, for a person.
         exists: Whether a session with this configuration has the tool.
         reason: Why not, when ``exists`` is False: ``unknown_tool`` (no
@@ -3286,9 +3290,9 @@ class PluginToolInvokeRequest(Event):
 
     Answered by :class:`PluginToolInvokeResultEvent` carrying this
     ``request_id``.  ``profile`` / ``plugin_configs`` as on
-    :class:`PluginToolDescribeRequest`.  The call runs in a short-lived
-    session of the caller's workspace, under that session's confinement and
-    permission policy; a permission ASK is sent to the caller as a
+    :class:`PluginToolDescribeRequest`.  The call runs in a runner of the
+    caller's workspace (no session), under the confinement and permission
+    policy a session there would get; a permission ASK is sent to the caller as a
     ``PermissionRequestedEvent`` and answered with ``PermissionResponseRequest``.
     ``timeout`` bounds the whole call, a pending ASK included (seconds;
     ``0`` or less means the daemon's default).
@@ -3312,7 +3316,7 @@ class PluginToolInvokeResultEvent(Event):
             nothing ran (or, for ``timeout`` / ``runner_unreachable``, that
             nobody can say whether it finished).
         category: ``""`` when the call ran; else ``invalid_request``,
-            ``no_workspace``, ``session_failed``, ``not_in_surface``,
+            ``no_workspace``, ``host_failed``, ``not_in_surface``,
             ``runner_unreachable`` or ``timeout``.
         error: The reason, for a person.
         success: The tool's own verdict (the executor's ``ok`` flag, #1053),
@@ -3321,8 +3325,6 @@ class PluginToolInvokeResultEvent(Event):
         result: What the tool returned, after secret redaction: the
             executor's payload, bookkeeping keys (``_permission``,
             ``_telemetry``) included, as a session receives it.
-        session_id: The short-lived session the call ran in (deleted when
-            the answer is sent), for reading the daemon log.
     """
     type: EventType = Field(default=EventType.PLUGIN_TOOL_INVOKE_RESULT)
     request_id: str = ""
@@ -3331,12 +3333,11 @@ class PluginToolInvokeResultEvent(Event):
     error: str = ""
     success: bool = False
     result: Any = None
-    session_id: str = ""
 
 
 #: The plugin-tool verbs (1.37).  Daemon-level: they resolve the caller's
-#: workspace from the CONNECTION and run in a session of their own, so a
-#: transport routes them without an attached session.
+#: workspace from the CONNECTION and need no session, so a transport routes
+#: them without an attached one.
 PLUGIN_TOOL_REQUEST_TYPES = (
     PluginToolDescribeRequest,
     PluginToolInvokeRequest,

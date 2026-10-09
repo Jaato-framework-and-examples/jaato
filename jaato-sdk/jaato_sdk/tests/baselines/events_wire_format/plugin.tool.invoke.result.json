@@ -1,0 +1,11 @@
+{
+  "type": "plugin.tool.invoke.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "ok": true,
+  "category": "",
+  "error": "",
+  "success": false,
+  "result": null
+}

@@ -1,46 +1,41 @@
-"""One plugin tool call with no model turn: the runner-side half (#1606).
+"""One plugin tool call with no session: the runner-side half (#1606).
 
 A client that wants a plugin's tool -- jaato-mcp's ``kind: plugin`` tool,
-kbwiki offering the ``template`` plugin to its MCP callers -- used to have
-two routes, both wrong for it: a model turn (a model in between), or
-importing ``jaato_server.shared.plugins.<x>`` and calling the executor
-in-process (jaato-server in the client's environment, internals as API, and
-the call outside the profile's confinement).
+kbwiki offering the ``template`` plugin to its MCP callers -- had two routes,
+both wrong for it: a model turn, or importing
+``jaato_server.shared.plugins.<x>`` and calling the executor in-process
+(jaato-server in the client's environment, internals as API, and the call
+outside the profile's confinement).
 
-The daemon now runs the call in a short-lived session of the caller's
-workspace (``server/plugin_tool_calls.py``), and the RUNNER answers it here,
-against that session.  Two operations, each one function:
+A tool needs no session.  What it needs is its plugin initialized with the
+profile's configuration, the profile's permission policy, and a process
+inside the workspace's boundary.  So the runner bootstraps in PLUGIN-HOST
+mode (``SessionInitEnvelope.plugin_host``): every envelope step that sets up
+the PROCESS runs as for a session (session env, output redaction, private
+``/tmp``, the uid drop, AppArmor/SELinux confinement, the tmpdir, the user
+tier, plugin discovery and the permission plugin), and the ``JaatoSession``
+is never built -- no provider, no model, no history, no system prompt.  In
+its place, :class:`PluginToolHost` holds a ``ToolExecutor`` wired the way
+``JaatoSession.configure`` wires one, so a call takes the path a model's call
+takes: the surface check, the permission gate, argument coercion (#1358),
+the result transformers, secret redaction (#1215) and the ``(ok, payload)``
+failure contract (#1053).
 
-:func:`describe_plugin_tool`
-    The tool's schema as THIS session exposes it: the owning plugin must be
-    the one named, ``tool_in_surface`` must hold (#1513 scopes, #1590
-    enabled set), and the schema goes through
-    ``filter_visible_tool_schemas`` -- the visibility predicates and every
-    ``narrow_tool_schema`` hook (``allow_inline_template: false`` removes
-    ``template`` from ``renderTemplateToFile``).  Nothing here re-derives
-    any of that; it asks the session the questions the wire asks it.
-
-:func:`invoke_plugin_tool`
-    Refuses what :func:`describe_plugin_tool` says does not exist (the model
-    of such a session could not call it either), then hands the call to the
-    session's own ``ToolExecutor.execute`` -- the path a model's call takes:
-    the scope check, the permission gate (an ASK goes to the session's
-    channel), argument coercion (#1358), the result transformers, secret
-    redaction (#1215) and the ``(ok, payload)`` failure contract (#1053).
-
-Both run with the session set as the current-session ContextVar, as a turn
-does, so a plugin that reads a per-session setting
-(``session_plugin_setting``) answers for this session.  The ContextVar is
-set inside a copied context, so the pool thread that runs this does not keep
-the session afterwards.
+The surface is the profile's, computed here from the envelope's plugin
+specs rather than asked of a session: the enabled set (#1590) is the
+``plugins:`` list plus what every session has (``introspection``,
+``permission``, enrichment-only plugins), and a ``plugin(tools:[...])``
+scope (#1513) leaves the other tools out.  A plugin that reads a
+per-session setting (``session_plugin_setting``) finds no current session
+and falls back to its instance's value -- which is the profile's, because
+plugin discovery initialized it with the profile's ``plugin_configs``.
 """
 
 from __future__ import annotations
 
-import contextvars
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-#: ``reason`` values of a tool that does not exist for the session.
+#: ``reason`` values of a tool that does not exist for the profile.
 REASON_UNKNOWN_TOOL = "unknown_tool"
 REASON_WRONG_PLUGIN = "wrong_plugin"
 REASON_NOT_IN_SURFACE = "not_in_surface"
@@ -65,11 +60,6 @@ def schema_to_dict(schema: Any) -> Dict[str, Any]:
     }
 
 
-def _registry_of(session: Any) -> Any:
-    runtime = getattr(session, "_runtime", None)
-    return getattr(runtime, "registry", None) if runtime is not None else None
-
-
 def _plugin_schema(plugin: Any, tool: str) -> Optional[Any]:
     """The schema ``plugin`` declares for ``tool``, or ``None``."""
     try:
@@ -82,105 +72,159 @@ def _plugin_schema(plugin: Any, tool: str) -> Optional[Any]:
     return None
 
 
-def _in_session_context(session: Any, fn: Any, *args: Any, **kwargs: Any) -> Any:
-    """Run ``fn`` with ``session`` as the current session, in a copied context."""
-    from .session_context import set_current_session
+class PluginToolHost:
+    """A plugin registry and the executor that runs its tools, no session.
 
-    def _run() -> Any:
-        if session is not None:
-            set_current_session(session)
-        return fn(*args, **kwargs)
+    Built by the runner's plugin-host bootstrap (see the module docstring).
 
-    return contextvars.copy_context().run(_run)
+    Args:
+        registry: The runner's ``PluginRegistry``, discovered and
+            initialized with the profile's ``plugin_configs``.
+        plugins: The profile's ``plugins:`` names, or ``None`` when no
+            profile declared a list (every exposed plugin is enabled).
+        tool_scopes: ``{plugin: [tool, ...]}`` from ``plugin(tools:[...])``.
+        executor: The ``ToolExecutor`` to run calls with; :meth:`wire`
+            gives it the surface, the executors and the permission plugin.
+    """
 
+    def __init__(
+        self,
+        registry: Any,
+        plugins: Optional[Iterable[str]],
+        tool_scopes: Optional[Dict[str, List[str]]],
+        executor: Any,
+    ) -> None:
+        self.registry = registry
+        self._plugins: Optional[Set[str]] = set(plugins) if plugins is not None else None
+        self._scopes = {k: set(v) for k, v in (tool_scopes or {}).items()}
+        # ``_executor`` (with the underscore) is the attribute the runner's
+        # //child install reads off a session; the host answers to it too.
+        self._executor = executor
 
-def _describe(session: Any, plugin_name: str, tool: str) -> Dict[str, Any]:
-    registry = _registry_of(session)
-    if registry is None:
-        return _absent(REASON_UNKNOWN_TOOL, "the session has no plugin registry")
-    try:
-        owner = registry.get_plugin_for_tool(tool)
-    except Exception:  # noqa: BLE001
-        owner = None
-    if owner is None:
-        named = registry.get_plugin(plugin_name)
-        if named is not None and _plugin_schema(named, tool) is not None:
-            # The plugin declares it but the registry does not serve it:
-            # the plugin is loaded and not exposed for this session.
-            return _absent(REASON_NOT_IN_SURFACE,
-                           f"`{tool}` is not available in this session: the "
-                           f"plugin `{plugin_name}` is not exposed")
-        return _absent(REASON_UNKNOWN_TOOL,
-                       f"no plugin in this session provides a tool `{tool}`")
-    owner_name = getattr(owner, "name", "")
-    if owner_name != plugin_name:
-        return _absent(REASON_WRONG_PLUGIN,
-                       f"`{tool}` is provided by the plugin `{owner_name}`, "
-                       f"not `{plugin_name}`")
-    if hasattr(session, "tool_in_surface") and not session.tool_in_surface(tool):
-        refusal = (session.tool_scope_refusal(tool)
-                   if hasattr(session, "tool_scope_refusal") else "")
-        return _absent(REASON_NOT_IN_SURFACE,
-                       refusal or f"`{tool}` is not in this session's surface")
-    schema = _plugin_schema(owner, tool)
-    if schema is None:
-        return _absent(REASON_UNKNOWN_TOOL,
-                       f"the plugin `{plugin_name}` declares no schema for `{tool}`")
-    from .tool_visibility import filter_visible_tool_schemas
+    # ------------------------------------------------------------------
+    # The profile's surface (#1590 enabled set, #1513 scopes)
+    # ------------------------------------------------------------------
 
-    visible = filter_visible_tool_schemas(registry, [schema], session=session)
-    if not visible:
-        return _absent(REASON_HIDDEN,
-                       f"the plugin `{plugin_name}` hides `{tool}` in this session")
-    return {"exists": True, "reason": "", "detail": "",
-            "tool_schema": schema_to_dict(visible[0])}
+    def plugin_enabled(self, plugin_name: str) -> bool:
+        """Whether the profile enables ``plugin_name`` (JaatoSession's rule)."""
+        if self._plugins is None or plugin_name in self._plugins:
+            return True
+        from .plugins.registry import PluginRegistry
+        if plugin_name in PluginRegistry._ALWAYS_INITIALIZE_PLUGINS:
+            return True
+        is_enrichment_only = getattr(self.registry, "is_enrichment_only", None)
+        try:
+            return callable(is_enrichment_only) and is_enrichment_only(plugin_name) is True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def tool_scope_refusal(self, tool_name: str) -> str:
+        """Why ``tool_name`` is not in the profile's surface, or ``""``."""
+        try:
+            plugin = self.registry.get_plugin_for_tool(tool_name)
+        except Exception:  # noqa: BLE001
+            plugin = None
+        if plugin is None:
+            return ""
+        name = getattr(plugin, "name", "")
+        if not self.plugin_enabled(name):
+            return (f"`{tool_name}` is not available: the profile does not "
+                    f"enable plugin `{name}`")
+        scope = self._scopes.get(name)
+        if scope is not None and tool_name not in scope:
+            return (f"`{tool_name}` is not available: the profile scopes "
+                    f"plugin `{name}` to {sorted(scope)}")
+        return ""
+
+    def tool_in_surface(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` exists for the profile."""
+        return not self.tool_scope_refusal(tool_name)
+
+    def wire(self, runtime: Any, permission_context: Dict[str, Any],
+             runtime_limits: Any = None) -> "PluginToolHost":
+        """Give the executor what ``JaatoSession.configure`` gives a session's.
+
+        The surface predicate, every enabled plugin's executors, the
+        registry (auto-background), the runtime limits (after the
+        registry: they are forwarded by walking it, #735) and the
+        permission plugin with ``permission_context``.
+        """
+        executor = self._executor
+        executor.set_tool_surface(self.tool_in_surface, self.tool_scope_refusal)
+        names = None if self._plugins is None else sorted(self._plugins)
+        for name, fn in runtime.get_executors(names).items():
+            executor.register(name, fn)
+        executor.set_registry(self.registry)
+        if runtime_limits is not None:
+            executor.set_runtime_limits(None, runtime_limits)
+        if getattr(runtime, "permission_plugin", None) is not None:
+            executor.set_permission_plugin(runtime.permission_plugin,
+                                           context=dict(permission_context))
+        return self
+
+    # ------------------------------------------------------------------
+    # The two operations
+    # ------------------------------------------------------------------
+
+    def describe(self, plugin_name: str, tool: str) -> Dict[str, Any]:
+        """``{exists, reason, detail, tool_schema}`` for ``plugin_name``'s ``tool``.
+
+        ``exists`` is True only when the named plugin owns the tool, the
+        profile's surface holds it and no visibility predicate hides it;
+        ``tool_schema`` is then the schema after every
+        ``narrow_tool_schema`` hook, as a session would put it on the wire.
+        """
+        try:
+            owner = self.registry.get_plugin_for_tool(tool)
+        except Exception:  # noqa: BLE001
+            owner = None
+        if owner is None:
+            return _absent(REASON_UNKNOWN_TOOL,
+                           f"no plugin of this profile provides a tool `{tool}`")
+        owner_name = getattr(owner, "name", "")
+        if owner_name != plugin_name:
+            return _absent(REASON_WRONG_PLUGIN,
+                           f"`{tool}` is provided by the plugin `{owner_name}`, "
+                           f"not `{plugin_name}`")
+        refusal = self.tool_scope_refusal(tool)
+        if refusal:
+            return _absent(REASON_NOT_IN_SURFACE, refusal)
+        schema = _plugin_schema(owner, tool)
+        if schema is None:
+            return _absent(REASON_UNKNOWN_TOOL,
+                           f"the plugin `{plugin_name}` declares no schema for `{tool}`")
+        from .tool_visibility import filter_visible_tool_schemas
+
+        visible = filter_visible_tool_schemas(self.registry, [schema])
+        if not visible:
+            return _absent(REASON_HIDDEN, f"the plugin `{plugin_name}` hides `{tool}`")
+        return {"exists": True, "reason": "", "detail": "",
+                "tool_schema": schema_to_dict(visible[0])}
+
+    def invoke(self, plugin_name: str, tool: str, args: Dict[str, Any], *,
+               call_id: Optional[str] = None,
+               cancel_token: Any = None) -> Dict[str, Any]:
+        """Run one call of ``tool`` through the executor.
+
+        Returns:
+            ``{"ran": False, "reason", "detail"}`` when the tool does not
+            exist for the profile (nothing ran), else ``{"ran": True,
+            "success", "result"}`` -- ``success`` is the executor's ``ok``
+            flag, so a permission denial or a tool failure is
+            ``success=False`` with the tool's own payload as ``result``.
+        """
+        described = self.describe(plugin_name, tool)
+        if not described["exists"]:
+            return {"ran": False, "reason": described["reason"],
+                    "detail": described["detail"]}
+        ok, result = _execute(self._executor, tool, dict(args or {}),
+                              cancel_token, call_id)
+        return {"ran": True, "success": bool(ok), "result": result}
 
 
 def _absent(reason: str, detail: str) -> Dict[str, Any]:
     return {"exists": False, "reason": reason, "detail": detail,
             "tool_schema": None}
-
-
-def describe_plugin_tool(session: Any, plugin_name: str, tool: str) -> Dict[str, Any]:
-    """``{exists, reason, detail, tool_schema}`` for ``plugin_name``'s ``tool``.
-
-    ``exists`` is True only when the named plugin owns the tool, the session's
-    surface holds it and no visibility predicate hides it; ``tool_schema`` is
-    then the schema after every ``narrow_tool_schema`` hook, as the session
-    would put it on the wire.  See the module docstring for the reasons.
-    """
-    return _in_session_context(session, _describe, session, plugin_name, tool)
-
-
-def invoke_plugin_tool(
-    session: Any,
-    plugin_name: str,
-    tool: str,
-    args: Dict[str, Any],
-    *,
-    cancel_token: Any = None,
-    call_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Run one call of ``tool`` through the session's executor.
-
-    Returns:
-        ``{"ran": False, "reason", "detail"}`` when the tool does not exist
-        for the session (nothing ran), else ``{"ran": True, "success",
-        "result"}`` -- ``success`` is the executor's ``ok`` flag, so a
-        permission denial or a tool failure is ``success=False`` with the
-        tool's own payload as ``result``.
-    """
-    described = describe_plugin_tool(session, plugin_name, tool)
-    if not described["exists"]:
-        return {"ran": False, "reason": described["reason"],
-                "detail": described["detail"]}
-    executor = getattr(session, "_executor", None)
-    if executor is None:
-        return {"ran": False, "reason": REASON_UNKNOWN_TOOL,
-                "detail": "the session has no tool executor"}
-    ok, result = _in_session_context(
-        session, _execute, executor, tool, dict(args or {}), cancel_token, call_id)
-    return {"ran": True, "success": bool(ok), "result": result}
 
 
 def _execute(executor: Any, tool: str, args: Dict[str, Any],
@@ -189,3 +233,23 @@ def _execute(executor: Any, tool: str, args: Dict[str, Any],
     if cancel_token is not None:
         kwargs["cancel_token"] = cancel_token
     return executor.execute(tool, args, **kwargs)
+
+
+def build_plugin_tool_host(
+    runtime: Any,
+    plugins: Optional[List[str]],
+    tool_scopes: Optional[Dict[str, List[str]]],
+    *,
+    permission_context: Dict[str, Any],
+    runtime_limits: Any = None,
+    executor_factory: Optional[Callable[[], Any]] = None,
+) -> PluginToolHost:
+    """A wired :class:`PluginToolHost` over ``runtime``'s registry."""
+    if executor_factory is None:
+        from .ai_tool_runner import ToolExecutor
+
+        def executor_factory() -> Any:
+            return ToolExecutor(ledger=getattr(runtime, "ledger", None))
+
+    host = PluginToolHost(runtime.registry, plugins, tool_scopes, executor_factory())
+    return host.wire(runtime, permission_context, runtime_limits)

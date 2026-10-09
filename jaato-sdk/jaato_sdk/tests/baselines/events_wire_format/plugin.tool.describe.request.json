@@ -1,0 +1,10 @@
+{
+  "type": "plugin.tool.describe.request",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "plugin": "",
+  "tool": "",
+  "profile": "",
+  "plugin_configs": null
+}

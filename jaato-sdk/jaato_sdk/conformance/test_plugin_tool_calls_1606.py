@@ -1,12 +1,12 @@
-"""One plugin tool call with no model turn, against a live daemon (#1606).
+"""One plugin tool call with no session, against a live daemon (#1606).
 
 ``describe_plugin_tool`` / ``invoke_plugin_tool`` are only worth having if
-what they answer is what a SESSION with that configuration would do: the
+what they answer is what a SESSION with that configuration would do -- the
 schema its wire carries, the surface its profile allows, the permission gate
-its policy runs.  A unit test of the daemon's orchestration cannot show that
--- the answers come from a runner, through a session the daemon builds -- so
-every case here drives a real daemon (echo provider, no credentials, no
-network) and a real runner through the SDK.
+its policy runs -- without building one.  The answers come from a runner the
+daemon bootstraps as a plugin host, so every case here drives a real daemon
+(echo provider for the profiles, never contacted) and a real runner through
+the SDK.
 
 The ``template`` plugin is the issue's first user (kbwiki offers its three
 tools over MCP) and it has every property worth checking: a per-session
@@ -178,5 +178,18 @@ def test_a_bad_request_and_a_missing_profile_say_why(tool_daemon):
 
     both, missing = _run(tool_daemon, body)
     assert not both.ok and both.category == "invalid_request"
-    assert not missing.ok and missing.category == "session_failed", missing
+    assert not missing.ok and missing.category == "host_failed", missing
     assert "no-such-profile" in missing.error
+
+
+def test_a_call_leaves_no_session_behind(tool_daemon):
+    async def body(c):
+        await c.invoke_plugin_tool(
+            "template", "listAvailableTemplates", {}, profile="tpl-ask")
+        await c.describe_plugin_tool(
+            "template", "listAvailableTemplates", profile="tpl-ask")
+
+    _run(tool_daemon, body)
+    sessions = tool_daemon.workspace / ".jaato" / "sessions"
+    assert not sessions.exists() or not list(sessions.glob("*.json")), (
+        "a plugin tool call wrote a session record")

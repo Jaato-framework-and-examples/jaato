@@ -1816,8 +1816,9 @@ export class JaatoClient {
   /**
    * A plugin tool's schema as a session would expose it (protocol 1.37,
    * #1606).  Configured by ``profile`` OR ``pluginConfigs``, never both.  The
-   * daemon answers from a short-lived session of this connection's
-   * workspace, so the schema is the one that session puts on the wire, and
+   * daemon answers from a runner of this connection's workspace holding those
+   * plugins and no session, so the schema is the one a session with that
+   * configuration puts on the wire, and
    * ``exists === false`` (with ``reason`` / ``detail``) when the profile does
    * not enable the plugin, scopes the tool out or hides it.  Mirror of Python
    * ``IPCClient.describe_plugin_tool``.
@@ -1849,7 +1850,7 @@ export class JaatoClient {
   /**
    * Run one plugin tool call with no model turn (protocol 1.37, #1606).
    *
-   * The call runs in a short-lived session of this connection's workspace,
+   * The call runs, with no session, in a runner of this connection's workspace,
    * under its confinement and through its own executor (permission policy,
    * argument coercion, secret redaction, the failure contract).  ``ok`` says
    * whether the call reached the tool, ``success`` whether the tool

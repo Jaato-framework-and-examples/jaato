@@ -8711,17 +8711,13 @@
      {
       "name": "result",
       "type": "Any"
-     },
-     {
-      "name": "session_id",
-      "type": "str"
      }
     ],
     "name": "PLUGIN_TOOL_INVOKE_RESULT",
     "note": "Answer to PluginToolInvokeRequest (1.37",
     "wire": "plugin.tool.invoke.result"
    },
-   "text": "PLUGIN_TOOL_INVOKE_RESULT   (plugin.tool.invoke.result)\n  direction : Server ↔ Client\n  domain    : Plugin tool calls, no model turn\n  class     : PluginToolInvokeResultEvent\n  subscribe : event_types=[\"PluginToolInvokeResultEvent\"]   (cascade_events / observer filters match the CLASS name)\n  note      : Answer to PluginToolInvokeRequest (1.37\n  purpose   : What one plugin tool call did (1.37, #1606).\n  fields    :\n    request_id : str\n    ok         : bool\n    category   : str\n    error      : str\n    success    : bool\n    result     : Any\n    session_id : str"
+   "text": "PLUGIN_TOOL_INVOKE_RESULT   (plugin.tool.invoke.result)\n  direction : Server ↔ Client\n  domain    : Plugin tool calls, no model turn\n  class     : PluginToolInvokeResultEvent\n  subscribe : event_types=[\"PluginToolInvokeResultEvent\"]   (cascade_events / observer filters match the CLASS name)\n  note      : Answer to PluginToolInvokeRequest (1.37\n  purpose   : What one plugin tool call did (1.37, #1606).\n  fields    :\n    request_id : str\n    ok         : bool\n    category   : str\n    error      : str\n    success    : bool\n    result     : Any"
   },
   "event POOL_STATUS": {
    "data": {
@@ -12543,8 +12539,7 @@
        "category",
        "error",
        "success",
-       "result",
-       "session_id"
+       "result"
       ],
       "wire": "plugin.tool.invoke.result"
      }

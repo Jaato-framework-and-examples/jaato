@@ -1,17 +1,18 @@
-"""One plugin tool call with no model turn answers as a session would (#1606).
+"""One plugin tool call answers as a session would, with no session (#1606).
 
-The runner-side half (``shared/plugin_tool_call.py``) is a handful of
-questions asked of a SESSION: who owns the tool, is it in this session's
-surface, what does this session's wire carry for it, and -- for an invoke --
-what does this session's executor make of the call.  Each test drives a real
-``PluginRegistry`` holding the real ``template`` and ``permission`` plugins
-and a real ``JaatoSession``, because the property under test is that the
-answer is the session's, not a copy of its rules.
+The runner-side half (``shared/plugin_tool_call.PluginToolHost``) asks a
+plugin registry the questions a session's wire asks: who owns the tool, is
+it in the profile's surface, what does the wire carry for it -- and runs a
+call through a ``ToolExecutor`` wired the way ``JaatoSession.configure``
+wires one.  Each test drives a real ``PluginRegistry`` holding the real
+``template`` plugin, a real ``PermissionPlugin`` and a real executor, and no
+``JaatoSession`` anywhere: the property under test is that the answer is the
+profile's without a session to ask.
 
 The daemon half (``server/plugin_tool_calls.py``) is checked where it decides
 something of its own: which call a permission answer belongs to, and the tag
 that lets a caller with several calls tell their ASKs apart.  The whole path
--- a real daemon, a real runner, the SDK -- is
+-- a real daemon, a runner bootstrapped as a plugin host, the SDK -- is
 ``jaato_sdk/conformance/test_plugin_tool_calls_1606.py``.
 """
 
@@ -37,41 +38,52 @@ from jaato_server.server.plugin_tool_calls import (  # noqa: E402
     request_problem,
 )
 from jaato_server.shared.jaato_runtime import JaatoRuntime  # noqa: E402
-from jaato_server.shared.jaato_session import JaatoSession  # noqa: E402
-from jaato_server.shared.plugin_tool_call import (  # noqa: E402
-    describe_plugin_tool,
-    invoke_plugin_tool,
-)
+from jaato_server.shared.plugin_tool_call import build_plugin_tool_host  # noqa: E402
 from jaato_server.shared.plugins.permission.plugin import PermissionPlugin  # noqa: E402
 from jaato_server.shared.plugins.registry import PluginRegistry  # noqa: E402
 from jaato_server.shared.plugins.template.plugin import TemplatePlugin  # noqa: E402
-from jaato_server.shared.session_context import isolated_current_session  # noqa: E402
 from jaato_server.shared.tests.reversion import Reversion  # noqa: E402
 
 _CALL = "jaato-server/jaato_server/shared/plugin_tool_call.py"
 _CALLS = "jaato-server/jaato_server/server/plugin_tool_calls.py"
+_BOOT = "jaato-server/jaato_server/server/runner/session.py"
 
 REVERSIONS = [
     Reversion(
+        target=_BOOT,
+        find=("    if envelope.plugin_host:\n"
+              "        return _build_plugin_host(envelope, runtime, child_cb)\n"),
+        replace="",
+        test="test_the_runner_bootstraps_a_plugin_host_and_no_session",
+        because="a plugin tool call's runner builds a session after all",
+    ),
+    Reversion(
         target=_CALL,
-        find=('    if hasattr(session, "tool_in_surface") and not '
-              'session.tool_in_surface(tool):\n'),
-        replace="    if False:\n",
+        find="        if self._plugins is None or plugin_name in self._plugins:\n",
+        replace="        if True:\n",
+        test="test_a_plugin_the_profile_does_not_enable_has_no_tools",
+        because="every registered plugin's tools are reachable, whatever the "
+                "profile's plugins: list says (#1590)",
+    ),
+    Reversion(
+        target=_CALL,
+        find="        refusal = self.tool_scope_refusal(tool)\n",
+        replace="        refusal = ''\n",
         test="test_describe_says_a_scoped_out_tool_does_not_exist",
         because="describe answers a tool the profile scoped out as present",
     ),
     Reversion(
         target=_CALL,
-        find="    visible = filter_visible_tool_schemas(registry, [schema], session=session)\n",
-        replace="    visible = [schema]\n",
-        test="test_describe_answers_the_schema_the_session_narrows",
+        find="        visible = filter_visible_tool_schemas(self.registry, [schema])\n",
+        replace="        visible = [schema]\n",
+        test="test_describe_answers_the_schema_the_profile_narrows",
         because="describe returns the plugin's declared schema, not the one "
-                "this session's narrow_tool_schema puts on the wire",
+                "the profile's narrow_tool_schema puts on the wire",
     ),
     Reversion(
         target=_CALL,
-        find='    if owner_name != plugin_name:\n',
-        replace="    if False:\n",
+        find='        if owner_name != plugin_name:\n',
+        replace="        if False:\n",
         test="test_describe_refuses_a_tool_named_under_another_plugin",
         because="a tool is reachable by naming any plugin",
     ),
@@ -82,8 +94,8 @@ REVERSIONS = [
                  ".get_executors()[tool]\n"
                  "    return True, _fn(args)\n"),
         test="test_invoke_goes_through_the_permission_gate",
-        because="the call skips the session's executor, so its permission "
-                "policy never runs",
+        because="the call skips the wired executor, so the profile's "
+                "permission policy never runs",
     ),
     Reversion(
         target=_CALLS,
@@ -110,12 +122,11 @@ def _isolated(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    with isolated_current_session():
-        yield
 
 
-def _session(tmp_path: Path, *, template_config=None, scopes=None,
-             policy=None) -> JaatoSession:
+def _host(tmp_path: Path, *, template_config=None, plugins=("template",),
+          scopes=None, policy=None):
+    """A plugin host over a real registry, as the runner's bootstrap builds it."""
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
     runtime = JaatoRuntime(provider_name="echo", workspace_path=ws)
@@ -124,55 +135,56 @@ def _session(tmp_path: Path, *, template_config=None, scopes=None,
     reg.register_plugin(TemplatePlugin(), expose=True,
                         config={"workspace_path": str(ws),
                                 **(template_config or {})})
-    runtime.configure_plugins(reg)
-    session = JaatoSession(runtime, "echo", agent_id="main")
-    session.configure(
-        skip_provider=True, plugins=["template"], tool_scopes=scopes,
-        plugin_configs={"template": dict(template_config or {})},
-    )
-    session._provider = SimpleNamespace(uses_external_tools=lambda: True)
+    perm = None
     if policy is not None:
         perm = PermissionPlugin()
         perm.initialize({"policy": policy})
-        session._executor.set_permission_plugin(perm)
-    return session
+    runtime.configure_plugins(reg, permission_plugin=perm)
+    return build_plugin_tool_host(
+        runtime, list(plugins), scopes,
+        permission_context={"agent_type": "main", "session_id": "plugintool_x"})
 
 
 def _properties(answer) -> set:
     return set(answer["tool_schema"]["parameters"].get("properties", {}))
 
 
-def test_describe_answers_the_schema_the_session_narrows(tmp_path):
-    narrow = describe_plugin_tool(
-        _session(tmp_path, template_config={"allow_inline_template": False}),
-        "template", "renderTemplateToFile")
+def test_describe_answers_the_schema_the_profile_narrows(tmp_path):
+    narrow = _host(tmp_path, template_config={"allow_inline_template": False}
+                   ).describe("template", "renderTemplateToFile")
     assert narrow["exists"], narrow
     assert "template" not in _properties(narrow)
     assert "template_id" in _properties(narrow)
 
 
 def test_describe_says_a_scoped_out_tool_does_not_exist(tmp_path):
-    session = _session(tmp_path, scopes={"template": ["listAvailableTemplates"]})
-    answer = describe_plugin_tool(session, "template", "renderTemplateToFile")
+    host = _host(tmp_path, scopes={"template": ["listAvailableTemplates"]})
+    answer = host.describe("template", "renderTemplateToFile")
     assert not answer["exists"]
     assert answer["reason"] == "not_in_surface"
     assert answer["tool_schema"] is None
-    assert describe_plugin_tool(
-        session, "template", "listAvailableTemplates")["exists"]
+    assert host.describe("template", "listAvailableTemplates")["exists"]
+
+
+def test_a_plugin_the_profile_does_not_enable_has_no_tools(tmp_path):
+    host = _host(tmp_path, plugins=("todo",), policy={"defaultPolicy": "allow"})
+    answer = host.describe("template", "listAvailableTemplates")
+    assert not answer["exists"]
+    assert answer["reason"] == "not_in_surface"
+    assert "does not enable" in answer["detail"]
+    assert host.invoke("template", "listAvailableTemplates", {})["ran"] is False
 
 
 def test_describe_refuses_a_tool_named_under_another_plugin(tmp_path):
-    answer = describe_plugin_tool(
-        _session(tmp_path), "memory", "listAvailableTemplates")
+    answer = _host(tmp_path).describe("memory", "listAvailableTemplates")
     assert not answer["exists"]
     assert answer["reason"] == "wrong_plugin"
 
 
 def test_invoke_goes_through_the_permission_gate(tmp_path):
     out = tmp_path / "ws" / "never.txt"
-    session = _session(tmp_path, policy={"defaultPolicy": "deny"})
-    answer = invoke_plugin_tool(
-        session, "template", "renderTemplateToFile",
+    answer = _host(tmp_path, policy={"defaultPolicy": "deny"}).invoke(
+        "template", "renderTemplateToFile",
         {"template": "x", "variables": {}, "output_path": str(out)})
     assert answer["ran"]
     assert answer["success"] is False, answer
@@ -180,10 +192,10 @@ def test_invoke_goes_through_the_permission_gate(tmp_path):
 
 
 def test_invoke_refuses_what_describe_says_does_not_exist(tmp_path):
-    session = _session(tmp_path, scopes={"template": ["listAvailableTemplates"]},
-                       policy={"defaultPolicy": "allow"})
-    answer = invoke_plugin_tool(
-        session, "template", "renderTemplateToFile",
+    host = _host(tmp_path, scopes={"template": ["listAvailableTemplates"]},
+                 policy={"defaultPolicy": "allow"})
+    answer = host.invoke(
+        "template", "renderTemplateToFile",
         {"template": "x", "variables": {}, "output_path": str(tmp_path / "o")})
     assert answer == {"ran": False, "reason": "not_in_surface",
                       "detail": answer["detail"]}
@@ -242,3 +254,28 @@ def test_a_request_must_name_one_configuration():
         plugin="p", tool="t", profile="x", plugin_configs={})).startswith(
             "profile and plugin_configs")
     assert request_problem(PluginToolInvokeRequest(plugin="p", tool="t")) == ""
+
+
+# ------------------------------------------------------- the runner bootstrap
+
+
+def test_the_runner_bootstraps_a_plugin_host_and_no_session(tmp_path):
+    """``plugin_host`` stops ``bootstrap_session`` before the session: no
+    model is named, none is needed, and the host answers for the profile."""
+    from jaato_server.server.runner.session import bootstrap_session
+    from jaato_server.shared.session_envelope import SessionInitEnvelope
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    host = bootstrap_session(SessionInitEnvelope(
+        session_id="plugintool_test", workspace_path=str(ws),
+        profile_name="", provider_name="", model_name="",
+        plugins=[{"name": "template"}],
+        plugin_configs={"template": {"allow_inline_template": False}},
+        plugin_host=True,
+    ))
+    assert host.session is None
+    assert host.plugin_host is not None
+    answer = host.plugin_host.describe("template", "renderTemplateToFile")
+    assert answer["exists"], answer
+    assert "template" not in answer["tool_schema"]["parameters"]["properties"]

@@ -1,0 +1,12 @@
+{
+  "type": "plugin.tool.invoke.request",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "plugin": "",
+  "tool": "",
+  "args": {},
+  "profile": "",
+  "plugin_configs": null,
+  "timeout": 0.0
+}

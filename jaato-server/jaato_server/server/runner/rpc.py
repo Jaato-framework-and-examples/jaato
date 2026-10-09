@@ -312,12 +312,12 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # WORK lane (``WORK_LANE_METHODS``): the first call may load the model.
     # A stopgap for #1422: goes once the runner may write its own catalog.
     "session.embed_texts": "_handle_session_embed_texts",
-    # One plugin tool call with no model turn (#1606): ``describe`` answers
-    # the tool's schema as THIS session exposes it, ``invoke`` runs one call
-    # through the session's own executor (scope, permission gate, coercion,
-    # redaction).  The daemon builds a short-lived session for it.  WORK
-    # lane (``WORK_LANE_METHODS``): an invoke runs plugin code and may wait
-    # on a permission answer.
+    # One plugin tool call with no session (#1606), on a runner bootstrapped
+    # as a plugin host: ``describe`` answers the tool's schema as the
+    # profile exposes it, ``invoke`` runs one call through the host's
+    # executor (scope, permission gate, coercion, redaction).  WORK lane
+    # (``WORK_LANE_METHODS``): an invoke runs plugin code and may wait on a
+    # permission answer.
     "session.plugin_tool": "_handle_session_plugin_tool",
 }
 
@@ -1999,35 +1999,33 @@ class RunnerRPC:
         """``session.plugin_tool`` -- describe or run one plugin tool (#1606).
 
         ``args = {"op": "describe"|"invoke", "plugin", "tool", "args",
-        "call_id"}``.  The body is :mod:`jaato_server.shared.plugin_tool_call`,
-        which asks this session the questions its wire asks it and, for an
-        invoke, hands the call to the session's ``ToolExecutor``.
+        "call_id"}``, served by the ``PluginToolHost`` a ``plugin_host``
+        bootstrap built (``shared/plugin_tool_call.py``): no session exists
+        on this runner, only the profile's plugins and an executor wired
+        the way a session wires one.
 
         Returns:
-            ``(True, <answer>)`` -- ``describe_plugin_tool`` /
-            ``invoke_plugin_tool``'s dict.  ``(False, {"error", "stage"})``
-            for ``no_host`` / ``no_session``, an unknown ``op`` and a raise,
+            ``(True, <answer>)`` -- the host's ``describe`` / ``invoke``
+            dict.  ``(False, {"error", "stage"})`` when this runner holds no
+            plugin host (``no_host``), for an unknown ``op`` and for a raise,
             which the daemon reports as ``runner_unreachable``.
         """
-        from jaato_server.shared.plugin_tool_call import (
-            describe_plugin_tool,
-            invoke_plugin_tool,
-        )
-
-        ready, err, session = self._require_ready_session()
-        if not ready:
-            return err
+        with self._session_lock:
+            host = self._session_host
+        plugin_host = getattr(host, "plugin_host", None) if host is not None else None
+        if plugin_host is None:
+            return False, {"error": "session.plugin_tool: this runner holds "
+                                    "no plugin host", "stage": "no_host"}
         op = str(args.get("op") or "")
         plugin = str(args.get("plugin") or "")
         tool = str(args.get("tool") or "")
         try:
             if op == "describe":
-                return True, describe_plugin_tool(session, plugin, tool)
+                return True, plugin_host.describe(plugin, tool)
             if op == "invoke":
-                return True, invoke_plugin_tool(
-                    session, plugin, tool, dict(args.get("args") or {}),
-                    call_id=str(args.get("call_id") or "") or None,
-                )
+                return True, plugin_host.invoke(
+                    plugin, tool, dict(args.get("args") or {}),
+                    call_id=str(args.get("call_id") or "") or None)
         except Exception as exc:  # noqa: BLE001 -- boundary
             return False, {
                 "error": f"session.plugin_tool: {type(exc).__name__}: {exc}",

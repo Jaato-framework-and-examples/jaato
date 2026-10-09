@@ -550,6 +550,15 @@ class SessionInitEnvelope:
     # runner then records ``absent`` (or refuses spawns when confinement is
     # required).  Additive, same-build daemon+runner: no schema_version bump.
     seccomp_program: Optional[Dict[str, Any]] = None
+    # #1606: bootstrap a PLUGIN HOST, not a session.  The runner runs every
+    # step that sets up the process (env, redaction, private /tmp, uid drop,
+    # confinement, tmpdir, user tier, plugin discovery, the permission
+    # plugin) and stops before the ``JaatoSession`` is built: no provider,
+    # no history, no prompt.  ``shared/plugin_tool_call.PluginToolHost``
+    # then runs one plugin tool call at a time.  ``False`` = a session, which
+    # is what an older daemon's envelope means; same-build daemon+runner, so
+    # no schema_version bump.
+    plugin_host: bool = False
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -648,6 +657,7 @@ class SessionInitEnvelope:
             "seccomp_program": (
                 dict(self.seccomp_program) if self.seccomp_program else None
             ),
+            "plugin_host": self.plugin_host,
         }
 
     @classmethod
@@ -738,6 +748,7 @@ class SessionInitEnvelope:
             gc_file=_optional_dict(d.get("gc_file")),
             runner_log_path=_optional_str(d.get("runner_log_path")),
             seccomp_program=_optional_dict(d.get("seccomp_program")),
+            plugin_host=bool(d.get("plugin_host", False)),
         )
 
 

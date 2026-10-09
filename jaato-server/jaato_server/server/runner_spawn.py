@@ -1575,6 +1575,8 @@ def build_session_envelope(
         # SELinux phase 4: where this session's runner logs, so a pool
         # slot stops writing the daemon's log (which it may not).
         runner_log_path=runner_log_path(workspace_path, session_id),
+        # #1606: a plugin-tool call bootstraps a plugin host, not a session.
+        plugin_host=bool(getattr(server, "_plugin_host", False)),
     )
 
 

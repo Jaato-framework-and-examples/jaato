@@ -384,7 +384,7 @@ class CommandRouter:
         self._event_sink = event_sink
         self._daemon_plugins = daemon_plugins
         # The plugin-tool verbs (1.37, #1606): one tool call with no model
-        # turn, in a short-lived session of the caller's workspace.
+        # turn and no session, in a runner of the caller's workspace.
         from .plugin_tool_calls import PluginToolCalls
         self._plugin_tool_calls = PluginToolCalls(
             session_manager,
@@ -493,7 +493,7 @@ class CommandRouter:
 
         try:
             # A permission answer to a plugin tool call's ASK (#1606) belongs
-            # to that call's short-lived session, not to the caller's own.
+            # to that call's runner, not to the caller's own session.
             # ``getattr``: a router built without ``__init__`` (a test
             # double) has no plugin tool calls to route to.
             calls = getattr(self, "_plugin_tool_calls", None)
