@@ -314,3 +314,35 @@ class UpstreamFinishError(InfrastructureError):
             "The request will be automatically retried.",
         ])
         return "\n".join(lines)
+
+
+class DecisionRequestRejectedError(OpenRouterError):
+    """The decision endpoint refused the request (a 4xx other than 401/429).
+
+    ``422`` is the documented case: a malformed question, with the body
+    naming the field.  Questions are validated locally before sending
+    (``jaato_sdk.plugins.model_provider.decisions``), so reaching this
+    usually means the endpoint's rules differ from the documented ones,
+    which the body says.  Not transient: retrying the same request gets
+    the same answer.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        model: str,
+        body: Optional[str] = None,
+    ):
+        self.status_code = status_code
+        self.model = model
+        self.body = body
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        lines = [
+            f"OpenRouter decision endpoint refused the request for "
+            f"{self.model!r} (HTTP {self.status_code})."
+        ]
+        if self.body:
+            lines.append(f"Response: {self.body[:2000]}")
+        return "\n".join(lines)

@@ -43,6 +43,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     cancellation=True,
     output_media=True,            # shares _openai_compat's wired streaming loop.
     reasoning_replay=True,        # reasoning_content + reasoning_details echoed
+    decisions=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

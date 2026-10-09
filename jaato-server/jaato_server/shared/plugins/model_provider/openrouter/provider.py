@@ -54,7 +54,7 @@ import json
 import logging
 import re
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    normalise_output_modalities,
     resolve_context_window,
     resolve_modalities,
 )
@@ -166,6 +167,15 @@ from .errors import (
     UpstreamFinishError,
 )
 from .stall import StreamStallGuard
+from .decisions import decisions_url as _decisions_url, post_decision
+from jaato_sdk.plugins.model_provider.decisions import (
+    DecisionModelOnlyError,
+    DecisionQuestion,
+    DecisionQuestionError,
+    DecisionResult,
+    build_decision_request,
+    parse_decision_response,
+)
 
 
 # Substrings that signal the upstream model exposes reasoning content
@@ -495,6 +505,12 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # Configuration
         self._api_key: Optional[str] = None
         self._base_url: str = DEFAULT_BASE_URL
+        # ``framework_overrides.decisions_url``: where decide() posts when
+        # the decision endpoint cannot be derived from ``base_url``.
+        self._decisions_url: Optional[str] = None
+        # Whether the connected model answers decisions only, decided once
+        # at connect() so complete() does not touch the catalog per turn.
+        self._decisions_only: bool = False
         self._http_referer: str = ""
         self._app_title: str = ""
 
@@ -668,6 +684,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
+        # Per-model ``/models/{id}/endpoints`` documents, for models the
+        # listing omits (``typesafe/jev-1.13`` is reachable but not
+        # listed).  Keyed by model id; a failed fetch is not cached.
+        self._model_doc_cache: Dict[str, Dict[str, Any]] = {}
 
         # Thinking/reasoning configuration.  Defaults to False so
         # nothing extra goes on the wire and reasoning content is not
@@ -748,9 +768,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         ``framework_overrides.output_modalities`` is the CAPABILITY
         assertion — the counterpart of the input ``modalities`` knob, and
         the only source of truth available, because the OpenRouter catalog
-        reports ``architecture.modality`` for input but says nothing about
-        what a model can EMIT.  Without it the floor stays text-only and
-        the startup check refuses any outbound tier role.
+        when the catalog's ``architecture.output_modalities`` does not
+        answer for the model (a self-hosted gateway, a catalog gap).  The
+        catalog is read first (see :meth:`output_modalities`); without
+        either, the floor stays text-only and the startup check refuses
+        any outbound tier role.
 
         ``api_params.modalities`` / ``api_params.audio`` are the REQUEST
         fields.  They are forwarded so a profile can pin the voice; a
@@ -964,6 +986,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         self._base_url = (
             _knob("base_url", layer=framework_overrides) or resolve_base_url()
         )
+        self._decisions_url = _knob("decisions_url", layer=framework_overrides)
         # App attribution, three tiers (highest first): the profile knob,
         # the OpenRouter-specific env var, then the framework-resolved
         # application identity — which is what makes a product built on the
@@ -1257,15 +1280,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         import httpx
 
         client_class = get_openai_client_class()
-        default_headers: Dict[str, str] = {}
-        if self._http_referer:
-            default_headers[HEADER_HTTP_REFERER] = self._http_referer
-        if self._app_title:
-            default_headers[HEADER_APP_TITLE] = self._app_title
-        if self._app_categories:
-            default_headers[HEADER_APP_CATEGORIES] = ",".join(self._app_categories)
-        if self._extra_headers:
-            default_headers.update(self._extra_headers)
+        default_headers = self._attribution_headers()
 
         return client_class(
             base_url=self._base_url,
@@ -1277,6 +1292,25 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             ),
             max_retries=0,
         )
+
+    def _attribution_headers(self) -> Dict[str, str]:
+        """App-attribution headers plus the profile's ``extra_headers``.
+
+        One definition for both wires: the chat client's
+        ``default_headers`` and the decision endpoint's request headers,
+        so a decision call is attributed to the same application as a
+        chat turn.
+        """
+        headers: Dict[str, str] = {}
+        if self._http_referer:
+            headers[HEADER_HTTP_REFERER] = self._http_referer
+        if self._app_title:
+            headers[HEADER_APP_TITLE] = self._app_title
+        if self._app_categories:
+            headers[HEADER_APP_CATEGORIES] = ",".join(self._app_categories)
+        if self._extra_headers:
+            headers.update(self._extra_headers)
+        return headers
 
     def verify_auth(
         self,
@@ -1415,8 +1449,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                 "JAATO_OPENROUTER_CONTEXT_LENGTH in the environment.  No "
                 "hardcoded fallback exists per the project's no-fallback rule."
             )
+        self._decisions_only = self.is_decisions_only(model)
         self._trace(
             f"[CONNECT] model={model} context_length={self._context_length}"
+            + (" decisions_only" if self._decisions_only else "")
         )
 
     @property
@@ -1485,13 +1521,88 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         self._catalog_cache = catalog
         return catalog
 
-    def _lookup_context_length(self, model: str) -> Optional[int]:
-        """Return the catalog-reported context length for ``model``."""
+    def _fetch_model_doc(self, model: str) -> Optional[Dict[str, Any]]:
+        """Fetch and cache ``GET /models/{model}/endpoints`` for one model.
+
+        The listing omits some models the API serves (``typesafe/jev-1.13``
+        is reachable but not listed), so per-model metadata for those comes
+        from this document.  Its ``data`` carries the same ``architecture``
+        block as a listing entry, and ``endpoints[].context_length`` per
+        upstream.  Returns ``None`` on any failure, which is not cached,
+        so a later call retries.
+        """
+        cache = getattr(self, "_model_doc_cache", None)
+        if cache is None:
+            cache = self._model_doc_cache = {}
+        if model in cache:
+            return cache[model]
+
+        import httpx
+
+        url = f"{self._base_url.rstrip('/')}/models/{model}/endpoints"
+        try:
+            response = httpx.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            self._trace(
+                f"[CATALOG] model doc fetch failed for {model}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+        doc = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(doc, dict):
+            self._trace(f"[CATALOG] model doc for {model} missing 'data'")
+            return None
+        cache[model] = doc
+        return doc
+
+    def _catalog_entry(self, model: str) -> Optional[Dict[str, Any]]:
+        """Return the catalog metadata for ``model``, listed or not.
+
+        The listing entry when the listing has the model, else the
+        per-model endpoints document (:meth:`_fetch_model_doc`), whose
+        ``context_length`` is taken as the largest any of its endpoints
+        reports.  ``None`` when neither answers.
+        """
         for entry in self._fetch_catalog():
             if entry.get("id") == model:
-                ctx = entry.get("context_length")
-                if isinstance(ctx, int) and ctx > 0:
-                    return ctx
+                return entry
+        doc = self._fetch_model_doc(model)
+        if doc is None:
+            return None
+        entry = dict(doc)
+        if "context_length" not in entry:
+            lengths = [
+                ep.get("context_length")
+                for ep in doc.get("endpoints") or []
+                if isinstance(ep, dict)
+            ]
+            lengths = [n for n in lengths if isinstance(n, int) and n > 0]
+            if lengths:
+                entry["context_length"] = max(lengths)
+        return entry
+
+    def _architecture_list(self, model: str, key: str) -> Optional[List[str]]:
+        """Return ``architecture[key]`` for ``model`` as a non-empty list."""
+        entry = self._catalog_entry(model)
+        if not entry:
+            return None
+        arch = entry.get("architecture")
+        if isinstance(arch, dict):
+            mods = arch.get(key)
+            if isinstance(mods, list) and mods:
+                return [str(m) for m in mods]
+        return None
+
+    def _lookup_context_length(self, model: str) -> Optional[int]:
+        """Return the catalog-reported context length for ``model``."""
+        entry = self._catalog_entry(model)
+        if entry:
+            ctx = entry.get("context_length")
+            if isinstance(ctx, int) and ctx > 0:
+                return ctx
         return None
 
     def _lookup_modalities(self, model: str) -> Optional[List[str]]:
@@ -1499,20 +1610,39 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         Reads ``architecture.input_modalities`` from
         ``GET /api/v1/models`` — present for all catalog models
-        (``["text","image"]`` for vision, ``["text"]`` for text-only).
-        Returns ``None`` when the model is absent or the field is missing
-        (self-hosted gateways, catalog gaps) so resolution falls through
-        to the manual knob.
+        (``["text","image"]`` for vision, ``["text"]`` for text-only) — or
+        from the per-model endpoints document for a model the listing
+        omits.  Returns ``None`` when the model is absent or the field is
+        missing (self-hosted gateways, catalog gaps) so resolution falls
+        through to the manual knob.
         """
-        for entry in self._fetch_catalog():
-            if entry.get("id") == model:
-                arch = entry.get("architecture")
-                if isinstance(arch, dict):
-                    mods = arch.get("input_modalities")
-                    if isinstance(mods, list) and mods:
-                        return [str(m) for m in mods]
-                return None
-        return None
+        return self._architecture_list(model, "input_modalities")
+
+    def _lookup_output_modalities(self, model: str) -> Optional[List[str]]:
+        """Return the catalog-reported OUTPUT modalities for ``model``.
+
+        ``architecture.output_modalities``: ``["text"]`` for chat models,
+        ``["text","audio"]`` for the audio models, ``["decisions"]`` for a
+        decision model.  ``None`` when the catalog does not answer.
+        """
+        return self._architecture_list(model, "output_modalities")
+
+    def output_modalities(self, model: Optional[str] = None) -> Set[str]:
+        """OUTPUT modalities ``model`` (default: the active model) can EMIT.
+
+        Catalog first (``architecture.output_modalities``, listed or from
+        the per-model endpoints document), then the
+        ``framework_overrides.output_modalities`` knob, then ``{text}``.
+        The mirror of :meth:`modalities` for input.  The text floor is
+        applied by :func:`normalise_output_modalities`, so a model the
+        catalog reports as ``["decisions"]`` stays decisions-only.
+        """
+        model = model or self._model_name
+        if model:
+            detected = self._lookup_output_modalities(model)
+            if detected:
+                return normalise_output_modalities(detected)
+        return super().output_modalities(model)
 
     def modalities(self, model: Optional[str] = None) -> Set[str]:
         """INPUT modalities ``model`` (default: the active model) accepts.
@@ -1533,6 +1663,106 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             profile_value=self._modalities_knob,
         )
         return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _require_chat_model(self) -> None:
+        """Raise unless ``complete()`` can run: connected, and the model
+        writes text.  A decisions-only model raises
+        :class:`DecisionModelOnlyError` (``decide()`` serves it)."""
+        if not self._client or not self._model_name:
+            raise RuntimeError(
+                "Provider not connected. Call initialize() and connect() first."
+            )
+        if self._decisions_only:
+            raise DecisionModelOnlyError(self._model_name, self.name)
+
+    # ==================== Decision models ====================
+
+    def decide(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        *,
+        model: Optional[str] = None,
+        cancel_token: Optional[CancelToken] = None,
+    ) -> DecisionResult:
+        """Ask a decision model typed questions about ``state``.
+
+        Posts to OpenRouter's decision endpoint (``/api/alpha/decisions``,
+        derived from ``base_url`` or set by
+        ``framework_overrides.decisions_url``) with the same key and
+        attribution headers as chat, under the provider's connect and
+        request deadlines.  Not streamed.  ``429`` and ``5xx`` (``529``
+        overloaded) are retried by ``with_retry``; ``401``, ``404`` and a
+        ``422`` are not.  Design: ``docs/design/decision-models.md`` §6.
+
+        Args:
+            state: The text, object or array the questions are about.
+            questions: ``{id: DecisionQuestion}``.  Ids are the caller's
+                and come back as the keys of ``answers``.
+            model: The decision model; defaults to the connected model.
+            cancel_token: Stops waiting and aborts the request.
+
+        Raises:
+            DecisionQuestionError: A question is malformed, or the request
+                is larger than the model's context window.  Nothing sent.
+            DecisionResponseError: The response leaves a question
+                unanswered or answers it in an unreadable shape.
+            RuntimeError: ``initialize()`` has not run, or no model named.
+        """
+        from jaato_server.shared.retry_utils import with_retry
+
+        if not self._api_key:
+            raise RuntimeError("Provider not initialized. Call initialize() first.")
+        model = model or self._model_name
+        if not model:
+            raise RuntimeError("decide() needs a model: pass model= or connect() first.")
+        body = build_decision_request(state, questions, model)
+        self._check_decision_fits(body, model)
+        url = _decisions_url(self._base_url, self._decisions_url)
+        headers = {**self._attribution_headers(),
+                   "Authorization": f"Bearer {self._api_key}"}
+        self._trace(f"DECIDE model={model} questions={list(questions)} url={url}")
+
+        def send() -> Dict[str, Any]:
+            return post_decision(
+                url, headers, body, model=model,
+                connect_timeout=self._connect_timeout,
+                request_timeout=self._request_timeout,
+                cancel_token=cancel_token,
+            )
+
+        def on_retry(message: str, attempt: int, max_attempts: int, delay: float) -> None:
+            self._trace(f"DECIDE_RETRY {attempt}/{max_attempts} in {delay:.1f}s: {message}")
+
+        raw, _stats = with_retry(send, context="decide", on_retry=on_retry,
+                                 cancel_token=cancel_token, provider=self)
+        result = parse_decision_response(raw, questions, model)
+        self._trace(
+            f"DECIDE_DONE model={result.model} answers={len(result.answers)} "
+            f"usage_reported={result.usage.reported}"
+        )
+        return result
+
+    def _check_decision_fits(self, body: Dict[str, Any], model: str) -> None:
+        """Refuse a request larger than the model's window, before sending.
+
+        The estimate is the whole JSON body at ~4 characters a token.  A
+        model whose window is unknown is not checked: the endpoint's own
+        refusal is then the answer.  Nothing is ever truncated.
+        """
+        if model == self._model_name and self._context_length:
+            limit = self._context_length
+        else:
+            limit = self._lookup_context_length(model) or 0
+        if not limit:
+            return
+        estimate = self.count_tokens(json.dumps(body, ensure_ascii=False, default=str))
+        if estimate > limit:
+            raise DecisionQuestionError(
+                None,
+                f"state and questions are ~{estimate} tokens, over the "
+                f"{limit}-token window of {model!r}; shorten the state",
+            )
 
     def _caching_active(self) -> bool:
         """Whether to stamp ``cache_control`` breakpoints on this request.
@@ -1617,10 +1847,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         Returns ``TurnResult.from_provider_response(r)`` on success and
         **raises** transient errors so ``with_retry`` can retry.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError(
-                "Provider not connected. Call initialize() and connect() first."
-            )
+        self._require_chat_model()
 
         cache_active = self._caching_active()
         cache_control = make_cache_control(self._cache_ttl) if cache_active else None

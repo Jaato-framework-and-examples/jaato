@@ -26,6 +26,12 @@ from .types import (
     normalize_inclusive_usage,
     uncached_prompt_tokens,
 )
+from .decisions import (
+    DecisionAnswer,
+    DecisionModelOnlyError,
+    DecisionQuestion,
+    DecisionResult,
+)
 
 __all__ = [
     "TRAIT_FILE_WRITER",
@@ -53,4 +59,10 @@ __all__ = [
     # meet TokenUsage's prompt-token convention; see its docstring.
     "normalize_inclusive_usage",
     "uncached_prompt_tokens",
+    # Decision models (docs/design/decision-models.md); the rest of the
+    # contract is in jaato_sdk.plugins.model_provider.decisions.
+    "DecisionAnswer",
+    "DecisionModelOnlyError",
+    "DecisionQuestion",
+    "DecisionResult",
 ]
