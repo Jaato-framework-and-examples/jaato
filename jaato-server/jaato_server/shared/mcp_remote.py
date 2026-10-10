@@ -31,6 +31,7 @@ inherited environment and has nothing to act on here.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import re
@@ -77,6 +78,11 @@ REMOTE_RULES: Tuple[str, ...] = (
     "a stale Mcp-Session-Id (404 'Session terminated') reconnects once on "
     "the next call; a server that cannot connect leaves the session up "
     "without its tools, reported once at WARNING",
+    "a 401 reconnects once with headers re-resolved and retries the call "
+    "once, so a rotated token in the session env is picked up; a server that "
+    "keeps refusing fails the call",
+    "session.reload_env reopens the remote servers whose headers read a "
+    "${VAR} the reload changed",
 )
 
 # An RFC 7230 header field-name (token).
@@ -238,22 +244,54 @@ def bind_headers_to_host(header_names, url: str):
 
 
 class SessionWatch:
-    """Records that the server forgot our ``Mcp-Session-Id``.
+    """Records what the server said about the session or the credential.
 
-    The streamable-HTTP spec has a server answer **404** to a request
-    carrying a session id it does not know (restart, idle expiry).  What the
-    SDK then raises depends on the server's body (``Session terminated`` when
-    the body is empty, the server's own JSON-RPC error otherwise, e.g.
-    ``Session not found``), so the status is observed at the HTTP layer by
-    :meth:`response_hook` instead of guessed from a message.
+    Two HTTP answers mean a reconnect can fix the call (#1580, #1609):
+
+    * **404** to a request carrying an ``Mcp-Session-Id``: the server forgot
+      the session (restart, idle expiry).  What the SDK then raises depends
+      on the server's body (``Session terminated`` when the body is empty,
+      the server's own JSON-RPC error otherwise), so the status is observed
+      here rather than guessed from a message.  Sets :attr:`stale`.
+    * **401**: the server refused the credential.  Headers are resolved once,
+      when the connection opens, so a rotated token (a refreshed OAuth access
+      token written into the session env) reaches the server only through a
+      new connection.  Sets :attr:`unauthorized`.
+
+    Both also set :attr:`tripped`, an event the call path races the call
+    against: on SSE the refused POST kills the transport and the pending
+    call never answers, so waiting for an exception would wait forever.
     """
 
     def __init__(self) -> None:
         self.stale = False
+        self.unauthorized = False
+        self.tripped = asyncio.Event()
 
     async def response_hook(self, response) -> None:
         if response.status_code == 404 and "mcp-session-id" in response.request.headers:
             self.stale = True
+            self.tripped.set()
+        elif response.status_code == 401:
+            self.unauthorized = True
+            self.tripped.set()
+
+
+_HEADER_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def header_env_names(templates: Mapping[str, str]) -> frozenset:
+    """The variable names the ``${VAR}`` references in ``templates`` read.
+
+    Used after ``session.reload_env`` to decide which remote connections
+    resolved a header from a variable that changed (#1609).  A whole-value
+    secret URI (``pass://...``) reads no variable and is not named here.
+    """
+    names = set()
+    for value in templates.values():
+        if isinstance(value, str):
+            names.update(m.strip() for m in _HEADER_VAR_RE.findall(value))
+    return frozenset(names)
 
 
 def _install_hook(client, kind: str, hook) -> None:

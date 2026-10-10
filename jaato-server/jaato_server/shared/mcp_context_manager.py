@@ -38,7 +38,8 @@ class _OwnedTransport:
         self.task = task
         self.stop = stop
         # mcp_remote.SessionWatch: set when the server answered 404 to our
-        # Mcp-Session-Id (the session it had for us is gone).
+        # Mcp-Session-Id (the session it had for us is gone) or 401 to the
+        # credential (#1609).
         self.watch = watch
 
     @property
@@ -79,6 +80,16 @@ class MCPServerUnavailableError(RuntimeError):
     message ("server X is unreachable") instead of a confusing
     "Server 'X' not connected" KeyError that surfaces from registry
     lookups when the server died mid-session.
+    """
+
+
+class _CallRefused(ConnectionError):
+    """A remote call abandoned because the server answered 401 or 404.
+
+    Raised by ``MCPClientManager._call_watched`` when the connection's
+    ``SessionWatch`` trips before the call answers (#1609).  A
+    ``ConnectionError`` so the call path's reconnect check treats it as a
+    dead connection.
     """
 
 
@@ -160,6 +171,20 @@ class ServerConnection:
         """True when a remote server answered 404 to our ``Mcp-Session-Id``."""
         return any(isinstance(c, _OwnedTransport) and c.watch is not None
                    and c.watch.stale for c in self.contexts)
+
+    @property
+    def credential_refused(self) -> bool:
+        """True when a remote server answered 401 on this connection (#1609)."""
+        return any(isinstance(c, _OwnedTransport) and c.watch is not None
+                   and c.watch.unauthorized for c in self.contexts)
+
+    @property
+    def watch(self) -> Any:
+        """The remote connection's ``SessionWatch``, or ``None`` (stdio)."""
+        for c in self.contexts:
+            if isinstance(c, _OwnedTransport) and c.watch is not None:
+                return c.watch
+        return None
 
     async def refresh_tools(self) -> list[Tool]:
         """Refresh the cached tool list."""
@@ -570,32 +595,110 @@ class MCPClientManager:
         arguments: dict[str, Any] | None,
         progress_callback: ProgressCallback,
     ) -> CallToolResult:
-        """Call a tool on a remote server, reconnecting ONCE on a stale session.
+        """Call a tool on a remote server, reconnecting ONCE when that can help.
 
-        A server that forgot our ``Mcp-Session-Id`` (restart, idle expiry)
-        answers 404, which the SDK reports as ``Session terminated``; a
-        transport whose owner task ended is likewise dead.  Either reconnects
-        once and retries the call once -- bounded, so a server that keeps
-        refusing fails this call instead of looping.
+        Three answers mean a new connection may succeed where this one failed:
+
+        * a server that forgot our ``Mcp-Session-Id`` (restart, idle expiry)
+          answers 404, which the SDK reports as ``Session terminated``;
+        * a transport whose owner task ended is dead;
+        * a server that answers **401** refused the credential (#1609).
+          Headers are resolved when the connection opens, so a rotated token
+          (an access token refreshed into the session env) is sent only on a
+          new connection; the reconnect re-resolves them.
+
+        Each reconnects once and retries the call once -- bounded, so a
+        server that keeps refusing fails this call instead of looping.
         """
         from jaato_server.shared.mcp_remote import is_stale_session
         if not connection.transport_closed:
             try:
-                return await connection.call_tool(
-                    tool_name, arguments, progress_callback=progress_callback,
+                return await self._call_watched(
+                    connection, tool_name, arguments, progress_callback,
                 )
             except Exception as exc:
                 if not (connection.session_stale or is_stale_session(exc)
+                        or connection.credential_refused
                         or connection.transport_closed):
                     raise
+                reason = ("refused the credential (401)"
+                          if connection.credential_refused
+                          else "session is stale")
                 logger.warning(
-                    "MCP server '%s' session is stale during call_tool('%s'); "
-                    "reconnecting once.", server, tool_name,
+                    "MCP server '%s' %s during call_tool('%s'); reconnecting "
+                    "once with headers re-resolved.", server, reason, tool_name,
                 )
         new_conn = await self._reconnect_once(server)
-        return await new_conn.call_tool(
+        try:
+            return await self._call_watched(
+                new_conn, tool_name, arguments, progress_callback,
+            )
+        except _CallRefused as exc:
+            raise MCPServerUnavailableError(
+                f"MCP server '{server}': {exc} again after a reconnect"
+            ) from exc
+
+    async def _call_watched(
+        self,
+        connection: ServerConnection,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+    ) -> CallToolResult:
+        """Run one remote call, abandoning it when the server refuses it.
+
+        On SSE a POST answered 401 ends the transport and the pending call
+        never answers, so the call is raced against the connection's
+        ``SessionWatch``: when the watch trips first the call is cancelled
+        and :class:`_CallRefused` raised.  On streamable HTTP the SDK raises
+        on its own, usually just after the watch tripped; either way the
+        caller sees an exception and the watch's flags say why.
+        """
+        watch = connection.watch
+        call = connection.call_tool(
             tool_name, arguments, progress_callback=progress_callback,
         )
+        if watch is None:
+            return await call
+        call_task = asyncio.ensure_future(call)
+        trip_task = asyncio.ensure_future(watch.tripped.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {call_task, trip_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            call_task.cancel()
+            trip_task.cancel()
+            raise
+        if call_task in done:
+            trip_task.cancel()
+            return call_task.result()
+        call_task.cancel()
+        try:
+            await call_task
+        except BaseException:  # noqa: BLE001 -- the call is being abandoned
+            pass
+        raise _CallRefused(
+            "refused the credential (401)" if watch.unauthorized
+            else "forgot the session (404)"
+        )
+
+    async def reconnect_remote(self, name: str) -> ServerConnection:
+        """Reopen a connected remote server, re-resolving its headers (#1609).
+
+        Used after ``session.reload_env`` changed a variable a header template
+        reads: the open connection still sends the value resolved when it
+        opened.  One attempt, as on the call path; on failure the server is
+        marked failed and ``MCPServerUnavailableError`` is raised.
+
+        Raises:
+            KeyError: ``name`` is not connected.
+            ValueError: ``name`` is a stdio server.
+        """
+        conn = self._connections[name]
+        if not conn.config.is_remote:
+            raise ValueError(f"MCP server '{name}' is not a remote server")
+        return await self._reconnect_once(name)
 
     async def _reconnect_once(self, name: str) -> ServerConnection:
         """Replace a remote connection with one fresh attempt.

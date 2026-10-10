@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import threading
 import traceback
@@ -376,6 +377,47 @@ def slot_retire_reasons(registry: Any) -> List[str]:
         if isinstance(reason, str) and reason:
             reasons.append(reason)
     return reasons
+
+
+def changed_env_names(before: Dict[str, str], after: Dict[str, str]) -> List[str]:
+    """Names set, removed or changed between two environment snapshots."""
+    return sorted(
+        name for name in set(before) | set(after)
+        if before.get(name) != after.get(name)
+    )
+
+
+def notify_env_reloaded(registry: Any, changed: List[str]) -> Dict[str, List[str]]:
+    """Tell plugins which variables a ``session.reload_env`` changed (#1609).
+
+    Asks every plugin in ``registry`` that implements
+    ``on_session_env_reloaded(changed_env_names)``.  Today that is ``mcp``,
+    which reopens the remote servers whose header templates read a changed
+    variable, so a rotated credential reaches them.  A plugin answers with
+    the names of what it refreshed; one that raises is logged and skipped,
+    because the environment is already applied and the reload's answer must
+    still describe it.
+
+    Returns:
+        ``{plugin_name: [what it refreshed, ...]}`` for plugins that
+        refreshed something; empty when none did, or nothing changed.
+    """
+    refreshed: Dict[str, List[str]] = {}
+    if not changed or registry is None:
+        return refreshed
+    for name in registry.list_available():
+        plugin = registry.get_plugin(name)
+        hook = getattr(plugin, "on_session_env_reloaded", None)
+        if not callable(hook):
+            continue
+        try:
+            answer = hook(list(changed))
+        except Exception:  # noqa: BLE001 -- per-plugin boundary
+            logger.exception("session.reload_env: %s.on_session_env_reloaded raised", name)
+            continue
+        if answer:
+            refreshed[name] = [str(item) for item in answer]
+    return refreshed
 
 
 def _own_label() -> Optional[str]:
@@ -2228,9 +2270,15 @@ class RunnerRPC:
           nothing changed, because swapping the environment under a
           streaming provider call is a race nobody asked for.
 
+        After the environment is applied, plugins implementing
+        ``on_session_env_reloaded`` are told which variable names changed
+        (:func:`notify_env_reloaded`, #1609): ``mcp`` reopens the remote
+        servers whose header templates read one, so a rotated token reaches
+        an open connection.  ``refreshed`` in the answer says what was.
+
         Returns:
-            ``(True, {"applied": int, "provider": str, "model": str,
-            "auth_info": str})`` on success.  ``(False, {"error", "stage"})``
+            ``(True, {"applied": int, "refreshed": {plugin: [...]},
+            "provider": str, "model": str, "auth_info": str})`` on success.  ``(False, {"error", "stage"})``
             with ``stage`` in ``no_host`` / ``no_session`` / ``busy`` /
             ``provider`` otherwise.
         """
@@ -2251,6 +2299,7 @@ class RunnerRPC:
                 "stage": "busy",
             }
         session_env = args.get("session_env") or {}
+        environ_before = dict(os.environ)
         # The scrub grant travels with the env it describes and is replaced
         # with it; an older daemon sends none, which grants nothing.
         applied = apply_session_env(
@@ -2264,6 +2313,14 @@ class RunnerRPC:
         # Rebuilt BEFORE the provider, so a credential the reload supplied
         # is redacted even if the provider then fails to rebuild.
         configure_redaction_sources(applied)
+        # #1609: plugins holding a credential resolved from the old env (a
+        # remote MCP server's headers) refresh it.  After the env is applied
+        # and before the provider, so a provider failure does not skip it.
+        runtime = getattr(session, "_runtime", None)
+        refreshed = notify_env_reloaded(
+            getattr(runtime, "registry", None) if runtime else None,
+            changed_env_names(environ_before, dict(os.environ)),
+        )
         try:
             info = session.reload_provider()
         except Exception as exc:  # noqa: BLE001 -- reported, not raised
@@ -2275,13 +2332,15 @@ class RunnerRPC:
                 "error": f"session.reload_env: provider rebuild failed: {exc}",
                 "stage": "provider",
                 "applied": len(applied),
+                "refreshed": refreshed,
             }
         logger.info(
-            "session.reload_env: applied %d env keys; provider=%s model=%s (%s)",
+            "session.reload_env: applied %d env keys; provider=%s model=%s (%s)%s",
             len(applied), info.get("provider"), info.get("model"),
             info.get("auth_info") or "credential source unknown",
+            f"; refreshed {refreshed}" if refreshed else "",
         )
-        return True, {"applied": len(applied), **info}
+        return True, {"applied": len(applied), "refreshed": refreshed, **info}
 
     def _handle_session_end(self) -> "tuple[bool, Any]":
         """Cascade-sharing session boundary — reset per-session plugin state.

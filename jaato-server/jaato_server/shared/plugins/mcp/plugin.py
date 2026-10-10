@@ -43,6 +43,9 @@ MSG_SERVER_STATUS = 'server_status'
 MSG_CONNECT_SERVER = 'connect_server'
 MSG_DISCONNECT_SERVER = 'disconnect_server'
 MSG_RELOAD_CONFIG = 'reload_config'
+# Reopen named remote servers so their headers re-resolve (#1609).  Answers
+# NOTHING on the response queue: the sender does not wait for it.
+MSG_RECONNECT_REMOTE = 'reconnect_remote'
 
 def _connect_call(mgr, name: str, spec: dict, expand_env) -> Tuple[Any, str]:
     """Return ``(coroutine, log_details)`` connecting one ``.mcp.json`` entry.
@@ -573,6 +576,55 @@ class MCPToolPlugin(RunnerForwardingMixin):
             "tool cache MUST survive across cascade sessions "
             "(cascade-sharing target plugin, sibling of lsp)"
         )
+
+    def on_session_env_reloaded(self, changed_env_names) -> List[str]:
+        """Reopen remote servers whose headers read a changed variable (#1609).
+
+        Called by the runner's ``session.reload_env`` after the new
+        environment is applied.  A remote server's headers are resolved once,
+        when its connection opens, so a rotated credential (an access token
+        the application refreshed into the session env) never reaches an
+        open connection.  Every connected ``http`` / ``sse`` server whose
+        header templates read a ``${VAR}`` named in ``changed_env_names`` is
+        reconnected; stdio servers, and remote servers whose headers read
+        none of the changed names, keep their connection.
+
+        The reconnect runs on the MCP thread and is NOT waited for: the
+        request queue is FIFO, so a tool call sent after this returns is
+        served on the reopened connection.  A reconnect that fails marks the
+        server failed and is logged at WARNING, as a failed connect is.
+
+        Args:
+            changed_env_names: Names whose value differs between the
+                environment before and after the reload (set, removed or
+                changed).
+
+        Returns:
+            The servers scheduled for a reconnect (empty when none).
+        """
+        from jaato_server.shared.mcp_remote import header_env_names
+
+        changed = {str(n) for n in (changed_env_names or ())}
+        manager = self._manager
+        if not changed or manager is None or self._request_queue is None:
+            return []
+        if self._thread is None or not self._thread.is_alive():
+            return []
+        names = []
+        for name, conn in list(getattr(manager, "_connections", {}).items()):
+            config = getattr(conn, "config", None)
+            if config is None or not getattr(config, "is_remote", False):
+                continue
+            if getattr(conn, "failed", False):
+                continue
+            if header_env_names(config.headers or {}) & changed:
+                names.append(name)
+        if names:
+            self._request_queue.put((MSG_RECONNECT_REMOTE, {"names": names}))
+            self._log_event(LOG_INFO, "Session env reloaded; reconnecting "
+                            "remote servers whose headers read a changed "
+                            "variable", details=", ".join(names))
+        return names
 
     def _normalize_tool_name(self, server_name: str, tool_name: str) -> str:
         """Normalize MCP tool name to include server prefix if not present.
@@ -2242,6 +2294,11 @@ class MCPToolPlugin(RunnerForwardingMixin):
                                 'tools': self._tool_cache,
                             }))
 
+                        elif msg_type == MSG_RECONNECT_REMOTE:
+                            # #1609: no response; the sender does not wait.
+                            await self._reconnect_remote_servers(
+                                manager, data.get('names', ()))
+
                         elif msg_type == MSG_LIST_SERVERS:
                             # Return list of servers and their status
                             self._response_queue.put(('ok', {
@@ -2251,22 +2308,8 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
                         elif msg_type == MSG_SERVER_STATUS:
                             # Return detailed status for a specific server
-                            name = data.get('name')
-                            if name in self._connected_servers:
-                                conn = manager.get_connection(name)
-                                self._response_queue.put(('ok', {
-                                    'status': 'connected',
-                                    'tools': [t.name for t in conn.tools],
-                                }))
-                            elif name in self._failed_servers:
-                                self._response_queue.put(('ok', {
-                                    'status': 'failed',
-                                    'error': self._failed_servers[name],
-                                }))
-                            else:
-                                self._response_queue.put(('ok', {
-                                    'status': 'disconnected',
-                                }))
+                            self._response_queue.put(('ok', self._server_status(
+                                manager, data.get('name'))))
 
                         else:
                             self._response_queue.put(('error', f'Unknown message type: {msg_type}'))
@@ -2305,6 +2348,41 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 self._loop.close()
             except Exception as exc:
                 logger.debug(f"Ignoring error when closing MCP event loop: {exc}")
+
+    def _server_status(self, manager, name: str) -> Dict[str, Any]:
+        """The ``MSG_SERVER_STATUS`` answer for one server."""
+        if name in self._connected_servers:
+            conn = manager.get_connection(name)
+            return {'status': 'connected',
+                    'tools': [t.name for t in conn.tools]}
+        if name in self._failed_servers:
+            return {'status': 'failed', 'error': self._failed_servers[name]}
+        return {'status': 'disconnected'}
+
+    async def _reconnect_remote_servers(self, manager, names) -> None:
+        """Reopen ``names`` so their headers re-resolve (#1609).
+
+        Runs on the MCP thread for ``MSG_RECONNECT_REMOTE``.  A failure marks
+        the server failed (``MCPClientManager.reconnect_remote`` installs the
+        failed sentinel) and is logged at WARNING; the others carry on.
+        """
+        for name in names:
+            try:
+                await manager.reconnect_remote(name)
+                self._connected_servers.add(name)
+                self._failed_servers.pop(name, None)
+                self._log_event(LOG_INFO, "Reconnected with headers re-resolved",
+                                server=name)
+            except Exception as exc:
+                error_msg = describe_failure(exc)
+                self._connected_servers.discard(name)
+                self._failed_servers[name] = error_msg
+                self._log_event(LOG_WARN, "Reconnect after env reload failed",
+                                server=name, details=error_msg)
+        self._tool_cache = {
+            name: list(conn.tools)
+            for name, conn in manager._connections.items()
+        }
 
     def _ensure_thread(self):
         """Start the MCP background thread if not already running.
