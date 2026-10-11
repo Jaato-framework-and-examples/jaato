@@ -4064,7 +4064,12 @@ Template rendering writes files to the workspace."""
             }
 
         # ``structured`` already populated above via syntax-dispatched
-        # parser call.
+        # parser call.  For Jinja2, a bare reference that only a
+        # branch the payload does not take would render is not
+        # required (#1628).
+        structured = self._jinja2_drop_untaken_branches(
+            syntax, template_content, structured, variables,
+        )
         errors: List[str] = []
 
         for var in structured:
@@ -4961,6 +4966,106 @@ Template rendering writes files to the workspace."""
             else:
                 result.append(line)
         return ''.join(result), stripped_line_numbers
+
+    def _jinja2_drop_untaken_branches(
+        self,
+        syntax: str,
+        template_content: str,
+        structured: List[Dict[str, Any]],
+        variables: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Demote absent ``scalar`` names the payload's branches never render.
+
+        ``_parse_jinja2_structure`` reads the template alone, so a bare
+        ``{{ x }}`` inside ``{% if variant == 'a' %}...{% else %}...{%
+        endif %}`` is ``scalar`` in every branch, and every variant's
+        fields were demanded whichever variant was rendered (#1628).
+        Required-ness should follow the branches the payload takes.
+
+        The payload decides that, not a re-implementation of Jinja2's
+        expression semantics: the template is rendered once with the
+        payload, in a sandbox shaped like the real render's
+        (``_render_jinja2``: ``SandboxedEnvironment``, no globals), and
+        an undefined top-level name records itself when it is turned
+        into OUTPUT (``__str__``).  Testing it (``{% if x %}``),
+        defaulting it, or iterating it records nothing, so those keep
+        their own classification.  An absent ``scalar`` name that was
+        never output is demoted to ``conditional_test``; one that was
+        output stays required, which keeps the #iter-49 strictness for
+        the branches that do render.
+
+        Any failure of that render (an arithmetic use of an absent
+        name, an ``{% include %}`` with no loader, a filter error)
+        leaves ``structured`` unchanged: the static reading, which
+        requires every branch, is the strict fallback.  Present names
+        are not touched, and nothing but Jinja2 templates is.
+
+        Args:
+            syntax: The detected template syntax.
+            template_content: The template source.
+            structured: ``_parse_jinja2_structure``'s output.
+            variables: The caller's payload (already checked to be a dict).
+
+        Returns:
+            ``structured``, or a copy with the demoted entries.
+        """
+        if syntax != "jinja2":
+            return structured
+        absent = {
+            v["name"] for v in structured
+            if v["kind"] == "scalar" and v["name"] not in variables
+        }
+        if not absent:
+            return structured
+        rendered = self._jinja2_absent_names_rendered(
+            template_content, variables,
+        )
+        if rendered is None:
+            return structured
+        return [
+            {**v, "kind": "conditional_test"}
+            if v["name"] in absent and v["name"] not in rendered else v
+            for v in structured
+        ]
+
+    @staticmethod
+    def _jinja2_absent_names_rendered(
+        template_content: str, variables: Dict[str, Any],
+    ) -> Optional[set]:
+        """Names absent from ``variables`` that a render with it outputs.
+
+        Renders once with a ``ChainableUndefined`` subclass that
+        records its own name when stringified, only for a top-level
+        lookup (``_undefined_obj is missing``: ``{{ x.y }}`` on an
+        absent ``x`` chains back to ``x``; a missing attribute of a
+        PRESENT value is not a payload variable).  Returns ``None``
+        when the render raised, so the caller keeps the strict static
+        reading.  Used by ``_jinja2_drop_untaken_branches`` (#1628).
+        """
+        try:
+            from jinja2 import ChainableUndefined
+            from jinja2.sandbox import SandboxedEnvironment
+            from jinja2.utils import missing
+        except ImportError:
+            return None
+
+        rendered: set = set()
+
+        class _Recording(ChainableUndefined):
+            __slots__ = ()
+
+            def __str__(self) -> str:
+                if self._undefined_obj is missing and self._undefined_name:
+                    rendered.add(self._undefined_name)
+                return ""
+
+        env = SandboxedEnvironment(undefined=_Recording)
+        env.globals = {}
+        try:
+            env.from_string(template_content).render(**variables)
+        except Exception:
+            return None
+        return rendered
 
     def _parse_jinja2_structure(self, content: str) -> List[Dict[str, Any]]:
         """Walk a Jinja2 template, classify each variable by AST context.

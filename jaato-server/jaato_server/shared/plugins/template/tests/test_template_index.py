@@ -5237,20 +5237,21 @@ class TestJinja2RequiredScalarEnforcement:
             {% if flag %}gated: {{ x }}{% endif %}
             trailer: {{ y }}
         """)
-        result = plugin._validate_render_inputs_against_structure(
+        # Required-ness follows the branches the payload takes
+        # (#1628): with ``flag`` absent the body does not render, so
+        # ``x`` is not demanded.
+        assert plugin._validate_render_inputs_against_structure(
             template,
             {"y": "supplied"},
+        ) is None
+        # With the gate open, the body renders ``x``, which is then
+        # required -- same contract as Mustache.
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {"y": "supplied", "flag": True},
         )
-        # x is classified as scalar (bare interpolation inside the
-        # if-body; the if-gate is a separate node).  Bare scalar
-        # absent is rejected — same contract as Mustache.  This
-        # documents the contract: gate IS optional, but the gated
-        # variable's binding strength inside the body is still
-        # scalar (per merge policy).  If kb-authors want true
-        # optionality for x they should use ``{{ x | default(...) }}``.
         assert result is not None
         errs = result["validation_errors"]
-        # x rejected, y accepted, flag accepted (gate is optional).
         assert any("variable 'x'" in e for e in errs), errs
         assert not any("variable 'y'" in e for e in errs), errs
         assert not any("variable 'flag'" in e for e in errs), errs
