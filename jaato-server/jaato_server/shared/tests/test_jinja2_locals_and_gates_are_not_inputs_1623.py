@@ -78,7 +78,7 @@ class TestLocalsAreNotInputs:
             "{% with a = b %}{{ a }}{% endwith %}"
             "{% set body %}x{% endset %}{{ body }}"
             "{% macro m(q) %}{{ q }}{% endmacro %}{{ m(z) }}"
-        ) == {"b": "scalar", "z": "scalar"}
+        ) == {"b": "operand", "z": "operand"}  # #1627: used in an expression
 
 
 class TestIfGatedReferenceIsOptional:

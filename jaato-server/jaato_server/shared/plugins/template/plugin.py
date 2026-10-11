@@ -1472,6 +1472,9 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "where ``description``, when present, is the catalog's guidance on "
                     "what to put in that variable, and:\n"
                     "  - ``kind == 'scalar'``: provide a string/number/bool — used as ``{{name}}``.\n"
+                    "  - ``kind == 'operand'`` (Jinja2): used inside an expression such as "
+                    "    ``{{ name | join(', ') }}`` or ``{{ name.field }}``; required, any type "
+                    "    the expression accepts (a list for ``join``).\n"
                     "  - ``kind == 'section'``: provide a list of dicts — used as "
                     "    ``{{#name}}...{{/name}}``. Each dict in the list MUST contain the "
                     "    keys listed in ``item_keys`` (these are the field names the "
@@ -4096,46 +4099,9 @@ Template rendering writes files to the workspace."""
                 # iterable / scalar_with_default → absence is the
                 # engine-specific idiom for "branch doesn't fire",
                 # skip silently.
-                if kind == "scalar":
-                    if syntax == "mustache":
-                        errors.append(
-                            f"variable {name!r} (kind=scalar) is "
-                            f"referenced by the template body but "
-                            f"absent from the variables payload.  "
-                            f"Mustache has no syntax for 'may be "
-                            f"empty' bare interpolation — "
-                            f"``{{{{{name}}}}}`` semantically MEANS "
-                            f"'always supplied'.  Either supply a "
-                            f"non-empty value, or wrap the reference "
-                            f"in a section "
-                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
-                            f"to signal the variable is optional and "
-                            f"the block should render only when "
-                            f"present."
-                        )
-                    else:
-                        # Jinja2 missing-scalar message (server
-                        # 0.6.173+).  Jinja2 has TWO optionality
-                        # idioms (default filter + if-control-flow);
-                        # surface both as actionable alternatives so
-                        # the agent picks the one matching the
-                        # template author's intent.
-                        errors.append(
-                            f"variable {name!r} (kind=scalar) is "
-                            f"referenced by the Jinja2 template body "
-                            f"as bare ``{{{{ {name} }}}}`` but absent "
-                            f"from the variables payload.  Bare Jinja2 "
-                            f"interpolation has no built-in 'may be "
-                            f"empty' semantics — author committed to "
-                            f"supplying.  Either supply a non-empty "
-                            f"value, OR (if the template author "
-                            f"intends optionality) edit the template "
-                            f"to use ``{{{{ {name} | default('...') "
-                            f"}}}}`` (filter-based default) or wrap "
-                            f"the reference in "
-                            f"``{{% if {name} %}}...{{% endif %}}`` "
-                            f"(control-flow gate)."
-                        )
+                message = self._absent_variable_error(name, kind, syntax)
+                if message:
+                    errors.append(message)
                 continue
 
             actual = variables[name]
@@ -4352,13 +4318,79 @@ Template rendering writes files to the workspace."""
                 "validation_errors": errors,
                 "hint": (
                     "Call listTemplateVariables for this template to see "
-                    "each variable's expected kind (scalar / section / "
-                    "inverted_section).  Sections expecting iteration "
+                    "each variable's expected kind (scalar / operand / "
+                    "section / inverted_section).  Sections expecting iteration "
                     "must receive list-of-dicts; scalars must receive "
                     "str/int/float/bool/None."
                 ),
             }
 
+        return None
+
+    @staticmethod
+    def _absent_variable_error(
+        name: str, kind: str, syntax: str,
+    ) -> Optional[str]:
+        """The refusal for a REQUIRED variable missing from the payload.
+
+        ``scalar`` (both engines) and ``operand`` (Jinja2, #1627) are
+        required; every other kind is optional, so ``None``.  An
+        ``operand`` that IS present is not type-checked by
+        ``_validate_render_inputs_against_structure``: the template
+        states no type for it.
+        """
+        if kind == "operand":
+            return (
+                f"variable {name!r} (kind=operand) is used "
+                f"inside an expression in the Jinja2 template "
+                f"body (a filter argument, attribute access or "
+                f"call) but absent from the variables payload.  "
+                f"Supply a value of the type that expression "
+                f"needs (any type is accepted), OR edit the "
+                f"template to use ``{{{{ {name} | default(...) "
+                f"}}}}`` or wrap the reference in "
+                f"``{{% if {name} %}}...{{% endif %}}``."
+            )
+        elif kind == "scalar":
+            if syntax == "mustache":
+                return (
+                    f"variable {name!r} (kind=scalar) is "
+                    f"referenced by the template body but "
+                    f"absent from the variables payload.  "
+                    f"Mustache has no syntax for 'may be "
+                    f"empty' bare interpolation — "
+                    f"``{{{{{name}}}}}`` semantically MEANS "
+                    f"'always supplied'.  Either supply a "
+                    f"non-empty value, or wrap the reference "
+                    f"in a section "
+                    f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                    f"to signal the variable is optional and "
+                    f"the block should render only when "
+                    f"present."
+                )
+            else:
+                # Jinja2 missing-scalar message (server
+                # 0.6.173+).  Jinja2 has TWO optionality
+                # idioms (default filter + if-control-flow);
+                # surface both as actionable alternatives so
+                # the agent picks the one matching the
+                # template author's intent.
+                return (
+                    f"variable {name!r} (kind=scalar) is "
+                    f"referenced by the Jinja2 template body "
+                    f"as bare ``{{{{ {name} }}}}`` but absent "
+                    f"from the variables payload.  Bare Jinja2 "
+                    f"interpolation has no built-in 'may be "
+                    f"empty' semantics — author committed to "
+                    f"supplying.  Either supply a non-empty "
+                    f"value, OR (if the template author "
+                    f"intends optionality) edit the template "
+                    f"to use ``{{{{ {name} | default('...') "
+                    f"}}}}`` (filter-based default) or wrap "
+                    f"the reference in "
+                    f"``{{% if {name} %}}...{{% endif %}}`` "
+                    f"(control-flow gate)."
+                )
         return None
 
     def _validate_resolved_output_path(
@@ -4973,8 +5005,8 @@ Template rendering writes files to the workspace."""
         Returns a deduplicated list of variable descriptors per the
         following kind taxonomy:
 
-        - ``"scalar"``: variable appears as bare ``{{ var }}`` Output
-          (no ``default()`` filter).  Per Jinja2 spec semantics, a
+        - ``"scalar"``: variable is the whole expression of an
+          Output, ``{{ var }}`` (no ``default()`` filter).  Per Jinja2 spec semantics, a
           bare interpolation REQUIRES the variable to be supplied;
           the only "may be empty" idiom available in Jinja2 syntax
           is ``{{ var | default(...) }}`` (filter) or wrapping in
@@ -4982,6 +5014,12 @@ Template rendering writes files to the workspace."""
           Maps onto the same Mustache ``scalar`` enforcement applied
           by ``_validate_render_inputs_against_structure``: REQUIRED
           + non-empty.
+        - ``"operand"``: variable is part of a larger expression
+          (a filter argument other than ``default``, an attribute or
+          item access, a call argument, a ``{% set %}`` / ``{% with
+          %}`` value).  Required, but untyped: the template states no
+          type for it (``{{ x | join(', ') }}`` needs a list), and a
+          value that renders is a valid value (#1627).
         - ``"conditional_test"``: variable appears in ``{% if var %}``
           test position, OR is referenced only inside the body of an
           ``{% if %}`` / ``{% elif %}`` whose test guarantees it
@@ -5000,7 +5038,8 @@ Template rendering writes files to the workspace."""
           when the variable is absent.
 
         Merge policy when one name appears in multiple contexts:
-        ``scalar`` always wins (the strictest classification).
+        ``scalar`` always wins (the strictest classification), then
+        ``operand`` (required) over the optional kinds.
         Example: ``{{ x }}{% if x %}gated{% endif %}`` — ``x`` is
         classified as ``scalar`` (the bare interpolation outside the
         gate locks it in as required), not ``conditional_test``.  A
@@ -5088,6 +5127,9 @@ Template rendering writes files to the workspace."""
             elif kind == "scalar":
                 # Scalar wins — strictest classification.
                 by_name[name] = "scalar"
+            elif kind == "operand" and existing != "scalar":
+                # Required beats every optional kind (#1627).
+                by_name[name] = "operand"
             # else: keep existing (already at the equal-or-stricter
             # level).
 
@@ -5122,8 +5164,14 @@ Template rendering writes files to the workspace."""
         - ``Filter`` ancestor with ``name == "default"`` →
           ``"scalar_with_default"``: the Name is being defaulted
           (e.g. ``{{ x | default('fallback') }}``).
-        - Otherwise → ``"scalar"``: bare Output reference or any
-          other context not covered above.
+        - The Name is the whole expression of an Output
+          (``{{ x }}``) → ``"scalar"``.
+        - Otherwise → ``"operand"``: the Name is part of a larger
+          expression (``{{ x | join(', ') }}``, ``{{ x.name }}``,
+          ``{{ f(x) }}``, ``{% set y = x %}``).  The template states
+          no type for it, so the value must be supplied but is not
+          type-checked (#1627).  A filter does not imply a primitive:
+          ``join`` needs an iterable.
 
         Args:
             name_node: A ``jinja2.nodes.Name`` node from the AST.
@@ -5131,7 +5179,7 @@ Template rendering writes files to the workspace."""
                 ``_parse_jinja2_structure``.
 
         Returns:
-            One of ``"scalar"``, ``"conditional_test"``,
+            One of ``"scalar"``, ``"operand"``, ``"conditional_test"``,
             ``"iterable"``, ``"scalar_with_default"``.
         """
         from jinja2 import nodes as jnodes
@@ -5140,10 +5188,15 @@ Template rendering writes files to the workspace."""
         while True:
             parent = parent_map.get(id(current))
             if parent is None:
-                # Reached the AST root.  Default to scalar — bare
-                # interpolation in an Output node OR a Name used in
-                # some other position we haven't explicitly mapped.
-                return "scalar"
+                # Reached the AST root.  Only a name printed as the
+                # whole ``{{ }}`` expression is a scalar; one used as
+                # an operand (a filter argument, an attribute or item
+                # access, a call argument, a ``{% set %}`` value) has
+                # no type the template states, so it is required and
+                # untyped (#1627).
+                if isinstance(parent_map.get(id(name_node)), jnodes.Output):
+                    return "scalar"
+                return "operand"
 
             # Inside an If node's test expression?
             if isinstance(parent, jnodes.If) and current is parent.test:

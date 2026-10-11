@@ -5708,6 +5708,23 @@ template` renders them from there. Guard:
 `jaato_server/shared/tests/test_template_variable_descriptions_1619.py`,
 five reversions.
 
+### A Filtered Jinja2 Variable Is Not a Scalar (#1627)
+
+`renderTemplate` checks the payload against
+`TemplatePlugin._parse_jinja2_structure`, and every name that was not an
+`if` test, a `for` source or a `default` argument was `kind=scalar`, which
+refuses any non-primitive. So `{{ decisions | join(', ') }}` refused the
+list `join` needs and `{{ user.name }}` refused its dict, though both
+render. Only a name that is the whole `{{ }}` expression is `scalar` now;
+a name inside a larger expression (a filter argument, attribute or item
+access, a call argument, a `{% set %}` / `{% with %}` value) is
+`operand`: required (an absent one is refused) and not type-checked,
+because the template states no type. Merge: `scalar` beats `operand`,
+which beats the optional kinds; a reference gated by `{% if x %}` stays
+`conditional_test`. `listTemplateVariables` documents the kind. Guard:
+`jaato_server/shared/tests/test_a_filtered_variable_is_not_a_scalar_1627.py`,
+three reversions.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
