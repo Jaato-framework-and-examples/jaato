@@ -1728,6 +1728,25 @@ reversions, against a real streamable-HTTP and SSE server
 (`mcp_http_fixture_server.py`, the installed SDK's own under uvicorn);
 verified on mcp 1.30 and 2.3.
 
+### A Tool Schema the Provider Refuses (#1631)
+
+One remote MCP tool declared its input as a top-level `oneOf` (valid JSON
+Schema, not a valid OpenAI function schema). Every tool's schema rides every
+request, so every turn of the agent failed, greeting included, with a 400
+naming `t_d3b93b33`: a wire id only the issuing runner can resolve.
+
+| Piece | Where |
+|---|---|
+| a tool whose top-level input schema has `oneOf` / `anyOf` / `allOf` / `enum` / `const` / `not`, a `type` other than `object`, or is not a dict is left out of the schemas, executors, streaming names and system-instruction listing, and announced once at WARNING by name | `plugins/mcp/schema_compat.py::top_level_schema_refusal`, `MCPToolPlugin._excluded_tools` / `_usable_tools`; `mcp show <server>` lists the excluded tools |
+| the runner's send-stage error and its traceback resolve tool ids back to names, in the process whose reverse map issued them | `scrub_tool_ids` in `RunnerRPC._handle_session_send_message` |
+
+The check is conservative and provider-agnostic: nested combinators and a
+schema with no `type` pass. A degraded agent beats a dead one, the bargain
+the plugin already makes for a server it cannot connect. Not done: asking
+the provider for its exact function-schema constraints. Guard:
+`jaato_server/shared/tests/test_a_refused_mcp_schema_names_its_tool_1631.py`,
+five reversions.
+
 ### Streaming & Cancellation
 
 Key types in `jaato_server/shared/plugins/model_provider/types.py`:

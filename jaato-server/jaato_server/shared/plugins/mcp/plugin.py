@@ -27,6 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
 from ..registry import is_runner_hosted_mirror
+from .schema_compat import top_level_schema_refusal
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
@@ -338,6 +339,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._agent_name: Optional[str] = None
         # Session ID for multi-session log disambiguation
         self._session_id: Optional[str] = None
+        # (server, tool name, reason) already announced as excluded, so the
+        # WARNING fires once per tool rather than on every schema walk (#1631).
+        self._excluded_announced: set = set()
 
     def _log_event(
         self,
@@ -659,6 +663,55 @@ class MCPToolPlugin(RunnerForwardingMixin):
             candidate = f"{expected_prefix}{tool_name}"
         return sanitize_untrusted_tool_name(candidate)
 
+    @staticmethod
+    def _raw_input_schema(tool: Any) -> Any:
+        """The tool's input schema as the server sent it.
+
+        mcp 1.x names the field ``inputSchema``; mcp 2.x's pydantic model
+        exposes it as ``input_schema`` (the camelCase name is only the wire
+        alias).
+        """
+        raw_schema = getattr(tool, 'inputSchema', None)
+        if raw_schema is None:
+            raw_schema = getattr(tool, 'input_schema', None)
+        return raw_schema
+
+    def _excluded_tools(self, server_name: str) -> Dict[str, str]:
+        """Tools of ``server_name`` dropped for an unusable schema, name -> reason.
+
+        A tool whose top-level input schema a provider refuses
+        (:func:`~.schema_compat.top_level_schema_refusal`) fails EVERY request
+        that offers it, because every tool's schema rides every request.  It
+        is left out of the schemas, executors, streaming names and the
+        system-instruction listing alike, so the four cannot disagree about
+        which tools exist, and announced once at WARNING naming the tool --
+        the same bargain the plugin makes for a server it cannot connect: a
+        degraded agent beats a dead one (#1631).  Keyed by the ORIGINAL tool
+        name, as the cache holds it.
+        """
+        excluded: Dict[str, str] = {}
+        for tool in self._tool_cache.get(server_name, []):
+            reason = top_level_schema_refusal(self._raw_input_schema(tool))
+            if reason is None:
+                continue
+            excluded[tool.name] = reason
+            key = (server_name, tool.name, reason)
+            if key not in self._excluded_announced:
+                self._excluded_announced.add(key)
+                self._log_event(
+                    LOG_WARN,
+                    f"Tool {self._normalize_tool_name(server_name, tool.name)} "
+                    f"excluded: its {reason}, which function-calling "
+                    f"providers refuse; offering it would fail every turn",
+                    server=server_name,
+                )
+        return excluded
+
+    def _usable_tools(self, server_name: str, tools: List[Any]) -> List[Any]:
+        """``tools`` without the ones :meth:`_excluded_tools` drops."""
+        excluded = self._excluded_tools(server_name)
+        return [t for t in tools if t.name not in excluded]
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return ToolSchemas for all discovered MCP tools."""
         if not self._initialized:
@@ -666,14 +719,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
         schemas = []
         for server_name, tools in self._tool_cache.items():
-            for tool in tools:
+            for tool in self._usable_tools(server_name, tools):
                 try:
-                    # mcp 1.x names the field ``inputSchema``; mcp 2.x's
-                    # pydantic model exposes it as ``input_schema`` (the
-                    # camelCase name is only the wire alias).
-                    raw_schema = getattr(tool, 'inputSchema', None)
-                    if raw_schema is None:
-                        raw_schema = getattr(tool, 'input_schema', None)
+                    raw_schema = self._raw_input_schema(tool)
                     cleaned_schema = self._clean_schema_for_vertex(raw_schema)
                     normalized_name = self._normalize_tool_name(server_name, tool.name)
                     schema = ToolSchema(
@@ -741,7 +789,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
         # Executors for MCP model tools
         tool_count = 0
         for server_name, tools in self._tool_cache.items():
-            for tool in tools:
+            for tool in self._usable_tools(server_name, tools):
                 # Normalize the tool name for registration
                 normalized_name = self._normalize_tool_name(server_name, tool.name)
                 # Create a closure that captures the ORIGINAL tool name for MCP server calls
@@ -833,7 +881,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
         boundary close marker and appear to escape the block.
         """
         rows = []
-        for tool in tools:
+        for tool in self._usable_tools(server_name, tools):
             raw = tool.description or "No description"
             desc = defang_untrusted_markers(" ".join(raw.split()))
             normalized_name = self._normalize_tool_name(server_name, tool.name)
@@ -1173,7 +1221,10 @@ class MCPToolPlugin(RunnerForwardingMixin):
         if server_name in self._connected_servers:
             lines.append(f"  Status: CONNECTED")
             tools = self._tool_cache.get(server_name, [])
-            lines.append(f"  Tools available: {len(tools)}")
+            excluded = self._excluded_tools(server_name)
+            lines.append(f"  Tools available: {len(tools) - len(excluded)}")
+            for name, reason in sorted(excluded.items()):
+                lines.append(f"  Excluded: {name} ({reason})")
         elif server_name in self._failed_servers:
             lines.append(f"  Status: FAILED")
             lines.append(f"  Error: {self._failed_servers[server_name]}")
@@ -1841,7 +1892,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
             # Only include tools from servers with streaming enabled
             if server_name not in self._streaming_servers:
                 continue
-            for tool in tools:
+            for tool in self._usable_tools(server_name, tools):
                 normalized_name = self._normalize_tool_name(server_name, tool.name)
                 tool_names.append(normalized_name)
         return tool_names

@@ -4451,15 +4451,23 @@ class RunnerRPC:
                 # Sanitized like every other traceback crossing this boundary
                 # (§3.1): the daemon log and any forwarded event are
                 # potentially cross-tenant surfaces.
+                #
+                # Tool ids are resolved back to names (#1631).  A provider
+                # that refuses a tool quotes the WIRE id it was sent
+                # (``Invalid schema for function 't_d3b93b33'``), and the
+                # reverse map that names it is process-local -- live here,
+                # in the process that issued the id, and nowhere the error
+                # is read.  Unknown ids pass through unchanged.
                 from .sanitize import sanitize_traceback
+                from jaato_server.shared.tool_id_map import scrub_tool_ids
                 return False, {
-                    "error": (
+                    "error": scrub_tool_ids(
                         f"session.send_message: model loop raised "
                         f"{type(exc).__name__}: {exc}"
                     ),
-                    "traceback": sanitize_traceback(
+                    "traceback": scrub_tool_ids(sanitize_traceback(
                         traceback.format_exc(), self._workspace_root,
-                    ),
+                    )),
                     "stage": "send",
                 }
 
