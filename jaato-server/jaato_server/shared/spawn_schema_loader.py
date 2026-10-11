@@ -31,7 +31,7 @@ visibly distinct in the codebase.
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from jaato_server.shared.user_tier import path as _user_tier_path
 
@@ -69,18 +69,49 @@ def resolve_spawn_schema(
         what "missing or broken schema" means for its feature (typically:
         skip spawn validation rather than refuse the spawn).
     """
+    return resolve_spawn_schema_reporting(
+        schema_ref, workspace_path, config_root)[0]
+
+
+#: Why a declared ``spawn_payload_schema`` did not resolve, in words a
+#: client may be shown: no resolved path, no file contents.  The daemon
+#: log line beside each carries the detail.
+SPAWN_SCHEMA_NOT_FOUND = "not found in any tier"
+SPAWN_SCHEMA_UNREADABLE = "file could not be read"
+SPAWN_SCHEMA_INVALID_JSON = "file is not valid JSON"
+SPAWN_SCHEMA_NOT_OBJECT = "file is not a JSON object"
+SPAWN_SCHEMA_BAD_TYPE = "must be an object or a path string"
+
+
+def resolve_spawn_schema_reporting(
+    schema_ref: Union[str, Dict[str, Any], None],
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """:func:`resolve_spawn_schema`, also saying why a declared one failed.
+
+    The one implementation: :func:`resolve_spawn_schema` returns its first
+    element.  The profile listing (#1637) reports the second, so a client
+    can tell "declares no schema" (``(None, None)``) from "declares one
+    that does not resolve" (``(None, reason)``).
+
+    Returns:
+        ``(schema, error)``.  ``error`` is one of the ``SPAWN_SCHEMA_*``
+        phrases, naming no path; every failure is also logged at WARNING
+        with the detail.
+    """
     if schema_ref is None:
-        return None
+        return None, None
 
     if isinstance(schema_ref, dict):
-        return schema_ref
+        return schema_ref, None
 
     if not isinstance(schema_ref, str):
         logger.warning(
             "spawn_payload_schema must be a dict or string path, got %s",
             type(schema_ref).__name__,
         )
-        return None
+        return None, SPAWN_SCHEMA_BAD_TYPE
 
     resolved = _resolve_schema_path(schema_ref, workspace_path, config_root)
     if resolved is None:
@@ -90,26 +121,26 @@ def resolve_spawn_schema(
             schema_ref, SPAWN_SCHEMAS_SUBDIR,
             SPAWN_SCHEMAS_SUBDIR, SPAWN_SCHEMAS_SUBDIR,
         )
-        return None
+        return None, SPAWN_SCHEMA_NOT_FOUND
 
     try:
         content = resolved.read_text(encoding='utf-8')
         data = json.loads(content)
     except json.JSONDecodeError as e:
         logger.warning("Invalid JSON in spawn schema %s: %s", resolved, e)
-        return None
+        return None, SPAWN_SCHEMA_INVALID_JSON
     except OSError as e:
         logger.warning("Cannot read spawn schema %s: %s", resolved, e)
-        return None
+        return None, SPAWN_SCHEMA_UNREADABLE
 
     if not isinstance(data, dict):
         logger.warning(
             "Spawn schema must be a JSON object, got %s in %s",
             type(data).__name__, resolved,
         )
-        return None
+        return None, SPAWN_SCHEMA_NOT_OBJECT
 
-    return data
+    return data, None
 
 
 def _resolve_schema_path(

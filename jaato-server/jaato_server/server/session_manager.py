@@ -15998,6 +15998,15 @@ class SessionManager:
         variable names survive); ``system_instructions`` and
         ``inherits`` are not exposed (deprecated or already resolved).
 
+        Two fields are RESOLVED here rather than copied (#1637), each by
+        the function a session of the profile would use:
+        ``spawn_payload_schema`` (the dict ``validate_spawn_params`` checks
+        ``agent_params`` against, or ``spawn_payload_schema_error`` when a
+        declared one does not resolve) and ``permission_default`` (the
+        effective ``defaultPolicy`` over every permission layer, #1474, or
+        ``permission_default_error`` when a ``permissions.json`` cannot be
+        read).  Neither names a file path.
+
         Args:
             workspace_path: Workspace directory to discover profiles from.
                 May be ``None`` (user-level and premium profiles are still
@@ -16022,14 +16031,36 @@ class SessionManager:
         from jaato_server.shared.plugins.subagent.config import discover_profiles
         from jaato_sdk.events import ProfileSummary, ProfileParseError
 
+        from jaato_server.shared.spawn_schema_loader import (
+            resolve_spawn_schema_reporting,
+        )
+        from jaato_server.shared.plugins.permission.policy_layers import (
+            listing_permission_default,
+        )
+
+        listing_env = _read_listing_env(env_file)
         discovery = discover_profiles(
             ".jaato/profiles",
             base_path=workspace_path or ".",
             config_root=config_root,
-            session_env=_read_listing_env(env_file),
+            session_env=listing_env,
         )
         summaries: List[ProfileSummary] = []
         for name, profile in discovery.profiles.items():
+            # #1637: the input contract and the permission default, each
+            # resolved by the function a session of this profile would use
+            # (``validate_spawn_params``' lookup, the enforcer's layering).
+            spawn_schema, spawn_error = resolve_spawn_schema_reporting(
+                profile.spawn_payload_schema,
+                workspace_path=workspace_path,
+                config_root=config_root,
+            )
+            perm_default, perm_error = listing_permission_default(
+                (profile.plugin_configs or {}).get("permission"),
+                workspace_path=workspace_path,
+                config_root=config_root,
+                listing_env=listing_env,
+            )
             summaries.append(ProfileSummary(
                 name=name,
                 description=profile.description,
@@ -16050,6 +16081,10 @@ class SessionManager:
                     if profile.runtime_limits else None
                 ),
                 completion_payload_schema=profile.completion_payload_schema,
+                spawn_payload_schema=spawn_schema,
+                spawn_payload_schema_error=spawn_error,
+                permission_default=perm_default,
+                permission_default_error=perm_error,
                 env_var_names=sorted(profile.env.keys()),
             ))
 

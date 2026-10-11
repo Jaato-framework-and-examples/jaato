@@ -10380,6 +10380,13 @@ export type CompletionPayloadSchema =
       [k: string]: unknown;
     }
   | null;
+export type SpawnPayloadSchema = {
+  [k: string]: unknown;
+} | null;
+export type SpawnPayloadSchemaError = string | null;
+export type Policy = string;
+export type Source6 = string;
+export type PermissionDefaultError = string | null;
 export type EnvVarNames = string[];
 export type Profiles = ProfileSummary[];
 export type Name1 = string;
@@ -24598,7 +24605,7 @@ export type SessionId134 = string;
 export type RequestId60 = string;
 export type RemoteAgentId1 = string;
 export type Text6 = string;
-export type Source6 = string;
+export type Source7 = string;
 /**
  * All event types in the protocol.
  */
@@ -27115,7 +27122,7 @@ export type EventType148 =
 export type Timestamp148 = string;
 export type SessionId148 = string;
 export type WakeRef1 = string;
-export type Source7 = string;
+export type Source8 = string;
 /**
  * All event types in the protocol.
  */
@@ -27999,7 +28006,7 @@ export type EventType153 =
   | "gates.snapshot";
 export type Timestamp153 = string;
 export type SessionId153 = string;
-export type Policy = string;
+export type Policy1 = string;
 /**
  * All event types in the protocol.
  */
@@ -31950,6 +31957,10 @@ export interface ProfileSummary {
   gc?: Gc;
   runtime_limits?: RuntimeLimits;
   completion_payload_schema?: CompletionPayloadSchema;
+  spawn_payload_schema?: SpawnPayloadSchema;
+  spawn_payload_schema_error?: SpawnPayloadSchemaError;
+  permission_default?: PermissionDefault | null;
+  permission_default_error?: PermissionDefaultError;
   env_var_names?: EnvVarNames;
 }
 export interface PluginConfigs {
@@ -31959,6 +31970,19 @@ export interface PluginConfigs {
 }
 export interface ModelTiers {
   [k: string]: unknown;
+}
+/**
+ * A profile's effective permission default, as listed (#1637).
+ *
+ * ``policy`` is ``allow`` / ``deny`` / ``ask``; ``source`` is the layer
+ * whose ``defaultPolicy`` won: ``framework``, ``user``, ``workspace`` or
+ * ``profile``.  A session created from the profile in the same workspace
+ * starts with this default; an ``ask`` under a client that cannot answer
+ * prompts is refused at run time.
+ */
+export interface PermissionDefault {
+  policy: Policy;
+  source: Source6;
 }
 /**
  * Profile file that failed to parse during discovery.
@@ -33790,7 +33814,7 @@ export interface PeerAgentOutputEvent {
   request_id?: RequestId60;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
-  source?: Source6;
+  source?: Source7;
 }
 /**
  * Signal that a remote subagent has finished execution.
@@ -34112,7 +34136,7 @@ export interface SessionWokenEvent {
   timestamp?: Timestamp148;
   session_id?: SessionId148;
   wake_ref?: WakeRef1;
-  source?: Source7;
+  source?: Source8;
 }
 /**
  * Add tools / patterns to the session's permission whitelist.
@@ -34182,7 +34206,7 @@ export interface PermissionSetDefaultRequest {
   type?: EventType153;
   timestamp?: Timestamp153;
   session_id?: SessionId153;
-  policy?: Policy;
+  policy?: Policy1;
 }
 /**
  * Request a structured snapshot of the current permission policy.

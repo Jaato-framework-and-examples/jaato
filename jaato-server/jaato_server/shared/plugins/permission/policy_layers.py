@@ -480,3 +480,53 @@ def enforcer_init_config(
     if profile_block:
         config.update(profile_block)
     return config
+
+
+# ---------------------------------------------------------------- listing
+
+def listing_permission_default(
+    profile_block: Optional[Dict[str, Any]],
+    *,
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+    listing_env: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """The effective ``defaultPolicy`` of one profile, for the listing (#1637).
+
+    ``session.profiles`` answers before any session exists, and a client
+    reading ``plugin_configs.permission.policy`` alone sees layer 4 only.
+    This asks :func:`resolve_effective_policy`, the function every enforcer
+    asks, for the listing's workspace and config root.
+
+    Args:
+        profile_block: The profile's ``plugin_configs.permission`` block.
+        workspace_path: The listing's workspace.
+        config_root: The listing's config root (``None`` = the workspace's).
+        listing_env: The env the listing resolved (#1593); its
+            ``PERMISSION_CONFIG_PATH`` names the project file when the block
+            names none.
+
+    Returns:
+        ``({"policy": ..., "source": <layer id>}, None)``, or
+        ``(None, reason)`` when a file layer cannot be read: the session
+        would fail to initialise its enforcer the same way.  Neither names
+        a file path or a list entry; the listing goes to clients.
+    """
+    block = profile_block if isinstance(profile_block, dict) else {}
+    profile_policy = block.get("policy")
+    config_path = block.get("config_path") or (listing_env or {}).get(
+        PERMISSION_CONFIG_PATH_ENV) or None
+    try:
+        effective = resolve_effective_policy(
+            profile_policy if isinstance(profile_policy, dict) else None,
+            workspace_path=workspace_path,
+            config_root=config_root,
+            config_path=config_path,
+        )
+    except (ConfigValidationError, ValueError, OSError) as exc:
+        logger.warning("permission: listing could not resolve the effective "
+                       "policy: %s", exc)
+        return None, (f"a permissions.json layer could not be read "
+                      f"({type(exc).__name__})")
+    return ({"policy": effective.default_policy,
+             "source": effective.default_policy_source.layer}, None)

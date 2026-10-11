@@ -635,7 +635,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ``PermissionRequestedEvent`` and is answered with the usual
 # ``PermissionResponseRequest``.  Both are session-less on IPC.  NEW verbs
 # (the 1.7 rule): the SDKs refuse below ``MIN_PLUGIN_TOOL_PROTOCOL``.
-PROTOCOL_VERSION = "1.37"
+# 1.38 -- ``ProfileSummary`` gains ``spawn_payload_schema`` (RESOLVED: the
+# inline dict, or the file a path names loaded through the daemon's own
+# spawn-schema lookup) with ``spawn_payload_schema_error`` when a declared
+# one resolves nowhere, and ``permission_default`` (``{policy, source}``:
+# the effective ``defaultPolicy`` over all four permission layers, #1474)
+# with ``permission_default_error`` (#1637).  Additive and optional: an
+# older client ignores them, an older daemon sends none, and absent reads
+# as "not said", never as "no schema" or "ask".
+PROTOCOL_VERSION = "1.38"
 
 
 # =============================================================================
@@ -2595,6 +2603,21 @@ class SessionDescriptionUpdatedEvent(Event):
     description: str = ""
 
 
+class PermissionDefault(BaseModel):
+    """A profile's effective permission default, as listed (#1637).
+
+    ``policy`` is ``allow`` / ``deny`` / ``ask``; ``source`` is the layer
+    whose ``defaultPolicy`` won: ``framework``, ``user``, ``workspace`` or
+    ``profile``.  A session created from the profile in the same workspace
+    starts with this default; an ``ask`` under a client that cannot answer
+    prompts is refused at run time.
+    """
+    model_config = ConfigDict(extra='ignore')
+
+    policy: str
+    source: str
+
+
 class ProfileSummary(BaseModel):
     """Stable summary of a profile, safe to expose to external clients.
 
@@ -2637,6 +2660,21 @@ class ProfileSummary(BaseModel):
     gc: Optional[Dict[str, Any]] = None
     runtime_limits: Optional[Dict[str, Any]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+    # The input contract (#1637, 1.38): ``spawn_payload_schema`` RESOLVED by
+    # the same lookup ``session.new`` validates ``agent_params`` against, so
+    # a client never re-implements the tier search.  ``None`` with no error:
+    # the profile declares none.  ``None`` with ``spawn_payload_schema_error``:
+    # it declares one that does not resolve (the reason names no path).
+    # Every property is a string on the wire (#883).
+    spawn_payload_schema: Optional[Dict[str, Any]] = None
+    spawn_payload_schema_error: Optional[str] = None
+    # The effective permission default (#1637, 1.38), over the framework
+    # default, the user and workspace ``permissions.json`` and the profile's
+    # ``plugin_configs.permission.policy`` (#1474), for the listing's
+    # workspace / config root.  ``plugin_configs`` alone is layer 4 and is
+    # wrong whenever a file decides.  No list contents, no file paths.
+    permission_default: Optional[PermissionDefault] = None
+    permission_default_error: Optional[str] = None
 
     # Env: variable NAMES the profile expects to find at runtime —
     # values never leave the daemon

@@ -572,7 +572,7 @@ await client.create_session(profile="researcher")
 
 **IPC command protocol:**
 - `session.new [name] --profile <name>` — create session from profile
-- `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
+- `session.profiles` — list available profiles (→ `SessionProfilesEvent`; since 1.38 each `ProfileSummary` carries the resolved `spawn_payload_schema` and the effective `permission_default`, see [A Profile's Input Contract, Listed](#a-profiles-input-contract-listed-protocol-138-1637))
 - `session.orphans` — list LOADED sessions with no client attached
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
@@ -1496,6 +1496,34 @@ session), `jaato_sdk/tests/test_plugin_tool_client_1606.py`, the TS SDK's
 cases, and `jaato_sdk/conformance/test_plugin_tool_calls_1606.py`, which
 drives a real daemon and runner through the SDK and checks no session record
 is written.
+
+### A Profile's Input Contract, Listed (protocol 1.38, #1637)
+
+`session.profiles` is how a client (jaato-mcp publishing each profile as
+an MCP tool) learns a profile's contract before any session exists. It
+carried `completion_payload_schema` (the output) and nothing about the
+input, and `plugin_configs.permission.policy` is only layer 4 of the
+effective policy (#1474). `ProfileSummary` gains four optional fields,
+each RESOLVED by the function a session of that profile would use, for the
+listing's own workspace, config root and `.env` (#1593):
+
+| Field | Resolved by | Meaning when absent |
+|---|---|---|
+| `spawn_payload_schema` | `spawn_schema_loader.resolve_spawn_schema_reporting` (the lookup `validate_spawn_params` uses) | with no `spawn_payload_schema_error`: the profile declares none |
+| `spawn_payload_schema_error` | the same call; a `SPAWN_SCHEMA_*` phrase naming no path | the schema (if declared) resolved |
+| `permission_default` (`{policy, source}`) | `policy_layers.listing_permission_default` over `resolve_effective_policy` | with no error: an older daemon |
+| `permission_default_error` | the same; the exception type only, no path | the default resolved |
+
+`source` is the layer whose `defaultPolicy` won: `framework`, `user`,
+`workspace` or `profile`. No list contents and no file paths reach the
+listing. `completion_payload_schema` is still passed raw. Additive, so an
+older client ignores the fields and an older daemon sends none; absent is
+"not said", never "no schema" or "ask". Stated limit: with neither the
+block's `config_path` nor the listing `.env` naming one,
+`PERMISSION_CONFIG_PATH` is read from the daemon's `os.environ` (the #1593
+overlay). Guard:
+`jaato_server/server/tests/test_profile_listing_carries_the_contract_1637.py`,
+three reversions.
 
 ### A Failure the Framework Was Told Was a Success (#1053)
 
