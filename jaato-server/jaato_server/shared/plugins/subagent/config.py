@@ -2363,6 +2363,22 @@ class SubagentProfile:
         "is picked per turn from model_tiers[<active_tier>]. Empty = "
         "single-model mode (falls back to the JAATO_TIER_* env vars, then "
         "`model`)."})
+    # Decision models (decision-models.md §7): non-conversational models
+    # served by ``provider.decide()``, bound by NAME outside the tier
+    # ladder so the session's active model can never be one.  Stored as
+    # the normalised ``{name: {model, provider?}}`` mapping
+    # ``shared/decision_models.py`` produces; the session builds each
+    # entry's provider on first use.  Inheritance: child replaces, by
+    # entry name.
+    decision_models: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Decision models bound by name, outside the tier "
+        "ladder: {<name>: {model (required), provider (optional; default "
+        "the session's provider)}}. A decision model answers typed questions "
+        "through provider.decide() and cannot chat, so it is never a tier "
+        "(a tier resolving to one is refused at startup). Consumers name an "
+        "entry, never a model. Names match ^[a-z][a-z0-9_]{1,31}$, at most "
+        "16 entries. Inheritance: child replaces, by entry name. Empty = "
+        "none."})
     # Budget ceilings + the degradation ladder applied as they're
     # approached.  Distinct from ``runtime_limits`` (host resources:
     # memory / pids / cpu) — this caps agent ECONOMICS.  A ``degrade``
@@ -3342,6 +3358,44 @@ class RecordKeepingConfig:
         return out
 
 
+def _str_keyed_dict(raw: Any) -> Dict[str, Any]:
+    """A profile mapping block (``model_tiers``, ``quirks``) with string keys.
+
+    ``None``, an empty value or anything that is not a mapping is ``{}``:
+    the shape these blocks have always been read with, kept in one place.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items()}
+
+
+def _copy_decision_models(value: Any) -> Dict[str, Dict[str, Any]]:
+    """A deep-enough copy of a profile's stored ``decision_models``."""
+    return {str(k): dict(v) for k, v in (value or {}).items()}
+
+
+def _decision_models_errors(data: Dict[str, Any]) -> List[str]:
+    """``validate_profile``'s message for a malformed ``decision_models:``."""
+    try:
+        parse_decision_models_block(data)
+    except ValueError as exc:
+        return [f"decision_models: {exc}"]
+    return []
+
+
+def parse_decision_models_block(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Read and normalise a profile's ``decision_models:`` block.
+
+    Returns the ``{name: {model, provider?}}`` mapping the profile stores.
+    Raises :class:`~jaato_server.shared.decision_models.DecisionModelsConfigError`
+    (a ``ValueError``) naming the entry it refuses.
+    """
+    from jaato_server.shared.decision_models import (
+        decision_models_to_dict, parse_decision_models)
+    return decision_models_to_dict(
+        parse_decision_models(data.get('decision_models')))
+
+
 def parse_record_keeping_block(
     data: Dict[str, Any],
 ) -> Optional['RecordKeepingConfig']:
@@ -3544,6 +3598,11 @@ def build_inline_profile(
         except (ValueError, TypeError) as exc:
             raise ValueError(f"Invalid budget_control in inline spec: {exc}")
 
+    try:
+        decision_models = parse_decision_models_block(data)
+    except ValueError as exc:
+        raise ValueError(f"Invalid decision_models in inline spec: {exc}")
+
     # ``plugins`` is REQUIRED on every profile / inline spec — absent
     # vs. explicitly-empty have meaningfully different downstream
     # semantics (see the workspace-tier scanner for the full
@@ -3561,17 +3620,9 @@ def build_inline_profile(
 
     env = parse_profile_env(data)
 
-    raw_model_tiers = data.get('model_tiers') or {}
-    model_tiers = (
-        {str(k): v for k, v in raw_model_tiers.items()}
-        if isinstance(raw_model_tiers, dict) else {}
-    )
+    model_tiers = _str_keyed_dict(data.get('model_tiers'))
 
-    raw_quirks = data.get('quirks') or {}
-    quirks = (
-        {str(k): v for k, v in raw_quirks.items()}
-        if isinstance(raw_quirks, dict) else {}
-    )
+    quirks = _str_keyed_dict(data.get('quirks'))
 
     return SubagentProfile(
         # Honor the spec's own ``name`` (e.g. "nano-chat") when the SDK
@@ -3606,6 +3657,7 @@ def build_inline_profile(
         runtime_limits=runtime_limits,
         budget_control=budget_control,
         model_tiers=model_tiers,
+        decision_models=decision_models,
         apparmor=bool(data.get('apparmor', False)),
         # Use ``data.get('apparmor_fragments')`` (returns None when
         # absent) rather than ``data.get(..., default)`` — None
@@ -3783,6 +3835,8 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
             getattr(profile, "runtime_limits", None)
         ),
         "model_tiers": dict(getattr(profile, "model_tiers", None) or {}),
+        "decision_models": _copy_decision_models(
+            getattr(profile, "decision_models", None)),
         "budget_control": budget.to_dict() if budget is not None else None,
         "apparmor": bool(getattr(profile, "apparmor", False)),
         "apparmor_fragments": (
@@ -3923,6 +3977,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         ),
         runtime_limits=blocks["runtime_limits"],
         model_tiers=dict(data.get("model_tiers") or {}),
+        decision_models=parse_decision_models_block(data),
         budget_control=blocks["budget_control"],
         apparmor=bool(data.get("apparmor", False)),
         apparmor_fragments=_normalize_apparmor_fragments(
@@ -4271,6 +4326,34 @@ def _merge_runtime_limits(
     if base is None and all(v is None for v in min_wins.values()):
         return None, conflicts
     return replace(base or RuntimeLimits(), **min_wins), conflicts
+
+
+def _merge_decision_models(parents, child, conflicts: List[str]) -> Dict[str, Any]:
+    """``decision_models`` across an ``inherits:`` chain: child replaces, by name.
+
+    An entry the child declares wins whole.  An entry only parents declare
+    is inherited when they agree on it; parents binding one name to two
+    different models, with no child entry to settle it, is a conflict
+    reported like any scalar conflict (silently picking one would decide
+    which model a consumer reaches by the order of ``inherits:``).
+    """
+    from jaato_server.shared.decision_models import merge_decision_models
+    inherited: Dict[str, Any] = {}
+    by_parent: Dict[str, Dict[str, Any]] = {}
+    for parent in parents:
+        for name, entry in (getattr(parent, "decision_models", None) or {}).items():
+            by_parent.setdefault(name, {})[parent.name] = entry
+    own = getattr(child, "decision_models", None) or {}
+    for name, declared in by_parent.items():
+        if name in own:
+            continue
+        distinct = {str(sorted(v.items())) for v in declared.values()}
+        if len(distinct) == 1:
+            inherited[name] = next(iter(declared.values()))
+            continue
+        details = ", ".join(f"'{p}': {v!r}" for p, v in declared.items())
+        conflicts.append(f"  decision_models.{name}: {details}")
+    return merge_decision_models(inherited, own)
 
 
 def _merge_budget_control(
@@ -4684,6 +4767,9 @@ def _merge_profiles(
     merged_model_tiers = _resolve_scalar(
         'model_tiers', child.model_tiers, default={})
 
+    merged_decision_models = _merge_decision_models(
+        parents, child, scalar_conflicts)
+
     # budget_control: NOT a plain scalar-override.  ``limits`` merge
     # MIN-WINS across parents + child (a child may only TIGHTEN a
     # ceiling — it must never grant itself a bigger budget than the
@@ -4833,6 +4919,7 @@ def _merge_profiles(
         runtime_limits=merged_runtime_limits,
         budget_control=merged_budget_control,
         model_tiers=merged_model_tiers,
+        decision_models=merged_decision_models,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
         apparmor_fragments_source=merged_apparmor_fragments_source,
@@ -5081,6 +5168,7 @@ PROFILE_FILE_KEYS = frozenset({
     'runtime_limits',
     'budget_control',
     'model_tiers',
+    'decision_models',
     'apparmor',
     'apparmor_fragments',
     'quirks',
@@ -5222,6 +5310,15 @@ def _scan_profiles_dir(
                     errors[name] = err
                 continue
 
+        try:
+            decision_models = parse_decision_models_block(data)
+        except ValueError as exc:
+            err = f"Invalid decision_models in profile '{name}': {exc}"
+            logger.warning(err)
+            if name not in errors:
+                errors[name] = err
+            continue
+
         # ``plugins:`` is a REQUIRED profile key as of server 0.6.x
         # (this PR).  Absent vs. explicitly-empty have meaningfully
         # different semantics:
@@ -5254,11 +5351,7 @@ def _scan_profiles_dir(
 
         # `env` was parsed (and checked) with the other blocks above.
 
-        raw_model_tiers = data.get('model_tiers') or {}
-        model_tiers = (
-            {str(k): v for k, v in raw_model_tiers.items()}
-            if isinstance(raw_model_tiers, dict) else {}
-        )
+        model_tiers = _str_keyed_dict(data.get('model_tiers'))
         if model_tiers and data.get('model'):
             logger.warning(
                 "Profile '%s' declares both 'model' and 'model_tiers'; "
@@ -5269,11 +5362,7 @@ def _scan_profiles_dir(
                 "tier).", name,
             )
 
-        raw_quirks = data.get('quirks') or {}
-        quirks = (
-            {str(k): v for k, v in raw_quirks.items()}
-            if isinstance(raw_quirks, dict) else {}
-        )
+        quirks = _str_keyed_dict(data.get('quirks'))
 
         profiles[name] = SubagentProfile(
             name=name,
@@ -5302,6 +5391,7 @@ def _scan_profiles_dir(
             runtime_limits=runtime_limits,
             budget_control=budget_control,
             model_tiers=model_tiers,
+            decision_models=decision_models,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
             quirks=quirks,
@@ -5766,6 +5856,15 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
                 )
                 continue
 
+        try:
+            decision_models = parse_decision_models_block(data)
+        except ValueError as exc:
+            logger.warning(
+                "Skipping premium profile '%s': invalid decision_models: %s",
+                name, exc,
+            )
+            continue
+
         # ``plugins:`` is REQUIRED on premium profiles too — see the
         # workspace scanner for the full rationale.
         if 'plugins' not in data:
@@ -5781,22 +5880,14 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
 
         env = parse_profile_env(data)
 
-        raw_model_tiers = data.get('model_tiers') or {}
-        model_tiers = (
-            {str(k): v for k, v in raw_model_tiers.items()}
-            if isinstance(raw_model_tiers, dict) else {}
-        )
+        model_tiers = _str_keyed_dict(data.get('model_tiers'))
         if model_tiers and data.get('model'):
             logger.warning(
                 "Premium profile '%s' declares both 'model' and 'model_tiers'; "
                 "'model' will be ignored.", name,
             )
 
-        raw_quirks = data.get('quirks') or {}
-        quirks = (
-            {str(k): v for k, v in raw_quirks.items()}
-            if isinstance(raw_quirks, dict) else {}
-        )
+        quirks = _str_keyed_dict(data.get('quirks'))
 
         profile = SubagentProfile(
             name=name,
@@ -5825,6 +5916,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             runtime_limits=runtime_limits,
             budget_control=budget_control,
             model_tiers=model_tiers,
+            decision_models=decision_models,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
             quirks=quirks,
@@ -6026,6 +6118,8 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
             except (ValueError, TypeError) as exc:
                 errors.append(f"budget_control: {exc}")
 
+    errors.extend(_decision_models_errors(data))
+
     return len(errors) == 0, errors, warnings
 
 
@@ -6121,6 +6215,8 @@ class SubagentConfig:
                 budget_control = BudgetControlConfig.from_dict(
                     profile_data['budget_control'])
 
+            decision_models = parse_decision_models_block(profile_data)
+
             # Parse plugin entries, separating (preload) annotations
             # and per-plugin tool allow-lists.
             raw_plugins = profile_data.get('plugins', [])
@@ -6164,6 +6260,7 @@ class SubagentConfig:
                 runtime_limits=runtime_limits,
                 budget_control=budget_control,
                 model_tiers=model_tiers,
+                decision_models=decision_models,
                 apparmor=bool(profile_data.get('apparmor', False)),
                 apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
                 scrub_secret_env=profile_data.get('scrub_secret_env'),

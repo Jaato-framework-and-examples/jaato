@@ -769,6 +769,15 @@ class JaatoSession:
         # is registered, no system-prompt augmentation, the provider
         # uses the legacy ``self._model_name``.
         self._tier_config: Optional['ModelTierConfig'] = None
+        # Decision models (decision-models.md §7): the profile's
+        # ``decision_models:`` bindings, by entry name, and the provider
+        # each one built on first use.  Never the session's active
+        # provider: a decision model cannot chat, so it gets an instance
+        # of its own, which ``connect()`` never re-points at a chat model.
+        # Empty = none declared.  See :meth:`decision_provider`.
+        self._decision_bindings: Dict[str, Any] = {}
+        self._decision_providers: Dict[str, Any] = {}
+        self._decision_lock = threading.Lock()
         # Budget control (shared/budget_control.py).  ``None`` = unbudgeted,
         # which is the default and the pre-existing behaviour.  When set, the
         # tracker accumulates spend from the SAME accounting the session
@@ -3038,6 +3047,7 @@ class JaatoSession:
         max_parallel_tools: Optional[int] = None,
         runtime_limits: Optional['RuntimeLimits'] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
+        decision_models: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the session with plugins and instructions.
 
@@ -3106,6 +3116,11 @@ class JaatoSession:
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
                 wins if both are given.
+            decision_models: The profile's ``decision_models:`` bindings
+                (decision-models.md §7), as parsed bindings or the
+                profile's stored dicts.  ``None`` leaves whatever the
+                session has; each entry's provider is built on first use by
+                :meth:`JaatoSession.decision_provider`.
         """
         # Back-compat: ``tools`` was a misleading name for the plugin-name list
         # (it never took tool names).  Honour it as a deprecated alias for
@@ -3176,6 +3191,8 @@ class JaatoSession:
 
         if tier_config is not None:
             self._apply_initial_tier_binding(tier_config)
+
+        self._set_decision_bindings(decision_models)
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
@@ -3796,6 +3813,7 @@ class JaatoSession:
             # once here, alongside the context-window resolution above,
             # before any model work (the earliest point the provider
             # exists).
+            self._refuse_decisions_only_tiers()
             self._validate_modality_tier_capabilities()
             # A session that STARTS in a speaking tier must ask for audio
             # too.  The initial tier never passes through
@@ -10360,6 +10378,63 @@ NOTES
             f"model_tiers.]"
         )
 
+    def _refuse_decisions_only_tiers(self) -> None:
+        """Refuse a tier whose model can only answer decision questions.
+
+        A decisions-only model (``output_modalities == {"decisions"}``, see
+        ``ModalityCapabilityMixin.is_decisions_only``) is served by
+        ``provider.decide()``, never by ``complete()``.  As a tier it would
+        strand the agent: ``enter_tier`` succeeds and the next turn raises
+        ``DecisionModelOnlyError``.  So it is refused here, at the first
+        point the provider exists, with a message pointing at
+        ``decision_models:`` (decision-models.md §7).
+
+        Covers the tiers on the ACTIVE provider, the boundary
+        :meth:`_validate_modality_tier_capabilities` documents: asking
+        another provider would build it.  A cross-provider tier bound to a
+        decisions-only model still fails, loudly, at its first turn.
+
+        Raises:
+            ModelTierConfigError: A same-provider tier maps to a
+                decisions-only model.
+        """
+        tier_config = getattr(self, "_tier_config", None)
+        provider = getattr(self, "_provider", None)
+        if tier_config is None or provider is None:
+            return
+        is_decisions_only = getattr(provider, "is_decisions_only", None)
+        if not callable(is_decisions_only):
+            return
+        from .model_tiers import ModelTierConfigError
+        for tier_name in tier_config.ordered_tier_names():
+            entry = tier_config.tiers[tier_name]
+            if entry.provider and entry.provider != self._active_provider_name:
+                continue
+            # Positive evidence only: a catalog lookup that fails, or an
+            # answer that is not ``True``, is not proof the model is a
+            # decision model, and must not stop a session whose tiers may
+            # all be ordinary chat models.
+            try:
+                decisions_only = is_decisions_only(entry.model) is True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "decisions-only check for tier %r (%s) failed: %s",
+                    tier_name, entry.model, exc,
+                )
+                continue
+            if not decisions_only:
+                continue
+            provider_name = getattr(provider, "name", "the provider")
+            raise ModelTierConfigError(
+                f"The {tier_name!r} tier maps to {entry.model!r} "
+                f"({provider_name}), a decision model: it answers typed "
+                f"questions through decide() and cannot hold a "
+                f"conversation, so it cannot be a tier.  Bind it under "
+                f"decision_models: instead, e.g. decision_models: "
+                f"{{{tier_name}: {{provider: {provider_name}, model: "
+                f"{entry.model}}}}}."
+            )
+
     def _validate_modality_tier_capabilities(self) -> None:
         """Fail loud when a tier declaring a modality role maps to a model
         the provider can't confirm accepts that input.
@@ -10384,10 +10459,12 @@ NOTES
         loop for why, and for what does (and does not) back up the rest.
 
         Inbound roles are checked against ``provider.supports_modality``.
-        Outbound roles are checked only when the provider implements
-        ``supports_output_modality``; none do yet, so an outbound role is
-        currently left unverified here rather than failing falsely — its
-        inertness is reported by ``jaato-scaffold validate`` instead.
+        Outbound roles are checked against ``supports_output_modality``,
+        which ``ModalityCapabilityMixin`` gives every provider (the output
+        knob, else ``{text}``; ``openrouter`` reads its catalog first).  A
+        provider without the method leaves the role unverified rather
+        than failing falsely.  A tier bound to a decisions-only model is
+        refused separately, by :meth:`_refuse_decisions_only_tiers`.
 
         Raises:
             ModelTierConfigError: A tier declares a modality its model
@@ -10430,13 +10507,9 @@ NOTES
                     f"plugin_configs.{provider_name}.modalities: "
                     f'["text", "{kind}"] to assert it.'
                 )
-            # Outbound is verified only against a provider that can answer.
-            # No provider implements ``supports_output_modality`` yet (the
-            # output half of the catalog's ``architecture.modality`` is still
-            # discarded), so this is a forward hook: absent the method the
-            # role is left unverified rather than failing falsely.  The
-            # inertness itself is surfaced by ``jaato-scaffold validate``,
-            # not by refusing to start.  See docs/design/binary-media-chunks.md.
+            # Outbound is verified only against a provider that can answer:
+            # absent ``supports_output_modality`` the role is left unverified
+            # rather than failing falsely.  See docs/design/binary-media-chunks.md.
             supports_out = getattr(provider, "supports_output_modality", None)
             if supports_out is None:
                 continue
@@ -14942,6 +15015,86 @@ NOTES
         if self._system_instruction:
             return self._system_instruction + "\n\n" + tier_line
         return tier_line
+
+    def _set_decision_bindings(self, decision_models: Optional[Dict[str, Any]]) -> None:
+        """Install the profile's ``decision_models:`` bindings.
+
+        ``None`` leaves the current bindings untouched (``configure()`` is
+        called with it whenever the caller has no profile block to give).
+
+        Accepts parsed :class:`~.decision_models.DecisionModelBinding`
+        values or the profile's stored ``{model, provider?}`` dicts, so an
+        in-process subagent can pass ``profile.decision_models`` as it is.
+        Providers built for a previous set are dropped: an entry that now
+        names another model must not keep answering from the old one.
+        """
+        if decision_models is None:
+            return
+        from .decision_models import DecisionModelBinding, parse_decision_models
+        raw = {
+            name: (b.to_dict() if isinstance(b, DecisionModelBinding) else b)
+            for name, b in dict(decision_models).items()
+        }
+        bindings = parse_decision_models(raw)
+        with self._decision_lock:
+            self._decision_bindings = bindings
+            self._decision_providers = {}
+
+    def decision_model_names(self) -> List[str]:
+        """The ``decision_models:`` entry names this session binds, sorted."""
+        return sorted(self._decision_bindings)
+
+    def decision_provider(self, name: str) -> Any:
+        """The provider serving ``decision_models.<name>``, built on first use.
+
+        The entry's provider is created through the runtime with this
+        session's ``plugin_configs`` (so it finds its own key and knobs),
+        connected to the entry's model, and cached for the session.  It is
+        a separate instance from the chat provider and from any tier's.
+
+        Raises:
+            UnknownDecisionModelError: No entry of that name; carries the
+                names that are bound.
+            DecisionModelUnavailableError: The entry's provider does not
+                implement ``decide()``.
+        """
+        from .decision_models import (
+            DecisionModelUnavailableError, UnknownDecisionModelError)
+        with self._decision_lock:
+            cached = self._decision_providers.get(name)
+            if cached is not None:
+                return cached
+            binding = self._decision_bindings.get(name)
+            if binding is None:
+                raise UnknownDecisionModelError(
+                    name, sorted(self._decision_bindings))
+            provider_name = (
+                binding.provider
+                or self._provider_name_override
+                or getattr(self._runtime, "provider_name", None)
+            )
+            base = getattr(self, "_tier_provider_base", None) or {}
+            prov = self._runtime.create_provider(
+                binding.model,
+                provider_name=provider_name,
+                skip_model_test=True,
+                plugin_configs=base.get("plugin_configs"),
+            )
+            if not callable(getattr(prov, "decide", None)):
+                raise DecisionModelUnavailableError(
+                    name, str(provider_name), binding.model)
+            if hasattr(prov, "set_agent_context"):
+                prov.set_agent_context(
+                    agent_type=self._agent_type,
+                    agent_name=self._agent_name,
+                    agent_id=self._agent_id,
+                )
+            self._decision_providers[name] = prov
+            logger.info(
+                "decision model %r bound: %s/%s", name, provider_name,
+                binding.model,
+            )
+            return prov
 
     def _provider_for_tier(self, provider_name: str, model: str) -> 'ModelProviderPlugin':
         """Cached provider instance for a cross-provider tier (V2).

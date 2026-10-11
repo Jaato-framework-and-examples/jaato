@@ -1254,6 +1254,7 @@ class JaatoRuntime:
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
         agent_id: str = "main",
+        decision_models: Optional[Dict[str, Any]] = None,
         tool_scopes: Optional[Dict[str, List[str]]] = None,
         max_parallel_tools: Optional[int] = None,
         runtime_limits: Optional['RuntimeLimits'] = None,
@@ -1323,6 +1324,11 @@ class JaatoRuntime:
                 the subprocess caps land on plugin instances a sibling
                 session also uses.  ``None`` is therefore a no-op, not
                 a clear — see ``JaatoSession._apply_runtime_limits``.
+            decision_models: The profile's ``decision_models:`` bindings
+                (decision-models.md §7), as parsed bindings or the
+                profile's stored dicts.  ``None`` leaves whatever the
+                session has; each entry's provider is built on first use by
+                :meth:`JaatoSession.decision_provider`.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -1382,6 +1388,7 @@ class JaatoRuntime:
             workspace_path=workspace_path,
             completion_payload_schema=completion_payload_schema,
             tier_config=tier_config,
+            decision_models=decision_models,
             budget_control=budget_control,
             agent_params=agent_params,
             completion_processors=completion_processors,

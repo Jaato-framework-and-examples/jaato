@@ -111,6 +111,16 @@ from .path_utils import require_absolute_path
 SESSION_ENVELOPE_VERSION = 8
 
 
+def decision_models_wire(value: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """``decision_models`` as it crosses the wire: a fresh ``{name: entry}``
+    copy, or ``None`` for absent, empty or not a mapping.  The runner
+    re-parses it (``shared/decision_models.py``), so nothing is validated
+    here."""
+    if not isinstance(value, dict) or not value:
+        return None
+    return {str(k): dict(v) for k, v in value.items() if isinstance(v, dict)}
+
+
 def _optional_str(value: Any) -> Optional[str]:
     """``str(value)`` for a present, non-empty wire value; else ``None``."""
     return str(value) if value else None
@@ -364,6 +374,12 @@ class SessionInitEnvelope:
     # mode (no ``enter_tier`` tool, no per-tier system-prompt line).
     # See ``shared/model_tiers.py`` for the resolver and schema.
     model_tiers: Optional[Dict[str, Any]] = None
+    # Profile-declared ``decision_models`` (decision-models.md §7), the
+    # normalised ``{name: {model, provider?}}`` mapping.  Additive, no
+    # version bump: an older runner ignores the key and the session simply
+    # has no decision models, which is what a consumer asking for one is
+    # told by name.  None = none declared.
+    decision_models: Optional[Dict[str, Any]] = None
     # Profile-declared ``budget_control``, re-serialised from the parsed
     # ``BudgetControlConfig`` (see shared/budget_control.py).  None means
     # unbudgeted.  The runner re-parses + validates on arrival.
@@ -639,6 +655,7 @@ class SessionInitEnvelope:
             "model_tiers": (
                 dict(self.model_tiers) if self.model_tiers else None
             ),
+            "decision_models": decision_models_wire(self.decision_models),
             "budget_control": (
                 dict(self.budget_control) if self.budget_control else None
             ),
@@ -732,6 +749,7 @@ class SessionInitEnvelope:
             model_tiers=(
                 dict(d["model_tiers"]) if d.get("model_tiers") else None
             ),
+            decision_models=decision_models_wire(d.get("decision_models")),
             budget_control=(
                 dict(d["budget_control"]) if d.get("budget_control") else None
             ),
