@@ -23,8 +23,10 @@ _PLUGIN = "jaato-server/jaato_server/shared/plugins/template/plugin.py"
 REVERSIONS = [
     Reversion(
         target=_PLUGIN,
-        find='                return "operand"\n',
-        replace='                return "scalar"\n',
+        find=('                    return "scalar"\n'
+              '                return "operand"\n'),
+        replace=('                    return "scalar"\n'
+                 '                return "scalar"\n'),
         because="a filtered name is typed scalar and the list join needs is refused",
         test="TestAnOperandIsNotTyped::test_the_issues_join_payload_passes",
     ),
