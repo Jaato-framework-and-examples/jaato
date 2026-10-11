@@ -5758,6 +5758,30 @@ which beats the optional kinds; a reference gated by `{% if x %}` stays
 `jaato_server/shared/tests/test_a_filtered_variable_is_not_a_scalar_1627.py`,
 three reversions.
 
+### A Payload the Check Accepted and the Renderer Refused (#1633)
+
+After #1623, #1627 and #1628 the shape check treats an absent name as
+optional where the template only tests it (`{% if x %}`), loops over it
+or compares it for equality. `_render_jinja2` rendered with
+`StrictUndefined`, whose `__bool__`, `__iter__` and `__eq__` raise, so
+`{% if signature %}{{ signature }}{% endif %}` with no `signature` passed
+the check and failed at render with `undefined_variable`. So did an
+optional key of a loop item (`{% if r.open %}` on `r = {}`), which the
+check never sees.
+
+| Layer | Change |
+|---|---|
+| renderer | `_gateable_undefined()`: `ChainableUndefined` with a strict `__str__`. Falsy, iterates as empty, `x.y` / `x[k]` chain, `==` is false; `{{ x }}`, `{{ r.open }}`, `{{ x \| upper }}` still raise. Arithmetic and ordering raise as on every `Undefined` |
+| check | a name in an `{% if %}` test is optional only when the test evaluates with it absent (`_jinja2_absent_name_survives`: `and` / `or` / `not`, attribute and item access, `==` / `!=` / `in`, the `defined`-style tests, `default` / `length` / `count` / `list`); otherwise it is `operand`, required. Unknown nodes count as unsafe |
+
+So `{% if variant == 'a' %}` with `variant` absent takes the else branch,
+and `{% if n > 3 %}` with `n` absent is refused by the check rather than by
+the renderer. Stated edge: `{{ x \| join(',') }}` renders `''` for an
+absent `x`, because `join` iterates; the check requires `x` there (#1627),
+so this is reachable only past the check. Guard:
+`jaato_server/shared/tests/test_the_renderer_follows_the_shape_check_1633.py`,
+three reversions.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
