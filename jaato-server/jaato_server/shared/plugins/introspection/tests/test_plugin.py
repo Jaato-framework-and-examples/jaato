@@ -380,6 +380,7 @@ class TestToolCategories:
         assert "web" in TOOL_CATEGORIES
         assert "communication" in TOOL_CATEGORIES
         assert "prompt" in TOOL_CATEGORIES
+        assert "decision" in TOOL_CATEGORIES
         assert "MCP" in TOOL_CATEGORIES
 
     def test_tool_schema_accepts_category(self):

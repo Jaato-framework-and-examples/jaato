@@ -2023,6 +2023,27 @@ def _compliance_example() -> List[str]:
     ]
 
 
+def _decision_models_example() -> List[str]:
+    """The ``decision_models:`` block, emitted COMMENTED OUT in a set profile.
+
+    Same reason as ``model_tiers``: nothing in a profile hints that a stage
+    can bind a decision model, and the ``decide`` tool stays hidden until
+    one is bound.  It sits in the SET profile because an entry names a
+    provider and a model, which the tier-1 base must not.  Commented,
+    because a live entry sends workspace content to a third party.  The
+    provider is ``openrouter`` whatever the set binds: it is the one
+    provider that implements ``decide()`` today.
+    """
+    return [
+        "# Optional decision models — typed judgements (classify, score, yes/no)",
+        "# from a model that cannot chat, bound by NAME outside the tier ladder.",
+        "# Add `decision` to plugins: for the `decide` tool, which is hidden",
+        "# until an entry is bound.  See `jaato-scaffold explain profile`.",
+        "# decision_models:",
+        "#   triage: {provider: openrouter, model: typesafe/jev-1.13}",
+    ]
+
+
 def _temperature_example(provider: str) -> List[str]:
     """The determinism knob, emitted COMMENTED OUT — and why.
 
@@ -2123,6 +2144,7 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
         "# {audio: outbound} stops inbound audio reaching a tier that only",
         "# speaks.  A tier declaring nothing is unchanged — the model's own",
         "# catalog decides.  See `jaato-scaffold explain tiers`.",
+        *_decision_models_example(),
         "# Optional per-SESSION env vars.  This block:",
     ]
     lines += [f"#   - {fact}" for fact in _facts.PROFILE_ENV_FACTS]
