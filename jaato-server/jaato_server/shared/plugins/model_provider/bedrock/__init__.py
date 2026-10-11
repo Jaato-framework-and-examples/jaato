@@ -76,6 +76,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     # provider reads reasoning out and does not write it back.  Wiring
     # this properly needs a signature-carrying part.
     reasoning_replay=False,
+    decisions=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

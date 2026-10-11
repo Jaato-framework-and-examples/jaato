@@ -64,6 +64,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     # and Chat Completions returns no reasoning text at all, so there is
     # nothing to replay on either wire.
     reasoning_replay=False,
+    decisions=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

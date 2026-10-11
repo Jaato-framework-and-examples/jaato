@@ -42,8 +42,9 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=True,
     output_media=True,   # verified end to end: a spoken answer reaches a client as
-    reasoning_replay=False,
 #   ToolOutputEvent media chunks and plays.
+    reasoning_replay=False,
+    decisions=True,   # decide() -> POST /api/alpha/decisions (decision-models.md)
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
@@ -91,9 +92,12 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("base_url", "str"),
         KnobSpec("modalities", "list", None, "assert INPUT modalities"),
         KnobSpec("output_modalities", "list", None,
-                 "assert what the model can EMIT; the catalog reports input "
-                 "modalities only, so without this the floor is text and the "
-                 "startup check refuses an outbound tier role"),
+                 "assert what the model can EMIT, for a model the catalog "
+                 "does not describe; the catalog's "
+                 "architecture.output_modalities wins when present"),
+        KnobSpec("decisions_url", "str", None,
+                 "decision endpoint for decide(); derived from base_url "
+                 "(…/api/v1 -> …/api/alpha/decisions) when unset"),
         KnobSpec("connect_timeout", "float", 15.0,
                  "TCP + TLS handshake deadline, seconds"),
         KnobSpec("request_timeout", "float", 600.0,

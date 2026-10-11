@@ -559,3 +559,56 @@ def test_every_provider_is_either_conformance_tested_or_explicitly_pending():
         f"providers neither behaviorally tested nor in _CONFORMANCE_PENDING: "
         f"{uncovered}. Add a converter entry or pin it as pending (with reason)."
     )
+
+
+# ------------------------------------------------------------- decisions
+#
+# ``decisions`` (docs/design/decision-models.md §4.4) says the adapter
+# DELIVERS ``decide()`` on the wire.  Each provider that declares it names
+# how to aim it at the stand-in decision endpoint here; a declaring
+# provider with no entry fails, so the flag cannot be set without a test
+# that drives it.
+
+def _openrouter_at_standin(server):
+    from jaato_server.shared.tests.decision_standin import openrouter_against
+    return openrouter_against(server)
+
+
+_DECISION_SETUP = {
+    "openrouter": _openrouter_at_standin,
+}
+
+
+@pytest.mark.parametrize("provider", sorted(_provider_dirs()))
+def test_declared_decisions_are_answered_on_the_wire(provider):
+    if not _read_declaration(provider).get("decisions"):
+        pytest.skip(f"{provider} does not declare decisions")
+    from jaato_sdk.plugins.model_provider.decisions import DecisionQuestion
+    from jaato_server.shared.tests.decision_standin import DecisionStandIn
+
+    assert provider in _DECISION_SETUP, (
+        f"{provider} declares decisions=True but has no stand-in setup in "
+        "_DECISION_SETUP, so nothing proves decide() reaches the wire."
+    )
+    questions = {
+        "urgent": DecisionQuestion("noul", "Is this urgent?"),
+        "team": DecisionQuestion("choice", "Which team?", {"billing": None, "tech": None}),
+        "mood": DecisionQuestion("score", "How upset?", ["Calm", "Upset", "Angry"]),
+    }
+    with DecisionStandIn() as server:
+        result = _DECISION_SETUP[provider](server).decide("Payouts failing", questions)
+        posts = server.posts()
+    assert len(posts) == 1 and posts[0][2]["questions"]["team"]["type"] == "choice", (
+        f"{provider}: decide() did not put the questions on the decision endpoint"
+    )
+    assert set(result.answers) == set(questions)
+
+
+@pytest.mark.parametrize("provider", sorted(_provider_dirs()))
+def test_undeclared_decisions_expose_no_decide(provider):
+    if _read_declaration(provider).get("decisions"):
+        pytest.skip(f"{provider} declares decisions")
+    inst = _load_provider_instance(provider)
+    assert not callable(getattr(inst, "decide", None)), (
+        f"{provider} has a decide() method but declares decisions=False."
+    )

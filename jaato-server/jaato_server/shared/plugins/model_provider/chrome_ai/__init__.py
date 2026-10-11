@@ -108,6 +108,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     cancellation=True,             # cancel token -> page-side AbortController
     output_media=False,
     reasoning_replay=False,
+    decisions=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

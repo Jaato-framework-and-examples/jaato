@@ -20118,6 +20118,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": true,
      "prompt_caching": true,
@@ -20247,6 +20248,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -20358,6 +20360,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -20527,6 +20530,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": true,
      "prompt_caching": true,
@@ -20665,6 +20669,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -20782,6 +20787,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": false,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -20857,6 +20863,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21002,6 +21009,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21077,6 +21085,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": true,
      "prompt_caching": true,
@@ -21153,6 +21162,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21293,6 +21303,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21370,6 +21381,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21515,6 +21527,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21660,6 +21673,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21805,6 +21819,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21867,6 +21882,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -21932,6 +21948,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": true,
      "prompt_caching": false,
@@ -22142,6 +22159,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "decisions": true,
      "output_media": true,
      "pdf_input": true,
      "prompt_caching": true,
@@ -22257,6 +22275,11 @@
         "description": "",
         "type": "int"
        },
+       "decisions_url": {
+        "default": null,
+        "description": "decision endpoint for decide(); derived from base_url (…/api/v1 -> …/api/alpha/decisions) when unset",
+        "type": "str"
+       },
        "modalities": {
         "default": null,
         "description": "assert INPUT modalities",
@@ -22264,7 +22287,7 @@
        },
        "output_modalities": {
         "default": null,
-        "description": "assert what the model can EMIT; the catalog reports input modalities only, so without this the floor is text and the startup check refuses an outbound tier role",
+        "description": "assert what the model can EMIT, for a model the catalog does not describe; the catalog's architecture.output_modalities wins when present",
         "type": "list"
        },
        "request_timeout": {
@@ -22329,7 +22352,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: openrouter\n  capabilities: user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, prompt_caching, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OPENROUTER_API_KEY → stored:openrouter-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OPENROUTER_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.openrouter.*):\n    [top_level]  — auth / app-attribution identity\n      api_key                str     OpenRouter API key (sk-or-...)\n      http_referer           str     HTTP-Referer attribution header\n      app_title              str     X-OpenRouter-Title header\n      app_categories         list    X-OpenRouter-Categories header\n      extra_headers          dict    additional headers (e.g. x-anthropic-beta)\n    [api_params]  — OpenAI Chat Completions request-body fields\n      models                 list    cross-model fallback list\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      parallel_tool_calls    bool  \n      tool_choice            str     auto|required|none, or a dict naming one tool\n      service_tier           str     auto|default|flex|priority|scale — OpenAI-style processing tier forwarded to tier-supporting upstreams\n      strict_tools           bool    emit strict:true on tool defs\n      enable_thinking        bool  \n      thinking_budget        int     → reasoning.max_tokens\n      thinking_level         str     low|medium|high → reasoning.effort\n      cache_prompt           str     auto|true|false  (default 'auto')\n      cache_ttl              str     5m|1h  (default '5m')\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name; a tier's outbound role supplies it otherwise\n      audio                  dict    voice/format companion of api_params.modalities; wins over the tier default\n    [routing] (opaque pass-through)  — OpenRouter provider-routing extension — any key forwarded verbatim (order, sort, only, ignore, quantizations, max_price, ...)\n    [framework_overrides]  — rare escape hatches\n      context_length         int   \n      base_url               str   \n      modalities             list    assert INPUT modalities\n      output_modalities      list    assert what the model can EMIT; the catalog reports input modalities only, so without this the floor is text and the startup check refuses an outbound tier role\n      connect_timeout        float   TCP + TLS handshake deadline, seconds  (default 15.0)\n      request_timeout        float   byte-level deadline (httpx read/write/pool), seconds; 0 disables  (default 600.0)\n      stream_idle_timeout    float   payload idle deadline for streaming turns, seconds; 0 disables.  Raises StallTimeoutError — httpx cannot see this failure because OpenRouter's keep-alive SSE comments reset the byte clock (#732)  (default 300.0)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: openrouter\n  capabilities: user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, prompt_caching, streaming, cancellation, output_media, decisions\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OPENROUTER_API_KEY → stored:openrouter-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OPENROUTER_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.openrouter.*):\n    [top_level]  — auth / app-attribution identity\n      api_key                str     OpenRouter API key (sk-or-...)\n      http_referer           str     HTTP-Referer attribution header\n      app_title              str     X-OpenRouter-Title header\n      app_categories         list    X-OpenRouter-Categories header\n      extra_headers          dict    additional headers (e.g. x-anthropic-beta)\n    [api_params]  — OpenAI Chat Completions request-body fields\n      models                 list    cross-model fallback list\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      parallel_tool_calls    bool  \n      tool_choice            str     auto|required|none, or a dict naming one tool\n      service_tier           str     auto|default|flex|priority|scale — OpenAI-style processing tier forwarded to tier-supporting upstreams\n      strict_tools           bool    emit strict:true on tool defs\n      enable_thinking        bool  \n      thinking_budget        int     → reasoning.max_tokens\n      thinking_level         str     low|medium|high → reasoning.effort\n      cache_prompt           str     auto|true|false  (default 'auto')\n      cache_ttl              str     5m|1h  (default '5m')\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name; a tier's outbound role supplies it otherwise\n      audio                  dict    voice/format companion of api_params.modalities; wins over the tier default\n    [routing] (opaque pass-through)  — OpenRouter provider-routing extension — any key forwarded verbatim (order, sort, only, ignore, quantizations, max_price, ...)\n    [framework_overrides]  — rare escape hatches\n      context_length         int   \n      base_url               str   \n      modalities             list    assert INPUT modalities\n      output_modalities      list    assert what the model can EMIT, for a model the catalog does not describe; the catalog's architecture.output_modalities wins when present\n      decisions_url          str     decision endpoint for decide(); derived from base_url (…/api/v1 -> …/api/alpha/decisions) when unset\n      connect_timeout        float   TCP + TLS handshake deadline, seconds  (default 15.0)\n      request_timeout        float   byte-level deadline (httpx read/write/pool), seconds; 0 disables  (default 600.0)\n      stream_idle_timeout    float   payload idle deadline for streaming turns, seconds; 0 disables.  Raises StallTimeoutError — httpx cannot see this failure because OpenRouter's keep-alive SSE comments reset the byte clock (#732)  (default 300.0)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider ovhcloud": {
    "data": {
@@ -22363,6 +22386,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -22508,6 +22532,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -22575,6 +22600,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -22652,6 +22678,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -22795,6 +22822,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": false,
      "pdf_input": false,
      "prompt_caching": false,
@@ -22892,6 +22920,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "decisions": false,
      "output_media": true,
      "pdf_input": false,
      "prompt_caching": false,
@@ -22953,6 +22982,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": true,
       "prompt_caching": true,
@@ -22970,6 +23000,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -22987,6 +23018,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23006,6 +23038,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": true,
       "prompt_caching": true,
@@ -23023,6 +23056,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23040,6 +23074,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": false,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23057,6 +23092,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23076,6 +23112,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23093,6 +23130,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": true,
       "prompt_caching": true,
@@ -23110,6 +23148,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23129,6 +23168,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23148,6 +23188,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23167,6 +23208,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23186,6 +23228,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23205,6 +23248,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23224,6 +23268,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23241,6 +23286,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": true,
       "prompt_caching": false,
@@ -23260,6 +23306,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "decisions": true,
       "output_media": true,
       "pdf_input": true,
       "prompt_caching": true,
@@ -23270,7 +23317,7 @@
       "tool_result_images": true,
       "user_message_images": true
      },
-     "knobs": 28,
+     "knobs": 29,
      "quirks": [
       "prose_tool_calls"
      ]
@@ -23279,6 +23326,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23298,6 +23346,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23317,6 +23366,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23336,6 +23386,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23359,6 +23410,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": false,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23376,6 +23428,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "decisions": false,
       "output_media": true,
       "pdf_input": false,
       "prompt_caching": false,
@@ -23392,7 +23445,7 @@
      ]
     }
    },
-   "text": "providers (capability flags: user=user_message_images, tool=tool_result_images, pdf_=pdf_input, audi=audio_input, tool=tool_choice_forwarding, thin=thinking, prom=prompt_caching, stre=streaming, canc=cancellation, outp=output_media, reas=reasoning_replay)\n                  user tool pdf_ audi tool thin prom stre canc outp reas\n  anthropic        ✓ ✓ ✓ — — ✓ ✓ ✓ ✓ — —   knobs:15  quirks:0\n  antigravity      ✓ — — — — ✓ — ✓ ✓ — —   knobs:10  quirks:0\n  azure_openai     ✓ ✓ — — ✓ — — ✓ ✓ ✓ —   knobs:20  quirks:1\n  bedrock          ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — —   knobs:18  quirks:0\n  chrome_ai        — — — — — — — ✓ ✓ — —   knobs:14  quirks:0\n  claude_cli       — — — — — ✓ — ✓ — — —   knobs:5   quirks:0\n  doubleword       ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ —   knobs:18  quirks:1\n  github_models    — — — — — ✓ — ✓ ✓ — —   knobs:4   quirks:0\n  google_genai     ✓ ✓ ✓ ✓ — — ✓ ✓ ✓ — —   knobs:4   quirks:0\n  kimi             ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓   knobs:17  quirks:1\n  lmstudio         ✓ ✓ — — — — — ✓ ✓ — —   knobs:3   quirks:1\n  mimo             ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓   knobs:16  quirks:1\n  minimax          ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓   knobs:16  quirks:1\n  nebius           ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ —   knobs:17  quirks:1\n  nim              ✓ ✓ — — — ✓ — ✓ ✓ ✓ —   knobs:4   quirks:1\n  ollama           ✓ ✓ — — — — — ✓ ✓ — —   knobs:2   quirks:0\n  openai           ✓ ✓ ✓ ✓ ✓ ✓ — ✓ ✓ ✓ —   knobs:30  quirks:1\n  openrouter       ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ —   knobs:28  quirks:1\n  ovhcloud         ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ —   knobs:18  quirks:1\n  tensorrt_llm     ✓ ✓ — — — — — ✓ ✓ — —   knobs:4   quirks:1\n  triton           ✓ ✓ — — — — — ✓ ✓ — —   knobs:5   quirks:1\n  vllm             ✓ ✓ — — ✓ — — ✓ ✓ — —   knobs:15  quirks:5\n  zhipuai          ✓ ✓ — — — ✓ — ✓ ✓ — —   knobs:8   quirks:0\n  zhipuai_openai   ✓ ✓ — — — ✓ — ✓ ✓ ✓ —   knobs:5   quirks:1"
+   "text": "providers (capability flags: user=user_message_images, tool=tool_result_images, pdf_=pdf_input, audi=audio_input, tool=tool_choice_forwarding, thin=thinking, prom=prompt_caching, stre=streaming, canc=cancellation, outp=output_media, reas=reasoning_replay, deci=decisions)\n                  user tool pdf_ audi tool thin prom stre canc outp reas deci\n  anthropic        ✓ ✓ ✓ — — ✓ ✓ ✓ ✓ — — —   knobs:15  quirks:0\n  antigravity      ✓ — — — — ✓ — ✓ ✓ — — —   knobs:10  quirks:0\n  azure_openai     ✓ ✓ — — ✓ — — ✓ ✓ ✓ — —   knobs:20  quirks:1\n  bedrock          ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — — —   knobs:18  quirks:0\n  chrome_ai        — — — — — — — ✓ ✓ — — —   knobs:14  quirks:0\n  claude_cli       — — — — — ✓ — ✓ — — — —   knobs:5   quirks:0\n  doubleword       ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:18  quirks:1\n  github_models    — — — — — ✓ — ✓ ✓ — — —   knobs:4   quirks:0\n  google_genai     ✓ ✓ ✓ ✓ — — ✓ ✓ ✓ — — —   knobs:4   quirks:0\n  kimi             ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:17  quirks:1\n  lmstudio         ✓ ✓ — — — — — ✓ ✓ — — —   knobs:3   quirks:1\n  mimo             ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:16  quirks:1\n  minimax          ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:16  quirks:1\n  nebius           ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:17  quirks:1\n  nim              ✓ ✓ — — — ✓ — ✓ ✓ ✓ — —   knobs:4   quirks:1\n  ollama           ✓ ✓ — — — — — ✓ ✓ — — —   knobs:2   quirks:0\n  openai           ✓ ✓ ✓ ✓ ✓ ✓ — ✓ ✓ ✓ — —   knobs:30  quirks:1\n  openrouter       ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — ✓   knobs:29  quirks:1\n  ovhcloud         ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:18  quirks:1\n  tensorrt_llm     ✓ ✓ — — — — — ✓ ✓ — — —   knobs:4   quirks:1\n  triton           ✓ ✓ — — — — — ✓ ✓ — — —   knobs:5   quirks:1\n  vllm             ✓ ✓ — — ✓ — — ✓ ✓ — — —   knobs:15  quirks:5\n  zhipuai          ✓ ✓ — — — ✓ — ✓ ✓ — — —   knobs:8   quirks:0\n  zhipuai_openai   ✓ ✓ — — — ✓ — ✓ ✓ ✓ — —   knobs:5   quirks:1"
   },
   "runtime": {
    "data": {
