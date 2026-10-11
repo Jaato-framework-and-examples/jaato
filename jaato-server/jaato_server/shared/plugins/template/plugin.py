@@ -4983,9 +4983,12 @@ Template rendering writes files to the workspace."""
           by ``_validate_render_inputs_against_structure``: REQUIRED
           + non-empty.
         - ``"conditional_test"``: variable appears in ``{% if var %}``
-          test position.  Analog of the Mustache section gate
-          (``{{#var}}...{{/var}}``).  Optional — absence means the
-          branch doesn't fire.
+          test position, OR is referenced only inside the body of an
+          ``{% if %}`` / ``{% elif %}`` whose test guarantees it
+          (``{% if var %}{{ var }}{% endif %}``, also ``var is
+          defined`` and ``and`` chains naming it; #1623).  Analog of
+          the Mustache section gate (``{{#var}}...{{/var}}``).
+          Optional — absence means the branch doesn't fire.
         - ``"iterable"``: variable appears in ``{% for x in var %}``
           iter position.  Analog of the Mustache list-iterating
           section.  Required at the iterable source, but the
@@ -4999,12 +5002,17 @@ Template rendering writes files to the workspace."""
         Merge policy when one name appears in multiple contexts:
         ``scalar`` always wins (the strictest classification).
         Example: ``{{ x }}{% if x %}gated{% endif %}`` — ``x`` is
-        classified as ``scalar`` (the bare interpolation locks it
-        in as required), not ``conditional_test``.
+        classified as ``scalar`` (the bare interpolation outside the
+        gate locks it in as required), not ``conditional_test``.  A
+        reference INSIDE the gate does not: ``{% if x %}{{ x }}{%
+        endif %}`` is ``conditional_test``, which is what the missing-
+        scalar error message advises.
 
-        Loop variables (e.g. ``item`` in ``{% for item in items %}``)
-        are excluded from the result — they're locally scoped and
-        not part of the agent's variables payload contract.
+        Only names ``jinja2.meta.find_undeclared_variables`` reports
+        are classified: loop targets, ``loop``, ``{% set %}`` /
+        ``{% with %}`` bindings and macro arguments are locally
+        scoped and not part of the agent's variables payload
+        contract (#1623).
 
         Args:
             content: Jinja2 template source.
@@ -5033,23 +5041,20 @@ Template rendering writes files to the workspace."""
             # it surface the error there with the proper context.
             return []
 
-        # Step 1: collect loop-bound variable names.  Jinja2's
-        # ``{% for x in items %}`` binds ``x`` locally; references
-        # to ``x`` inside the loop body are not agent-payload
-        # contributions.  ``find_undeclared_variables`` already
-        # excludes these but we re-derive here because we classify
-        # via Name nodes directly (find_undeclared returns just
-        # names, no AST positions).  Tuple-unpacking forms
-        # (``{% for a, b in pairs %}``) are also handled.
-        loop_bound: set = set()
-        for for_node in ast.find_all(jnodes.For):
-            target = for_node.target
-            if isinstance(target, jnodes.Name):
-                loop_bound.add(target.name)
-            elif isinstance(target, jnodes.Tuple):
-                for inner in target.items:
-                    if isinstance(inner, jnodes.Name):
-                        loop_bound.add(inner.name)
+        # Step 1: which names are payload variables at all (#1623).
+        # Jinja2's own ``find_undeclared_variables`` is the source of
+        # truth: it excludes every locally bound name -- a ``for``
+        # target (tuple unpacking included), the built-in ``loop``
+        # inside a ``for`` body, ``{% set %}`` / ``{% set %}...{%
+        # endset %}`` targets, ``{% with %}`` bindings and macro
+        # arguments.  A hand-rolled loop-target set used to stand in
+        # for it and missed all but the first, so ``loop.index`` and
+        # a ``{% set n = ... %}`` name were demanded from the caller.
+        from jinja2 import meta as jmeta
+        try:
+            undeclared = set(jmeta.find_undeclared_variables(ast))
+        except Exception:
+            return []
 
         # Step 2: build a parent map so each Name can walk up to its
         # semantic context (If.test / For.iter / Filter[default] /
@@ -5070,7 +5075,7 @@ Template rendering writes files to the workspace."""
 
         for name_node in ast.find_all(jnodes.Name):
             name = name_node.name
-            if name in loop_bound:
+            if name not in undeclared or name_node.ctx != "load":
                 continue
 
             kind = self._classify_jinja2_name_context(
@@ -5106,6 +5111,11 @@ Template rendering writes files to the workspace."""
           is part of the conditional gate (e.g.
           ``{% if user.is_admin and flag %}`` — both ``user`` and
           ``flag`` walk up through ``And`` to find ``If.test``).
+        - ``If.body`` ancestor whose test guarantees the same name
+          (see ``_jinja2_test_guards_name``) → ``"conditional_test"``:
+          ``{% if sig %}{{ sig }}{% endif %}`` -- absence means the
+          branch does not fire (#1623).  An ``else`` branch is not
+          gated.
         - ``For.iter`` ancestor → ``"iterable"``: the Name is the
           loop's source iterable (e.g. ``{% for x in items %}`` —
           ``items`` walks up to find ``For.iter``).
@@ -5139,6 +5149,21 @@ Template rendering writes files to the workspace."""
             if isinstance(parent, jnodes.If) and current is parent.test:
                 return "conditional_test"
 
+            # Inside the body of an ``{% if %}`` / ``{% elif %}`` whose
+            # test guarantees this name (#1623)?  Absence means the
+            # branch does not fire, so the reference is optional --
+            # the idiom the missing-scalar message recommends.  Only
+            # ``body``: an ``else`` branch runs exactly when the gate
+            # failed.
+            if (
+                isinstance(parent, jnodes.If)
+                and any(current is n for n in parent.body)
+                and self._jinja2_test_guards_name(
+                    parent.test, name_node.name,
+                )
+            ):
+                return "conditional_test"
+
             # Inside a For node's iter expression?
             if isinstance(parent, jnodes.For) and current is parent.iter:
                 return "iterable"
@@ -5153,6 +5178,31 @@ Template rendering writes files to the workspace."""
                 # we're in a larger gated context.
 
             current = parent
+
+    @staticmethod
+    def _jinja2_test_guards_name(test: Any, name: str) -> bool:
+        """Whether an ``{% if %}`` test is only true when ``name`` is set.
+
+        True for the bare name (``{% if x %}``), ``x is defined``, and
+        an ``and`` chain with any such operand.  Anything else
+        (``or``, ``not x``, a comparison, ``x is not none`` -- which
+        is true for an undefined ``x``) proves nothing about ``x``
+        being supplied, so the body reference keeps its own
+        classification.  Used by
+        ``_classify_jinja2_name_context`` (#1623).
+        """
+        from jinja2 import nodes as jnodes
+
+        if isinstance(test, jnodes.Name):
+            return test.name == name
+        if isinstance(test, jnodes.And):
+            return (
+                TemplatePlugin._jinja2_test_guards_name(test.left, name)
+                or TemplatePlugin._jinja2_test_guards_name(test.right, name)
+            )
+        if isinstance(test, jnodes.Test) and isinstance(test.node, jnodes.Name):
+            return test.node.name == name and test.name == "defined"
+        return False
 
     def _parse_mustache_structure(self, content: str) -> List[Dict[str, Any]]:
         """Walk a Mustache template, classify each variable by kind.
