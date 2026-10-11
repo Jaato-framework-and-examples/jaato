@@ -1747,12 +1747,26 @@ def _check_decision_models(profile: Any, add: Callable[..., None]) -> None:
     """
     bindings = getattr(profile, "decision_models", None) or {}
     if not bindings:
+        _check_decide_has_a_model(profile, add)
         return
     default_provider = getattr(profile, "provider", None)
     for name, entry in bindings.items():
         _check_decision_model_provider(
             name, entry or {}, default_provider, add)
     _check_decision_models_not_tiers(profile, bindings, add)
+
+
+def _check_decide_has_a_model(profile: Any, add: Callable[..., None]) -> None:
+    """``decision_tool_without_models`` (warn): the profile enables the
+    ``decision`` plugin and binds no ``decision_models:``, so ``decide`` is
+    hidden from every session it starts."""
+    if "decision" not in (getattr(profile, "plugins", None) or []):
+        return
+    add("warn", "decision_tool_without_models",
+        "plugins: names 'decision' but the profile binds no "
+        "decision_models:, so the decide tool is hidden; bind one, e.g. "
+        "decision_models: {triage: {provider: openrouter, model: "
+        "typesafe/jev-1.13}}", where="plugins")
 
 
 def _check_decision_model_provider(

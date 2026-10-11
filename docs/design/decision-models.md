@@ -289,6 +289,35 @@ however little, and sends workspace content to a third party.
 This needs nothing from the framework beyond §4-§7, and it proves the
 contract end to end.
 
+Shipped as the `decision` plugin (`shared/plugins/decision/`, runner tier,
+deferred). What the call looks like:
+
+```
+decide(model="triage", state="<ticket text or JSON>", questions=[
+  {"id": "urgent", "type": "noul",   "instructions": "Is this urgent?",
+   "true_means": "needs a reply today"},
+  {"id": "team",   "type": "choice", "instructions": "Which team?",
+   "options": [{"option": "shipping", "description": "deliveries"},
+               {"option": "billing"}]},
+  {"id": "anger",  "type": "score",  "instructions": "How frustrated?",
+   "levels": ["calm", "annoyed", "furious"]}])
+-> {"model": "triage", "answered_by": "...", "answers": {...}, "usage": {...}}
+```
+
+| Rule | Why |
+|---|---|
+| criteria are typed fields per question type (`options`, `levels`, `true_means` / `false_means`), not the wire's free-form `criteria` | a schema property with no type is rejected by some providers, and typed fields are what a model fills in correctly |
+| `questions` is an array of objects with an `id`, not an object keyed by id | no `additionalProperties` in the schema, which some providers reject |
+| hidden from a session whose profile binds no entry; `model` is an `enum` of the calling session's entry names | read per session at call time (`is_tool_visible`, `narrow_tool_schema`), because the plugin instance is shared with in-process subagents |
+| a refusal is `(False, {error})` | an unknown entry, a malformed question, a provider error: the reliability plugin and the trace see a failure (#1053) |
+| a `decision` record in the session's token ledger | the call's spend is invisible to the chat accounting |
+| at most 32 questions a call | one call is one decision about one state |
+
+Not covered: a decision call's spend does not feed `budget_control` or the
+consumption report; the ledger record is the only account of it.
+`jaato-scaffold validate` warns `decision_tool_without_models` when a
+profile enables `decision` and binds no entry.
+
 ### 8.2 The permission evaluator
 
 The motivating fit. TypeSafe's own playground example is *"A noul question
@@ -417,6 +446,6 @@ allows on an error.
    - `JaatoSession._refuse_decisions_only_tiers` runs where the provider is first created and refuses a same-provider tier whose model `is_decisions_only`, naming `decision_models:`. A lookup that fails is not evidence and refuses nothing. A cross-provider tier still fails at its first turn with `DecisionModelOnlyError`.
    - Not covered: the embedded client and the isolated sub-runner do not carry the block (neither carries `model_tiers` either).
    - Guard: `jaato_server/shared/tests/test_decision_models_are_bound_by_name.py`, seven reversions.
-4. The `decide` tool (§8.1).
+4. The `decide` tool (§8.1). **Shipped**: the `decision` plugin. Guard: `jaato_server/shared/tests/test_the_decide_tool.py`, six reversions, driving the real plugin, session and `OpenRouterProvider` against the decision stand-in.
 5. The permission gate, with `PolicyDecision.ASK` (§8.2).
 6. The `laya` adapter.
