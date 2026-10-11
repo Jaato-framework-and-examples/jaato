@@ -626,6 +626,9 @@ def validate_profile(
     _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add,
                        getattr(profile, "provider", None))
 
+    # --- decision_models (decision-models.md §7) -------------------------
+    _check_decision_models(profile, add)
+
     # --- the completion gate's own shape ---------------------------------
     _check_completion_gate_shape(profile, add)
 
@@ -1718,6 +1721,78 @@ def _check_budget_overlays(profile: Any, budget: Any, add) -> None:
                     "`jaato-scaffold explain providers`)",
                     where=f"budget_control.degrade[{i}].model_tiers."
                           f"{tier_name}.provider")
+
+
+def _check_decision_models(profile: Any, add: Callable[..., None]) -> None:
+    """Static checks on a profile's ``decision_models:`` bindings.
+
+    The block's shape was already checked by the profile loader (a
+    malformed entry refuses the profile).  What remains is what the loader
+    cannot see:
+
+    - ``decision_model_provider_unsupported`` (error): the entry's provider
+      does not declare ``ProviderCapabilities.decisions``, so its
+      ``decide()`` does not exist and every consumer of the entry fails.
+      An entry with no ``provider`` is judged against the profile's own.
+    - ``decision_model_provider_unknown`` (error): the provider is not
+      installed here.
+    - ``decision_model_as_tier`` (error): a ``model_tiers`` entry binds a
+      model this profile itself declares as a decision model.  The session
+      would refuse it at startup; this says so before one exists.
+
+    Whether the CATALOG reports the model as ``decisions`` is not checked:
+    that needs the network, and ``validate`` makes no requests.  A model
+    bound here that turns out to chat is not an error at all; one that
+    turns out to decide and sits in a tier is refused at session start.
+    """
+    bindings = getattr(profile, "decision_models", None) or {}
+    if not bindings:
+        return
+    default_provider = getattr(profile, "provider", None)
+    for name, entry in bindings.items():
+        _check_decision_model_provider(
+            name, entry or {}, default_provider, add)
+    _check_decision_models_not_tiers(profile, bindings, add)
+
+
+def _check_decision_model_provider(
+    name: str, entry: Dict[str, Any], default_provider: Optional[str],
+    add: Callable[..., None],
+) -> None:
+    """One entry's provider: installed, and declaring ``decisions``."""
+    provider_name = entry.get("provider") or default_provider
+    if not provider_name:
+        return
+    from .introspect import resolve_provider
+    where = f"decision_models.{name}"
+    info = resolve_provider(str(provider_name))
+    if info is None:
+        add("error", "decision_model_provider_unknown",
+            f"decision_models.{name} names provider '{provider_name}', "
+            "which is not installed here", where=where)
+        return
+    if not getattr(info.capabilities, "decisions", False):
+        add("error", "decision_model_provider_unsupported",
+            f"decision_models.{name} binds {entry.get('model')!r} on "
+            f"provider '{provider_name}', which does not declare the "
+            "decisions capability, so it has no decide(); bind it on a "
+            "provider that does (openrouter)", where=where)
+
+
+def _check_decision_models_not_tiers(
+    profile: Any, bindings: Dict[str, Any], add: Callable[..., None],
+) -> None:
+    """A tier binding a model the profile declares as a decision model."""
+    decision_model_ids = {
+        (entry or {}).get("model") for entry in bindings.values()}
+    for key, entry in (getattr(profile, "model_tiers", None) or {}).items():
+        tier_model = entry.get("model") if isinstance(entry, dict) else entry
+        if tier_model in decision_model_ids:
+            add("error", "decision_model_as_tier",
+                f"model_tiers.{key} binds {tier_model!r}, which this profile "
+                "declares under decision_models: a decision model cannot "
+                "hold a conversation, so the session would refuse the tier "
+                "at startup", where=f"model_tiers.{key}")
 
 
 def _check_model_tiers(mt_cfg, add, provider_name=None):

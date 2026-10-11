@@ -2512,6 +2512,23 @@ def _build_session(
             '(session runs unbudgeted): %s', exc,
         )
 
+    # decision-models.md §7: the profile's decision-model bindings.  The
+    # profile loader already refused a malformed block; one that fails
+    # here came from a daemon this runner does not understand, and
+    # degrades to "none declared" (a consumer is then told the entry does
+    # not exist) rather than refusing the bootstrap.
+    decision_models = None
+    if envelope.decision_models:
+        try:
+            from jaato_server.shared.decision_models import (
+                parse_decision_models)
+            decision_models = parse_decision_models(envelope.decision_models)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "runner-session bootstrap: decision_models rejected "
+                "(session has none): %s", exc,
+            )
+
     return runtime.create_session(
         model=envelope.model_name,
         # PR #240 (2026-06-07) attempted to fix the same bug at
@@ -2550,6 +2567,7 @@ def _build_session(
             _processors_from_envelope(envelope) or None
         ),
         tier_config=tier_config,
+        decision_models=decision_models,
         budget_control=budget_control,
         # Envelope v6 (#862): the profile's tool-pool ceiling.  ``None``
         # from an older daemon, or from a profile that declares no

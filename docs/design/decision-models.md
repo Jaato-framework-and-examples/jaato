@@ -250,15 +250,30 @@ decision_models:
     model: convaiinnovations/laya
 ```
 
-Each entry is a (provider, model) pair, like a tier, built lazily on first
-use and cached per session. A consumer names an entry, never a model
-directly, so swapping Jev for Laya is a profile change.
+Each entry is a (provider, model) pair, like a tier: `model` is required,
+and `provider` defaults to the session's own. The session builds an entry's
+provider on first use (`JaatoSession.decision_provider(name)`), as an
+instance of its own that the chat provider never shares, and caches it for
+the session. A consumer names an entry, never a model directly, so swapping
+Jev for Laya is a profile change.
 
-Inheritance: child replaces, by entry name. `jaato-scaffold validate`
-reports an entry whose model the catalog does not report as `decisions`
-(`decision_model_not_decisions`, warn, since the knob may assert it), an
-entry on a provider that does not declare `capabilities.decisions`
-(error), and a consumer naming an entry that does not exist (error).
+Inheritance: child replaces, by entry name. Two parents binding one name to
+different models, with no child entry to settle it, is a conflict.
+
+`jaato-scaffold validate` reports:
+
+| Code | Severity | When |
+|---|---|---|
+| `decision_model_provider_unsupported` | error | the entry's provider does not declare `capabilities.decisions`, so it has no `decide()` |
+| `decision_model_provider_unknown` | error | the entry's provider is not installed |
+| `decision_model_as_tier` | error | a `model_tiers` entry binds a model the profile declares under `decision_models:` |
+
+Whether the catalog reports an entry's model as `decisions` is not checked
+statically: `validate` makes no network requests. A tier bound to a
+decisions-only model the profile does not declare is still refused, at
+session start. A consumer naming a missing entry is checked once the
+consumers exist (steps 4 and 5); at runtime it raises
+`UnknownDecisionModelError`, which lists the bound names.
 
 ## 8. Consumers, in build order
 
@@ -395,7 +410,13 @@ allows on an error.
    - Guards: `jaato_server/shared/tests/test_decide_on_openrouter.py` (five reversions) uses the vendor's documented request and response as fixtures. The stand-in is `decision_standin.py`. In `test_provider_capability_conformance.py`, a declaring provider must answer the stand-in and an undeclared one may not expose `decide`.
    - `examples/provider_smoke_decisions.py` runs the same checks against the stand-in. With `--live-openrouter` it sends one request to `typesafe/jev-1.13` and prints the raw response beside the parse.
    - Verified against the live endpoint on 2026-10-09: the response matched the documented shape, with integer probabilities, a `cost` in usage (kept as `cost_usd`) and `id` / `provider` keys the parser ignores. That response is a fixture (`LIVE_RESPONSE`).
-3. `decision_models:` and the tier refusal (§7).
+3. `decision_models:` and the tier refusal (§7). **Shipped**:
+   - `shared/decision_models.py` is the one definition of an entry: `parse_decision_models` (refuses a malformed entry by name, at most 16 entries), `DecisionModelBinding`, `merge_decision_models`, and the two runtime errors `UnknownDecisionModelError` / `DecisionModelUnavailableError`.
+   - `SubagentProfile.decision_models` is read by every profile loader (workspace and premium tiers, inline specs, `SubagentConfig`, `validate_profile`), kept in the session snapshot, merged across `inherits:`, and carried on `SessionInitEnvelope.decision_models` (additive, no version bump; an older runner ignores it).
+   - The runner bootstrap and both in-process subagent spawn paths pass it to `create_session(decision_models=)`. `JaatoSession.decision_provider(name)` builds the entry's provider through `runtime.create_provider` with the session's `plugin_configs`, refuses one without `decide()`, and caches it.
+   - `JaatoSession._refuse_decisions_only_tiers` runs where the provider is first created and refuses a same-provider tier whose model `is_decisions_only`, naming `decision_models:`. A lookup that fails is not evidence and refuses nothing. A cross-provider tier still fails at its first turn with `DecisionModelOnlyError`.
+   - Not covered: the embedded client and the isolated sub-runner do not carry the block (neither carries `model_tiers` either).
+   - Guard: `jaato_server/shared/tests/test_decision_models_are_bound_by_name.py`, seven reversions.
 4. The `decide` tool (§8.1).
 5. The permission gate, with `PolicyDecision.ASK` (§8.2).
 6. The `laya` adapter.

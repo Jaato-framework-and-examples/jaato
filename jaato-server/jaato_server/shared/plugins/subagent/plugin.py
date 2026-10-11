@@ -731,6 +731,8 @@ class SubagentPlugin:
                     # See the sibling call site: a subagent's own declared
                     # budget was omitted, leaving it silently unbudgeted.
                     budget_control=getattr(profile, "budget_control", None),
+                    # decision-models.md §7: the subagent's own bindings.
+                    decision_models=getattr(profile, "decision_models", None),
                     # The one ``runtime_limits`` field an in-process
                     # subagent can honour (#862): the session owns the
                     # thread pool, so no subprocess boundary is needed.
@@ -4069,6 +4071,8 @@ class SubagentPlugin:
                 # runtime-level sessions, so they are also invisible to the
                 # daemon-side pool; this is their ONLY budget.
                 budget_control=getattr(profile, "budget_control", None),
+                # decision-models.md §7: the subagent's own bindings.
+                decision_models=getattr(profile, "decision_models", None),
                 # See the sibling call site: application-enforced, so it
                 # survives the in-process path that refuses kernel limits.
                 max_parallel_tools=_profile_max_parallel_tools(profile),

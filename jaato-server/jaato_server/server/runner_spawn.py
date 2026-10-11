@@ -1132,7 +1132,8 @@ def build_session_envelope(
         A :class:`SessionInitEnvelope` ready for
         :meth:`server.runner_rpc_client.RunnerRPCClient.bootstrap_session_threadsafe`.
     """
-    from jaato_server.shared.session_envelope import SessionInitEnvelope
+    from jaato_server.shared.session_envelope import (
+        SessionInitEnvelope, decision_models_wire)
 
     profile = getattr(server, "_profile", None)
     provider_name = ""
@@ -1154,6 +1155,7 @@ def build_session_envelope(
     gc_dict: Optional[dict] = None
     env_overrides: dict = {}
     model_tiers_dict: Optional[Dict[str, Any]] = None
+    decision_models_dict: Optional[Dict[str, Any]] = None
     budget_control_dict: Optional[Dict[str, Any]] = None
     max_parallel_tools: Optional[int] = None
     runtime_limits_dict: Optional[Dict[str, Any]] = None
@@ -1195,6 +1197,10 @@ def build_session_envelope(
         raw_tiers = getattr(profile, "model_tiers", None) or None
         if raw_tiers:
             model_tiers_dict = {str(k): v for k, v in raw_tiers.items()}
+        # decision-models.md §7: the bindings ride beside the tiers, for the
+        # same reason -- the runner owns the session that builds them.
+        decision_models_dict = decision_models_wire(
+            getattr(profile, "decision_models", None))
         # Envelope v5: same contract as model_tiers above — without this
         # the runner leaves ``JaatoSession._budget_tracker = None`` and the
         # session silently runs UNBUDGETED regardless of profile config.
@@ -1510,6 +1516,7 @@ def build_session_envelope(
         completion_payload_schema=profile_completion_schema,
         completion_processors=profile_completion_processors,
         model_tiers=model_tiers_dict,
+        decision_models=decision_models_dict,
         budget_control=budget_control_dict,
         max_parallel_tools=max_parallel_tools,
         runtime_limits=runtime_limits_dict,
