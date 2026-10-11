@@ -112,7 +112,7 @@ Rules every adapter holds to, each because the alternative fails open:
   verbatim, wrapped as untrusted, under a `Checkpoint:` line and, for tool
   results, a `Tool:` line, with the same secret redaction, value cuts and
   window fitting as the permission gate's renderer
-  ([Decision Models](decision-models.md) §8.2.1). On output it cannot
+  ([Decision Models](decision-models.md) §8.2.1). Content it cannot
   fit, the check fails as `on_unavailable` says, never by passing.
 
 ### 4.2 Adapters
