@@ -427,6 +427,36 @@ FRONTMATTER_ID_PATTERN = re.compile(r'^id:\s*(.+)$', re.MULTILINE)
 _GENERATED_ANNOTATION_RE = re.compile(r'^[/*#\s]*@generated\b.*$', re.MULTILINE)
 
 
+
+def _gateable_undefined() -> type:
+    """The ``Undefined`` type ``_render_jinja2`` renders with (#1633).
+
+    The shape check (``_validate_render_inputs_against_structure``)
+    treats an absent name as optional where the template only TESTS
+    it (``{% if x %}``, ``x is defined``, ``x == 'a'``), loops over it
+    (``{% for r in rows %}``) or defaults it, and as required where it
+    is printed or computed with.  ``StrictUndefined`` refused all of
+    those, so a payload the check accepted was refused at render.
+
+    This type is ``ChainableUndefined`` (falsy, iterates as empty,
+    ``x.y`` and ``x[k]`` chain, ``==`` is false) with ``__str__``
+    made strict, so ``{{ x }}``, ``{{ r.open }}`` on an ``r`` without
+    ``open`` and ``{{ x | upper }}`` still raise ``UndefinedError``.
+    Arithmetic and ordering (``x + 1``, ``x > 3``) raise as on every
+    ``Undefined``; the check requires a name used that way.  A filter
+    that iterates instead of printing (``{{ x | join(',') }}``) renders
+    ``''`` for an absent ``x``; the check requires ``x`` there (#1627).
+
+    Built lazily so the module imports without Jinja2.
+    """
+    from jinja2 import ChainableUndefined, Undefined
+
+    class GateableUndefined(ChainableUndefined):
+        __slots__ = ()
+        __str__ = Undefined._fail_with_undefined_error
+
+    return GateableUndefined
+
 class TemplatePlugin(RunnerForwardingMixin):
     """Plugin for template-based file generation.
 
@@ -3479,7 +3509,7 @@ Template rendering writes files to the workspace."""
         """
         # Try to import Jinja2
         try:
-            from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
+            from jinja2 import TemplateSyntaxError, UndefinedError
             from jinja2.sandbox import SandboxedEnvironment
         except ImportError:
             return "", {
@@ -3487,8 +3517,11 @@ Template rendering writes files to the workspace."""
                 "status": "dependency_missing"
             }
 
-        # Create sandboxed environment (safer execution)
-        env = SandboxedEnvironment(undefined=StrictUndefined)
+        # Create sandboxed environment (safer execution).  An absent
+        # name is falsy and empty when tested or looped over, and
+        # strict when printed: the contract the shape check enforces
+        # (#1633).
+        env = SandboxedEnvironment(undefined=_gateable_undefined())
 
         # Disable dangerous features
         env.globals = {}  # No built-in globals
@@ -4348,8 +4381,10 @@ Template rendering writes files to the workspace."""
             return (
                 f"variable {name!r} (kind=operand) is used "
                 f"inside an expression in the Jinja2 template "
-                f"body (a filter argument, attribute access or "
-                f"call) but absent from the variables payload.  "
+                f"body (a filter argument, attribute access, "
+                f"call, or an ``{{% if %}}`` test that compares or "
+                f"computes with it) but absent from the variables "
+                f"payload.  "
                 f"Supply a value of the type that expression "
                 f"needs (any type is accepted), OR edit the "
                 f"template to use ``{{{{ {name} | default(...) "
@@ -5126,7 +5161,10 @@ Template rendering writes files to the workspace."""
           type for it (``{{ x | join(', ') }}`` needs a list), and a
           value that renders is a valid value (#1627).
         - ``"conditional_test"``: variable appears in ``{% if var %}``
-          test position, OR is referenced only inside the body of an
+          test position (truth, ``==`` / ``!=`` / ``in``, attribute
+          access, a safe test or filter; ordering, arithmetic and
+          printing filters make it ``operand``, #1633), OR is
+          referenced only inside the body of an
           ``{% if %}`` / ``{% elif %}`` whose test guarantees it
           (``{% if var %}{{ var }}{% endif %}``, also ``var is
           defined`` and ``and`` chains naming it; #1623).  Analog of
@@ -5258,6 +5296,10 @@ Template rendering writes files to the workspace."""
           is part of the conditional gate (e.g.
           ``{% if user.is_admin and flag %}`` — both ``user`` and
           ``flag`` walk up through ``And`` to find ``If.test``).
+          Only when the test evaluates with the name absent
+          (``_jinja2_absent_name_survives``); a test that computes
+          with it (``{% if n > 3 %}``) makes it ``"operand"``, since
+          the renderer raises there (#1633).
         - ``If.body`` ancestor whose test guarantees the same name
           (see ``_jinja2_test_guards_name``) → ``"conditional_test"``:
           ``{% if sig %}{{ sig }}{% endif %}`` -- absence means the
@@ -5303,9 +5345,14 @@ Template rendering writes files to the workspace."""
                     return "scalar"
                 return "operand"
 
-            # Inside an If node's test expression?
+            # Inside an If node's test expression?  Optional only when
+            # the test can evaluate with the name absent (#1633).
             if isinstance(parent, jnodes.If) and current is parent.test:
-                return "conditional_test"
+                if self._jinja2_absent_name_survives(
+                    name_node, current, parent_map,
+                ):
+                    return "conditional_test"
+                return "operand"
 
             # Inside the body of an ``{% if %}`` / ``{% elif %}`` whose
             # test guarantees this name (#1623)?  Absence means the
@@ -5336,6 +5383,84 @@ Template rendering writes files to the workspace."""
                 # we're in a larger gated context.
 
             current = parent
+
+    # Filters whose result is defined whatever the input: an absent
+    # input stops being undefined there (#1633).
+    _JINJA2_UNDEFINED_SAFE_FILTERS = frozenset({
+        "default", "d", "length", "count", "list",
+    })
+    # Tests that answer for an undefined value without computing with it.
+    _JINJA2_UNDEFINED_SAFE_TESTS = frozenset({
+        "defined", "undefined", "none", "boolean", "false", "true",
+        "integer", "float", "number", "string", "mapping", "iterable",
+        "sequence", "callable", "sameas",
+    })
+    # Comparison operators an undefined answers (``==`` is false,
+    # ``in`` iterates as empty); ordering raises.
+    _JINJA2_UNDEFINED_SAFE_COMPARISONS = frozenset({"eq", "ne", "in", "notin"})
+
+    @classmethod
+    def _jinja2_absent_name_survives(
+        cls, name_node: Any, test: Any, parent_map: Dict[int, Any],
+    ) -> bool:
+        """Whether an ``{% if %}`` test evaluates with ``name_node`` absent.
+
+        Walks from the Name up to ``test`` (the ``If.test`` root),
+        following the value while it is still undefined.  It survives
+        truth tests (``and`` / ``or`` / ``not``, a conditional
+        expression's test), attribute and item access (chained), the
+        safe filters and tests above, and ``==`` / ``!=`` / ``in``.
+        Anything else (``x > 3``, ``x + 1``, ``x | upper``, a call)
+        raises under the renderer's undefined, so the name is required
+        (#1633).  Unknown node types count as unsafe: the strict
+        direction.  Used by ``_classify_jinja2_name_context``.
+        """
+        current = name_node
+        while current is not test:
+            parent = parent_map.get(id(current))
+            if parent is None:
+                return True
+            verdict = cls._jinja2_undefined_step(parent, current)
+            if verdict is not None:
+                return verdict
+            current = parent
+        return True
+
+    @classmethod
+    def _jinja2_undefined_step(cls, parent: Any, current: Any) -> Optional[bool]:
+        """One step of ``_jinja2_absent_name_survives``.
+
+        ``current`` is still undefined; ``parent`` applies to it.
+        Returns ``None`` when the value passes through still undefined
+        (keep walking), ``True`` when ``parent`` answers for it (it is
+        defined from here up), ``False`` when ``parent`` raises on it.
+        """
+        from jinja2 import nodes as jnodes
+
+        if isinstance(parent, (jnodes.And, jnodes.Or, jnodes.Operand)):
+            return None
+        if isinstance(parent, jnodes.Not):
+            return True
+        if isinstance(parent, jnodes.CondExpr):
+            return True if current is parent.test else None
+        if isinstance(parent, (jnodes.Getattr, jnodes.Getitem)):
+            return None if current is parent.node else False
+        if isinstance(parent, jnodes.Filter):
+            return (
+                current is parent.node
+                and parent.name in cls._JINJA2_UNDEFINED_SAFE_FILTERS
+            )
+        if isinstance(parent, jnodes.Test):
+            return (
+                current is parent.node
+                and parent.name in cls._JINJA2_UNDEFINED_SAFE_TESTS
+            )
+        if isinstance(parent, jnodes.Compare):
+            return all(
+                op.op in cls._JINJA2_UNDEFINED_SAFE_COMPARISONS
+                for op in parent.ops
+            )
+        return False
 
     @staticmethod
     def _jinja2_test_guards_name(test: Any, name: str) -> bool:
