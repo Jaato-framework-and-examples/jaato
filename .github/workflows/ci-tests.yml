@@ -151,7 +151,7 @@ jobs:
       - name: Install (editable + interactive backend)
         run: |
           pip install -e jaato-sdk/
-          pip install -e "jaato-server/.[dev,interactive]"
+          pip install -e "jaato-server/.[dev,interactive,templates]"
       - name: Every guard detects its own reversion
         run: |
           pytest -q \

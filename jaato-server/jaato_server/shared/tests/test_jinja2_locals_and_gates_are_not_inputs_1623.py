@@ -20,10 +20,6 @@ ungated reference elsewhere still makes the name required.
 
 from __future__ import annotations
 
-import pytest
-
-pytest.importorskip("jinja2")
-
 from jaato_server.shared.plugins.template.plugin import TemplatePlugin
 from jaato_server.shared.tests.reversion import Reversion
 
