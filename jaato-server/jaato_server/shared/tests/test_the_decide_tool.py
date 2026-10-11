@@ -231,6 +231,17 @@ def test_model_is_limited_to_the_sessions_entries():
         "the shared schema was mutated; another session would see these names")
 
 
+def test_the_tool_is_in_the_decision_category():
+    from jaato_sdk.plugins.model_provider.types import TOOL_CATEGORIES
+    schema, = DecisionPlugin().get_tool_schemas()
+    assert schema.category == "decision"
+    assert schema.category in TOOL_CATEGORIES
+    registry = MagicMock()
+    DecisionPlugin().set_plugin_registry(registry)
+    name, description = registry.register_category.call_args.args
+    assert name == "decision" and description
+
+
 def test_the_tool_is_not_auto_approved():
     assert TOOL_NAME not in DecisionPlugin().get_auto_approved_tools()
 

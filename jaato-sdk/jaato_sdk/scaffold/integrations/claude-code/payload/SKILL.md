@@ -176,6 +176,15 @@ Art. 25(4) pack for jaato itself. `jaato-doctor --incidents` and
 `--audit-verify` read the records a session wrote. The manual with a capture
 of each control is `docs/eu-ai-act-manual.md` in the framework repository.
 
+**A decision model is bound by name, never as a tier.** A model that answers
+typed questions (`noul` / `choice` / `score`) and cannot chat goes in
+`decision_models: {<name>: {model, provider?}}`, documented by `explain
+profile` and emitted commented-out in each set profile by `new profile-set`;
+a tier bound to one is refused at startup. The `decision` plugin's `decide`
+tool (category `decision`, deferred, not auto-approved) names an entry and is
+hidden from a session that binds none; `validate` reports
+`decision_tool_without_models` when a profile enables it with nothing bound.
+
 **Never reverse-engineer the generator.** `explain archetype <name>` states what
 `new` writes, what is placeholder versus recipe, and `--dry-run` shows the exact
 tree your flags produce. Reading the templates costs far more than one

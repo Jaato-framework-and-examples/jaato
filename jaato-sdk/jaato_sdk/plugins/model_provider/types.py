@@ -339,6 +339,7 @@ TOOL_CATEGORIES = [
     "web",          # Web fetching, API calls, external resources
     "communication",  # User interaction, prompts, questions
     "prompt",         # Reusable prompt templates and skills
+    "decision",       # Typed judgements (classify, score, yes/no) from a decision model
     "MCP",          # Tools from external MCP (Model Context Protocol) servers
 ]
 

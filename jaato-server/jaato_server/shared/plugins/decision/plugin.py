@@ -214,6 +214,12 @@ class DecisionPlugin:
     def shutdown(self) -> None:
         pass
 
+    def set_plugin_registry(self, registry: Any) -> None:
+        """Called during ``expose_tool()``.  Registers the decision category."""
+        registry.register_category(
+            "decision",
+            "Typed judgements from a decision model: classify, score, yes/no")
+
     def reset_for_next_session(self) -> None:
         """Nothing to clear: the providers belong to each session."""
 
@@ -250,7 +256,7 @@ class DecisionPlugin:
                 },
                 "required": ["model", "state", "questions"],
             },
-            category="web",
+            category="decision",
             discoverability=DISCOVERABILITY_DEFERRED,
         )]
 

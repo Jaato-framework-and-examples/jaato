@@ -284,7 +284,9 @@ A tool plugin, `decide(model, state, questions)`, where `model` names a
 its questions and gets typed answers back, which makes map-reduce over a
 dataset cheap. Its schema exposes the three question types and enumerates
 the configured entry names. It is not auto-approved: it spends money,
-however little, and sends workspace content to a third party.
+however little, and sends workspace content to a third party. It is
+deferred, in its own `decision` tool category (typed judgements from a
+decision model), so `list_tools` groups it apart from web fetching.
 
 This needs nothing from the framework beyond §4-§7, and it proves the
 contract end to end.
