@@ -12822,6 +12822,60 @@ Not done: a per-cell warning when a cell imports `jaato_server` or calls
 `jaato_server/shared/tests/test_notebook_discloses_the_daemons_jaato_1413.py`,
 four reversions.
 
+### A Script's Imports From the Session's Venv (#1644)
+
+Completion processors and `{{!py:...}}` prefetch scripts are imported by
+`script_loader.load_script_symbol` into the runner's own interpreter, so a
+third-party import in either resolved against the daemon's environment.
+The tool-venv (#1274) isolates the model's subprocesses and the client's
+host tools; these two script kinds were the one place a cascade's code ran
+without it, and `sys.path.insert` from a script changed the path of a slot
+that serves several sessions (#1171).
+
+```yaml
+plugin_configs:
+  cli:
+    workspace_venv: .jaato/tool-venv   # or the managed default
+    script_imports: workspace_venv     # default: daemon
+```
+
+`shared/script_imports.py` is the one rule; `explain completion` and
+`explain prefetch` render its `RESOLUTION_RULES`:
+
+| Rule | How |
+|---|---|
+| **the daemon's environment answers first** | the venv's site-packages (and the directory lines of its `.pth` files) are APPENDED to `sys.path`, so a package the daemon has resolves to the daemon's copy; the venv fills gaps |
+| **jaato's packages are never the venv's** | a meta-path finder answers every top-level `jaato*` name from the daemon's path only, and refuses one the daemon lacks |
+| **the load and each call only** | `load_script_symbol(import_scope=)` imports inside the scope and wraps the returned callable to enter it on every call. At exit the entries are removed and every module loaded from the venv's dirs is taken out of `sys.modules` and parked on the scope, restored on its next entry: the session keeps one module object across calls, a slot's next session cannot import it |
+| **no grant is added** | under confinement the runner reads the venv with what its profile already grants: the tool-venv is in the workspace (read), a C extension needs an exec-mapping grant the base profile does not carry there, a venv outside the workspace is not readable |
+
+The scope is built from the session's own `plugin_configs.cli` block
+(`declared_plugin_config`), kept on the session once found (a miss is not
+kept: the tool-venv is created by the first command that needs it). One
+INFO line names where the imports resolve; an opt-in that cannot be
+honoured is one WARNING. Both processor load sites in `LifecycleTools` and
+the prefetch site pass it; `invoke_processors` is unchanged.
+
+Stated costs:
+
+- **Scoped calls are serialised per process** (`sys.path` and `sys.modules`
+  are interpreter-wide; one lock from entry to exit). Nothing takes it
+  without the opt-in.
+- **Another thread may see the venv during a scoped call**; what it loads
+  from the venv is parked at exit with the rest.
+- **The tool-venv is model-writable.** A gate importing from it trusts what
+  the model installed there, for any name the daemon lacks. That is why it
+  is opt-in; point `workspace_venv` at a venv the model does not write when
+  the gate's imports must be its author's.
+- **Not version isolation.** A package both have resolves to the daemon's
+  copy; a script needing a different version needs to run out of process.
+- **A `.pth` `import` line is skipped** (it would install a process-wide
+  hook), so a finder-style editable install in the venv is not seen.
+
+Guard: `jaato_server/shared/tests/test_script_imports_from_workspace_venv_1644.py`,
+six reversions, through the real `load_processors` and
+`expand_py_placeholders` against a venv-shaped tree on disk.
+
 ### The Files Panel Asks Git What a Clone Ignores
 
 The workspace monitor filtered paths through `GitignoreParser`, which reads

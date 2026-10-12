@@ -3610,6 +3610,7 @@ def completion() -> Rendered:
             "and no verdict (#768 rule 2)."
         ),
         "generator": "jaato-scaffold new processor --name <n> --workspace DIR",
+        "imports_resolve": _script_imports_data(),
     }
     fields = "\n".join(
         f"    {f.name:16} {f.type:22}"
@@ -3719,6 +3720,7 @@ def completion() -> Rendered:
         "        write the file on a later turn), NOT as `faults`, which is for",
         "        an environment the agent cannot fix.",
         "",
+    ] + _script_imports_lines() + [
         "  THE RETRY BUDGET IS budget_control.  A blocked completion is",
         "  retried until the processor's own max_refusals stops it blocking,",
         "  or the profile's budget_control crosses a degrade rung whose",
@@ -3878,6 +3880,64 @@ def _context_attr_lines(attrs: List[Tuple[str, str]]) -> List[str]:
             for name, note in attrs]
 
 
+def _script_imports_lines() -> List[str]:
+    """Where a processor's or prefetch script's imports resolve (#1644).
+
+    Shared by ``explain completion`` and ``explain prefetch``: both script
+    kinds are loaded by the same loader into the runner's interpreter, so
+    the answer is one answer.  The key, its values and the rules are READ
+    from :mod:`jaato_server.shared.script_imports`, never restated here.
+    """
+    import textwrap
+
+    from jaato_server.shared import script_imports as si
+
+    width = max(len(v) for v in si.SCRIPT_IMPORTS_VALUES)
+    values = [
+        line
+        for v, why in si.SCRIPT_IMPORTS_VALUES.items()
+        for line in textwrap.wrap(
+            why, 74, initial_indent=f"      {v:<{width}}  ",
+            subsequent_indent=" " * (8 + width))
+    ]
+    rules = [
+        line
+        for rule in si.RESOLUTION_RULES
+        for line in textwrap.wrap(
+            rule, 74, initial_indent="    - ", subsequent_indent="      ")
+    ]
+    return [
+        "  WHERE ITS IMPORTS RESOLVE.  The script is imported into the",
+        "  runner's own interpreter, so a third-party import resolves in the",
+        "  DAEMON's environment, not the workspace tool-venv the model's",
+        "  commands run in.  Do not `sys.path.insert` from a script: the runner",
+        "  slot serves several sessions in turn, so the next session's imports",
+        "  change too.  A profile may widen it for its own scripts:",
+        "",
+        f"    plugin_configs.cli.{si.SCRIPT_IMPORTS_KEY}:",
+        *values,
+        "",
+        "  With workspace_venv:",
+        *rules,
+        "  The tool-venv is model-writable: a gate that imports from it trusts",
+        "  what the model installed there.  The runner log names where a",
+        "  session's script imports resolve when it first loads one.",
+        "",
+    ]
+
+
+def _script_imports_data() -> Dict[str, Any]:
+    """The machine-readable half of :func:`_script_imports_lines`."""
+    from jaato_server.shared import script_imports as si
+
+    return {
+        "default": "the daemon's (runner's) own interpreter",
+        "key": f"plugin_configs.cli.{si.SCRIPT_IMPORTS_KEY}",
+        "values": dict(si.SCRIPT_IMPORTS_VALUES),
+        "rules": list(si.RESOLUTION_RULES),
+    }
+
+
 def prefetch() -> Rendered:
     """The prefetch-script capability — a DETERMINISTIC per-agent way to inject
     computed/fetched content into the system prompt BEFORE the model's first turn.
@@ -3897,6 +3957,7 @@ def prefetch() -> Rendered:
         "context_attrs": [name for name, _ in attrs],
         "context_attr_notes": {name: note for name, note in attrs if note},
         "example": "shared/plugins/subagent/README.md (prefetch_kyc_aml.py)",
+        "imports_resolve": _script_imports_data(),
         "agent_params_are_not_secret": (
             "agent_params are substituted into the persona, so anything put "
             "there reaches the model in its system prompt AND is persisted "
@@ -3943,6 +4004,7 @@ def prefetch() -> Rendered:
         *_context_attr_lines(attrs),
         "",
         "",
+    ] + _script_imports_lines() + [
         "  NEVER PASS A CREDENTIAL AS AN agent_param.  They are substituted",
         "  into the persona, so they already reach the model in its system",
         "  prompt — and the rendered persona is PERSISTED with the session",

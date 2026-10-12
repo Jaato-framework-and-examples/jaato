@@ -68,8 +68,10 @@ REVERSIONS = [
     Reversion(
         target="jaato-server/jaato_server/shared/lifecycle_tools.py",
         find="            from .dynamic_instructions import build_render_context\n"
+             "            from .script_imports import script_import_scope_for\n"
              "            if self._processors_loaded is None:",
         replace="            from .dynamic_instructions import build_render_context\n"
+                "            from .script_imports import script_import_scope_for\n"
                 "            if True:",
         test="test_an_always_refusing_gate_stops_refusing_at_the_ceiling",
         because="the load-once-per-session caching the refusal counter lives "

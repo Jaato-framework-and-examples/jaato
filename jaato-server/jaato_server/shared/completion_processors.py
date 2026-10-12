@@ -190,6 +190,7 @@ def load_processors(
     processors: List[Any],  # List[CompletionProcessor]
     workspace_path: Optional[str],
     config_root: Optional[str],
+    import_scope: Optional[Any] = None,
 ) -> List[LoadedProcessor]:
     """Resolve + import each processor module lazily.
 
@@ -207,6 +208,10 @@ def load_processors(
         workspace_path: Session workspace for relative resolution.
         config_root: Config-root override.  Matches the prefetch +
             reactor handler convention.
+        import_scope: The session's
+            :class:`~jaato_server.shared.script_imports.ScriptImportScope`
+            (#1644), or ``None`` for the daemon's environment only.  Both
+            symbols are loaded inside it and every call of them enters it.
 
     Returns:
         Parallel list of ``LoadedProcessor`` instances.  Order
@@ -238,10 +243,12 @@ def load_processors(
         render_fn = load_script_symbol(
             resolved, symbol="render",
             module_prefix="_jaato_completion_processor",
+            import_scope=import_scope,
         )
         validate_fn = load_script_symbol(
             resolved, symbol="validate",
             module_prefix="_jaato_completion_processor",
+            import_scope=import_scope,
         )
         if render_fn is None and validate_fn is None:
             err = (

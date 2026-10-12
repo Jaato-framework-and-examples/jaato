@@ -864,6 +864,7 @@ class LifecycleTools:
                 load_processors,
             )
             from .dynamic_instructions import build_render_context
+            from .script_imports import script_import_scope_for
             if self._processors_loaded is None:
                 workspace_path_str = getattr(self._session, "workspace_path", None)
                 config_root_str = getattr(
@@ -873,6 +874,7 @@ class LifecycleTools:
                     configured_processors,
                     workspace_path=workspace_path_str,
                     config_root=config_root_str,
+                    import_scope=script_import_scope_for(self._session),
                 )
             try:
                 history = self._session.get_history()
@@ -1019,6 +1021,7 @@ class LifecycleTools:
             load_processors,
         )
         from .dynamic_instructions import build_render_context
+        from .script_imports import script_import_scope_for
         if self._processors_loaded is None:
             workspace_path_str = getattr(self._session, "workspace_path", None)
             config_root_str = getattr(
@@ -1028,6 +1031,7 @@ class LifecycleTools:
                 configured_processors,
                 workspace_path=workspace_path_str,
                 config_root=config_root_str,
+                import_scope=script_import_scope_for(self._session),
             )
         try:
             history = self._session.get_history()
