@@ -34,6 +34,7 @@ from ..base import (  # noqa: E402
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
+    chat=True,
     user_message_images=True,
     tool_result_images=True,
     # NOT declared, and not an oversight: the ``file`` and ``input_audio``

@@ -85,6 +85,19 @@ class ProviderInfo:
     #: ``None`` means the framework's chain, which ``explain`` renders.
     context_resolution: Optional[str] = None
 
+    @property
+    def chat(self) -> bool:
+        """Whether a session can hold a conversation on this provider.
+
+        ``False`` for a decision-only provider (``ProviderCapabilities.chat``,
+        e.g. ``laya``): it serves ``decide()`` and is bound in
+        ``decision_models:``, never as a profile's or a tier's provider.  A
+        provider that declares no capabilities chats, as the dataclass
+        default says.
+        """
+        caps = self.capabilities
+        return True if caps is None else bool(getattr(caps, "chat", True))
+
     def normalized_names(self) -> set:
         """Names a profile's ``provider:`` field might use for this provider.
 

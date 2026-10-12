@@ -629,6 +629,7 @@ def validate_profile(
     # --- decision_models (decision-models.md §7) -------------------------
     _check_decision_models(profile, add)
     _check_decision_gate(profile, add)
+    _check_chat_providers(profile, provider_name, add)
 
     # --- the completion gate's own shape ---------------------------------
     _check_completion_gate_shape(profile, add)
@@ -1825,7 +1826,47 @@ def _check_decision_model_provider(
             f"decision_models.{name} binds {entry.get('model')!r} on "
             f"provider '{provider_name}', which does not declare the "
             "decisions capability, so it has no decide(); bind it on a "
-            "provider that does (openrouter)", where=where)
+            f"provider that does ({_decision_providers()})", where=where)
+
+
+def _check_chat_providers(
+    profile: Any, provider_name: Optional[str], add: Callable[..., None],
+) -> None:
+    """``decision_only_provider`` (error): a provider that cannot chat is
+    bound where a session holds its conversation.
+
+    A provider declaring ``ProviderCapabilities.chat=False`` (``laya``)
+    serves ``decide()`` only; its ``complete()`` raises
+    ``DecisionModelOnlyError``, so a profile whose ``provider:`` or a tier
+    whose ``provider:`` names it fails on the first turn.  It belongs under
+    ``decision_models:``.  Silent for an abstract base (no ``model`` and no
+    ``model_tiers``), whose concrete children carry the check.
+    """
+    tiers = getattr(profile, "model_tiers", None) or {}
+    if not (getattr(profile, "model", None) or tiers):
+        return
+    from .introspect import resolve_provider
+    sites = [("provider", provider_name)]
+    sites += [(f"model_tiers.{key}.provider", entry.get("provider"))
+              for key, entry in tiers.items() if isinstance(entry, dict)]
+    for where, name in sites:
+        info = resolve_provider(str(name)) if name else None
+        if info is None or info.chat:
+            continue
+        add("error", "decision_only_provider",
+            f"{where} names '{name}', which serves decision models only "
+            "(decide(), no chat turns), so the session fails on its first "
+            f"turn; bind it under decision_models: instead, e.g. "
+            f"decision_models: {{local: {{provider: {name}, model: ...}}}}, "
+            "with a provider that chats here", where=where)
+
+
+def _decision_providers() -> str:
+    """The installed providers declaring ``decisions``, for a message."""
+    from .introspect import providers
+    names = sorted(n for n, i in providers().items()
+                   if getattr(i.capabilities, "decisions", False))
+    return ", ".join(names) or "none installed"
 
 
 def _check_decision_models_not_tiers(

@@ -85,10 +85,14 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
 # full-suite follow-up; pinned so a new provider can't join silently.
 _CONFORMANCE_PENDING = {"google_genai", "antigravity", "github_models", "claude_cli"}
 
-# Decision-only providers: no chat wire, so no message converter to scan.
-# Their wire is ``decide()``, driven against the stand-in below
-# (``_DECISION_SETUP``).
-_NO_CHAT_WIRE = {"laya"}
+# Decision-only providers (``chat=False``): no chat wire, so no message
+# converter to scan.  Their wire is ``decide()``, driven against the
+# stand-in below (``_DECISION_SETUP``).  Derived from the declarations, so a
+# provider cannot escape the converter scan without declaring that it has
+# nothing to convert, and the declaration is then held to it
+# (``test_declared_no_chat_refuses_a_turn``).
+_NO_CHAT_WIRE = {p for p in _provider_dirs()
+                 if (_read_declaration(p) or {}).get("chat") is False}
 
 _IMAGE_MARK = "CONFORMANCE-IMAGE-PAYLOAD-1234567890"
 _PDF_MARK = "CONFORMANCE-PDF-PAYLOAD-1234567890"
@@ -623,3 +627,22 @@ def test_undeclared_decisions_expose_no_decide(provider):
     assert not callable(getattr(inst, "decide", None)), (
         f"{provider} has a decide() method but declares decisions=False."
     )
+
+
+# ------------------------------------------------------------------ chat
+#
+# ``chat=False`` says ``complete()`` cannot run a turn: the provider serves
+# decision models through ``decide()`` only, and is bound in
+# ``decision_models:``, never as a profile's or a tier's provider.
+
+@pytest.mark.parametrize("provider", sorted(_NO_CHAT_WIRE))
+def test_declared_no_chat_refuses_a_turn(provider):
+    from jaato_sdk.plugins.model_provider.decisions import DecisionModelOnlyError
+
+    assert _read_declaration(provider).get("decisions"), (
+        f"{provider} declares chat=False and decisions=False, so it serves "
+        "nothing."
+    )
+    inst = _load_provider_instance(provider)
+    with pytest.raises(DecisionModelOnlyError):
+        inst.complete([])

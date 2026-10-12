@@ -126,6 +126,9 @@ class ProviderView:
     dir_name: str
     auth: Tuple[AuthStep, ...] = ()
     knobs: Optional[KnobsView] = None
+    #: ``ProviderInfo.chat``: ``False`` for a decision-only provider, which
+    #: ``new`` refuses as a session's provider.
+    chat: bool = True
 
     def normalized_names(self) -> set:
         """Same spellings as ``ProviderInfo.normalized_names``."""
@@ -158,6 +161,7 @@ def project_providers(infos: Dict[str, Any]) -> Dict[str, Any]:
         out[name] = {
             "auth": [[s.kind, s.name, s.note] for s in (info.auth or ())],
             "knobs": None if knobs is None else _project_knobs(knobs),
+            "chat": bool(getattr(info, "chat", True)),
         }
     return out
 
@@ -439,6 +443,7 @@ def providers() -> Dict[str, Any]:
             knobs=None if knobs is None else KnobsView(tuple(
                 (layer, spec["opaque"], frozenset(spec["keys"]))
                 for layer, spec in knobs.items())),
+            chat=bool(rec.get("chat", True)),
         )
     return out
 

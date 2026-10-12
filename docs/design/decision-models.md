@@ -268,6 +268,13 @@ different models, with no child entry to settle it, is a conflict.
 | `decision_model_provider_unsupported` | error | the entry's provider does not declare `capabilities.decisions`, so it has no `decide()` |
 | `decision_model_provider_unknown` | error | the entry's provider is not installed |
 | `decision_model_as_tier` | error | a `model_tiers` entry binds a model the profile declares under `decision_models:` |
+| `decision_only_provider` | error | the profile's `provider:` or a tier's `provider:` declares `capabilities.chat=False` (`laya`): it serves `decide()` only, so the session fails on its first turn |
+
+A provider that has no chat wire at all says so statically, as
+`ProviderCapabilities.chat=False`; `jaato-scaffold new profile-set` and
+`new client` refuse it as `--provider` before writing anything, and the
+conformance guard holds the flag to `complete()` raising
+`DecisionModelOnlyError`.
 
 Whether the catalog reports an entry's model as `decisions` is not checked
 statically: `validate` makes no network requests. A tier bound to a
