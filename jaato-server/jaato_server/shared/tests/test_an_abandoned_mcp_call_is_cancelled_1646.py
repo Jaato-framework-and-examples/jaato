@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -104,6 +105,7 @@ class _Server:
         self.proc = subprocess.Popen(
             [sys.executable, str(_FIXTURE), str(self.port), str(log),
              transport],
+            env={**os.environ, "MCP_FIXTURE_SLOW_TOOL": "1"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.time() + 20
         while time.time() < deadline:
