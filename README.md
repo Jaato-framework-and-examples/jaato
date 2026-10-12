@@ -40,7 +40,7 @@ jaato is a framework for building agentic AI applications with LLM function call
 
 **Core capabilities:**
 
-- **24 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI, MiniMax, Moonshot AI Kimi, Xiaomi MiMo), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM), and unified gateways (OpenRouter, Nebius, OVHcloud, AWS Bedrock) — all behind one provider abstraction, switchable by configuration
+- **25 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI, MiniMax, Moonshot AI Kimi, Xiaomi MiMo), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM, and the Laya decision model), and unified gateways (OpenRouter, Nebius, OVHcloud, AWS Bedrock) — all behind one provider abstraction, switchable by configuration
 - **40+ Plugins** - file editing, shell execution, interactive PTY sessions, MCP servers, subagent delegation, AST search, LSP diagnostics, memory, web search, inbound webhooks, and more — auto-discovered and auto-wired
 - **Server-First Architecture** - daemon mode with IPC (Unix socket) and WebSocket (bearer-authenticated) transports, multi-session orchestration, and disk persistence
 - **Agent Profiles & Subagents** - YAML/JSON profiles configure model, provider, plugins, and GC per agent; subagents spawn as lightweight sessions that share the parent's runtime (provider config, plugin registry, permissions, token ledger)
@@ -92,13 +92,14 @@ jaato abstracts model providers behind a unified interface. Switch providers by 
 | **vLLM** | Self-hosted | Any `vllm serve` model | Local — optional `--api-key` bearer |
 | **TensorRT-LLM** | Self-hosted | `trtllm-serve` engines | Local — optional bearer |
 | **Triton** | Self-hosted | Triton + KServe v2 model repository | Local — optional bearer |
+| **Laya** | Self-hosted decision model | `convaiinnovations/laya` via `laya-serve` or in-process — typed answers with probabilities, no text | Local — optional bearer |
 | **NVIDIA NIM** | Gateway / self-hosted | Llama, DeepSeek-R1, Nemotron, … | API key (hosted) or self-hosted (no auth) |
 | **OpenRouter** | Gateway | 300+ models across vendors (`vendor/model`) | API key |
 | **Nebius Token Factory** | Gateway | Serverless open models (Llama, Qwen, DeepSeek-R1, …) | API key |
 | **OVHcloud AI Endpoints** | Gateway | Serverless open models on EU cloud (Llama, Mistral, Qwen, gpt-oss, …) | API key (or opt-in anonymous free tier) |
 | **AWS Bedrock** | Gateway (your AWS account) | Anthropic, Amazon Nova, Meta, Mistral, Cohere, AI21, DeepSeek — one `Converse` API | SigV4 via boto3's own chain: env, profile, SSO, ECS/EKS or EC2 role (jaato holds no credential) |
 
-ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **24 providers** total. The three newest (MiniMax, Kimi, MiMo) replay an assistant turn's reasoning on the next request of a tool loop, which their thinking models require. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
+ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **25 providers** total. Laya is a decision model: it answers typed questions through `decide()` and is bound in a profile's `decision_models:` block, never as a tier (OpenRouter serves the other one, TypeSafe Jev). The three newest (MiniMax, Kimi, MiMo) replay an assistant turn's reasoning on the next request of a tool loop, which their thinking models require. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
 
 ## Plugin Ecosystem
 
@@ -164,7 +165,7 @@ jaato ships with **40+ built-in plugins** organized by function. Plugins are aut
 ### Infrastructure
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer (24 providers) |
+| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer (25 providers) |
 | <img src="docs/web/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 | | **introspection** | Runtime self-inspection for tool and plugin discovery |
 | | **streaming** | Token-level streaming with cancellation support |

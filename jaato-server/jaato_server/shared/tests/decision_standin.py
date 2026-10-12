@@ -2,7 +2,8 @@
 
 Serves, on ``127.0.0.1`` and an ephemeral port:
 
-* ``POST /api/alpha/decisions``: answers every question it is asked, in
+* ``POST /api/alpha/decisions`` (OpenRouter) and ``POST /v1/systemone``
+  (``laya-serve``, TypeSafe's path): answers every question it is asked, in
   the vendor's documented shape (``noul`` 0.95; ``choice`` the first
   option; ``score`` 1.0), unless a scripted reply is queued;
 * ``GET /api/v1/models``: a listing with ``openai/gpt-4o`` only;
@@ -27,6 +28,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
 JEV = "typesafe/jev-1.13"
+
+#: OpenRouter's decision endpoint, and laya-serve's (TypeSafe's path).
+DECISION_PATHS = ("/api/alpha/decisions", "/v1/systemone")
 HANG_SECONDS = 5.0
 
 JEV_ENDPOINTS_DOC: Dict[str, Any] = {
@@ -112,7 +116,7 @@ class _Handler(BaseHTTPRequestHandler):
             body = None
         self.server.seen.append(("POST", self.path, dict(self.headers), body))
         self.server.arrived.set()
-        if self.path != "/api/alpha/decisions":
+        if self.path not in DECISION_PATHS:
             self._reply(404, {"error": "not found"})
             return
         if self.server.hang is not None:
@@ -135,6 +139,11 @@ class DecisionStandIn(ThreadingHTTPServer):
         self.arrived = threading.Event()   # set when a POST is received
         self._thread = threading.Thread(
             target=self.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+
+    @property
+    def host(self) -> str:
+        """The server root, as ``plugin_configs.laya.host`` names it."""
+        return f"http://127.0.0.1:{self.server_address[1]}"
 
     @property
     def base_url(self) -> str:
@@ -180,5 +189,17 @@ def openrouter_against(server: DecisionStandIn, model: str = JEV, **extra: Any):
         api_key="sk-or-test",
         extra={"framework_overrides": {"base_url": server.base_url}, **extra},
     ))
+    provider.connect(model)
+    return provider
+
+
+def laya_against(server: DecisionStandIn, model: str = "convaiinnovations/laya",
+                 **extra: Any):
+    """An initialized, connected ``LayaProvider`` aimed at ``server``."""
+    from jaato_server.shared.plugins.model_provider.base import ProviderConfig
+    from jaato_server.shared.plugins.model_provider.laya import LayaProvider
+
+    provider = LayaProvider()
+    provider.initialize(ProviderConfig(extra={"host": server.host, **extra}))
     provider.connect(model)
     return provider

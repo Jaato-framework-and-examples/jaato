@@ -359,6 +359,8 @@ def slot_retire_reasons(registry: Any) -> List[str]:
     an embedding model: ~1 GB of heap stays).  A plugin without the
     method, one answering ``None`` or ``""``, and one that raises (logged)
     give no reason; a raising probe is not a reason to lose a warm slot.
+    The reasons noted process-wide (``shared/process_retirement.py``, by a
+    decision provider that loaded a model into this process) follow.
 
     Returns:
         The reasons, in registry order; empty when the slot may be pooled.
@@ -376,6 +378,10 @@ def slot_retire_reasons(registry: Any) -> List[str]:
             continue
         if isinstance(reason, str) and reason:
             reasons.append(reason)
+    # A model provider is not a registry plugin; one that loaded weights
+    # into this process (``laya`` mode ``local``) notes it here.
+    from jaato_server.shared.process_retirement import process_retirement_reasons
+    reasons.extend(r for r in process_retirement_reasons() if r not in reasons)
     return reasons
 
 

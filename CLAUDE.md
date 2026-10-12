@@ -159,6 +159,7 @@ Four plugin types:
 - `model_provider/tensorrt_llm/`: NVIDIA TensorRT-LLM via `trtllm-serve` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/vllm/`: vLLM via `vllm.entrypoints.openai.api_server` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
+- `model_provider/laya/`: Laya (ConvAI Innovations), a **decision model**: typed `noul` / `choice` / `score` answers with probabilities, no text. Served by `decide()` only (`complete()` raises `DecisionModelOnlyError`), bound in `decision_models:`. `mode: http` (default) posts to `laya-serve`'s `POST /v1/systemone` (Jev's shape, the transport shared with OpenRouter in `model_provider/_decisions_http.py`); `mode: local` loads the `laya` package in the runner and retires the pool slot (`shared/process_retirement.py`). An answer Laya reports as truncated is refused.
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
 - `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; `context_length` must be set — the catalog reports no per-model window)
@@ -14228,6 +14229,34 @@ plugin_configs:
       response_format: {type: json_object}
 ```
 
+### Laya (decision model)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_LAYA_HOST` | `laya-serve` URL (default `http://localhost:8000`, where `laya-serve` binds) |
+| `JAATO_LAYA_API_KEY` | Bearer token, when the server was started with `LAYA_API_KEY` |
+| `LAYA_API_KEY` | `laya-serve`'s own key variable, honoured beneath the jaato one |
+| `JAATO_LAYA_MODE` | `http` (default) or `local` (the `laya` package in the runner; `pip install laya` there, which brings torch) |
+| `JAATO_LAYA_CONTEXT_LENGTH` | Window override; the published checkpoints are known (512 English, 1,024 multilingual / typed-decisions) |
+
+```yaml
+decision_models:
+  local:
+    provider: laya
+    model: convaiinnovations/laya     # the server's router picks English or multilingual
+plugin_configs:
+  laya:
+    host: http://gpu-box:8000
+```
+
+A request estimated over the window is refused before sending, and an
+answer whose `usage` says Laya truncated the state (or had no room for a
+question) is refused with the same `DecisionQuestionError`: an answer
+about part of the state is not one about the state. In `mode: local` the
+first load notes a process retirement, which the runner's `session.end`
+reports, so the slot is closed rather than pooled (#1565). Check a server
+with `python examples/provider_smoke_decisions.py --live-laya HOST`.
+Design: [Decision Models](docs/design/decision-models.md) §11 step 6.
+
 ### Claude CLI Provider
 | Variable | Purpose |
 |----------|---------|
@@ -14850,7 +14879,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
-- [Decision Models (System One)](docs/design/decision-models.md) - Steps 1-5 shipped (the `decisions` output modality, `OpenRouterProvider.decide()`, the `decision_models:` profile block with `JaatoSession.decision_provider(name)` and the startup refusal of a tier bound to a decision model, the `decision` plugin's `decide` tool, and the permission gate `plugin_configs.permission.decision_gate` with `PolicyDecision.ASK`), the rest proposed: support for non-conversational decision models (TypeSafe Jev, Laya) that take a state and typed questions (`noul` / `choice` / `score`) and return calibrated probabilities. `decisions` becomes an OUTPUT modality (OpenRouter's catalog already reports `text->decisions` for `typesafe/jev-1.13`), detected per model; a decisions-only model is served by a separate `provider.decide()` call to the decision endpoint (`/api/alpha/decisions` on OpenRouter), never by `complete()`, and is bound in a `decision_models:` block outside the tier ladder. First consumers: a `decide` tool and a permission gate that maps the probability onto ALLOW / ASK / DENY.
+- [Decision Models (System One)](docs/design/decision-models.md) - All six rollout steps shipped (the `decisions` output modality, `OpenRouterProvider.decide()`, the `decision_models:` profile block with `JaatoSession.decision_provider(name)` and the startup refusal of a tier bound to a decision model, the `decision` plugin's `decide` tool, the permission gate `plugin_configs.permission.decision_gate` with `PolicyDecision.ASK`, and the `laya` provider over `laya-serve` or in-process): support for non-conversational decision models (TypeSafe Jev, Laya) that take a state and typed questions (`noul` / `choice` / `score`) and return calibrated probabilities. `decisions` becomes an OUTPUT modality (OpenRouter's catalog already reports `text->decisions` for `typesafe/jev-1.13`), detected per model; a decisions-only model is served by a separate `provider.decide()` call to the decision endpoint (`/api/alpha/decisions` on OpenRouter), never by `complete()`, and is bound in a `decision_models:` block outside the tier ladder. First consumers: a `decide` tool and a permission gate that maps the probability onto ALLOW / ASK / DENY.
 - [Content Moderation](docs/design/content-moderation.md) - Proposed, nothing built: classifier checkpoints on user input (daemon side), tool results and model output (runner side), configured by a top-level `moderation:` profile block (named classifiers, per-category threshold and action `block`/`ask`/`redact`/`flag`, `delivery: stream|buffer`, fail-closed `on_unavailable`), inherited most-restrictive-wins. Backends sit behind a `ModerationBackend` interface; `decide()` on a decision model is the default adapter, beside Llama Guard and Azure AI Content Safety. Records the gaps it needs closed first: no enrichment hook can refuse content, model text has four emit sites and no single door, and clients have no event to withdraw text already streamed.
 - [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
 - [Plugin schema census](docs/design/plugin-schema-census.md) - Which config keys each plugin READS that its `get_config_schema()` does not DECLARE, measured tree-wide by `scripts/plugin_schema_census.py`. A census, deliberately **not** a guard: the raw count spans four surfaces (framework-injected keys, the block an author writes, a nested dict with its own owner, and a separate file the block points at), and a ratchet seeded before those are separated would freeze the ambiguity as a fact. `permission` is worked through site by site as the one audited row.

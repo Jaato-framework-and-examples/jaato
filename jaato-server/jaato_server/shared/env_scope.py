@@ -731,6 +731,14 @@ CATALOG: Dict[str, EnvClass] = {
         "manual context-window override; kimi exposes the knob"),
     "JAATO_KIMI_MODEL": EnvClass(SESSION, "model",
         "the profile's own `model` field selects the model"),
+    "JAATO_LAYA_API_KEY": EnvClass(SESSION, "plugin_configs.laya.api_key",
+        "optional laya-serve bearer token; laya exposes the knob"),
+    "JAATO_LAYA_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.laya.context_length",
+        "manual context-window override; laya exposes the knob"),
+    "JAATO_LAYA_HOST": EnvClass(SESSION, "plugin_configs.laya.host",
+        "laya-serve URL; laya exposes the knob"),
+    "JAATO_LAYA_MODE": EnvClass(SESSION, "plugin_configs.laya.mode",
+        "http (laya-serve) or local (in-process); laya exposes the knob"),
     "JAATO_MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
         "credential; mimo exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),
@@ -811,6 +819,8 @@ CATALOG: Dict[str, EnvClass] = {
         "credential; the vendor's own documented variable, honoured beneath JAATO_MINIMAX_API_KEY"),
     "MOONSHOT_API_KEY": EnvClass(SESSION, "plugin_configs.kimi.api_key",
         "credential; the vendor's own documented variable, honoured beneath JAATO_KIMI_API_KEY"),
+    "LAYA_API_KEY": EnvClass(SESSION, "plugin_configs.laya.api_key",
+        "laya-serve's own key variable, honoured beneath JAATO_LAYA_API_KEY"),
     "NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),

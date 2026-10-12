@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Smoke-test ``decide()`` on the ``openrouter`` provider (decision models).
+"""Smoke-test ``decide()`` on the ``openrouter`` and ``laya`` providers.
 
-Two modes, the same checks in both:
+Four modes, the same checks in each:
 
     # (1) no key, no money: drive the provider against the local stand-in
     #     the test suite uses, and print what reached it
@@ -12,10 +12,18 @@ Two modes, the same checks in both:
         python examples/provider_smoke_decisions.py --live-openrouter
     # another decision model:  --model typesafe/jev-1.13
 
+    # (3) laya against the same stand-in (its /v1/systemone path)
+    python examples/provider_smoke_decisions.py --laya
+
+    # (4) a running laya-serve (pip install "laya[serve]"; laya-serve)
+    python examples/provider_smoke_decisions.py --live-laya http://localhost:8000
+    # a token, when the server has LAYA_API_KEY:  JAATO_LAYA_API_KEY=... first
+
 The live run sends ONE request to ``POST /api/alpha/decisions`` with three
 questions (``noul``, ``choice``, ``score``) about a short support ticket.
 At Jev 1.13's price ($0.042 per million input tokens, output free) that
-is a fraction of a cent.  It prints:
+is a fraction of a cent.  ``--live-laya`` sends the same request to
+``POST {host}/v1/systemone``, at no cost.  It prints:
 
 * what the catalog says about the model (output modalities, window);
 * the request body that was sent;
@@ -58,6 +66,7 @@ from jaato_server.shared.plugins.model_provider.openrouter import (  # noqa: E40
 )
 
 DEFAULT_MODEL = "typesafe/jev-1.13"
+LAYA_MODEL = "convaiinnovations/laya"
 
 STATE = (
     "Subject: payouts failing\n\n"
@@ -117,17 +126,17 @@ def _check_answers(result: DecisionResult, failures: List[str]) -> None:
         failures.append("a noul answer carried a confidence; the docs say it has none")
 
 
-def check_catalog(provider: OpenRouterProvider, model: str, failures: List[str]) -> None:
+def check_catalog(provider: Any, model: str, failures: List[str]) -> None:
     _section("catalog")
     outputs = sorted(provider.output_modalities(model))
     print(f"output modalities: {outputs}")
     print(f"decisions only:    {provider.is_decisions_only(model)}")
-    print(f"context window:    {provider._context_length}")
+    print(f"context window:    {provider.get_context_limit() or 'unknown'}")
     if not provider.is_decisions_only(model):
         failures.append(f"{model} is not reported as decisions-only by the catalog")
 
 
-def check_complete_refuses(provider: OpenRouterProvider, failures: List[str]) -> None:
+def check_complete_refuses(provider: Any, failures: List[str]) -> None:
     _section("complete() on a decision model")
     try:
         provider.complete([])
@@ -140,7 +149,7 @@ def check_complete_refuses(provider: OpenRouterProvider, failures: List[str]) ->
     failures.append("complete() did not refuse a decisions-only model")
 
 
-def check_decide(provider: OpenRouterProvider, model: str, failures: List[str]) -> None:
+def check_decide(provider: Any, model: str, failures: List[str]) -> None:
     _section("request sent")
     _dump(build_decision_request(STATE, QUESTIONS, model))
     try:
@@ -162,7 +171,7 @@ def check_decide(provider: OpenRouterProvider, model: str, failures: List[str]) 
     _check_answers(result, failures)
 
 
-def run(provider: OpenRouterProvider, model: str) -> List[str]:
+def run(provider: Any, model: str) -> List[str]:
     failures: List[str] = []
     check_catalog(provider, model, failures)
     check_complete_refuses(provider, failures)
@@ -170,15 +179,17 @@ def run(provider: OpenRouterProvider, model: str) -> List[str]:
     return failures
 
 
-def run_mock(model: str) -> List[str]:
+def run_mock(model: str, laya: bool = False) -> List[str]:
     from jaato_server.shared.tests.decision_standin import (
         DecisionStandIn,
+        laya_against,
         openrouter_against,
     )
 
+    against = laya_against if laya else openrouter_against
     with DecisionStandIn() as server:
-        print(f"stand-in at {server.base_url} (answers anything, proves only our side)")
-        failures = run(openrouter_against(server, model=model), model)
+        print(f"stand-in at {server.host} (answers anything, proves only our side)")
+        failures = run(against(server, model=model), model)
         _section("requests the stand-in received")
         for method, path, _headers, _body in server.seen:
             print(f"  {method} {path}")
@@ -196,22 +207,46 @@ def run_live(model: str) -> List[str]:
     return run(provider, model)
 
 
+def run_live_laya(host: str, model: str) -> List[str]:
+    from jaato_server.shared.plugins.model_provider.laya import LayaProvider
+
+    provider = LayaProvider()
+    provider.initialize(ProviderConfig(extra={"host": host}))   # token from env
+    provider.connect(model)
+    print(f"laya-serve at {host}")
+    return run(provider, model)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--live-openrouter", action="store_true",
                         help="send one request to the real OpenRouter endpoint")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"decision model (default {DEFAULT_MODEL})")
+    parser.add_argument("--laya", action="store_true",
+                        help="drive the laya provider against the stand-in")
+    parser.add_argument("--live-laya", metavar="HOST",
+                        help="send one request to a running laya-serve")
+    parser.add_argument("--model", default=None,
+                        help=f"decision model (default {DEFAULT_MODEL}, "
+                             f"or {LAYA_MODEL} for laya)")
     args = parser.parse_args()
 
-    failures = run_live(args.model) if args.live_openrouter else run_mock(args.model)
+    laya = bool(args.laya or args.live_laya)
+    model = args.model or (LAYA_MODEL if laya else DEFAULT_MODEL)
+    live = bool(args.live_openrouter or args.live_laya)
+    if args.live_laya:
+        failures = run_live_laya(args.live_laya, model)
+    elif args.live_openrouter:
+        failures = run_live(model)
+    else:
+        failures = run_mock(model, laya=laya)
     _section("result")
     if failures:
         for failure in failures:
             print(f"FAIL  {failure}")
         return 1
-    print("PASS" + ("" if args.live_openrouter else
-                    "  (mock only: run --live-openrouter to check the real endpoint)"))
+    print("PASS" + ("" if live else
+                    "  (mock only: run --live-openrouter or --live-laya HOST "
+                    "to check a real endpoint)"))
     return 0
 
 

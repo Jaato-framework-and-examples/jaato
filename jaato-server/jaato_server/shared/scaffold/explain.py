@@ -1858,9 +1858,12 @@ def _resolution_order(info, EV) -> list:
                      if EV[n].category == f"provider:{d}"
                      and n.endswith("CONTEXT_LENGTH"))
     tail = f" → env {ctx_env[0]}" if ctx_env else ""
-    lines.append(
-        f"    context window : catalog/endpoint detect → profile knob "
-        f"'context_length'{tail} → else error  (detect WINS over the knob)")
+    if getattr(info, "context_resolution", None):
+        lines.append(f"    context window : {info.context_resolution}")
+    else:
+        lines.append(
+            f"    context window : catalog/endpoint detect → profile knob "
+            f"'context_length'{tail} → else error  (detect WINS over the knob)")
     if info.knobs and any(any(k.name == "modalities" for k in l.knobs)
                           for l in info.knobs.layers):
         lines.append(

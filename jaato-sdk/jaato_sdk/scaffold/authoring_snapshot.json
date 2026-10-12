@@ -292,6 +292,22 @@
    "category": "plugin:mermaid_formatter",
    "default": "https://kroki.io"
   },
+  "JAATO_LAYA_API_KEY": {
+   "category": "provider:laya",
+   "default": null
+  },
+  "JAATO_LAYA_CONTEXT_LENGTH": {
+   "category": "provider:laya",
+   "default": null
+  },
+  "JAATO_LAYA_HOST": {
+   "category": "provider:laya",
+   "default": null
+  },
+  "JAATO_LAYA_MODE": {
+   "category": "provider:laya",
+   "default": null
+  },
   "JAATO_MIMO_API_KEY": {
    "category": "provider:mimo",
    "default": null
@@ -458,6 +474,10 @@
   },
   "JAATO_ZHIPUAI_API_KEY": {
    "category": "provider:zhipuai",
+   "default": null
+  },
+  "LAYA_API_KEY": {
+   "category": "provider:laya",
    "default": null
   },
   "LMSTUDIO_API_TOKEN": {
@@ -1222,6 +1242,44 @@
       "extra_body",
       "modalities",
       "output_modalities"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "laya": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.laya.api_key (optional)"
+    ],
+    [
+     "env",
+     "JAATO_LAYA_API_KEY",
+     "optional"
+    ],
+    [
+     "env",
+     "LAYA_API_KEY",
+     "laya-serve's own variable (optional)"
+    ]
+   ],
+   "knobs": {
+    "framework_overrides": {
+     "keys": [
+      "connect_timeout",
+      "request_timeout"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "context_length",
+      "host",
+      "mode",
+      "subfolder"
      ],
      "opaque": false
     }
