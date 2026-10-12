@@ -1,7 +1,8 @@
 # Decision Models (System One): `decisions` as an Output Modality
 
-Status: steps 1-2 of §11 are **shipped** (the modality and `decide()` on
-`openrouter`); steps 3-6 are proposed.
+Status: every step of §11 is **shipped**: the modality, `decide()` on
+`openrouter`, `decision_models:`, the `decide` tool, the permission gate
+and the `laya` adapter. §8.3 lists the consumers still to come.
 
 ## 1. What a decision model is
 
@@ -223,7 +224,7 @@ class DecisionCapable(Protocol):
 |---|---|---|
 | `openrouter` | `POST /api/alpha/decisions` | Reuses the provider's key resolution, attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`), deadlines and `cost` parsing. **`/api/alpha/` is not a stable route**, so the parser is defensive and the guard fixtures are the vendor's documented examples |
 | `typesafe` (optional) | `POST https://api.typesafe.ai/v1/systemone` | The same body. Only worth adding if a deployment needs the vendor directly (its own rate limits, no gateway) |
-| `laya` | local forward pass, or an HTTP endpoint serving it | See §9 for the in-process cost |
+| `laya` | `POST {host}/v1/systemone` on `laya-serve` (`mode: http`, the default), or `laya.load(...).predict()` in the runner (`mode: local`) | `laya-serve` speaks Jev's request and response, so the HTTP transport is shared with `openrouter`. See §9 for the in-process cost |
 
 `decide()` on a chat model with structured outputs (a JSON-schema
 `response_format` plus logprobs) is a possible fallback for providers with
@@ -500,4 +501,12 @@ without a gate (the default decides, as before).
    - The plugin runs the gate only where the policy matched its default, after evaluators, the blacklist, the whitelist and suspensions. One `_ForcedAsk` applies the gray zone, an evaluator's ASK and the reliability re-confirmation to the first check and to the re-check under the policy lock. Before it, the re-check undid the reliability re-confirmation on a whitelisted tool and recursed without end.
    - `PolicyDecision.ASK`, `EvalContext.decide`, the DECISION line's `gate_model` / `gate_probability` / `gate_state_sha256`, the config schema entry (`explain plugin permission`), and `validate`'s `decision_gate_invalid` / `decision_gate_unknown_model`.
    - Guard: `jaato_server/shared/tests/test_the_permission_decision_gate.py`, eight reversions, against the real plugin, session and `OpenRouterProvider` with the decision stand-in.
-6. The `laya` adapter.
+6. The `laya` adapter. **Shipped**: `model_provider/laya/`.
+   - `laya-serve` answers `POST /v1/systemone` with Jev's shape, so `mode: http` (the default) posts there through `model_provider/_decisions_http.py`, the transport `openrouter/decisions.py` now also binds to its own error types. `host` defaults to `http://localhost:8000` (where `laya-serve` binds); the bearer token is `plugin_configs.laya.api_key`, then `JAATO_LAYA_API_KEY`, then `LAYA_API_KEY` (the server's own variable). `401` / `404` / `422` are not retried, `429` / `5xx` / an unreachable server are.
+   - `mode: local` loads the `laya` package in the runner (`laya.load(model, subfolder=...)`, once per provider), by name, so `validate` does not report the package missing for an HTTP-mode profile. Before the load it notes a process retirement in `shared/process_retirement.py`, which the runner's `session.end` sweep (`slot_retire_reasons`) reports beside the plugins' reasons, so the slot is closed rather than pooled (#1565). A provider is not a registry plugin, which is why it could not answer `slot_retire_reason()` itself.
+   - The window: `context_length`, then `JAATO_LAYA_CONTEXT_LENGTH`, then the model card's table (512 English, 1,024 multilingual and typed-decisions). An unknown model's window is not checked. A request estimated over it is refused before sending.
+   - Laya truncates a state over its window to one window, and says so in `usage` (`truncated`, `state_tokens`, `state_tokens_dropped`, `truncated_questions`; read from the `laya` 0.4.6 source, `Agent.system_one` and `serve.py`). Such an answer is refused with the same `DecisionQuestionError` (`refuse_truncated`), naming the question when one question's head had no room. A body without those keys (`LAYA_JEV_STRICT`) is not evidence and passes. The pre-send estimate is ~4 characters a token and can be wrong in either direction; this check is the measured one.
+   - `model: convaiinnovations/laya` sent to `laya-serve` means "let the server's router choose" (English or multilingual by language); `convaiinnovations/laya-multilingual` and `-typed-decisions` pin a checkpoint. The window table is keyed the same way, so the bundle id is checked against 512.
+   - `complete()` and history serialisation raise `DecisionModelOnlyError`; the output set is `{decisions}`.
+   - Not run against a live `laya-serve` or the real package (torch and the weights were not installed here); the wire was read from the package source. `examples/provider_smoke_decisions.py --live-laya HOST` is that check.
+   - Guard: `jaato_server/shared/tests/test_decide_on_laya.py`, seven reversions, against the decision stand-in (which now also serves `/v1/systemone`) and a stand-in `laya` module.

@@ -56,7 +56,8 @@ _PROVIDER_NS = {
 }
 
 _WANTED_CONSTS = ("PROVIDER_CAPABILITIES", "PROVIDER_KNOBS", "PROVIDER_QUIRKS",
-                  "PROVIDER_AUTH_RESOLUTION", "PROVIDER_NOTES")
+                  "PROVIDER_AUTH_RESOLUTION", "PROVIDER_NOTES",
+                  "PROVIDER_CONTEXT_RESOLUTION")
 
 
 # -------------------------------------------------------------------- models
@@ -78,6 +79,11 @@ class ProviderInfo:
     #: provider it describes; empty for a provider with nothing unusual
     #: to say.
     notes: tuple = ()
+    #: The provider's own context-window chain, in ``PROVIDER_CONTEXT_RESOLUTION``,
+    #: for a provider that does not resolve it through ``resolve_context_window``
+    #: (``laya``: knob, env, a table of published checkpoints, else unchecked).
+    #: ``None`` means the framework's chain, which ``explain`` renders.
+    context_resolution: Optional[str] = None
 
     def normalized_names(self) -> set:
         """Names a profile's ``provider:`` field might use for this provider.
@@ -309,7 +315,9 @@ def _read_provider_consts(dir_name: str) -> Dict[str, Any]:
         for const in _WANTED_CONSTS:
             if const in targets:
                 seg = ast.get_source_segment(src, node.value)
-                out[const] = eval(seg, dict(_PROVIDER_NS))  # noqa: S307 controlled ns
+                # Parenthesised: the segment of a string concatenated across
+                # lines omits the enclosing parentheses, so it would not parse.
+                out[const] = eval(f"({seg})", dict(_PROVIDER_NS))  # noqa: S307 controlled ns
     return out
 
 
@@ -325,6 +333,7 @@ def providers() -> Dict[str, ProviderInfo]:
             quirks=consts.get("PROVIDER_QUIRKS") or frozenset(),
             auth=consts.get("PROVIDER_AUTH_RESOLUTION") or (),
             notes=tuple(consts.get("PROVIDER_NOTES") or ()),
+            context_resolution=consts.get("PROVIDER_CONTEXT_RESOLUTION"),
         )
     return out
 

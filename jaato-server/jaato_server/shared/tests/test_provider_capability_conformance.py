@@ -85,6 +85,11 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
 # full-suite follow-up; pinned so a new provider can't join silently.
 _CONFORMANCE_PENDING = {"google_genai", "antigravity", "github_models", "claude_cli"}
 
+# Decision-only providers: no chat wire, so no message converter to scan.
+# Their wire is ``decide()``, driven against the stand-in below
+# (``_DECISION_SETUP``).
+_NO_CHAT_WIRE = {"laya"}
+
 _IMAGE_MARK = "CONFORMANCE-IMAGE-PAYLOAD-1234567890"
 _PDF_MARK = "CONFORMANCE-PDF-PAYLOAD-1234567890"
 _AUDIO_MARK = "CONFORMANCE-AUDIO-PAYLOAD-1234567890"
@@ -553,7 +558,7 @@ def test_undeclared_reasoning_replay_is_not_opted_in(provider):
 def test_every_provider_is_either_conformance_tested_or_explicitly_pending():
     """No provider may silently escape behavioral conformance — it's either in
     the testable converter registry or the explicitly-pinned pending set."""
-    covered = set(_CONVERTERS) | _CONFORMANCE_PENDING
+    covered = set(_CONVERTERS) | _CONFORMANCE_PENDING | _NO_CHAT_WIRE
     uncovered = [p for p in _provider_dirs() if p not in covered]
     assert uncovered == [], (
         f"providers neither behaviorally tested nor in _CONFORMANCE_PENDING: "
@@ -574,7 +579,13 @@ def _openrouter_at_standin(server):
     return openrouter_against(server)
 
 
+def _laya_at_standin(server):
+    from jaato_server.shared.tests.decision_standin import laya_against
+    return laya_against(server)
+
+
 _DECISION_SETUP = {
+    "laya": _laya_at_standin,
     "openrouter": _openrouter_at_standin,
 }
 

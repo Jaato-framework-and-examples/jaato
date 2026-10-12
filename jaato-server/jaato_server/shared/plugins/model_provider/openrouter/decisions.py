@@ -5,9 +5,10 @@ OpenRouter serves decision models (``typesafe/jev-1.13``) on
 ``/api/v1/chat/completions``, with the same Bearer key and attribution
 headers.  The body and response are the vendor's (see
 ``jaato_sdk.plugins.model_provider.decisions``); this module only
-locates the endpoint, sends one request under the provider's deadlines,
-honours a cancel token, and maps HTTP statuses onto the provider's
-error types so ``with_retry`` classifies them:
+locates the endpoint and binds OpenRouter's error types to the shared
+transport (``model_provider/_decisions_http.py``), which sends one
+request under the provider's deadlines, honours a cancel token and maps
+HTTP statuses so ``with_retry`` classifies them:
 
 ======  ===========================================  ==========
 status  error                                        transient
@@ -25,10 +26,12 @@ response than the parser in the SDK module checks.
 
 from __future__ import annotations
 
-import concurrent.futures
 from typing import Any, Dict, Optional
 
-from jaato_sdk.plugins.model_provider.types import CancelledException, CancelToken
+from jaato_sdk.plugins.model_provider.types import CancelToken
+
+from .. import _decisions_http as _http
+from .._decisions_http import DecisionHttpErrors
 
 from .errors import (
     AuthenticationError,
@@ -40,9 +43,6 @@ from .errors import (
 
 #: Path of the decision endpoint relative to OpenRouter's ``/api`` root.
 DECISIONS_PATH = "/alpha/decisions"
-
-#: How often a waiting call looks at its cancel token, seconds.
-CANCEL_POLL_SECONDS = 0.05
 
 
 def decisions_url(base_url: str, override: Optional[str] = None) -> str:
@@ -62,48 +62,21 @@ def decisions_url(base_url: str, override: Optional[str] = None) -> str:
     return root + DECISIONS_PATH
 
 
-def _retry_after(response: Any) -> Optional[float]:
-    raw = response.headers.get("retry-after")
-    try:
-        return float(raw) if raw else None
-    except (TypeError, ValueError):
-        return None
+_ERRORS = DecisionHttpErrors(
+    authentication=lambda text: AuthenticationError(original_error=text),
+    not_found=lambda model, text: ModelNotFoundError(model=model, original_error=text),
+    rate_limit=lambda retry_after, text: RateLimitError(
+        retry_after=retry_after, original_error=text),
+    infrastructure=lambda status, text: InfrastructureError(
+        status_code=status, original_error=text),
+    rejected=lambda status, model, body: DecisionRequestRejectedError(
+        status_code=status, model=model, body=body),
+)
 
 
 def raise_for_decision_status(response: Any, model: str) -> None:
     """Raise the provider error for a non-2xx decision response."""
-    status = response.status_code
-    if status < 400:
-        return
-    text = response.text
-    if status == 401:
-        raise AuthenticationError(original_error=text)
-    if status == 404:
-        raise ModelNotFoundError(model=model, original_error=text)
-    if status == 429:
-        raise RateLimitError(retry_after=_retry_after(response), original_error=text)
-    if status >= 500:
-        raise InfrastructureError(status_code=status, original_error=text)
-    raise DecisionRequestRejectedError(status_code=status, model=model, body=text)
-
-
-def _send(client: Any, url: str, headers: Dict[str, str], body: Dict[str, Any]) -> Any:
-    import httpx
-
-    try:
-        return client.post(url, headers=headers, json=body)
-    except httpx.TransportError as exc:   # connect, read, write, timeouts
-        raise InfrastructureError(status_code=0, original_error=str(exc)) from exc
-
-
-def _wait(future: Any, client: Any, cancel_token: Optional[CancelToken]) -> Any:
-    while True:
-        try:
-            return future.result(timeout=CANCEL_POLL_SECONDS)
-        except concurrent.futures.TimeoutError:
-            if cancel_token is not None and cancel_token.is_cancelled:
-                client.close()   # aborts the in-flight request
-                raise CancelledException("decision request cancelled")
+    _http.raise_for_decision_status(response, model, _ERRORS)
 
 
 def post_decision(
@@ -116,30 +89,13 @@ def post_decision(
     request_timeout: float,
     cancel_token: Optional[CancelToken] = None,
 ) -> Dict[str, Any]:
-    """POST one decision request and return the parsed JSON body.
+    """POST one decision request with OpenRouter's error types.
 
-    The request runs on a worker thread so the caller can stop waiting
-    the moment ``cancel_token`` trips; the client is then closed, which
-    aborts the request.  A ``0`` deadline means none, as on the chat path.
+    The transport (worker thread, cancel token, status mapping) is
+    ``model_provider/_decisions_http.py``, shared with ``laya``.
     """
-    import httpx
-
-    if cancel_token is not None:
-        cancel_token.raise_if_cancelled()
-    timeout = httpx.Timeout(request_timeout or None, connect=connect_timeout or None)
-    client = httpx.Client(timeout=timeout)
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        future = pool.submit(_send, client, url, headers, body)
-        response = _wait(future, client, cancel_token)
-        raise_for_decision_status(response, model)
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise InfrastructureError(
-                status_code=response.status_code,
-                original_error=f"decision response is not JSON: {response.text[:500]}",
-            ) from exc
-    finally:
-        pool.shutdown(wait=False)
-        client.close()
+    return _http.post_decision(
+        url, headers, body, model=model, errors=_ERRORS,
+        connect_timeout=connect_timeout, request_timeout=request_timeout,
+        cancel_token=cancel_token,
+    )

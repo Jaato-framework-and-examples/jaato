@@ -47,6 +47,7 @@ from jaato_server.shared.tests.reversion import Reversion
 
 _SDK = "jaato-sdk/jaato_sdk/plugins/model_provider/decisions.py"
 _OR = "jaato-server/jaato_server/shared/plugins/model_provider/openrouter/"
+_HTTP = "jaato-server/jaato_server/shared/plugins/model_provider/_decisions_http.py"
 
 REVERSIONS = [
     Reversion(
@@ -64,16 +65,16 @@ REVERSIONS = [
         because="a chat turn would be sent to a model that cannot answer one",
     ),
     Reversion(
-        target=_OR + "decisions.py",
+        target=_HTTP,
         find="            if cancel_token is not None and cancel_token.is_cancelled:\n",
         replace="            if False:\n",
         test="test_a_cancel_stops_the_wait",
         because="a cancelled decision would wait out the whole request",
     ),
     Reversion(
-        target=_OR + "decisions.py",
-        find="    if status >= 500:\n        raise InfrastructureError(",
-        replace="    if status >= 400:\n        raise InfrastructureError(",
+        target=_HTTP,
+        find="    if status >= 500:\n        raise errors.infrastructure(",
+        replace="    if status >= 400:\n        raise errors.infrastructure(",
         test="test_a_422_is_not_retried",
         because="a malformed request would be retried as if transient",
     ),
