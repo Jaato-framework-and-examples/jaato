@@ -40,6 +40,7 @@ from ..base import (  # noqa: E402
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
+    chat=False,             # a decision model: complete() refuses every turn
     user_message_images=False,
     tool_result_images=False,
     pdf_input=False,

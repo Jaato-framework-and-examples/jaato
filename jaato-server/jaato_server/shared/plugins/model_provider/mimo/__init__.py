@@ -30,6 +30,7 @@ from ..base import (  # noqa: E402
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
+    chat=True,
     user_message_images=True,     # mimo-v2.5 (the omnimodal model)
     tool_result_images=True,
     pdf_input=False,

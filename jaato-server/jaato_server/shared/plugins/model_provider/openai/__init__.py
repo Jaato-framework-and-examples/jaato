@@ -45,6 +45,7 @@ from ..base import (  # noqa: E402
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
+    chat=True,
     user_message_images=True,
     tool_result_images=True,
     # OpenAI's own wire carries what the gateways sharing the transport

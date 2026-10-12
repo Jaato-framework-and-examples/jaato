@@ -1173,7 +1173,38 @@ def _resolve_client_binding(args, archetype: str, transport: str):
         known = ", ".join(sorted(_contracts.providers()))
         print(f"new {archetype}: unknown provider '{provider}' (have: {known})")
         return 2, None, None
+    if provider and _refuse_decision_only(archetype, provider, model):
+        return 2, None, None
     return None, provider, model
+
+
+def _refuse_provider(archetype: str, provider: str, model: str) -> bool:
+    """Refuse an unknown or decision-only ``--provider``; ``True`` if refused."""
+    if _contracts.resolve_provider(provider) is None:
+        known = ", ".join(sorted(_contracts.providers()))
+        print(f"new {archetype}: unknown provider '{provider}' (have: {known})")
+        return True
+    return _refuse_decision_only(archetype, provider, model)
+
+
+def _refuse_decision_only(archetype: str, provider: str, model: str) -> bool:
+    """Refuse a decision-only provider as a session's provider, and say why.
+
+    A provider declaring ``chat=False`` (``laya``) serves ``decide()`` and
+    nothing else: ``complete()`` raises ``DecisionModelOnlyError``, so a
+    session bound to it fails on its first turn.  It belongs under
+    ``decision_models:`` beside a provider that chats.  Returns ``True``
+    when it printed the refusal.
+    """
+    info = _contracts.resolve_provider(provider)
+    if info is None or getattr(info, "chat", True):
+        return False
+    print(f"new {archetype}: provider '{provider}' serves decision models only "
+          f"(decide(), no chat turns), so a session bound to it fails on its "
+          f"first turn.  Bind it in a profile whose provider chats: "
+          f"decision_models: {{local: {{provider: {provider}, model: "
+          f"{model or '<model>'}}}}}")
+    return True
 
 
 def _profile_set_env_lines(args) -> List[str]:
@@ -2310,9 +2341,7 @@ def _new_profile_set(args) -> int:
         return 2
 
     provider = args.provider
-    if _contracts.resolve_provider(provider) is None:
-        known = ", ".join(sorted(_contracts.providers()))
-        print(f"new profile-set: unknown provider '{provider}' (have: {known})")
+    if _refuse_provider("profile-set", provider, args.model):
         return 2
 
     agents = [a.strip() for a in args.agents.split(",") if a.strip()]

@@ -479,6 +479,7 @@ class ModalityCapabilityMixin:
 # guard can assert it.  Adding a field here is the one place a new capability is
 # defined; the doc generator and the guard both read this tuple.
 CAPABILITY_FIELDS = (
+    "chat",
     "user_message_images",
     "tool_result_images",
     "pdf_input",
@@ -513,6 +514,7 @@ class ProviderCapabilities:
     Providers override per the behavior they actually implement.
     """
 
+    chat: bool = True                   # complete() runs a conversational turn (False: decide() only)
     user_message_images: bool = False   # Part.inline_data image -> wire image block
     tool_result_images: bool = False    # tool-result image attachment -> the model
     pdf_input: bool = False             # application/pdf attachment -> wire file/document block

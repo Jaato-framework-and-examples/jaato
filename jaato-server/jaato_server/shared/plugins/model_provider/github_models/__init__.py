@@ -25,6 +25,7 @@ from ..base import (  # noqa: E402
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
+    chat=True,
     user_message_images=False,
     tool_result_images=False,
     pdf_input=False,

@@ -42,6 +42,7 @@ from ..base import (  # noqa: E402
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
+    chat=True,
     # Converse's own content blocks, each with a closed format vocabulary:
     # ``image`` (png/jpeg/gif/webp), ``document`` (pdf + office + plain
     # text), ``audio``.  A mime outside a vocabulary is withheld with a

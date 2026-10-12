@@ -20347,6 +20347,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": true,
@@ -20463,7 +20464,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: anthropic\n  capabilities: user_message_images, tool_result_images, pdf_input, thinking, prompt_caching, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : api_key_param:api_key → oauth:anthropic_oauth.json → env:ANTHROPIC_AUTH_TOKEN → env:CLAUDE_CODE_OAUTH_TOKEN → env:ANTHROPIC_API_KEY   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.anthropic.*):\n    [top_level]  — auth / identity + prompt-cache control\n      api_key                str     Anthropic API key (sk-ant-api...)\n      oauth_token            str     OAuth token for Pro/Max subscription\n      enable_caching         bool    cache_control breakpoints on system/tools/history; unset resolves JAATO_ANTHROPIC_ENABLE_CACHING (default off)\n      cache_ttl              str     5m | 1h (1h costs a 2x write premium)  (default '5m')\n      cache_history          bool    place the history breakpoint (BP3), not just system+tools  (default True)\n      cache_exclude_recent_turns int     BP3 fallback turn count when no InstructionBudget is set  (default 2)\n      cache_min_tokens       bool    enforce Anthropic's minimum cacheable size before spending a breakpoint  (default True)\n    [api_params]  — Anthropic Messages API request-body fields\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      enable_thinking        bool  \n      thinking_budget        int   \n    [framework_overrides]  — rare escape hatches\n      context_length         int   \n      modalities             list  \n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: anthropic\n  capabilities: chat, user_message_images, tool_result_images, pdf_input, thinking, prompt_caching, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : api_key_param:api_key → oauth:anthropic_oauth.json → env:ANTHROPIC_AUTH_TOKEN → env:CLAUDE_CODE_OAUTH_TOKEN → env:ANTHROPIC_API_KEY   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.anthropic.*):\n    [top_level]  — auth / identity + prompt-cache control\n      api_key                str     Anthropic API key (sk-ant-api...)\n      oauth_token            str     OAuth token for Pro/Max subscription\n      enable_caching         bool    cache_control breakpoints on system/tools/history; unset resolves JAATO_ANTHROPIC_ENABLE_CACHING (default off)\n      cache_ttl              str     5m | 1h (1h costs a 2x write premium)  (default '5m')\n      cache_history          bool    place the history breakpoint (BP3), not just system+tools  (default True)\n      cache_exclude_recent_turns int     BP3 fallback turn count when no InstructionBudget is set  (default 2)\n      cache_min_tokens       bool    enforce Anthropic's minimum cacheable size before spending a breakpoint  (default True)\n    [api_params]  — Anthropic Messages API request-body fields\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      enable_thinking        bool  \n      thinking_budget        int   \n    [framework_overrides]  — rare escape hatches\n      context_length         int   \n      modalities             list  \n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider antigravity": {
    "data": {
@@ -20477,6 +20478,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -20555,7 +20557,7 @@
      "    modalities     : catalog detect → profile knob 'modalities' → static table → text floor"
     ]
    },
-   "text": "provider: antigravity\n  capabilities: user_message_images, thinking, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : oauth:antigravity_accounts.json   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n  knobs (plugin_configs.antigravity.*):\n    [top_level]  — quota / endpoint / generation\n      endpoint               str   \n      quota_type             str     antigravity|gemini-cli\n      project_id             str   \n      auto_rotate            bool    multi-account rotation\n      retry_empty            bool  \n      session_recovery       bool  \n      thinking_level         str     minimal|low|medium|high (Gemini 3)\n      thinking_budget        int     Claude thinking budget\n      context_length         int   \n      modalities             list  "
+   "text": "provider: antigravity\n  capabilities: chat, user_message_images, thinking, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : oauth:antigravity_accounts.json   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n  knobs (plugin_configs.antigravity.*):\n    [top_level]  — quota / endpoint / generation\n      endpoint               str   \n      quota_type             str     antigravity|gemini-cli\n      project_id             str   \n      auto_rotate            bool    multi-account rotation\n      retry_empty            bool  \n      session_recovery       bool  \n      thinking_level         str     minimal|low|medium|high (Gemini 3)\n      thinking_budget        int     Claude thinking budget\n      context_length         int   \n      modalities             list  "
   },
   "provider azure_openai": {
    "data": {
@@ -20589,6 +20591,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -20730,7 +20733,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: azure_openai\n  read this first:\n    ! `model:` in a profile is the DEPLOYMENT name from your Azure resource\n      (Azure AI Foundry -> Deployments), NOT a catalog model id. A catalog id\n      that happens to be spelled like one fails at request time with\n      DeploymentNotFound, and nothing earlier says why.\n    ! `plugin_configs.azure_openai.model_name` carries the model the\n      deployment actually serves (e.g. gpt-4o). It is what makes the input-\n      modality table applicable — a deployment name identifies nothing.\n    ! `api_version` is required and has no default: the date decides which\n      request fields exist, so the framework must not pick one for you.\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_AZURE_OPENAI_API_KEY → env:AZURE_OPENAI_API_KEY → stored:azure_openai_auth.json → adc:DefaultAzureCredential   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_AZURE_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.azure_openai.*):\n    [top_level]  — resource / deployment / credential\n      endpoint               str     REQUIRED — https://<resource>.openai.azure.com\n      api_version            str     REQUIRED — the api-version date, e.g. 2024-10-21; no default, because it decides which request fields exist\n      auth                   str     \"key\" (resource key) or \"aad\" (Microsoft Entra ID, needs the azure-identity package)  (default 'key')\n      api_key                str     Azure OpenAI resource key\n      context_length         int     REQUIRED — Azure reports no per-deployment window, and a deployment name does not identify the model behind it\n      model_name             str     the MODEL id this deployment serves, e.g. gpt-4o; the only thing that makes the input-modality table applicable, since the deployment name is arbitrary\n      modalities             list    assert INPUT modalities directly, e.g. [\"text\",\"image\"]\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: azure_openai\n  read this first:\n    ! `model:` in a profile is the DEPLOYMENT name from your Azure resource\n      (Azure AI Foundry -> Deployments), NOT a catalog model id. A catalog id\n      that happens to be spelled like one fails at request time with\n      DeploymentNotFound, and nothing earlier says why.\n    ! `plugin_configs.azure_openai.model_name` carries the model the\n      deployment actually serves (e.g. gpt-4o). It is what makes the input-\n      modality table applicable — a deployment name identifies nothing.\n    ! `api_version` is required and has no default: the date decides which\n      request fields exist, so the framework must not pick one for you.\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_AZURE_OPENAI_API_KEY → env:AZURE_OPENAI_API_KEY → stored:azure_openai_auth.json → adc:DefaultAzureCredential   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_AZURE_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.azure_openai.*):\n    [top_level]  — resource / deployment / credential\n      endpoint               str     REQUIRED — https://<resource>.openai.azure.com\n      api_version            str     REQUIRED — the api-version date, e.g. 2024-10-21; no default, because it decides which request fields exist\n      auth                   str     \"key\" (resource key) or \"aad\" (Microsoft Entra ID, needs the azure-identity package)  (default 'key')\n      api_key                str     Azure OpenAI resource key\n      context_length         int     REQUIRED — Azure reports no per-deployment window, and a deployment name does not identify the model behind it\n      model_name             str     the MODEL id this deployment serves, e.g. gpt-4o; the only thing that makes the input-modality table applicable, since the deployment name is arbitrary\n      modalities             list    assert INPUT modalities directly, e.g. [\"text\",\"image\"]\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider bedrock": {
    "data": {
@@ -20759,6 +20762,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": true,
@@ -20884,7 +20888,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: bedrock\n  capabilities: user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, prompt_caching, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : env:AWS_ACCESS_KEY_ID → stored:~/.aws/credentials → cli:aws sso login → adc:container and instance roles   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_BEDROCK_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.bedrock.*):\n    [top_level]  — region / credential routing / wire extensions\n      region                 str     AWS region, e.g. us-east-1.  Bedrock is regional and model availability differs by region, so there is no default.  Unset falls through to JAATO_BEDROCK_REGION, then AWS_REGION (read here because Python's botocore does not), then boto3's own AWS_DEFAULT_REGION / profile region\n      profile                str     named AWS profile to build the boto3 session from — the per-session override of boto3's AWS_PROFILE, so two sessions on one host can use two AWS accounts\n      endpoint_url           str     bedrock-runtime endpoint override (a VPC endpoint, or a local stand-in in tests)\n      context_length         int     REQUIRED — Bedrock's catalog reports no per-model context window, so an operator assertion is the only source of truth and connect() fails loud without one\n      modalities             list    assert INPUT modalities, e.g. [\"text\",\"image\",\"file\"].  Layered over the per-family table; needed for a model the table does not name, since Bedrock's catalog vocabulary (TEXT|IMAGE|EMBEDDING) cannot express documents or audio\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n      enable_caching         bool    place Converse cachePoint blocks after the system prompt and the tool list — Bedrock's spelling of Anthropic's cache_control breakpoints  (default False)\n      cache_ttl              str     \"5m\" or \"1h\"; anything else is dropped rather than forwarded, because Bedrock rejects values outside the enum\n      additional_model_request_fields dict    Converse's own escape hatch for vendor-specific inference parameters.  Applied LAST, so it overrides anything the framework put there (the thinking config included)\n      guardrail_config       dict    guardrailIdentifier / guardrailVersion / trace, forwarded verbatim to Converse\n      performance_latency    str     \"standard\" or \"optimized\" — Bedrock's performanceConfig\n    [api_params]  — Converse inferenceConfig (filtered allow-list)\n      max_tokens             int     output cap; always sent, because Converse has no server-side default worth relying on across seven vendors  (default 8192)\n      temperature            float \n      top_p                  float \n      stop_sequences         list  \n      tool_choice            str     auto / required (Converse's \"any\") / none, or a dict naming one tool; \"none\" drops the whole toolConfig, which is how this wire says it\n      enable_thinking        bool    request extended reasoning.  WARNS at connect: reasoning is extracted but not replayed, so a thinking turn that also calls tools may be rejected  (default False)\n      thinking_budget        int     reasoning token budget when enable_thinking is on  (default 4096)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: bedrock\n  capabilities: chat, user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, prompt_caching, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : env:AWS_ACCESS_KEY_ID → stored:~/.aws/credentials → cli:aws sso login → adc:container and instance roles   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_BEDROCK_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.bedrock.*):\n    [top_level]  — region / credential routing / wire extensions\n      region                 str     AWS region, e.g. us-east-1.  Bedrock is regional and model availability differs by region, so there is no default.  Unset falls through to JAATO_BEDROCK_REGION, then AWS_REGION (read here because Python's botocore does not), then boto3's own AWS_DEFAULT_REGION / profile region\n      profile                str     named AWS profile to build the boto3 session from — the per-session override of boto3's AWS_PROFILE, so two sessions on one host can use two AWS accounts\n      endpoint_url           str     bedrock-runtime endpoint override (a VPC endpoint, or a local stand-in in tests)\n      context_length         int     REQUIRED — Bedrock's catalog reports no per-model context window, so an operator assertion is the only source of truth and connect() fails loud without one\n      modalities             list    assert INPUT modalities, e.g. [\"text\",\"image\",\"file\"].  Layered over the per-family table; needed for a model the table does not name, since Bedrock's catalog vocabulary (TEXT|IMAGE|EMBEDDING) cannot express documents or audio\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n      enable_caching         bool    place Converse cachePoint blocks after the system prompt and the tool list — Bedrock's spelling of Anthropic's cache_control breakpoints  (default False)\n      cache_ttl              str     \"5m\" or \"1h\"; anything else is dropped rather than forwarded, because Bedrock rejects values outside the enum\n      additional_model_request_fields dict    Converse's own escape hatch for vendor-specific inference parameters.  Applied LAST, so it overrides anything the framework put there (the thinking config included)\n      guardrail_config       dict    guardrailIdentifier / guardrailVersion / trace, forwarded verbatim to Converse\n      performance_latency    str     \"standard\" or \"optimized\" — Bedrock's performanceConfig\n    [api_params]  — Converse inferenceConfig (filtered allow-list)\n      max_tokens             int     output cap; always sent, because Converse has no server-side default worth relying on across seven vendors  (default 8192)\n      temperature            float \n      top_p                  float \n      stop_sequences         list  \n      tool_choice            str     auto / required (Converse's \"any\") / none, or a dict naming one tool; \"none\" drops the whole toolConfig, which is how this wire says it\n      enable_thinking        bool    request extended reasoning.  WARNS at connect: reasoning is extracted but not replayed, so a thinking turn that also calls tools may be rejected  (default False)\n      thinking_budget        int     reasoning token budget when enable_thinking is on  (default 4096)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider chrome_ai": {
    "data": {
@@ -20898,6 +20902,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -21002,7 +21007,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: chrome_ai\n  capabilities: streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : none   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_CHROME_AI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.chrome_ai.*):\n    [top_level]  — browser connection\n      binary                 str     Browser binary path (JAATO_CHROME_AI_BINARY override)\n      cdp_url                str     Attach to a running browser (http://host:port or ws:// DevTools URL) instead of launching one\n      user_data_dir          str     Persistent Chrome profile dir (default ~/.jaato/chrome_ai/profile; the model download is profile-bound)\n      headless               bool    Launch with --headless=new (model must already be in the profile)  (default True)\n      page_url               str     Page hosting the Prompt API calls (point at an https origin if the build gates the API)  (default 'about:blank')\n      extra_args             list    Additional Chrome CLI switches (e.g. --enable-features=...)\n      auto_download          bool    Trigger the on-device model component download at connect() when the model is 'downloadable'  (default False)\n      download_timeout       int     Seconds to wait for the model download  (default 1800)\n      connect_timeout        int     Seconds for browser launch / CDP attach  (default 30)\n      turn_timeout           int     Seconds of mid-turn event silence before aborting  (default 300)\n      context_length         int     Manual context-window override (normally detected from the session quota)\n      warmup                 bool    Run one throwaway generation at connect() to absorb the on-device model's cold-start (~11s first-token) off the first real turn; set false for fastest connect  (default True)\n    [api_params]  — LanguageModel.create() sampling options\n      temperature            float   Sampling temperature (LanguageModel.create option; unset = browser default)\n      top_k                  int     Top-K sampling (LanguageModel.create option; unset = browser default)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: chrome_ai\n  capabilities: chat, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : none   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_CHROME_AI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.chrome_ai.*):\n    [top_level]  — browser connection\n      binary                 str     Browser binary path (JAATO_CHROME_AI_BINARY override)\n      cdp_url                str     Attach to a running browser (http://host:port or ws:// DevTools URL) instead of launching one\n      user_data_dir          str     Persistent Chrome profile dir (default ~/.jaato/chrome_ai/profile; the model download is profile-bound)\n      headless               bool    Launch with --headless=new (model must already be in the profile)  (default True)\n      page_url               str     Page hosting the Prompt API calls (point at an https origin if the build gates the API)  (default 'about:blank')\n      extra_args             list    Additional Chrome CLI switches (e.g. --enable-features=...)\n      auto_download          bool    Trigger the on-device model component download at connect() when the model is 'downloadable'  (default False)\n      download_timeout       int     Seconds to wait for the model download  (default 1800)\n      connect_timeout        int     Seconds for browser launch / CDP attach  (default 30)\n      turn_timeout           int     Seconds of mid-turn event silence before aborting  (default 300)\n      context_length         int     Manual context-window override (normally detected from the session quota)\n      warmup                 bool    Run one throwaway generation at connect() to absorb the on-device model's cold-start (~11s first-token) off the first real turn; set false for fastest connect  (default True)\n    [api_params]  — LanguageModel.create() sampling options\n      temperature            float   Sampling temperature (LanguageModel.create option; unset = browser default)\n      top_k                  int     Top-K sampling (LanguageModel.create option; unset = browser default)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider claude_cli": {
    "data": {
@@ -21016,6 +21021,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": false,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -21068,7 +21074,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: claude_cli\n  capabilities: thinking, streaming\n  quirks: (none)\n  resolution order:\n    credentials    : cli:claude   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n  knobs (plugin_configs.claude_cli.*):\n    [top_level]  — CLI backend configuration\n      cli_path               str     path to claude CLI\n      cli_mode               str     delegated|passthrough\n      max_turns              int     max agentic turns\n      permission_mode        str     CLI permission mode\n      context_length         int   "
+   "text": "provider: claude_cli\n  capabilities: chat, thinking, streaming\n  quirks: (none)\n  resolution order:\n    credentials    : cli:claude   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n  knobs (plugin_configs.claude_cli.*):\n    [top_level]  — CLI backend configuration\n      cli_path               str     path to claude CLI\n      cli_mode               str     delegated|passthrough\n      max_turns              int     max agentic turns\n      permission_mode        str     CLI permission mode\n      context_length         int   "
   },
   "provider doubleword": {
    "data": {
@@ -21092,6 +21098,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -21219,7 +21226,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: doubleword\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_DOUBLEWORD_API_KEY → stored:doubleword-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_DOUBLEWORD_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.doubleword.*):\n    [top_level]  — connection / identity\n      api_key                str     Doubleword API key\n      base_url               str     JAATO_DOUBLEWORD_BASE_URL override\n      context_length         int   \n      modalities             list  \n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      service_tier           str     inference tier: \"flex\" = discounted async (minutes-level latency, ~1 min to first token), \"priority\" = realtime; JAATO_DOUBLEWORD_SERVICE_TIER is the env fallback\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: doubleword\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_DOUBLEWORD_API_KEY → stored:doubleword-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_DOUBLEWORD_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.doubleword.*):\n    [top_level]  — connection / identity\n      api_key                str     Doubleword API key\n      base_url               str     JAATO_DOUBLEWORD_BASE_URL override\n      context_length         int   \n      modalities             list  \n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      service_tier           str     inference tier: \"flex\" = discounted async (minutes-level latency, ~1 min to first token), \"priority\" = realtime; JAATO_DOUBLEWORD_SERVICE_TIER is the env fallback\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider github_models": {
    "data": {
@@ -21238,6 +21245,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -21285,7 +21293,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: github_models\n  capabilities: thinking, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : oauth:github_oauth.json → env:GITHUB_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n  knobs (plugin_configs.github_models.*):\n    [top_level]  — connection / billing\n      organization           str     billing-attribution org\n      enterprise             str   \n      endpoint               str   \n      context_length         int   "
+   "text": "provider: github_models\n  capabilities: chat, thinking, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : oauth:github_oauth.json → env:GITHUB_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n  knobs (plugin_configs.github_models.*):\n    [top_level]  — connection / billing\n      organization           str     billing-attribution org\n      enterprise             str   \n      endpoint               str   \n      context_length         int   "
   },
   "provider google_genai": {
    "data": {
@@ -21314,6 +21322,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": true,
@@ -21362,7 +21371,7 @@
      "    modalities     : catalog detect → profile knob 'modalities' → static table → text floor"
     ]
    },
-   "text": "provider: google_genai\n  capabilities: user_message_images, tool_result_images, pdf_input, audio_input, prompt_caching, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : api_key_param:api_key → env:GOOGLE_GENAI_API_KEY → stored:GOOGLE_APPLICATION_CREDENTIALS → adc   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n  knobs (plugin_configs.google_genai.*):\n    [top_level]  — context / modality overrides + prompt-cache control\n      context_length         int   \n      modalities             list  \n      enable_caching         bool    create a server-side CachedContent for system+tools (needs ~32k tokens of stable prefix to engage)  (default False)\n      cache_ttl              str     CachedContent TTL, Google duration format (e.g. 3600s)  (default '3600s')"
+   "text": "provider: google_genai\n  capabilities: chat, user_message_images, tool_result_images, pdf_input, audio_input, prompt_caching, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : api_key_param:api_key → env:GOOGLE_GENAI_API_KEY → stored:GOOGLE_APPLICATION_CREDENTIALS → adc   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n  knobs (plugin_configs.google_genai.*):\n    [top_level]  — context / modality overrides + prompt-cache control\n      context_length         int   \n      modalities             list  \n      enable_caching         bool    create a server-side CachedContent for system+tools (needs ~32k tokens of stable prefix to engage)  (default False)\n      cache_ttl              str     CachedContent TTL, Google duration format (e.g. 3600s)  (default '3600s')"
   },
   "provider kimi": {
    "data": {
@@ -21391,6 +21400,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -21513,7 +21523,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: kimi\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media, reasoning_replay\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_KIMI_API_KEY → env:MOONSHOT_API_KEY → stored:kimi-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_KIMI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.kimi.*):\n    [top_level]  — connection / identity\n      api_key                str     Kimi API key\n      base_url               str     JAATO_KIMI_BASE_URL override (.cn platform, Kimi Code plan, a proxy)\n      context_length         int     manual override when the catalog lacks the model\n      modalities             list    assert input modalities for a model the catalog does not classify\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — Kimi Chat Completions params (filtered allow-list; no sampling parameters — they are fixed per model)\n      max_tokens             int     sent as max_completion_tokens; >= 16k advised for thinking models\n      tool_choice            str     auto|none|required|named on K3; auto|none on K2.x (else folded to auto)\n      stop                   list    up to 5 strings of up to 32 bytes\n      response_format        dict    {type: text|json_object|json_schema}\n      prompt_cache_key       str     stable per-task key that raises the automatic cache hit rate (required on the Kimi Code plan)\n      thinking_level         str     K3 → reasoning_effort: low|high|max (vendor default max)\n      enable_thinking        bool    K2.6 → thinking.type; ignored on K3 (always on) and K2.7-code (forced on)\n      thinking_keep          str     K2.6 → thinking.keep: \"all\" replays historical reasoning server-side; unset = the vendor default (null)\n      strict_tools           bool    stamp strict: true on tool definitions (default false — Kimi defaults strict on, and the framework's schemas are not authored for strict mode)\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: kimi\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media, reasoning_replay\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_KIMI_API_KEY → env:MOONSHOT_API_KEY → stored:kimi-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_KIMI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.kimi.*):\n    [top_level]  — connection / identity\n      api_key                str     Kimi API key\n      base_url               str     JAATO_KIMI_BASE_URL override (.cn platform, Kimi Code plan, a proxy)\n      context_length         int     manual override when the catalog lacks the model\n      modalities             list    assert input modalities for a model the catalog does not classify\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — Kimi Chat Completions params (filtered allow-list; no sampling parameters — they are fixed per model)\n      max_tokens             int     sent as max_completion_tokens; >= 16k advised for thinking models\n      tool_choice            str     auto|none|required|named on K3; auto|none on K2.x (else folded to auto)\n      stop                   list    up to 5 strings of up to 32 bytes\n      response_format        dict    {type: text|json_object|json_schema}\n      prompt_cache_key       str     stable per-task key that raises the automatic cache hit rate (required on the Kimi Code plan)\n      thinking_level         str     K3 → reasoning_effort: low|high|max (vendor default max)\n      enable_thinking        bool    K2.6 → thinking.type; ignored on K3 (always on) and K2.7-code (forced on)\n      thinking_keep          str     K2.6 → thinking.keep: \"all\" replays historical reasoning server-side; unset = the vendor default (null)\n      strict_tools           bool    stamp strict: true on tool definitions (default false — Kimi defaults strict on, and the framework's schemas are not authored for strict mode)\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider laya": {
    "data": {
@@ -21537,6 +21547,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": false,
      "decisions": true,
      "output_media": false,
      "pdf_input": false,
@@ -21629,6 +21640,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -21678,7 +21690,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → env LMSTUDIO_CONTEXT_LENGTH → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: lmstudio\n  capabilities: user_message_images, tool_result_images, streaming, cancellation\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:LMSTUDIO_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env LMSTUDIO_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.lmstudio.*):\n    [top_level]  — LM Studio server connection\n      host                   str     LM Studio server URL (LMSTUDIO_HOST)\n      api_token              str     bearer token (only if required)\n      context_length         int   \n    [load] (opaque pass-through)  — native /api/v1/models/load body — any key forwarded verbatim (context_length, flash_attention, offload_kv_cache_to_gpu, eval_batch_size, num_experts, ...)"
+   "text": "provider: lmstudio\n  capabilities: chat, user_message_images, tool_result_images, streaming, cancellation\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:LMSTUDIO_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env LMSTUDIO_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.lmstudio.*):\n    [top_level]  — LM Studio server connection\n      host                   str     LM Studio server URL (LMSTUDIO_HOST)\n      api_token              str     bearer token (only if required)\n      context_length         int   \n    [load] (opaque pass-through)  — native /api/v1/models/load body — any key forwarded verbatim (context_length, flash_attention, offload_kv_cache_to_gpu, eval_batch_size, num_experts, ...)"
   },
   "provider mimo": {
    "data": {
@@ -21707,6 +21719,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -21824,7 +21837,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: mimo\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media, reasoning_replay\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_MIMO_API_KEY → env:MIMO_API_KEY → stored:mimo-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_MIMO_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.mimo.*):\n    [top_level]  — connection / identity\n      api_key                str     MiMo API key\n      base_url               str     JAATO_MIMO_BASE_URL override (Token Plan hosts, a local proxy)\n      context_length         int     override the built-in per-model window\n      modalities             list    assert input modalities for a model the table does not name\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float   forced to 1.0 by the vendor while thinking is enabled\n      top_p                  float   forced to 0.95 by the vendor while thinking is enabled\n      max_tokens             int     sent as max_completion_tokens (up to 131072)\n      tool_choice            str     only \"auto\" is accepted; anything else is folded to it with a warning\n      parallel_tool_calls    bool  \n      stop                   list  \n      response_format        dict    {type: json_object} works on both models; no json_schema\n      enable_thinking        bool    → thinking: {type: enabled|disabled} (vendor default: enabled)\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: mimo\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media, reasoning_replay\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_MIMO_API_KEY → env:MIMO_API_KEY → stored:mimo-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_MIMO_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.mimo.*):\n    [top_level]  — connection / identity\n      api_key                str     MiMo API key\n      base_url               str     JAATO_MIMO_BASE_URL override (Token Plan hosts, a local proxy)\n      context_length         int     override the built-in per-model window\n      modalities             list    assert input modalities for a model the table does not name\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float   forced to 1.0 by the vendor while thinking is enabled\n      top_p                  float   forced to 0.95 by the vendor while thinking is enabled\n      max_tokens             int     sent as max_completion_tokens (up to 131072)\n      tool_choice            str     only \"auto\" is accepted; anything else is folded to it with a warning\n      parallel_tool_calls    bool  \n      stop                   list  \n      response_format        dict    {type: json_object} works on both models; no json_schema\n      enable_thinking        bool    → thinking: {type: enabled|disabled} (vendor default: enabled)\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider minimax": {
    "data": {
@@ -21853,6 +21866,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -21970,7 +21984,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: minimax\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media, reasoning_replay\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_MINIMAX_API_KEY → env:MINIMAX_API_KEY → stored:minimax-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_MINIMAX_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.minimax.*):\n    [top_level]  — connection / identity\n      api_key                str     MiniMax API key or Token Plan key\n      base_url               str     JAATO_MINIMAX_BASE_URL override (the .cn platform, a proxy)\n      context_length         int     override the built-in per-model window\n      modalities             list    assert input modalities for a model the table does not name\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float   0-2\n      top_p                  float \n      max_tokens             int     sent as max_completion_tokens; default = the model's recommended cap\n      tool_choice            str     none|auto; anything else is folded to auto with a warning\n      parallel_tool_calls    bool  \n      stop                   list  \n      service_tier           str     \"priority\" = 1.5x price, faster\n      enable_thinking        bool    M3 → thinking: {type: adaptive|disabled}; ignored on M2.x (always on)\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: minimax\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media, reasoning_replay\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_MINIMAX_API_KEY → env:MINIMAX_API_KEY → stored:minimax-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_MINIMAX_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.minimax.*):\n    [top_level]  — connection / identity\n      api_key                str     MiniMax API key or Token Plan key\n      base_url               str     JAATO_MINIMAX_BASE_URL override (the .cn platform, a proxy)\n      context_length         int     override the built-in per-model window\n      modalities             list    assert input modalities for a model the table does not name\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float   0-2\n      top_p                  float \n      max_tokens             int     sent as max_completion_tokens; default = the model's recommended cap\n      tool_choice            str     none|auto; anything else is folded to auto with a warning\n      parallel_tool_calls    bool  \n      stop                   list  \n      service_tier           str     \"priority\" = 1.5x price, faster\n      enable_thinking        bool    M3 → thinking: {type: adaptive|disabled}; ignored on M2.x (always on)\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider nebius": {
    "data": {
@@ -21999,6 +22013,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -22121,7 +22136,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: nebius\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_NEBIUS_API_KEY → env:NEBIUS_API_KEY → stored:nebius-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_NEBIUS_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.nebius.*):\n    [top_level]  — connection / identity\n      api_key                str     Nebius API key\n      base_url               str     JAATO_NEBIUS_BASE_URL override\n      context_length         int   \n      modalities             list  \n      extra_body             dict    opaque passthrough to OpenAI create() extra_body (guided_json/guided_choice, cache_salt, ...)\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: nebius\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_NEBIUS_API_KEY → env:NEBIUS_API_KEY → stored:nebius-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_NEBIUS_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.nebius.*):\n    [top_level]  — connection / identity\n      api_key                str     Nebius API key\n      base_url               str     JAATO_NEBIUS_BASE_URL override\n      context_length         int   \n      modalities             list  \n      extra_body             dict    opaque passthrough to OpenAI create() extra_body (guided_json/guided_choice, cache_salt, ...)\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider nim": {
    "data": {
@@ -22145,6 +22160,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -22194,7 +22210,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_NIM_CONTEXT_LENGTH → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: nim\n  capabilities: user_message_images, tool_result_images, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_NIM_API_KEY → stored:nim-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_NIM_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.nim.*):\n    [top_level]  — connection / identity\n      api_key                str     NIM API key (nvapi-...)\n      base_url               str     JAATO_NIM_BASE_URL (self-hosted endpoint)\n      context_length         int   \n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role"
+   "text": "provider: nim\n  capabilities: chat, user_message_images, tool_result_images, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_NIM_API_KEY → stored:nim-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_NIM_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.nim.*):\n    [top_level]  — connection / identity\n      api_key                str     NIM API key (nvapi-...)\n      base_url               str     JAATO_NIM_BASE_URL (self-hosted endpoint)\n      context_length         int   \n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role"
   },
   "provider ollama": {
    "data": {
@@ -22208,6 +22224,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -22245,7 +22262,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → env OLLAMA_CONTEXT_LENGTH → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: ollama\n  capabilities: user_message_images, tool_result_images, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : none   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env OLLAMA_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.ollama.*):\n    [top_level]  — connection\n      host                   str     OLLAMA_HOST override\n      context_length         int   "
+   "text": "provider: ollama\n  capabilities: chat, user_message_images, tool_result_images, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : none   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env OLLAMA_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.ollama.*):\n    [top_level]  — connection\n      host                   str     OLLAMA_HOST override\n      context_length         int   "
   },
   "provider openai": {
    "data": {
@@ -22274,6 +22291,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": true,
@@ -22461,7 +22479,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: openai\n  capabilities: user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OPENAI_API_KEY → env:OPENAI_API_KEY → stored:openai_auth.json   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.openai.*):\n    [top_level]  — connection / identity / wire selection\n      api                    str     which wire to speak: \"chat\" (Chat Completions) or \"responses\" (the Responses API); JAATO_OPENAI_API is the env fallback  (default 'chat')\n      api_key                str     OpenAI API key\n      base_url               str     JAATO_OPENAI_BASE_URL override\n      organization           str     OpenAI-Organization header (billing attribution)\n      project                str     OpenAI-Project header; a project-scoped key needs it\n      context_length         int     REQUIRED — OpenAI's catalog reports no context window, so connect() fails loud without this or JAATO_OPENAI_CONTEXT_LENGTH\n      modalities             list    assert/correct INPUT modalities for a model the built-in table has not caught up with\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — request-body fields; the allow-list applied depends on the wire (a chat-only key on the responses wire is dropped with a warning, and vice versa)\n      temperature            float \n      top_p                  float \n      max_tokens             int     chat wire only\n      max_output_tokens      int     responses wire only\n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float   chat wire only\n      presence_penalty       float   chat wire only\n      seed                   int     chat wire only\n      stop                   list    chat wire only\n      reasoning              dict    responses wire only: {effort, summary}\n      text                   dict    responses wire only: {format} — structured output\n      store                  bool    responses wire only; jaato owns the history, so server-side threading is off unless deliberately enabled  (default False)\n      include                list    responses wire only, e.g. [\"reasoning.encrypted_content\"]\n      truncation             str     responses wire only\n      metadata               dict    responses wire only\n      prompt_cache_key       str     responses wire only\n      safety_identifier      str     responses wire only\n      service_tier           str     auto|default|flex|priority — processing tier\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: openai\n  capabilities: chat, user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OPENAI_API_KEY → env:OPENAI_API_KEY → stored:openai_auth.json   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.openai.*):\n    [top_level]  — connection / identity / wire selection\n      api                    str     which wire to speak: \"chat\" (Chat Completions) or \"responses\" (the Responses API); JAATO_OPENAI_API is the env fallback  (default 'chat')\n      api_key                str     OpenAI API key\n      base_url               str     JAATO_OPENAI_BASE_URL override\n      organization           str     OpenAI-Organization header (billing attribution)\n      project                str     OpenAI-Project header; a project-scoped key needs it\n      context_length         int     REQUIRED — OpenAI's catalog reports no context window, so connect() fails loud without this or JAATO_OPENAI_CONTEXT_LENGTH\n      modalities             list    assert/correct INPUT modalities for a model the built-in table has not caught up with\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — request-body fields; the allow-list applied depends on the wire (a chat-only key on the responses wire is dropped with a warning, and vice versa)\n      temperature            float \n      top_p                  float \n      max_tokens             int     chat wire only\n      max_output_tokens      int     responses wire only\n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float   chat wire only\n      presence_penalty       float   chat wire only\n      seed                   int     chat wire only\n      stop                   list    chat wire only\n      reasoning              dict    responses wire only: {effort, summary}\n      text                   dict    responses wire only: {format} — structured output\n      store                  bool    responses wire only; jaato owns the history, so server-side threading is off unless deliberately enabled  (default False)\n      include                list    responses wire only, e.g. [\"reasoning.encrypted_content\"]\n      truncation             str     responses wire only\n      metadata               dict    responses wire only\n      prompt_cache_key       str     responses wire only\n      safety_identifier      str     responses wire only\n      service_tier           str     auto|default|flex|priority — processing tier\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider openrouter": {
    "data": {
@@ -22485,6 +22503,7 @@
     "capabilities": {
      "audio_input": true,
      "cancellation": true,
+     "chat": true,
      "decisions": true,
      "output_media": true,
      "pdf_input": true,
@@ -22678,7 +22697,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: openrouter\n  capabilities: user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, prompt_caching, streaming, cancellation, output_media, decisions\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OPENROUTER_API_KEY → stored:openrouter-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OPENROUTER_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.openrouter.*):\n    [top_level]  — auth / app-attribution identity\n      api_key                str     OpenRouter API key (sk-or-...)\n      http_referer           str     HTTP-Referer attribution header\n      app_title              str     X-OpenRouter-Title header\n      app_categories         list    X-OpenRouter-Categories header\n      extra_headers          dict    additional headers (e.g. x-anthropic-beta)\n    [api_params]  — OpenAI Chat Completions request-body fields\n      models                 list    cross-model fallback list\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      parallel_tool_calls    bool  \n      tool_choice            str     auto|required|none, or a dict naming one tool\n      service_tier           str     auto|default|flex|priority|scale — OpenAI-style processing tier forwarded to tier-supporting upstreams\n      strict_tools           bool    emit strict:true on tool defs\n      enable_thinking        bool  \n      thinking_budget        int     → reasoning.max_tokens\n      thinking_level         str     low|medium|high → reasoning.effort\n      cache_prompt           str     auto|true|false  (default 'auto')\n      cache_ttl              str     5m|1h  (default '5m')\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name; a tier's outbound role supplies it otherwise\n      audio                  dict    voice/format companion of api_params.modalities; wins over the tier default\n    [routing] (opaque pass-through)  — OpenRouter provider-routing extension — any key forwarded verbatim (order, sort, only, ignore, quantizations, max_price, ...)\n    [framework_overrides]  — rare escape hatches\n      context_length         int   \n      base_url               str   \n      modalities             list    assert INPUT modalities\n      output_modalities      list    assert what the model can EMIT, for a model the catalog does not describe; the catalog's architecture.output_modalities wins when present\n      decisions_url          str     decision endpoint for decide(); derived from base_url (…/api/v1 -> …/api/alpha/decisions) when unset\n      connect_timeout        float   TCP + TLS handshake deadline, seconds  (default 15.0)\n      request_timeout        float   byte-level deadline (httpx read/write/pool), seconds; 0 disables  (default 600.0)\n      stream_idle_timeout    float   payload idle deadline for streaming turns, seconds; 0 disables.  Raises StallTimeoutError — httpx cannot see this failure because OpenRouter's keep-alive SSE comments reset the byte clock (#732)  (default 300.0)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: openrouter\n  capabilities: chat, user_message_images, tool_result_images, pdf_input, audio_input, tool_choice_forwarding, thinking, prompt_caching, streaming, cancellation, output_media, decisions\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OPENROUTER_API_KEY → stored:openrouter-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OPENROUTER_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.openrouter.*):\n    [top_level]  — auth / app-attribution identity\n      api_key                str     OpenRouter API key (sk-or-...)\n      http_referer           str     HTTP-Referer attribution header\n      app_title              str     X-OpenRouter-Title header\n      app_categories         list    X-OpenRouter-Categories header\n      extra_headers          dict    additional headers (e.g. x-anthropic-beta)\n    [api_params]  — OpenAI Chat Completions request-body fields\n      models                 list    cross-model fallback list\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      parallel_tool_calls    bool  \n      tool_choice            str     auto|required|none, or a dict naming one tool\n      service_tier           str     auto|default|flex|priority|scale — OpenAI-style processing tier forwarded to tier-supporting upstreams\n      strict_tools           bool    emit strict:true on tool defs\n      enable_thinking        bool  \n      thinking_budget        int     → reasoning.max_tokens\n      thinking_level         str     low|medium|high → reasoning.effort\n      cache_prompt           str     auto|true|false  (default 'auto')\n      cache_ttl              str     5m|1h  (default '5m')\n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name; a tier's outbound role supplies it otherwise\n      audio                  dict    voice/format companion of api_params.modalities; wins over the tier default\n    [routing] (opaque pass-through)  — OpenRouter provider-routing extension — any key forwarded verbatim (order, sort, only, ignore, quantizations, max_price, ...)\n    [framework_overrides]  — rare escape hatches\n      context_length         int   \n      base_url               str   \n      modalities             list    assert INPUT modalities\n      output_modalities      list    assert what the model can EMIT, for a model the catalog does not describe; the catalog's architecture.output_modalities wins when present\n      decisions_url          str     decision endpoint for decide(); derived from base_url (…/api/v1 -> …/api/alpha/decisions) when unset\n      connect_timeout        float   TCP + TLS handshake deadline, seconds  (default 15.0)\n      request_timeout        float   byte-level deadline (httpx read/write/pool), seconds; 0 disables  (default 600.0)\n      stream_idle_timeout    float   payload idle deadline for streaming turns, seconds; 0 disables.  Raises StallTimeoutError — httpx cannot see this failure because OpenRouter's keep-alive SSE comments reset the byte clock (#732)  (default 300.0)\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider ovhcloud": {
    "data": {
@@ -22712,6 +22731,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -22839,7 +22859,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: ovhcloud\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OVHCLOUD_API_KEY → env:OVH_AI_ENDPOINTS_ACCESS_TOKEN → stored:ovhcloud-auth → none   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OVHCLOUD_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.ovhcloud.*):\n    [top_level]  — connection / identity\n      api_key                str     OVHcloud AI Endpoints API key\n      base_url               str     JAATO_OVHCLOUD_BASE_URL override\n      context_length         int   \n      modalities             list  \n      allow_anonymous        bool    opt into the keyless rate-limited free tier  (default False)\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: ovhcloud\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_OVHCLOUD_API_KEY → env:OVH_AI_ENDPOINTS_ACCESS_TOKEN → stored:ovhcloud-auth → none   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env JAATO_OVHCLOUD_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    modalities     : catalog detect → profile knob 'modalities' → static table → text floor\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.ovhcloud.*):\n    [top_level]  — connection / identity\n      api_key                str     OVHcloud AI Endpoints API key\n      base_url               str     JAATO_OVHCLOUD_BASE_URL override\n      context_length         int   \n      modalities             list  \n      allow_anonymous        bool    opt into the keyless rate-limited free tier  (default False)\n      extra_body             dict    opaque passthrough to OpenAI create() extra_body\n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n      modalities             list    OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the opposite direction from the tier key of the same name\n      audio                  dict    voice/format companion of api_params.modalities\n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider tensorrt_llm": {
    "data": {
@@ -22858,6 +22878,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -22907,7 +22928,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → env TENSORRT_LLM_CONTEXT_LENGTH → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: tensorrt_llm\n  capabilities: user_message_images, tool_result_images, streaming, cancellation\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:TENSORRT_LLM_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env TENSORRT_LLM_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.tensorrt_llm.*):\n    [top_level]  — server connection + generation\n      host                   str     trtllm-serve URL (TENSORRT_LLM_HOST)\n      api_token              str     bearer token (auth proxy)\n      context_length         int   \n      max_tokens             int   "
+   "text": "provider: tensorrt_llm\n  capabilities: chat, user_message_images, tool_result_images, streaming, cancellation\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:TENSORRT_LLM_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env TENSORRT_LLM_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.tensorrt_llm.*):\n    [top_level]  — server connection + generation\n      host                   str     trtllm-serve URL (TENSORRT_LLM_HOST)\n      api_token              str     bearer token (auth proxy)\n      context_length         int   \n      max_tokens             int   "
   },
   "provider triton": {
    "data": {
@@ -22926,6 +22947,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -22985,7 +23007,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → env TRITON_CONTEXT_LENGTH → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: triton\n  capabilities: user_message_images, tool_result_images, streaming, cancellation\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:TRITON_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env TRITON_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.triton.*):\n    [top_level]  — server connection\n      openai_url             str     OpenAI frontend URL\n      control_url            str     Triton KServe control URL\n      host                   str     shorthand host (derives both URLs)\n      api_token              str     bearer token (auth proxy)\n      context_length         int   \n    [load] (opaque pass-through)  — KServe model-load body — forwarded verbatim (parameters.config, ...)"
+   "text": "provider: triton\n  capabilities: chat, user_message_images, tool_result_images, streaming, cancellation\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:TRITON_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env TRITON_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.triton.*):\n    [top_level]  — server connection\n      openai_url             str     OpenAI frontend URL\n      control_url            str     Triton KServe control URL\n      host                   str     shorthand host (derives both URLs)\n      api_token              str     bearer token (auth proxy)\n      context_length         int   \n    [load] (opaque pass-through)  — KServe model-load body — forwarded verbatim (parameters.config, ...)"
   },
   "provider vllm": {
    "data": {
@@ -23004,6 +23026,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -23119,7 +23142,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: vllm\n  capabilities: user_message_images, tool_result_images, tool_choice_forwarding, streaming, cancellation\n  quirks: auto_finalize_on_complete, coerce_typed_tool_args, force_narration_between_tools, force_tool_choice_for_lifecycle, prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:VLLM_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env VLLM_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.vllm.*):\n    [top_level]  — vLLM server connection + generation knobs\n      host                   str     vLLM server URL (VLLM_HOST)\n      api_token              str     bearer token (when --api-key set)\n      context_length         int   \n      max_tokens             int   \n      parallel_tool_calls    bool  \n      quirks                 dict    model-quirk toggles (see PROVIDER_QUIRKS)\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: vllm\n  capabilities: chat, user_message_images, tool_result_images, tool_choice_forwarding, streaming, cancellation\n  quirks: auto_finalize_on_complete, coerce_typed_tool_args, force_narration_between_tools, force_tool_choice_for_lifecycle, prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_token → env:VLLM_API_TOKEN   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env VLLM_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.vllm.*):\n    [top_level]  — vLLM server connection + generation knobs\n      host                   str     vLLM server URL (VLLM_HOST)\n      api_token              str     bearer token (when --api-key set)\n      context_length         int   \n      max_tokens             int   \n      parallel_tool_calls    bool  \n      quirks                 dict    model-quirk toggles (see PROVIDER_QUIRKS)\n    [api_params]  — OpenAI Chat Completions params (filtered allow-list)\n      temperature            float \n      top_p                  float \n      max_tokens             int   \n      tool_choice            str   \n      parallel_tool_calls    bool  \n      frequency_penalty      float \n      presence_penalty       float \n      seed                   int   \n      stop                   list  \n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider zhipuai": {
    "data": {
@@ -23148,6 +23171,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": false,
      "pdf_input": false,
@@ -23222,7 +23246,7 @@
      "    layered knobs  : layer dict → flat key (deprecated, warns) → default"
     ]
    },
-   "text": "provider: zhipuai\n  capabilities: user_message_images, tool_result_images, thinking, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_ZHIPUAI_API_KEY → env:ZHIPUAI_API_KEY → stored:zhipuai-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env ZHIPUAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.zhipuai.*):\n    [api_params]  — Anthropic Messages API request-body fields\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      enable_thinking        bool  \n      thinking_budget        int   \n    [framework_overrides]  — endpoint / context overrides\n      base_url               str   \n      context_length         int   \n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
+   "text": "provider: zhipuai\n  capabilities: chat, user_message_images, tool_result_images, thinking, streaming, cancellation\n  quirks: (none)\n  resolution order:\n    credentials    : api_key_param:api_key → env:JAATO_ZHIPUAI_API_KEY → env:ZHIPUAI_API_KEY → stored:zhipuai-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env ZHIPUAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n    layered knobs  : layer dict → flat key (deprecated, warns) → default\n  knobs (plugin_configs.zhipuai.*):\n    [api_params]  — Anthropic Messages API request-body fields\n      temperature            float \n      top_p                  float \n      top_k                  int   \n      max_tokens             int   \n      enable_thinking        bool  \n      thinking_budget        int   \n    [framework_overrides]  — endpoint / context overrides\n      base_url               str   \n      context_length         int   \n  api_params — scope of the check:\n    `validate` checks these against THIS PROVIDER's allow-list, not against\n    the model you named: a key can be a valid provider knob and still be a\n    400 on one model (reasoning models commonly accept only the DEFAULT\n    temperature / top_p, and reject an explicit 0.0).  Which values a model\n    takes is the vendor's documentation, not a fact this framework holds.\n    OMITTING a parameter is always safe — it is never the cause of a 400."
   },
   "provider zhipuai_openai": {
    "data": {
@@ -23246,6 +23270,7 @@
     "capabilities": {
      "audio_input": false,
      "cancellation": true,
+     "chat": true,
      "decisions": false,
      "output_media": true,
      "pdf_input": false,
@@ -23300,7 +23325,7 @@
      "    context window : catalog/endpoint detect → profile knob 'context_length' → env ZHIPUAI_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)"
     ]
    },
-   "text": "provider: zhipuai_openai\n  capabilities: user_message_images, tool_result_images, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:ZHIPUAI_API_KEY → stored:zhipuai-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env ZHIPUAI_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.zhipuai_openai.*):\n    [top_level]  — connection / generation\n      base_url               str     ZHIPUAI_OPENAI_BASE_URL override\n      context_length         int   \n      enable_thinking        bool  \n      thinking_budget        int   \n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role"
+   "text": "provider: zhipuai_openai\n  capabilities: chat, user_message_images, tool_result_images, thinking, streaming, cancellation, output_media\n  quirks: prose_tool_calls\n  resolution order:\n    credentials    : api_key_param:api_key → env:ZHIPUAI_API_KEY → stored:zhipuai-auth   (first source that yields a credential wins)\n    context window : catalog/endpoint detect → profile knob 'context_length' → env ZHIPUAI_OPENAI_CONTEXT_LENGTH → else error  (detect WINS over the knob)\n  knobs (plugin_configs.zhipuai_openai.*):\n    [top_level]  — connection / generation\n      base_url               str     ZHIPUAI_OPENAI_BASE_URL override\n      context_length         int   \n      enable_thinking        bool  \n      thinking_budget        int   \n      output_modalities      list    assert what the model can EMIT; no catalog reports output modalities, so without this the floor is text and the startup check refuses an outbound tier role"
   },
   "providers": {
    "data": {
@@ -23308,6 +23333,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": true,
@@ -23326,6 +23352,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23344,6 +23371,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23364,6 +23392,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": true,
@@ -23382,6 +23411,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23400,6 +23430,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": false,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23418,6 +23449,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23438,6 +23470,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23456,6 +23489,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": true,
@@ -23474,6 +23508,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23494,6 +23529,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": false,
       "decisions": true,
       "output_media": false,
       "pdf_input": false,
@@ -23512,6 +23548,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23532,6 +23569,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23552,6 +23590,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23572,6 +23611,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23592,6 +23632,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23612,6 +23653,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23630,6 +23672,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": true,
@@ -23650,6 +23693,7 @@
      "capabilities": {
       "audio_input": true,
       "cancellation": true,
+      "chat": true,
       "decisions": true,
       "output_media": true,
       "pdf_input": true,
@@ -23670,6 +23714,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23690,6 +23735,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23710,6 +23756,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23730,6 +23777,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23754,6 +23802,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": false,
       "pdf_input": false,
@@ -23772,6 +23821,7 @@
      "capabilities": {
       "audio_input": false,
       "cancellation": true,
+      "chat": true,
       "decisions": false,
       "output_media": true,
       "pdf_input": false,
@@ -23789,7 +23839,7 @@
      ]
     }
    },
-   "text": "providers (capability flags: user=user_message_images, tool=tool_result_images, pdf_=pdf_input, audi=audio_input, tool=tool_choice_forwarding, thin=thinking, prom=prompt_caching, stre=streaming, canc=cancellation, outp=output_media, reas=reasoning_replay, deci=decisions)\n                  user tool pdf_ audi tool thin prom stre canc outp reas deci\n  anthropic        ✓ ✓ ✓ — — ✓ ✓ ✓ ✓ — — —   knobs:15  quirks:0\n  antigravity      ✓ — — — — ✓ — ✓ ✓ — — —   knobs:10  quirks:0\n  azure_openai     ✓ ✓ — — ✓ — — ✓ ✓ ✓ — —   knobs:20  quirks:1\n  bedrock          ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — — —   knobs:18  quirks:0\n  chrome_ai        — — — — — — — ✓ ✓ — — —   knobs:14  quirks:0\n  claude_cli       — — — — — ✓ — ✓ — — — —   knobs:5   quirks:0\n  doubleword       ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:18  quirks:1\n  github_models    — — — — — ✓ — ✓ ✓ — — —   knobs:4   quirks:0\n  google_genai     ✓ ✓ ✓ ✓ — — ✓ ✓ ✓ — — —   knobs:4   quirks:0\n  kimi             ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:17  quirks:1\n  laya             — — — — — — — — ✓ — — ✓   knobs:7   quirks:0\n  lmstudio         ✓ ✓ — — — — — ✓ ✓ — — —   knobs:3   quirks:1\n  mimo             ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:16  quirks:1\n  minimax          ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:16  quirks:1\n  nebius           ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:17  quirks:1\n  nim              ✓ ✓ — — — ✓ — ✓ ✓ ✓ — —   knobs:4   quirks:1\n  ollama           ✓ ✓ — — — — — ✓ ✓ — — —   knobs:2   quirks:0\n  openai           ✓ ✓ ✓ ✓ ✓ ✓ — ✓ ✓ ✓ — —   knobs:30  quirks:1\n  openrouter       ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — ✓   knobs:29  quirks:1\n  ovhcloud         ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:18  quirks:1\n  tensorrt_llm     ✓ ✓ — — — — — ✓ ✓ — — —   knobs:4   quirks:1\n  triton           ✓ ✓ — — — — — ✓ ✓ — — —   knobs:5   quirks:1\n  vllm             ✓ ✓ — — ✓ — — ✓ ✓ — — —   knobs:15  quirks:5\n  zhipuai          ✓ ✓ — — — ✓ — ✓ ✓ — — —   knobs:8   quirks:0\n  zhipuai_openai   ✓ ✓ — — — ✓ — ✓ ✓ ✓ — —   knobs:5   quirks:1"
+   "text": "providers (capability flags: chat=chat, user=user_message_images, tool=tool_result_images, pdf_=pdf_input, audi=audio_input, tool=tool_choice_forwarding, thin=thinking, prom=prompt_caching, stre=streaming, canc=cancellation, outp=output_media, reas=reasoning_replay, deci=decisions)\n                  chat user tool pdf_ audi tool thin prom stre canc outp reas deci\n  anthropic        ✓ ✓ ✓ ✓ — — ✓ ✓ ✓ ✓ — — —   knobs:15  quirks:0\n  antigravity      ✓ ✓ — — — — ✓ — ✓ ✓ — — —   knobs:10  quirks:0\n  azure_openai     ✓ ✓ ✓ — — ✓ — — ✓ ✓ ✓ — —   knobs:20  quirks:1\n  bedrock          ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — — —   knobs:18  quirks:0\n  chrome_ai        ✓ — — — — — — — ✓ ✓ — — —   knobs:14  quirks:0\n  claude_cli       ✓ — — — — — ✓ — ✓ — — — —   knobs:5   quirks:0\n  doubleword       ✓ ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:18  quirks:1\n  github_models    ✓ — — — — — ✓ — ✓ ✓ — — —   knobs:4   quirks:0\n  google_genai     ✓ ✓ ✓ ✓ ✓ — — ✓ ✓ ✓ — — —   knobs:4   quirks:0\n  kimi             ✓ ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:17  quirks:1\n  laya             — — — — — — — — — ✓ — — ✓   knobs:7   quirks:0\n  lmstudio         ✓ ✓ ✓ — — — — — ✓ ✓ — — —   knobs:3   quirks:1\n  mimo             ✓ ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:16  quirks:1\n  minimax          ✓ ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ ✓ —   knobs:16  quirks:1\n  nebius           ✓ ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:17  quirks:1\n  nim              ✓ ✓ ✓ — — — ✓ — ✓ ✓ ✓ — —   knobs:4   quirks:1\n  ollama           ✓ ✓ ✓ — — — — — ✓ ✓ — — —   knobs:2   quirks:0\n  openai           ✓ ✓ ✓ ✓ ✓ ✓ ✓ — ✓ ✓ ✓ — —   knobs:30  quirks:1\n  openrouter       ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ — ✓   knobs:29  quirks:1\n  ovhcloud         ✓ ✓ ✓ — — ✓ ✓ — ✓ ✓ ✓ — —   knobs:18  quirks:1\n  tensorrt_llm     ✓ ✓ ✓ — — — — — ✓ ✓ — — —   knobs:4   quirks:1\n  triton           ✓ ✓ ✓ — — — — — ✓ ✓ — — —   knobs:5   quirks:1\n  vllm             ✓ ✓ ✓ — — ✓ — — ✓ ✓ — — —   knobs:15  quirks:5\n  zhipuai          ✓ ✓ ✓ — — — ✓ — ✓ ✓ — — —   knobs:8   quirks:0\n  zhipuai_openai   ✓ ✓ ✓ — — — ✓ — ✓ ✓ ✓ — —   knobs:5   quirks:1"
   },
   "runtime": {
    "data": {
