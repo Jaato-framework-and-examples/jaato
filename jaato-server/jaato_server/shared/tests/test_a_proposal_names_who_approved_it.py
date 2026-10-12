@@ -100,8 +100,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_PERM,
-        find='        info = {**info, "asked": asked}\n',
-        replace="        info = dict(info)\n",
+        find='        info = {**self._gate_fields(), **info, "asked": asked}\n',
+        replace="        info = {**self._gate_fields(), **info}\n",
         because=(
             "the gate's caller cannot tell a person's approval from a "
             "policy's, so no call is ever witnessed"

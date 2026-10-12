@@ -384,7 +384,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/permission/plugin.py::PermissionPlugin._get_tool_completions": 16,
     "jaato-server/jaato_server/shared/plugins/permission/plugin.py::PermissionPlugin._handle_channel_response": 16,
     "jaato-server/jaato_server/shared/plugins/permission/plugin.py::PermissionPlugin.execute_permissions": 17,
-    "jaato-server/jaato_server/shared/plugins/permission/policy.py::PermissionPolicy.check": 18,
     "jaato-server/jaato_server/shared/plugins/permission/runner_rpc_channel.py::RunnerRPCChannel.request_permission": 17,
     "jaato-server/jaato_server/shared/plugins/permission/sanitization.py::check_path_scope": 19,
     "jaato-server/jaato_server/shared/plugins/prompt_library/plugin.py::PromptLibraryPlugin._execute_prompt_command": 33,

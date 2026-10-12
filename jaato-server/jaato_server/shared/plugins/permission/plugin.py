@@ -13,6 +13,7 @@ import tempfile
 import json
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -26,6 +27,17 @@ from .policy import (
     PermissionDecision,
     PolicyMatch,
     overridden_evaluator_allow,
+)
+from .decision_gate import (
+    DecisionGateConfigError,
+    GateInputs,
+    compose_effect,
+    evaluate_gate,
+    judge_paths,
+    named_paths,
+    parse_decision_gate,
+    session_boundary,
+    session_task,
 )
 from .evaluator import EvalContext, PolicyDecision as EvalDecision, load_evaluators
 from .config_loader import load_config, PermissionConfig
@@ -99,6 +111,11 @@ def _describe_permission_decider(info: Dict[str, Any]) -> str:
     approver = info.get("approver")
     if approver:
         parts.append(f" approver={approver}")
+    # The decision gate's model, probability and state digest (§8.2):
+    # present only when the gate was consulted for this call.
+    for key in ("gate_model", "gate_probability", "gate_state_sha256"):
+        if info.get(key):
+            parts.append(f" {key}={info[key]}")
     return "".join(parts)
 
 
@@ -153,6 +170,114 @@ def parse_decision_trace(msg: str) -> Optional[Dict[str, Any]]:
     except (ValueError, SyntaxError):          # pragma: no cover - defensive
         out["reason"] = reason
     return out
+
+
+def _load_decision_gate(policy: Any, config: Dict[str, Any], where: str) -> None:
+    """Attach ``config['decision_gate']`` to ``policy`` (§8.2).
+
+    A malformed block is logged at ERROR and no gate is installed, so the
+    default decides as before; ``jaato-scaffold validate`` reports the
+    same block before any session exists.
+    """
+    try:
+        policy.decision_gate = parse_decision_gate(config.get("decision_gate"))
+    except DecisionGateConfigError as exc:
+        policy.decision_gate = None
+        logger.error("permission (%s): decision_gate ignored: %s", where, exc)
+        return
+    if policy.decision_gate is not None:
+        gate = policy.decision_gate
+        logger.info(
+            "permission (%s): decision_gate model=%s tools=%s allow>=%s "
+            "deny<=%s", where, gate.model,
+            "default" if gate.tools is None else sorted(gate.tools),
+            gate.allow_above, gate.deny_below)
+
+
+def _current_session_or_none() -> Any:
+    from jaato_server.shared.session_context import get_current_session
+    try:
+        return get_current_session()
+    except LookupError:
+        return None
+
+
+def _session_decide() -> Optional[Callable[..., Any]]:
+    """``EvalContext.decide`` for the calling session (§8.2.2), or ``None``.
+
+    Bound to the session's ``decision_models:`` entries by name; ``None``
+    when there is no session or it binds none, so a script can test it.
+    """
+    session = _current_session_or_none()
+    names = getattr(session, "decision_model_names", None)
+    try:
+        bound = list(names()) if callable(names) else []
+    except Exception:  # noqa: BLE001
+        bound = []
+    if not bound:
+        return None
+
+    def decide(name: str, state: Any, questions: Dict[str, Any]) -> Any:
+        from jaato_server.shared.ai_tool_runner import get_current_cancel_token
+        return session.decision_provider(name).decide(
+            state, questions, cancel_token=get_current_cancel_token())
+
+    return decide
+
+
+@dataclass(frozen=True)
+class _ForcedAsk:
+    """The asks that override what the policy matched, in one place.
+
+    Applied to the first policy check AND to the re-check under the
+    policy lock.  Applying it to the first only made the re-check see the
+    unforced ALLOW, read it as a policy change mid-ask and recurse into
+    the same check with nothing to stop it.
+
+    Attributes:
+        escalation: A reliability re-confirmation (interactive client):
+            an ALLOW becomes an ASK.
+        evaluator: An evaluator returned ASK: an ALLOW, or a DENY by the
+            default, becomes an ASK; a blacklist DENY stands.
+        gate_reason: The decision gate's gray zone or failure: whatever
+            the default decided becomes an ASK.
+    """
+
+    escalation: bool = False
+    evaluator: bool = False
+    gate_reason: Optional[str] = None
+
+    def apply(self, match: Any) -> Any:
+        import dataclasses
+        decision = match.decision
+        if decision == PermissionDecision.ASK_CHANNEL:
+            return match
+        by_default = match.rule_type == "default"
+        if self.gate_reason and by_default:
+            reason = self.gate_reason
+        elif self.evaluator and (decision == PermissionDecision.ALLOW
+                                 or by_default):
+            reason = "Evaluator asked for a person to decide"
+        elif self.escalation and decision == PermissionDecision.ALLOW:
+            reason = ("reliability escalation: tool flagged after repeated "
+                      "failures — re-confirm before running")
+        else:
+            return match
+        return dataclasses.replace(
+            match, decision=PermissionDecision.ASK_CHANNEL, reason=reason)
+
+
+@dataclass(frozen=True)
+class _GateOutcome:
+    """What :meth:`PermissionPlugin._run_decision_gate` settled.
+
+    ``final`` is the verdict to return (the gate allowed or denied);
+    ``ask_reason`` is set when a person must decide; both ``None`` when
+    the gate did not apply.
+    """
+
+    final: Optional[Tuple[bool, Dict[str, Any]]] = None
+    ask_reason: Optional[str] = None
 
 
 class PermissionPlugin(RunnerForwardingMixin):
@@ -614,6 +739,7 @@ class PermissionPlugin(RunnerForwardingMixin):
             evaluators = load_evaluators(evaluator_config, workspace_path=self._workspace_path)
             if evaluators:
                 self._policy.set_evaluators(evaluators)
+        _load_decision_gate(self._policy, config, "runtime")
 
         # Initialize channel
         channel_type = config.get("channel_type") or self._config.channel_type
@@ -792,6 +918,50 @@ class PermissionPlugin(RunnerForwardingMixin):
                     "type": "object",
                     "description": "Permission evaluator scripts. Maps tool names (or 'default') to script paths.",
                     "additionalProperties": {"type": "string"},
+                },
+                "decision_gate": {
+                    "type": "object",
+                    "description": (
+                        "Put a gated tool's call to a decision model when the "
+                        "policy would otherwise apply its defaultPolicy: allow "
+                        "at or above allow_above, deny at or below deny_below, "
+                        "ask a person in between or on any failure "
+                        "(docs/design/decision-models.md §8.2).  The blacklist, "
+                        "the whitelist and suspensions still decide first."
+                    ),
+                    "properties": {
+                        "model": {
+                            "type": "string",
+                            "description": "A decision_models: entry of the session.",
+                        },
+                        "tools": {
+                            "type": ["array", "string"],
+                            "items": {"type": "string"},
+                            "description": (
+                                "The gated tools, or 'default' for every tool."
+                            ),
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": (
+                                "The yes/no question asked about each call.  "
+                                "Default: 'Is this action safe to run without "
+                                "a human approving it first?'"
+                            ),
+                        },
+                        "allow_above": {
+                            "type": "number",
+                            "description": "Allow at or above this probability (required).",
+                        },
+                        "deny_below": {
+                            "type": "number",
+                            "description": (
+                                "Deny at or below this probability (required, "
+                                "below allow_above)."
+                            ),
+                        },
+                    },
+                    "required": ["model", "tools", "allow_above", "deny_below"],
                 },
                 "policy": {
                     "type": "object",
@@ -1044,6 +1214,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                 evaluator_config, workspace_path=self._workspace_path)
             if evaluators:
                 policy.set_evaluators(evaluators)
+        _load_decision_gate(policy, config, f"scope:{scope}")
         # auto_allow_housekeeping is per-block, not propagated through
         # _auto_whitelisted (#1304 phase 3, see the field's own docstring):
         # a subagent whose OWN block does not opt in must not inherit the
@@ -2080,7 +2251,7 @@ class PermissionPlugin(RunnerForwardingMixin):
         # a person's approval from a policy's without reading the trace
         # (the executor turns it into the call's witness).
         asked = self._was_prompted()
-        info = {**info, "asked": asked}
+        info = {**self._gate_fields(), **info, "asked": asked}
         self._trace(
             f"{DECISION_TRACE_PREFIX}tool={tool_name} call_id={call_id}"
             f"{who} allowed={allowed} "
@@ -2125,6 +2296,11 @@ class PermissionPlugin(RunnerForwardingMixin):
         """
         self._decision_state.prompted = False
         self._decision_state.resolved_emitted = False
+        self._decision_state.gate_fields = {}
+
+    def _gate_fields(self) -> Dict[str, str]:
+        """The decision gate's trace fields for the call in flight, if any."""
+        return dict(getattr(self._decision_state, "gate_fields", None) or {})
 
     def _was_prompted(self) -> bool:
         """Whether the decision in flight reached the approval channel."""
@@ -2323,6 +2499,76 @@ class PermissionPlugin(RunnerForwardingMixin):
             }
         return None
 
+    def _has_ask_grant(self, tool_name: str, args: Optional[Dict[str, Any]]) -> bool:
+        """Whether an ``askPermission`` grant waits for this exact call."""
+        key = self._ask_grant_key(tool_name, args)
+        with self._ask_grants_lock:
+            return self._ask_grants.get(key, "missing") is None
+
+    def _gate_inputs(self, tool_name: str, args: Dict[str, Any],
+                     session: Any) -> GateInputs:
+        """Collect what :func:`render_gate_state` renders for one call."""
+        from jaato_server.shared.tool_id_map import id_to_name
+        pairs, unanalyzable = named_paths(args)
+        return GateInputs(
+            tool_name=id_to_name(tool_name),
+            args=dict(args),
+            effect=compose_effect(
+                self._get_display_info(tool_name, args, "decision_gate")),
+            paths=judge_paths(pairs, self._workspace_path, self._registry),
+            paths_unanalyzable=unanalyzable,
+            boundary=session_boundary(),
+            task=session_task(session),
+        )
+
+    def _run_decision_gate(
+        self,
+        policy: Optional[PermissionPolicy],
+        tool_name: str,
+        args: Dict[str, Any],
+        match: Any,
+        *,
+        in_bridge: bool,
+        forced: bool,
+        announce: bool,
+    ) -> _GateOutcome:
+        """Put a gated call that fell to the default to the decision model.
+
+        Applies only when ``policy`` carries a gate for ``tool_name`` and
+        the policy matched nothing but its default (§8.2, "Where it
+        sits"), and not inside the trusted bridge (``in_bridge``) or when
+        a person must decide anyway (``forced``).  A
+        pending ``askPermission`` grant asks without calling the model, so
+        the approval it carries is consumed.  Records the gate's trace
+        fields on the decision scope for the DECISION line.
+        """
+        gate = getattr(policy, "decision_gate", None)
+        if (gate is None or in_bridge or forced or match.rule_type != "default"
+                or not gate.gates(tool_name)):
+            return _GateOutcome()
+        if self._has_ask_grant(tool_name, args):
+            return _GateOutcome(ask_reason="askPermission approval pending")
+        from jaato_server.shared.ai_tool_runner import get_current_cancel_token
+        from jaato_server.shared.secret_redaction import current_redactor
+        session = _current_session_or_none()
+        verdict = evaluate_gate(
+            gate, session, self._gate_inputs(tool_name, args, session),
+            redact=current_redactor().redact,
+            cancel_token=get_current_cancel_token())
+        self._decision_state.gate_fields = verdict.trace_fields()
+        if verdict.decision == "ask":
+            return _GateOutcome(ask_reason=verdict.reason)
+        allowed = verdict.decision == "allow"
+        self._log_decision(tool_name, args, "allow" if allowed else "deny",
+                           verdict.reason)
+        if announce:
+            self._emit_resolved(tool_name, "", allowed, "decision_gate",
+                                comment="" if allowed else verdict.reason)
+        info: Dict[str, Any] = {'reason': verdict.reason, 'method': 'decision_gate'}
+        if not allowed:
+            info['comment'] = verdict.reason
+        return _GateOutcome(final=(allowed, info))
+
     def _check_permission_impl(
         self,
         tool_name: str,
@@ -2374,7 +2620,9 @@ class PermissionPlugin(RunnerForwardingMixin):
             # decision isn't appended until after evaluation, so the log holds
             # exactly calls 1..N-1 here.
             execution_log=list(self._execution_log),
+            decide=_session_decide(),
         )
+        evaluator_ask = False
 
         # Run evaluators before pre-approval short-circuits.
         # Evaluators can override pre-approvals (DENY overrides allow_all),
@@ -2406,6 +2654,9 @@ class PermissionPlugin(RunnerForwardingMixin):
             eval_result = run_evaluator(
                 policy._evaluators, tool_name, args, eval_context
             )
+            # ASK falls through like the ALLOWs below, and forces a
+            # person to decide whatever the policy then says (§8.2.2).
+            evaluator_ask = eval_result.decision == EvalDecision.ASK
             if eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT:
                 return self._resolve_allow_with_comment(
                     policy, tool_name, args, eval_result
@@ -2416,6 +2667,7 @@ class PermissionPlugin(RunnerForwardingMixin):
             # short-circuits from this block.
             if eval_result.decision not in (
                 EvalDecision.FALLBACK,
+                EvalDecision.ASK,
                 EvalDecision.ALLOW,
                 EvalDecision.ALLOW_ONCE,
                 EvalDecision.ALLOW_TURN,
@@ -2468,7 +2720,9 @@ class PermissionPlugin(RunnerForwardingMixin):
                           "try a different tool.",
                 'method': 'reliability_escalation_denied',
             }
-        force_reescalation = (escalation_action == "ask")
+        # An evaluator's ASK is not lifted by a suspension, the trusted
+        # bridge or an askPermission grant either: the same posture.
+        force_reescalation = escalation_action == "ask" or evaluator_ask
 
         # Check suspension states in priority order:
         # 1. idle suspension (most conservative - clears on idle)
@@ -2510,15 +2764,24 @@ class PermissionPlugin(RunnerForwardingMixin):
             eval_context=None if already_evaluated else eval_context,
         )
 
-        # Reliability escalation re-gate: a whitelisted/auto-allowed tool the
-        # reactor escalated (interactive client) must be re-confirmed — turn the
-        # ALLOW into a channel prompt so the user decides whether to proceed.
-        if force_reescalation and match.decision == PermissionDecision.ALLOW:
-            import dataclasses
-            match = dataclasses.replace(
-                match, decision=PermissionDecision.ASK_CHANNEL,
-                reason="reliability escalation: tool flagged after repeated "
-                       "failures — re-confirm before running")
+        # The decision gate decides a gated call in place of the default
+        # policy (decision-models.md §8.2); then the forced asks apply
+        # (a reliability re-confirmation, an evaluator's ASK, the gate's
+        # gray zone).  The re-check under the lock below applies the SAME
+        # ``forced`` so it cannot read a forced ASK as a policy change.
+        gate = self._run_decision_gate(
+            policy, tool_name, args, match,
+            in_bridge=is_trusted_bridge, forced=force_reescalation,
+            announce=not is_subagent_mode,
+        )
+        if gate.final is not None:
+            return gate.final
+        forced = _ForcedAsk(
+            escalation=escalation_action == "ask",
+            evaluator=evaluator_ask,
+            gate_reason=gate.ask_reason,
+        )
+        match = forced.apply(match)
 
         if match.decision == PermissionDecision.ALLOW:
             # Apply scoped side effects from evaluator decisions
@@ -2647,10 +2910,10 @@ class PermissionPlugin(RunnerForwardingMixin):
                 # in its own (unlocked) check, so its decision tree
                 # lands directly in ALLOW/DENY without re-acquiring
                 # the lock.
-                recheck = policy.check(
+                recheck = forced.apply(policy.check(
                     tool_name, args,
                     eval_context=None if already_evaluated else eval_context,
-                )
+                ))
                 policy_mutated = (
                     recheck.decision != PermissionDecision.ASK_CHANNEL
                 )

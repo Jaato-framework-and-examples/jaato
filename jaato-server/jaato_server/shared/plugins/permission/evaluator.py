@@ -56,6 +56,9 @@ class PolicyDecision(Enum):
         DENY_SESSION: Add to session blacklist (``never``).
         DENY_WITH_COMMENT: Deny and pass a comment to the model (``c:``).
             When returning this, use ``EvalResult`` with the comment text.
+        ASK: A person decides, whatever ``defaultPolicy`` says.  Not
+            lifted by a whitelist entry, a suspension, the trusted bridge
+            or an ``askPermission`` grant; a blacklist still denies.
         FALLBACK: Defer to the standard policy pipeline
             (blacklist/whitelist/default).
     """
@@ -69,6 +72,7 @@ class PolicyDecision(Enum):
     DENY = "deny"
     DENY_SESSION = "deny_session"
     DENY_WITH_COMMENT = "deny_with_comment"
+    ASK = "ask"
     FALLBACK = "fallback"
 
 
@@ -108,6 +112,12 @@ class EvalContext:
         model_preamble: Text the model emitted before this tool call
             in the current response.  May be None if the model called
             the tool without any preamble text.
+        decide: ``decide(name, state, questions)``, bound to the calling
+            session's ``decision_models:`` entries, so a script can ask a
+            decision model (docs/design/decision-models.md §8.2.2).
+            ``name`` is an entry name; ``questions`` maps ids to
+            ``DecisionQuestion``; returns a ``DecisionResult``.  ``None``
+            when the session binds no decision model.
         execution_log: Read-only snapshot of the session's PRIOR permission
             decisions, oldest-first — a list of ``{"tool_name", "arguments",
             "decision", "reason"}`` dicts.  Lets an evaluator decide based on
@@ -127,6 +137,7 @@ class EvalContext:
     turn_index: Optional[int] = None
     model_preamble: Optional[str] = None
     execution_log: List[Dict[str, Any]] = field(default_factory=list)
+    decide: Optional[Callable[..., Any]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -210,7 +221,7 @@ def run_evaluator(
     Evaluators can return:
     - A ``PolicyDecision`` enum value
     - An ``EvalResult`` (for richer responses like deny-with-comment)
-    - A string (``"allow"``, ``"deny"``, ``"fallback"``)
+    - A string (``"allow"``, ``"deny"``, ``"ask"``, ``"fallback"``)
     - A tuple ``(decision, comment)`` for deny-with-comment
 
     Args:

@@ -628,6 +628,7 @@ def validate_profile(
 
     # --- decision_models (decision-models.md §7) -------------------------
     _check_decision_models(profile, add)
+    _check_decision_gate(profile, add)
 
     # --- the completion gate's own shape ---------------------------------
     _check_completion_gate_shape(profile, add)
@@ -1754,6 +1755,40 @@ def _check_decision_models(profile: Any, add: Callable[..., None]) -> None:
         _check_decision_model_provider(
             name, entry or {}, default_provider, add)
     _check_decision_models_not_tiers(profile, bindings, add)
+
+
+def _check_decision_gate(profile: Any, add: Callable[..., None]) -> None:
+    """Static checks on ``plugin_configs.permission.decision_gate`` (§8.2).
+
+    - ``decision_gate_invalid`` (error): the block does not parse (an
+      unknown key, a missing ``model`` / ``tools`` / threshold, thresholds
+      out of order).  The plugin logs it at ERROR and runs with no gate.
+    - ``decision_gate_unknown_model`` (error): ``model`` names no
+      ``decision_models:`` entry of the profile, so every gated call asks a
+      person (the gate cannot answer) and no call is ever gated.
+    """
+    from ..plugins.permission.decision_gate import (
+        DecisionGateConfigError, parse_decision_gate,
+    )
+    block = ((getattr(profile, "plugin_configs", None) or {})
+             .get("permission") or {})
+    if not isinstance(block, dict) or "decision_gate" not in block:
+        return
+    where = "plugin_configs.permission.decision_gate"
+    try:
+        gate = parse_decision_gate(block["decision_gate"])
+    except DecisionGateConfigError as exc:
+        add("error", "decision_gate_invalid", str(exc), where=where)
+        return
+    if gate is None:
+        return
+    bound = getattr(profile, "decision_models", None) or {}
+    if gate.model not in bound:
+        names = ", ".join(sorted(bound)) or "none"
+        add("error", "decision_gate_unknown_model",
+            f"decision_gate.model {gate.model!r} names no decision_models: "
+            f"entry of this profile (bound: {names}); every gated call would "
+            f"ask a person", where=f"{where}.model")
 
 
 def _check_decide_has_a_model(profile: Any, add: Callable[..., None]) -> None:
