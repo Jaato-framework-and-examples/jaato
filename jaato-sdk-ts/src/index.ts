@@ -12,6 +12,8 @@ export * from "./events.js";
 export * from "./helpers.js";
 export * from "./errors.js";
 export * from "./state.js";
+// Hashed tool/category ids shown by name (#1650); mirror of tool_ids.py.
+export * from "./toolIds.js";
 export type {
   CatchallEventHandler,
   EventByType,
