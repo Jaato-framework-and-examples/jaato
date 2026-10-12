@@ -22,12 +22,10 @@ carries U+FFFD is reported at WARNING.
 
 import json
 import logging
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
-
-pytest.importorskip("openai")
-from openai import OpenAI  # noqa: E402
 
 from jaato_sdk.plugins.model_provider.types import MediaDelta  # noqa: E402
 from jaato_server.shared.plugins.model_provider import _media_deltas  # noqa: E402
@@ -97,11 +95,16 @@ def _split_inside_every_multibyte_char(raw: bytes):
 
 
 def _client(chunks):
+    # Only the split-bytes case needs the real SDK; importing it here keeps
+    # this module importable without it (the reversion-guard job installs
+    # no openai, and imports every guard module to read REVERSIONS).
+    openai = pytest.importorskip("openai")
+
     def handler(_request):
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"},
             stream=httpx.ByteStream(b"") if not chunks else _Chunks(chunks))
-    return OpenAI(api_key="test", base_url="http://upstream.test/v1",
+    return openai.OpenAI(api_key="test", base_url="http://upstream.test/v1",
                   http_client=httpx.Client(transport=httpx.MockTransport(handler)),
                   max_retries=0)
 
@@ -119,10 +122,47 @@ class _Chunks(httpx.SyncByteStream):
 def _build(cls, model, chunks, traces):
     provider = cls()
     provider._client = _client(chunks)
+    return _configure(provider, model, traces)
+
+
+def _configure(provider, model, traces):
     provider._model_name = model
     provider._enable_thinking = False
     provider._trace = traces.append
     return provider
+
+
+def _sdk_chunk(audio=None, finish_reason=None):
+    """One parsed chunk as the SDK hands it to the loop (the #674 shape)."""
+    chunk = MagicMock()
+    chunk.usage = None
+    choice = MagicMock()
+    choice.finish_reason = finish_reason
+    delta = MagicMock()
+    delta.content = None
+    delta.tool_calls = None
+    delta.reasoning_content = None
+    delta.audio = audio
+    choice.delta = delta
+    chunk.choices = [choice]
+    return chunk
+
+
+def _mocked(cls, model, transcript_pieces, traces):
+    """The provider's real streaming loop over an already-parsed stream.
+
+    No SDK needed: these cases are about what the loop does with a
+    transcript delta, not about bytes on the wire.
+    """
+    chunks = [_sdk_chunk({"transcript": p}) for p in transcript_pieces]
+    chunks += [_sdk_chunk({"data": "AAEC"}), _sdk_chunk({"expires_at": 1}),
+               _sdk_chunk(finish_reason="stop")]
+    stream = MagicMock()
+    stream.__iter__ = lambda self: iter(chunks)
+    provider = cls()
+    provider._client = MagicMock()
+    provider._client.chat.completions.create = lambda **kw: stream
+    return _configure(provider, model, traces)
 
 
 PROVIDERS = [
@@ -163,7 +203,7 @@ class TestTheWordsArriveWhole:
 class TestEachDeltaIsTraced:
     def test_every_transcript_delta_is_traced_as_received(self, cls, model):
         traces = []
-        _speak(_build(cls, model, [_sse(_pieces())], traces))
+        _speak(_mocked(cls, model, _pieces(), traces))
         seen = [t for t in traces if t.startswith("AUDIO_TRANSCRIPT_DELTA")]
         assert len(seen) == len(_pieces())
         assert all("replacement_chars=0" in t for t in seen)
@@ -175,7 +215,7 @@ class TestDamageIsReported:
     def test_a_replacement_character_is_reported_once(self, cls, model, caplog):
         damaged = ["del est�", "ndar RIP, y m�s"]
         traces = []
-        provider = _build(cls, model, [_sse(damaged)], traces)
+        provider = _mocked(cls, model, damaged, traces)
         with caplog.at_level(logging.WARNING, logger=_media_deltas.__name__):
             transcript = _speak(provider)
         # Passed through unchanged: nothing downstream can recover the bytes.
