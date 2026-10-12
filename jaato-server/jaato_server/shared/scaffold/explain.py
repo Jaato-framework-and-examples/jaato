@@ -1840,6 +1840,20 @@ def providers() -> Rendered:
     return data, text
 
 
+def _context_window_line(info, EV) -> str:
+    """The provider's context-window chain: its own declaration
+    (``PROVIDER_CONTEXT_RESOLUTION``), else the framework's
+    ``resolve_context_window`` order with the provider's env var."""
+    if getattr(info, "context_resolution", None):
+        return f"    context window : {info.context_resolution}"
+    ctx_env = sorted(n for n in EV
+                     if EV[n].category == f"provider:{info.dir_name}"
+                     and n.endswith("CONTEXT_LENGTH"))
+    tail = f" → env {ctx_env[0]}" if ctx_env else ""
+    return (f"    context window : catalog/endpoint detect → profile knob "
+            f"'context_length'{tail} → else error  (detect WINS over the knob)")
+
+
 def _resolution_order(info, EV) -> list:
     """Provider-specific resolution chains, from the uniform helper contracts.
 
@@ -1854,16 +1868,7 @@ def _resolution_order(info, EV) -> list:
                  for a in info.auth]
         lines.append("    credentials    : " + " → ".join(steps)
                      + "   (first source that yields a credential wins)")
-    ctx_env = sorted(n for n in EV
-                     if EV[n].category == f"provider:{d}"
-                     and n.endswith("CONTEXT_LENGTH"))
-    tail = f" → env {ctx_env[0]}" if ctx_env else ""
-    if getattr(info, "context_resolution", None):
-        lines.append(f"    context window : {info.context_resolution}")
-    else:
-        lines.append(
-            f"    context window : catalog/endpoint detect → profile knob "
-            f"'context_length'{tail} → else error  (detect WINS over the knob)")
+    lines.append(_context_window_line(info, EV))
     if info.knobs and any(any(k.name == "modalities" for k in l.knobs)
                           for l in info.knobs.layers):
         lines.append(
