@@ -94,13 +94,46 @@ def requires_shell(command: str) -> bool:
     return bool(SHELL_METACHAR_PATTERN.search(command))
 
 
+def resolve_executable(
+    exe: str,
+    search_path: Optional[str],
+    cwd: Optional[str],
+) -> Optional[str]:
+    """Resolve the executable word of an argv-mode command (#1652).
+
+    A bare name is looked up on *search_path*, exactly as before.  A
+    path-shaped word (one with a directory component) is resolved against
+    *cwd*, the directory the command will run in: ``shutil.which`` ignores
+    ``path`` for such a word and tests it relative to the CALLING process's
+    cwd, which is the runner's, not the command's.  Containment
+    (``command_containment.executable_on_search_path``) already judges a
+    relative executable against the subprocess cwd, so resolving it the
+    same way is what makes judging and running agree (#1202's rule).
+
+    Args:
+        exe: The word in the executable position.
+        search_path: The PATH the subprocess runs under.
+        cwd: The subprocess working directory; ``None`` keeps the calling
+            process's cwd, which is what the subprocess then inherits.
+
+    Returns:
+        The path to execute, or ``None`` when nothing executable is found.
+    """
+    has_dir = os.sep in exe or (os.altsep is not None and os.altsep in exe)
+    if has_dir and cwd and not os.path.isabs(exe):
+        exe = os.path.join(cwd, exe)
+    return shutil.which(exe, path=search_path)
+
+
 def _resolve_argv(
     command: str,
     env: Dict[str, str],
+    cwd: Optional[str] = None,
 ) -> Optional[List[str]]:
     """Parse *command* into an argv list and resolve the executable.
 
-    Returns ``None`` if the executable cannot be found on ``PATH``.
+    Returns ``None`` if the executable cannot be found on ``PATH`` (or, for
+    a path-shaped word, relative to *cwd*; see :func:`resolve_executable`).
     """
     argv = shlex.split(command)
 
@@ -109,7 +142,7 @@ def _resolve_argv(
         argv = shlex.split(argv[0])
 
     exe = argv[0]
-    resolved = shutil.which(exe, path=env.get('PATH'))
+    resolved = resolve_executable(exe, env.get('PATH'), cwd)
     if resolved is None:
         return None
     argv[0] = resolved
@@ -193,7 +226,7 @@ def run_command(
     if use_shell:
         cmd = command
     else:
-        argv = _resolve_argv(command, env)
+        argv = _resolve_argv(command, env, cwd)
         if argv is None:
             exe = shlex.split(command)[0]
             return RunResult(

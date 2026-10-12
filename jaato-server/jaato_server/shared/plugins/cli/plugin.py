@@ -36,7 +36,9 @@ from jaato_server.shared.script_imports import (
 )
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
-from jaato_server.shared.subprocess_runner import run_command, requires_shell, RunResult
+from jaato_server.shared.subprocess_runner import (
+    run_command, requires_shell, resolve_executable, RunResult,
+)
 from jaato_server.shared.secret_scrub import (
     DEFAULT_SECRET_ENV_PATTERNS, granted_env_names, resolve_scrub_patterns,
 )
@@ -1000,7 +1002,11 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     argv = shlex.split(argv[0])
 
                 exe = argv[0]
-                resolved = shutil.which(exe, path=env.get('PATH'))
+                # A relative path resolves against the command's cwd, the
+                # one containment judged it against (#1652).
+                resolved = resolve_executable(
+                    exe, env.get('PATH'), self._workspace_root,
+                )
                 if resolved:
                     argv[0] = resolved
                 else:
