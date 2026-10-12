@@ -54,7 +54,8 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from contextlib import nullcontext
+from typing import Any, Callable, Dict, Optional
 
 from jaato_server.shared.user_tier import path as _user_tier_path
 
@@ -293,6 +294,7 @@ def load_script_symbol(
     file_path: Path,
     symbol: str,
     module_prefix: str = "_jaato_script",
+    import_scope: Optional[Any] = None,
 ) -> Optional[Callable]:
     """Load ``symbol`` as a top-level callable from a Python script.
 
@@ -309,6 +311,12 @@ def load_script_symbol(
         module_prefix: Prefix used when building the synthetic module
             name for log messages. Pass a feature-specific prefix so
             load errors are attributable.
+        import_scope: A
+            :class:`~jaato_server.shared.script_imports.ScriptImportScope`
+            (#1644), or ``None``.  When given, the script is imported
+            inside it and the returned callable enters it on every call,
+            so the script's imports may resolve from the session's
+            workspace venv for that load and those calls only.
 
     Returns:
         The loaded callable, or ``None`` when the file cannot be loaded,
@@ -331,7 +339,8 @@ def load_script_symbol(
             logger.warning("Cannot load script module from %s", file_path)
             return None
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        with import_scope if import_scope is not None else nullcontext():
+            spec.loader.exec_module(module)
     except Exception as exc:
         logger.warning("Failed to load script from %s: %s", file_path, exc)
         return None
@@ -367,4 +376,4 @@ def load_script_symbol(
             "Script %s: '%s' is not callable", file_path, symbol,
         )
         return None
-    return fn
+    return import_scope.wrap(fn) if import_scope is not None else fn

@@ -46,6 +46,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from .script_imports import script_import_scope_for
 from .script_loader import resolve_script_path, load_script_symbol
 
 logger = logging.getLogger(__name__)
@@ -257,6 +258,7 @@ def expand_py_placeholders(content: str, context: RenderContext) -> str:
 
         fn = load_script_symbol(
             path, symbol="render", module_prefix="_jaato_dynprompt",
+            import_scope=script_import_scope_for(context.session),
         )
         if fn is None:
             return _fail(

@@ -31,6 +31,9 @@ from ..jaato_tools_path import apply_jaato_tools_to_env
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
 )
+from jaato_server.shared.script_imports import (
+    SCRIPT_IMPORTS_DAEMON, SCRIPT_IMPORTS_VALUES,
+)
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from jaato_server.shared.subprocess_runner import run_command, requires_shell, RunResult
@@ -543,6 +546,22 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                         "against the workspace root. Created if absent with "
                         "--system-site-packages; the model's pip installs "
                         "persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
+                "script_imports": {
+                    "type": "string",
+                    "enum": list(SCRIPT_IMPORTS_VALUES),
+                    "default": SCRIPT_IMPORTS_DAEMON,
+                    "description": (
+                        "Where this session's completion processors and "
+                        "{{!py:...}} prefetch scripts resolve their imports "
+                        "(#1644). 'daemon' (default): the runner's own "
+                        "interpreter. 'workspace_venv': also the site-packages "
+                        "of workspace_venv, appended after the daemon's paths "
+                        "for the load and each call only; jaato's own packages "
+                        "are never taken from it. The tool-venv is "
+                        "model-writable, so a gate importing from it trusts "
+                        "what the model installed there."
                     ),
                 },
                 "private_tmp": {
