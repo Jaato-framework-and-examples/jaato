@@ -38,6 +38,10 @@ from jaato_sdk.plugins.model_provider.types import MediaDelta, Part
 
 logger = logging.getLogger(__name__)
 
+#: U+FFFD, what a lossy UTF-8 decode puts in place of bytes it could not
+#: decode.  Its presence in a transcript delta is reported (#1647).
+REPLACEMENT_CHAR = "\ufffd"
+
 
 #: OpenAI streams audio as headerless pcm16 -- 24 kHz mono signed 16-bit
 #: little-endian -- and ONLY pcm16: requesting wav/mp3 together with
@@ -340,6 +344,7 @@ def emit_audio_delta(
     transcript_sink: Optional[List[str]] = None,
     pending: Optional[List[Any]] = None,
     wrote_text: Optional[Callable[[], bool]] = None,
+    on_transcript: Optional[Callable[[str], None]] = None,
 ) -> int:
     """Emit one model-generated audio chunk; return the new sequence.
 
@@ -386,6 +391,12 @@ def emit_audio_delta(
     Without ``pending`` the behaviour is exactly as before -- chunks go
     out immediately and ``final`` is never set -- so a caller that has
     not opted in is unaffected.
+
+    ``on_transcript`` observes each transcript delta exactly as the
+    upstream sent it, before it joins the sink (#1647).  It is how a
+    provider traces the raw deltas of a spoken turn; it cannot change
+    them.  An observer that raises is logged and ignored, because a
+    diagnostic must not cost the turn.
     """
     if pending is not None and is_end_of_audio(delta):
         _release(on_chunk, pending, final=True,
@@ -395,6 +406,11 @@ def emit_audio_delta(
     if found is None:
         return sequence
     raw, transcript = found
+    if transcript and on_transcript is not None:
+        try:
+            on_transcript(transcript)
+        except Exception:  # noqa: BLE001 - a diagnostic never costs the turn
+            logger.debug("transcript observer raised", exc_info=True)
     if transcript and transcript_sink is not None:
         transcript_sink.append(transcript)
     if raw is None:
@@ -547,8 +563,41 @@ class OpenAIMediaOutputMixin:
         """
         return emit_audio_delta(
             delta, on_chunk, sequence, self.STREAM_AUDIO_MIME, transcript_sink,
-            pending, wrote_text,
+            pending, wrote_text, on_transcript=self._observe_transcript_delta,
         )
+
+    def _observe_transcript_delta(self, text: str) -> None:
+        """Trace one transcript delta as received, and flag U+FFFD (#1647).
+
+        Every decode between the HTTP response and a client is strict
+        UTF-8: the OpenAI SDK decodes each complete SSE line, and the
+        runner, IPC and WS frames are decoded whole.  A byte sequence
+        split across a boundary there would RAISE, never become U+FFFD.
+        So a replacement character in a transcript delta was in the
+        JSON the upstream sent, and nothing downstream can recover the
+        bytes it stands for.  The trace line (``AUDIO_TRANSCRIPT_DELTA``,
+        the delta's ``repr``) is the evidence for a given turn; the
+        WARNING, once per provider instance, says it happened when no
+        trace is configured.
+        """
+        trace = getattr(self, "_trace", None)
+        damaged = REPLACEMENT_CHAR in text
+        if callable(trace):
+            trace(
+                f"AUDIO_TRANSCRIPT_DELTA len={len(text)} "
+                f"replacement_chars={text.count(REPLACEMENT_CHAR)} "
+                f"text={text!r}"
+            )
+        if damaged and not getattr(self, "_transcript_damage_warned", False):
+            self._transcript_damage_warned = True
+            logger.warning(
+                "The upstream sent a spoken-audio transcript delta containing "
+                "U+FFFD (%r); the characters it replaces were lost before the "
+                "response reached jaato and cannot be recovered. Set "
+                "trace.provider_log to record every transcript delta "
+                "(AUDIO_TRANSCRIPT_DELTA). Further occurrences on this "
+                "provider are traced only.", text,
+            )
 
     def flush_media_stream(
         self, on_chunk: Any, pending: Optional[List[Any]],
