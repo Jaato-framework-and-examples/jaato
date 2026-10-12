@@ -4051,6 +4051,22 @@ any `inline_data` into a `Blob` with the part's own mime. Its
 the tool-result gate and the tier validator read — so the framework declined
 content the wire beneath it would have delivered.
 
+**A replacement character in the words came from upstream (#1647).**
+A spoken transcript was reported with U+FFFD in place of some accented
+characters. Every decode between the HTTP response and a client is
+strict UTF-8: the OpenAI SDK decodes each complete SSE line, and the
+runner, IPC and WS frames are decoded whole, so a byte sequence split
+across a boundary there would raise, not substitute. Driven through the
+real `_openai_compat` and `openrouter` loops with `á` cut in half across
+response chunks, the words arrive intact. So a U+FFFD was in the JSON the
+upstream sent and cannot be recovered. `OpenAIMediaOutputMixin` now traces
+each transcript delta as received (`AUDIO_TRANSCRIPT_DELTA`, with its
+`repr` and a `replacement_chars` count) and logs one WARNING per provider
+instance when a delta carries U+FFFD; `emit_audio_delta(on_transcript=)`
+is the observer hook. Guard:
+`jaato_server/shared/tests/test_spoken_transcript_survives_split_bytes_1647.py`,
+two reversions.
+
 **An attachment no longer means "do not stream" (#837).** The ears and the
 voice could not be used in the same turn. A user message carrying an
 attachment is routed to `_run_chat_loop_with_parts`, which called the
