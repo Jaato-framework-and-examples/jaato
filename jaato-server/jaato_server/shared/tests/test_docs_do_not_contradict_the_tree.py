@@ -95,7 +95,7 @@ REVERSIONS = [
     ),
     Reversion(
         target="docs/design/multimodal-model-support.md",
-        find="all but `chrome_ai`, `claude_cli` and `github_models`",
+        find="all but `chrome_ai`, `claude_cli`, `github_models` and `laya`",
         replace="4/13 providers (anthropic, google_genai, antigravity, "
                 "openrouter)",
         test="test_the_current_state_table_names_the_providers_the_tree_declares",
