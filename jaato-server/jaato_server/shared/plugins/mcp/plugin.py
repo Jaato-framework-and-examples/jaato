@@ -1,6 +1,7 @@
 """MCP tool plugin for executing Model Context Protocol tools."""
 
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -28,6 +29,8 @@ from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
 from ..registry import is_runner_hosted_mirror
 from .schema_compat import top_level_schema_refusal
+from .call_timeout import (
+    PLUGIN_KEY as CALL_TIMEOUT_KEY, resolve_call_timeout, timeout_message)
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
@@ -47,6 +50,10 @@ MSG_RELOAD_CONFIG = 'reload_config'
 # Reopen named remote servers so their headers re-resolve (#1609).  Answers
 # NOTHING on the response queue: the sender does not wait for it.
 MSG_RECONNECT_REMOTE = 'reconnect_remote'
+# Cancel one in-flight tool call by its call id (#1646).  Answers NOTHING:
+# the caller has already stopped waiting.  The call's task is cancelled,
+# which tells the server too (MCP ``notifications/cancelled``).
+MSG_CANCEL_CALL = 'cancel_call'
 
 def _connect_call(mgr, name: str, spec: dict, expand_env) -> Tuple[Any, str]:
     """Return ``(coroutine, log_details)`` connecting one ``.mcp.json`` entry.
@@ -342,6 +349,15 @@ class MCPToolPlugin(RunnerForwardingMixin):
         # (server, tool name, reason) already announced as excluded, so the
         # WARNING fires once per tool rather than on every schema walk (#1631).
         self._excluded_announced: set = set()
+        # plugin_configs.mcp.call_timeout as initialize() received it (#1646);
+        # None = not declared, so the per-server key or the default decides.
+        self._call_timeout: Any = None
+        # Tool calls in flight, by call id.  Read and written ONLY on the
+        # MCP thread's event loop: each call runs in its own task, so one
+        # can be cancelled while others run, and answers on its own reply
+        # queue, so a late answer to an abandoned call reaches nobody.
+        self._call_tasks: Dict[int, asyncio.Task] = {}
+        self._call_ids = itertools.count(1)
 
     def _log_event(
         self,
@@ -446,6 +462,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._session_id = config.get("session_id")
         self._custom_config_path = config.get("config_path")
         self._workspace_path = config.get("workspace_path")
+        self._call_timeout = config.get(CALL_TIMEOUT_KEY)
         # Secrets-broker scrub (#10, default flipped in #863): the shared
         # resolver keeps a lone string as ONE pattern (never split into
         # characters, which would fail OPEN), applies the framework set when
@@ -483,6 +500,18 @@ class MCPToolPlugin(RunnerForwardingMixin):
                         "at connect time and sent only to the url's host. A "
                         "remote server is an outbound connection from the "
                         "runner, so an egress allowlist must include its host."
+                    ),
+                },
+                CALL_TIMEOUT_KEY: {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 30,
+                    "description": (
+                        "Seconds one MCP tool call may run before it is "
+                        "abandoned AND cancelled on the server (MCP "
+                        "notifications/cancelled). 0 = no ceiling. A server's "
+                        "own \"timeout\" key on its .mcp.json entry wins over "
+                        "this value."
                     ),
                 },
                 "scrub_secret_env": {
@@ -1939,21 +1968,14 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 original_tool_name = parts[2]
 
         # Verify tool exists
-        found = False
-        for tools in self._tool_cache.values():
-            for t in tools:
-                if t.name == original_tool_name:
-                    found = True
-                    break
-            if found:
-                break
-
-        if not found:
+        server = self._server_of_tool(original_tool_name)
+        if server is None:
             raise ValueError(f"Tool '{tool_name}' not found on any MCP server")
 
         # Create a queue for progress updates from the background thread
         progress_queue: queue.Queue = queue.Queue()
         sequence = 0
+        call_id = next(self._call_ids)
 
         try:
             # Send streaming request to MCP thread
@@ -1961,95 +1983,96 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 'toolname': original_tool_name,
                 'args': arguments,
                 'progress_queue': progress_queue,
+                'call_id': call_id,
             }))
 
-            # Yield progress chunks as they arrive
+            # Yield progress chunks as they arrive.  The same ceiling and
+            # cancellation as a plain call (#1646): past the ceiling
+            # ``_await_call`` cancels the call on the server and answers
+            # ('complete', {'error': ...}), which ends this loop.
             while True:
-                try:
-                    # Wait for progress update or completion signal
-                    msg_type, data = progress_queue.get(timeout=0.1)
+                msg_type, data = self._await_call(
+                    call_id, progress_queue, original_tool_name, server,
+                    streaming=True)
 
-                    if msg_type == 'progress':
-                        # Progress notification from MCP server
-                        progress = data.get('progress', 0)
-                        total = data.get('total')
-                        message = data.get('message', '')
+                if msg_type == 'progress':
+                    # Progress notification from MCP server
+                    progress = data.get('progress', 0)
+                    total = data.get('total')
+                    message = data.get('message', '')
 
-                        # Format progress message
-                        if total is not None:
-                            content = f"Progress: {progress}/{total}"
-                        else:
-                            content = f"Progress: {progress}"
-                        if message:
-                            content = f"{content} - {message}"
+                    # Format progress message
+                    if total is not None:
+                        content = f"Progress: {progress}/{total}"
+                    else:
+                        content = f"Progress: {progress}"
+                    if message:
+                        content = f"{content} - {message}"
+
+                    chunk = StreamChunk(
+                        content=content,
+                        chunk_type="progress",
+                        sequence=sequence,
+                        metadata={
+                            'progress': progress,
+                            'total': total,
+                            'message': message,
+                        },
+                    )
+                    sequence += 1
+
+                    if on_chunk:
+                        try:
+                            on_chunk(chunk)
+                        except Exception as e:
+                            self._trace(f"Chunk callback error: {e}")
+
+                    yield chunk
+
+                elif msg_type == 'complete':
+                    # Tool execution completed - yield final result
+                    result = data.get('result')
+                    error = data.get('error')
+
+                    if error:
+                        chunk = StreamChunk(
+                            content=f"Error: {error}",
+                            chunk_type="error",
+                            sequence=sequence,
+                            metadata={'is_final': True, 'error': error},
+                        )
+                    else:
+                        # Extract content from result
+                        content_list = [
+                            getattr(c, 'text', None)
+                            for c in getattr(result, 'content', [])
+                        ]
+                        content_text = '\n'.join(
+                            c for c in content_list if c
+                        ) or 'Completed'
 
                         chunk = StreamChunk(
-                            content=content,
-                            chunk_type="progress",
+                            content=content_text,
+                            chunk_type="result",
                             sequence=sequence,
                             metadata={
-                                'progress': progress,
-                                'total': total,
-                                'message': message,
+                                'is_final': True,
+                                'tool': tool_name,
+                                'isError': getattr(result, 'isError', False),
                             },
                         )
-                        sequence += 1
 
-                        if on_chunk:
-                            try:
-                                on_chunk(chunk)
-                            except Exception as e:
-                                self._trace(f"Chunk callback error: {e}")
+                    if on_chunk:
+                        try:
+                            on_chunk(chunk)
+                        except Exception as e:
+                            self._trace(f"Chunk callback error: {e}")
 
-                        yield chunk
+                    yield chunk
+                    break
 
-                    elif msg_type == 'complete':
-                        # Tool execution completed - yield final result
-                        result = data.get('result')
-                        error = data.get('error')
-
-                        if error:
-                            chunk = StreamChunk(
-                                content=f"Error: {error}",
-                                chunk_type="error",
-                                sequence=sequence,
-                                metadata={'is_final': True, 'error': error},
-                            )
-                        else:
-                            # Extract content from result
-                            content_list = [
-                                getattr(c, 'text', None)
-                                for c in getattr(result, 'content', [])
-                            ]
-                            content_text = '\n'.join(
-                                c for c in content_list if c
-                            ) or 'Completed'
-
-                            chunk = StreamChunk(
-                                content=content_text,
-                                chunk_type="result",
-                                sequence=sequence,
-                                metadata={
-                                    'is_final': True,
-                                    'tool': tool_name,
-                                    'isError': getattr(result, 'isError', False),
-                                },
-                            )
-
-                        if on_chunk:
-                            try:
-                                on_chunk(chunk)
-                            except Exception as e:
-                                self._trace(f"Chunk callback error: {e}")
-
-                        yield chunk
-                        break
-
-                except queue.Empty:
-                    # No message yet, continue waiting
-                    # Could add timeout handling here if needed
-                    continue
-
+        except CancelledException:
+            raise
         except Exception as exc:
             self._log_event(
                 LOG_ERROR,
@@ -2184,93 +2207,25 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 # Process requests from main thread
                 while True:
                     try:
-                        req = self._request_queue.get(timeout=0.1)
+                        # Non-blocking: call tasks run on this loop (#1646),
+                        # and a blocking get would starve them.
+                        req = self._request_queue.get_nowait()
                         if req is None or req == (None, None):  # Shutdown signal
                             self._log_event(LOG_INFO, "Shutdown signal received")
                             break
 
                         msg_type, data = req
 
-                        if msg_type == MSG_CALL_TOOL:
-                            # Tool execution request
-                            toolname = data.get('toolname')
-                            args = data.get('args', {})
-                            # Find which server provides this tool
-                            server_name = None
-                            for sname, tools in self._tool_cache.items():
-                                if any(t.name == toolname for t in tools):
-                                    server_name = sname
-                                    break
-                            self._log_event(LOG_DEBUG, f"Calling tool: {toolname}", server=server_name,
-                                          details=f"args: {json.dumps(args, default=str)[:200]}")
-                            try:
-                                res = await manager.call_tool_auto(toolname, args)
-                                is_error = getattr(res, 'isError', False)
-                                if is_error:
-                                    self._log_event(LOG_WARN, f"Tool returned error: {toolname}", server=server_name)
-                                else:
-                                    self._log_event(LOG_DEBUG, f"Tool completed: {toolname}", server=server_name)
-                                self._response_queue.put(('ok', res))
-                            except Exception as exc:
-                                self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}", server=server_name,
-                                              details=str(exc), include_traceback=True)
-                                self._response_queue.put(('error', str(exc)))
+                        if msg_type in (MSG_CALL_TOOL, MSG_CALL_TOOL_STREAMING):
+                            # Each call is its own task (#1646), so a slow
+                            # tool no longer holds every other call, and
+                            # MSG_CANCEL_CALL can cancel exactly this one.
+                            self._start_call_task(manager, msg_type, data)
 
-                        elif msg_type == MSG_CALL_TOOL_STREAMING:
-                            # Streaming tool execution request with progress callback
-                            toolname = data.get('toolname')
-                            args = data.get('args', {})
-                            progress_queue = data.get('progress_queue')
-
-                            # Find which server provides this tool
-                            server_name = None
-                            for sname, tools in self._tool_cache.items():
-                                if any(t.name == toolname for t in tools):
-                                    server_name = sname
-                                    break
-
-                            self._log_event(LOG_DEBUG, f"Calling tool (streaming): {toolname}",
-                                          server=server_name,
-                                          details=f"args: {json.dumps(args, default=str)[:200]}")
-
-                            # Create progress callback that sends to the queue
-                            async def progress_callback(
-                                progress: float,
-                                total: float | None,
-                                message: str | None
-                            ) -> None:
-                                """Forward progress notifications to the streaming queue."""
-                                if progress_queue:
-                                    progress_queue.put(('progress', {
-                                        'progress': progress,
-                                        'total': total,
-                                        'message': message,
-                                    }))
-                                self._log_event(LOG_DEBUG, f"Progress: {progress}/{total}",
-                                              server=server_name,
-                                              details=message)
-
-                            try:
-                                res = await manager.call_tool_auto(
-                                    toolname, args, progress_callback=progress_callback
-                                )
-                                is_error = getattr(res, 'isError', False)
-                                if is_error:
-                                    self._log_event(LOG_WARN, f"Tool returned error: {toolname}",
-                                                  server=server_name)
-                                else:
-                                    self._log_event(LOG_DEBUG, f"Tool completed: {toolname}",
-                                                  server=server_name)
-                                # Signal completion
-                                if progress_queue:
-                                    progress_queue.put(('complete', {'result': res}))
-                            except Exception as exc:
-                                self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}",
-                                              server=server_name,
-                                              details=str(exc), include_traceback=True)
-                                # Signal error
-                                if progress_queue:
-                                    progress_queue.put(('complete', {'error': str(exc)}))
+                        elif msg_type == MSG_CANCEL_CALL:
+                            task = self._call_tasks.get(data.get('call_id'))
+                            if task is not None and not task.done():
+                                task.cancel(data.get('reason') or None)
 
                         elif msg_type == MSG_CONNECT_SERVER:
                             # Connect to a specific server
@@ -2455,6 +2410,138 @@ class MCPToolPlugin(RunnerForwardingMixin):
         # Block until tool discovery finishes (or 10 s timeout).
         self._ready_event.wait(timeout=10.0)
 
+    # ---- one tool call: its task, its reply queue, its ceiling (#1646) ----
+
+    def _server_of_tool(self, toolname: str) -> Optional[str]:
+        """The connected server whose cached tools include ``toolname``."""
+        for sname, tools in self._tool_cache.items():
+            if any(t.name == toolname for t in tools):
+                return sname
+        return None
+
+    def _start_call_task(self, manager: Any, msg_type: str,
+                         data: Dict[str, Any]) -> None:
+        """Run one call request as its own task on the MCP loop.
+
+        Called on the MCP thread only.  The task is registered under the
+        request's ``call_id`` so ``MSG_CANCEL_CALL`` can cancel it;
+        cancelling it cancels the SDK request, which tells the server
+        (``notifications/cancelled``: the SDK on mcp 2.x,
+        ``ServerConnection.call_tool`` on 1.x).
+        """
+        call_id = data.get('call_id')
+        task = asyncio.ensure_future(self._run_call(manager, msg_type, data))
+        if call_id is not None:
+            self._call_tasks[call_id] = task
+            task.add_done_callback(
+                lambda _t, cid=call_id: self._call_tasks.pop(cid, None))
+
+    async def _run_call(self, manager: Any, msg_type: str,
+                        data: Dict[str, Any]) -> None:
+        """Call one tool and answer on the request's own reply queue.
+
+        A plain call answers ``('ok', result)`` / ``('error', text)`` on
+        ``data['reply']``; a streaming call answers ``('progress', ...)``
+        and then ``('complete', {...})`` on ``data['progress_queue']``.  A
+        cancelled call answers nothing: its caller stopped waiting.
+        """
+        toolname = data.get('toolname')
+        args = data.get('args', {})
+        streaming = msg_type == MSG_CALL_TOOL_STREAMING
+        reply = data.get('progress_queue' if streaming else 'reply')
+        server_name = self._server_of_tool(toolname)
+        self._log_event(
+            LOG_DEBUG,
+            f"Calling tool{' (streaming)' if streaming else ''}: {toolname}",
+            server=server_name,
+            details=f"args: {json.dumps(args, default=str)[:200]}")
+
+        kwargs: Dict[str, Any] = {}
+        if streaming:
+            async def progress_callback(progress: float, total: float | None,
+                                        message: str | None) -> None:
+                """Forward progress notifications to the streaming queue."""
+                if reply is not None:
+                    reply.put(('progress', {'progress': progress,
+                                            'total': total,
+                                            'message': message}))
+                self._log_event(LOG_DEBUG, f"Progress: {progress}/{total}",
+                                server=server_name, details=message)
+            kwargs['progress_callback'] = progress_callback
+
+        try:
+            res = await manager.call_tool_auto(toolname, args, **kwargs)
+        except asyncio.CancelledError as exc:
+            reason = exc.args[0] if exc.args else 'cancelled'
+            self._log_event(LOG_INFO, f"Tool call cancelled: {toolname}",
+                            server=server_name, details=str(reason))
+            raise
+        except Exception as exc:
+            self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}",
+                            server=server_name, details=str(exc),
+                            include_traceback=True)
+            if reply is not None:
+                reply.put(('complete', {'error': str(exc)}) if streaming
+                          else ('error', str(exc)))
+            return
+        if getattr(res, 'isError', False):
+            self._log_event(LOG_WARN, f"Tool returned error: {toolname}",
+                            server=server_name)
+        else:
+            self._log_event(LOG_DEBUG, f"Tool completed: {toolname}",
+                            server=server_name)
+        if reply is not None:
+            reply.put(('complete', {'result': res}) if streaming
+                      else ('ok', res))
+
+    def _call_timeout_for(self, server: str) -> Tuple[Optional[float], str]:
+        """``(seconds, source)`` for a call to ``server``; None = no ceiling."""
+        from jaato_server.shared.session_context import session_plugin_setting
+        spec = (self._config_cache.get('mcpServers') or {}).get(server)
+        plugin_value = session_plugin_setting(
+            self.name, CALL_TIMEOUT_KEY, self._call_timeout)
+        return resolve_call_timeout(spec, plugin_value, server=server)
+
+    def _abandon_call(self, call_id: int, reason: str) -> None:
+        """Ask the MCP thread to cancel ``call_id``; returns at once."""
+        if self._request_queue is not None:
+            self._request_queue.put(
+                (MSG_CANCEL_CALL, {'call_id': call_id, 'reason': reason}))
+
+    def _await_call(self, call_id: int, reply: "queue.Queue", toolname: str,
+                    server: str, *, streaming: bool = False) -> Tuple[str, Any]:
+        """Wait for one call's answer, honouring its ceiling and the session.
+
+        Returns ``(status, payload)`` from the reply queue.  After the
+        ceiling the call is cancelled on the server and the answer is
+        ``('timeout', message)``, or for a ``streaming`` call the final
+        message its loop already handles, ``('complete', {'error':
+        message})``.  Raises ``CancelledException`` when the session's
+        cancel token trips, after cancelling the call.
+        """
+        cancel_token = get_current_cancel_token()
+        timeout, source = self._call_timeout_for(server)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                self._abandon_call(call_id, "cancelled by the client")
+                raise CancelledException(f"MCP tool call cancelled: {toolname}")
+            wait = 0.2
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    self._abandon_call(
+                        call_id, f"timed out after {timeout:g}s")
+                    message = timeout_message(timeout, source, server)
+                    if streaming:
+                        return 'complete', {'error': message}
+                    return 'timeout', message
+                wait = min(wait, left)
+            try:
+                return reply.get(timeout=wait)
+            except queue.Empty:
+                continue
+
     def _execute(self, toolname: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute an MCP tool via the background connection.
 
@@ -2490,25 +2577,17 @@ class MCPToolPlugin(RunnerForwardingMixin):
             return {'error': f"Tool '{toolname}' not found on any MCP server"}
 
         try:
-            # Send request to MCP thread using new message format
-            self._request_queue.put((MSG_CALL_TOOL, {'toolname': toolname, 'args': args}))
-
-            # Poll response queue with short intervals so we can check for cancellation.
-            cancel_token = get_current_cancel_token()
-            poll_interval = 0.2
-            elapsed = 0.0
-            timeout = 30.0
-            status, result = None, None
-            while elapsed < timeout:
-                if cancel_token is not None and cancel_token.is_cancelled:
-                    raise CancelledException(f"MCP tool call cancelled: {toolname}")
-                try:
-                    status, result = self._response_queue.get(timeout=poll_interval)
-                    break  # Got a response
-                except queue.Empty:
-                    elapsed += poll_interval
-            else:
-                raise queue.Empty()  # Timed out — fall through to except queue.Empty handler
+            call_id = next(self._call_ids)
+            reply: queue.Queue = queue.Queue()
+            self._request_queue.put((MSG_CALL_TOOL, {
+                'toolname': toolname, 'args': args,
+                'call_id': call_id, 'reply': reply}))
+            status, result = self._await_call(
+                call_id, reply, toolname, server_name_for_tool)
+            if status == 'timeout':
+                self._log_event(LOG_ERROR, f"Tool call timed out: {toolname}",
+                                server=server_name_for_tool, details=result)
+                return {'error': result}
 
             if status == 'error':
                 return {'error': result}
@@ -2553,9 +2632,8 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 },
             }
 
-        except queue.Empty:
-            self._log_event(LOG_ERROR, f"Tool call timed out: {toolname}", details="Queue get operation timed out after 30s")
-            return {'error': 'MCP tool call timed out'}
+        except CancelledException:
+            raise
         except Exception as exc:
             self._log_event(LOG_ERROR, f"Tool call failed: {toolname}", details=str(exc), include_traceback=True)
             return {'error': f"{type(exc).__name__}: {exc}"}
