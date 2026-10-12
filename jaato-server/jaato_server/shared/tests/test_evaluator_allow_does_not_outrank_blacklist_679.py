@@ -62,15 +62,15 @@ _PLUGIN = "jaato-server/jaato_server/shared/plugins/permission/plugin.py"
 REVERSIONS = [
     Reversion(
         target=_POLICY,
-        find="""                veto = self.blacklist_veto(tool_name, args, signature)
-                if veto is not None:
-                    return overridden_evaluator_allow(veto)
-                return PolicyMatch(
-                    decision=PermissionDecision.ALLOW,
-                    reason="Evaluator granted access",""",
-        replace="""                return PolicyMatch(
-                    decision=PermissionDecision.ALLOW,
-                    reason="Evaluator granted access",""",
+        find="""            veto = self.blacklist_veto(tool_name, args, signature)
+            if veto is not None:
+                return overridden_evaluator_allow(veto)
+            return PolicyMatch(
+                decision=PermissionDecision.ALLOW,
+                reason="Evaluator granted access",""",
+        replace="""            return PolicyMatch(
+                decision=PermissionDecision.ALLOW,
+                reason="Evaluator granted access",""",
         test="test_policy_evaluator_allow_does_not_bypass_static_blacklist",
         because="policy.check honours an evaluator ALLOW over the blacklist again",
     ),

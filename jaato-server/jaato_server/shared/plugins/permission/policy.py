@@ -149,6 +149,11 @@ class PermissionPolicy:
     # Permission evaluators (tool_name|"default" -> evaluate callable)
     _evaluators: Dict[str, Callable] = field(default_factory=dict)
 
+    # The decision-model gate (``decision_gate.DecisionGateConfig``), or
+    # None.  Consulted by the plugin, never by :meth:`check`: it decides a
+    # gated call in place of the default policy (decision-models.md §8.2).
+    decision_gate: Optional[Any] = None
+
     def set_evaluators(self, evaluators: Dict[str, Callable]) -> None:
         """Set runtime permission evaluators.
 
@@ -193,49 +198,12 @@ class PermissionPolicy:
 
         # 0.5. Run permission evaluators (after sanitization).  A DENY here
         # short-circuits; an ALLOW is provisional and is put to the blacklist
-        # below before it is honored (#679).
+        # before it is honored (#679).
         if self._evaluators and eval_context is not None:
-            eval_result = run_evaluator(self._evaluators, tool_name, args, eval_context)
-            decision = eval_result.decision
-
-            if decision == EvalDecision.FALLBACK:
-                pass  # Continue to blacklist/whitelist
-
-            elif decision in (EvalDecision.DENY, EvalDecision.DENY_SESSION):
-                return PolicyMatch(
-                    decision=PermissionDecision.DENY,
-                    reason="Evaluator denied access",
-                    rule_type="evaluator",
-                    eval_result=eval_result,
-                )
-            elif decision == EvalDecision.DENY_WITH_COMMENT:
-                comment = eval_result.comment or "Denied by evaluator"
-                return PolicyMatch(
-                    decision=PermissionDecision.DENY,
-                    reason=f"Tool not executed. Evaluator comment: {comment}",
-                    rule_type="evaluator_comment",
-                    eval_result=eval_result,
-                )
-            elif decision in (
-                EvalDecision.ALLOW,
-                EvalDecision.ALLOW_ONCE,
-                EvalDecision.ALLOW_TURN,
-                EvalDecision.ALLOW_UNTIL_IDLE,
-                EvalDecision.ALLOW_SESSION,
-                EvalDecision.ALLOW_ALL,
-                EvalDecision.ALLOW_WITH_COMMENT,
-            ):
-                # #679: an evaluator ALLOW is "no objection from me", not
-                # "final".  The operator's deny tiers still decide.
-                veto = self.blacklist_veto(tool_name, args, signature)
-                if veto is not None:
-                    return overridden_evaluator_allow(veto)
-                return PolicyMatch(
-                    decision=PermissionDecision.ALLOW,
-                    reason="Evaluator granted access",
-                    rule_type="evaluator_comment" if decision == EvalDecision.ALLOW_WITH_COMMENT else "evaluator",
-                    eval_result=eval_result,
-                )
+            evaluated = self._check_evaluators(
+                tool_name, args, signature, eval_context)
+            if evaluated is not None:
+                return evaluated
 
         # 1-2. Session blacklist, then static blacklist (highest priority)
         blacklist_match = self.blacklist_veto(tool_name, args, signature)
@@ -276,6 +244,74 @@ class PermissionPolicy:
                 reason="No matching rule, requires channel approval",
                 rule_type="default"
             )
+
+    def _check_evaluators(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        signature: str,
+        eval_context: EvalContext,
+    ) -> Optional[PolicyMatch]:
+        """The evaluators' verdict, or ``None`` to continue (FALLBACK).
+
+        DENY short-circuits; ASK and ALLOW are put to
+        :meth:`blacklist_veto` first, so the operator's deny tiers still
+        decide (#679).
+        """
+        eval_result = run_evaluator(self._evaluators, tool_name, args, eval_context)
+        decision = eval_result.decision
+
+        if decision == EvalDecision.FALLBACK:
+            pass  # Continue to blacklist/whitelist
+
+        elif decision in (EvalDecision.DENY, EvalDecision.DENY_SESSION):
+            return PolicyMatch(
+                decision=PermissionDecision.DENY,
+                reason="Evaluator denied access",
+                rule_type="evaluator",
+                eval_result=eval_result,
+            )
+        elif decision == EvalDecision.DENY_WITH_COMMENT:
+            comment = eval_result.comment or "Denied by evaluator"
+            return PolicyMatch(
+                decision=PermissionDecision.DENY,
+                reason=f"Tool not executed. Evaluator comment: {comment}",
+                rule_type="evaluator_comment",
+                eval_result=eval_result,
+            )
+        elif decision == EvalDecision.ASK:
+            # A person decides, whatever the default says; the
+            # operator's deny tiers still refuse first.
+            veto = self.blacklist_veto(tool_name, args, signature)
+            if veto is not None:
+                return veto
+            return PolicyMatch(
+                decision=PermissionDecision.ASK_CHANNEL,
+                reason="Evaluator asked for a person to decide",
+                rule_type="evaluator_ask",
+                eval_result=eval_result,
+            )
+        elif decision in (
+            EvalDecision.ALLOW,
+            EvalDecision.ALLOW_ONCE,
+            EvalDecision.ALLOW_TURN,
+            EvalDecision.ALLOW_UNTIL_IDLE,
+            EvalDecision.ALLOW_SESSION,
+            EvalDecision.ALLOW_ALL,
+            EvalDecision.ALLOW_WITH_COMMENT,
+        ):
+            # #679: an evaluator ALLOW is "no objection from me", not
+            # "final".  The operator's deny tiers still decide.
+            veto = self.blacklist_veto(tool_name, args, signature)
+            if veto is not None:
+                return overridden_evaluator_allow(veto)
+            return PolicyMatch(
+                decision=PermissionDecision.ALLOW,
+                reason="Evaluator granted access",
+                rule_type="evaluator_comment" if decision == EvalDecision.ALLOW_WITH_COMMENT else "evaluator",
+                eval_result=eval_result,
+            )
+        return None
 
     def blacklist_veto(
         self,

@@ -184,6 +184,11 @@ a tier bound to one is refused at startup. The `decision` plugin's `decide`
 tool (category `decision`, deferred, not auto-approved) names an entry and is
 hidden from a session that binds none; `validate` reports
 `decision_tool_without_models` when a profile enables it with nothing bound.
+`plugin_configs.permission.decision_gate` (`model`, `tools`, `allow_above`,
+`deny_below`) puts a gated call the policy would hand to its default to that
+entry: allow, deny, or ask a person in between or on any failure; `explain
+plugin permission` shows the block and `validate` reports
+`decision_gate_invalid` / `decision_gate_unknown_model`.
 
 **Never reverse-engineer the generator.** `explain archetype <name>` states what
 `new` writes, what is placeholder versus recipe, and `--dry-run` shows the exact
