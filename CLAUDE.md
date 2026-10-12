@@ -1776,6 +1776,32 @@ the provider for its exact function-schema constraints. Guard:
 `jaato_server/shared/tests/test_a_refused_mcp_schema_names_its_tool_1631.py`,
 five reversions.
 
+### An MCP Call That Outlived Its Caller (#1646)
+
+Every MCP tool call waited a literal 30 s, with no knob. A remote tool whose
+normal answer took 60-90 s (jaato-mcp's `ask_librarian`) was discarded
+whenever it ran long, and kept running on the server for nobody, because the
+client never said it had given up. Worse, calls ran one at a time on the MCP
+thread and answered on ONE shared queue, so a slow call held every other
+call, and the late answer to an abandoned call was read by the next call.
+
+| Piece | Where |
+|---|---|
+| the ceiling: `"timeout"` on the server's `.mcp.json` entry, else `plugin_configs.mcp.call_timeout` (read per session), else 30 s; `0` = no ceiling; a value that is not non-negative seconds is ignored with a WARNING and the next layer decides | `plugins/mcp/call_timeout.py` (`resolve_call_timeout`, `CALL_TIMEOUT_RULES`, rendered by `explain plugin mcp`) |
+| each call is its own task on the MCP loop, keyed by a call id, answering on its own reply queue; the request loop reads non-blocking so the tasks run | `MCPToolPlugin._start_call_task` / `_run_call` |
+| a call past its ceiling, or whose session cancel token tripped, is cancelled (`MSG_CANCEL_CALL`); the timeout error names the knob to raise | `MCPToolPlugin._await_call` / `_abandon_call`, both the plain and the streaming path |
+| cancelling the call tells the server: mcp 2.x sends `notifications/cancelled` itself; on mcp 1.x `ServerConnection.call_tool` sends it, with the request id 1.x assigned and the cancel's reason | `mcp_context_manager._sdk_1x_next_request_id` / `_send_cancelled` |
+
+A cancelled call now raises `CancelledException` to the executor, which
+records `{"error": "cancelled"}`; before, the plugin's catch-all turned it
+into an error dict. The default stays 30 s. Not done: MCP tasks
+(`tasks/get` / `tasks/cancel`), which jaato-mcp serves to clients that
+declare the extension; the client does not yet declare it.
+
+Guard: `jaato_server/shared/tests/test_an_abandoned_mcp_call_is_cancelled_1646.py`,
+five reversions, against a real streamable-HTTP and SSE server whose `slow`
+tool records whether it was cancelled; verified on mcp 1.30 and 2.3.
+
 ### Streaming & Cancellation
 
 Key types in `jaato_server/shared/plugins/model_provider/types.py`:

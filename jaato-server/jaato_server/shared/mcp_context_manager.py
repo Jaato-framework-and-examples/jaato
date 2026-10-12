@@ -22,6 +22,65 @@ from jaato_server.shared.secret_scrub import scrub_env
 logger = logging.getLogger(__name__)
 
 
+#: Bound on the courtesy ``notifications/cancelled`` write (#1646), so a
+#: wedged transport cannot turn an abandoned call into a hang.
+_CANCEL_NOTIFY_TIMEOUT = 5.0
+
+
+def _sdk_1x_next_request_id(session: Any) -> "int | None":
+    """The id mcp 1.x will give the next request, or ``None`` (#1646).
+
+    mcp 2.x sends ``notifications/cancelled`` itself when a request's task
+    is cancelled (``cancel_on_abandon``); mcp 1.x does not, and its
+    ``BaseSession.send_request`` assigns ``self._request_id`` synchronously
+    as its first act.  Only a 1.x session (an int ``_request_id`` beside
+    ``_response_streams``) answers; anything else is left to its SDK.
+    """
+    rid = getattr(session, "_request_id", None)
+    if isinstance(rid, bool) or not isinstance(rid, int):
+        return None
+    if not isinstance(getattr(session, "_response_streams", None), dict):
+        return None
+    return rid
+
+
+def _cancel_reason(exc: BaseException) -> str:
+    """The message a ``task.cancel(msg)`` carried, else a generic reason."""
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], str) and args[0]:
+        return args[0]
+    return "abandoned by the client"
+
+
+async def _send_cancelled(session: Any, request_id: int, reason: str, *,
+                          server: str, tool: str) -> None:
+    """Tell an mcp 1.x server to stop working on ``request_id`` (#1646).
+
+    Best effort and bounded: a server that already answered ignores an
+    unknown id (the spec says so), and a transport that cannot take the
+    write costs at most :data:`_CANCEL_NOTIFY_TIMEOUT`.
+    """
+    from mcp import types as T
+    note = T.CancelledNotification(
+        params=T.CancelledNotificationParams.model_validate(
+            {"requestId": request_id, "reason": reason}))
+    # 1.x wraps a client notification in the ``ClientNotification`` root
+    # model; 2.x spells that name as a plain union, which is not callable.
+    wrapper = getattr(T, "ClientNotification", None)
+    if isinstance(wrapper, type):
+        note = wrapper(note)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(session.send_notification(note)),
+            _CANCEL_NOTIFY_TIMEOUT,
+        )
+        logger.info("MCP server '%s': cancelled call to '%s' (request %s): %s",
+                    server, tool, request_id, reason)
+    except BaseException as exc:  # noqa: BLE001 -- the call is already gone
+        logger.debug("MCP server '%s': cancel notification for '%s' not sent: "
+                     "%s", server, tool, exc)
+
+
 class _OwnedTransport:
     """Closes a remote transport from the task that opened it.
 
@@ -209,11 +268,22 @@ class ServerConnection:
         Returns:
             CallToolResult from the MCP server.
         """
-        return await self.session.call_tool(
-            name,
-            arguments or {},
-            progress_callback=progress_callback,
-        )
+        # Read BEFORE the call: on mcp 1.x ``send_request`` takes this id with
+        # no await in between, so it is the id the request is sent under.
+        request_id = _sdk_1x_next_request_id(self.session)
+        try:
+            return await self.session.call_tool(
+                name,
+                arguments or {},
+                progress_callback=progress_callback,
+            )
+        except asyncio.CancelledError as exc:
+            if request_id is not None:
+                await _send_cancelled(
+                    self.session, request_id, _cancel_reason(exc),
+                    server=self.config.name, tool=name,
+                )
+            raise
 
     async def aclose(self) -> None:
         """Close all contexts owned by this connection.
@@ -666,8 +736,10 @@ class MCPClientManager:
             done, _ = await asyncio.wait(
                 {call_task, trip_task}, return_when=asyncio.FIRST_COMPLETED,
             )
-        except BaseException:
-            call_task.cancel()
+        except BaseException as exc:
+            # Pass a cancel's reason on, so the server is told why (#1646).
+            call_task.cancel(_cancel_reason(exc)
+                             if isinstance(exc, asyncio.CancelledError) else None)
             trip_task.cancel()
             raise
         if call_task in done:

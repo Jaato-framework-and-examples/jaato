@@ -6,6 +6,14 @@ or, with ``sse``, at ``http://127.0.0.1:PORT/sse``, and appends the
 ``Authorization`` header of every request it receives to ``HEADER_LOG`` (one
 line per request, ``-`` when absent), so a test can see what reached it.
 
+With ``MCP_FIXTURE_SLOW_TOOL=1`` in its environment it also serves
+``slow`` (off otherwise, so the other guards see exactly ``echo``), which
+sleeps for the seconds it is given and
+appends ``start <tag>`` and then ``done <tag>`` -- or ``cancelled <tag>``
+when the call is cancelled by the client -- to ``HEADER_LOG + ".events"``,
+so a test can see whether an abandoned call was stopped on the server
+(#1646).
+
 An optional fourth argument names a TOKEN FILE: when given, a request
 whose ``Authorization`` header differs from the file's (stripped) content
 is answered **401** before it reaches the MCP app, so a test can rotate
@@ -15,12 +23,13 @@ Built on whichever mcp SDK generation is installed: 2.x ``MCPServer``,
 else 1.x ``FastMCP``.
 """
 
+import os
 import sys
 
 import uvicorn
 
 
-def _build_app(transport):
+def _build_app(transport, events_path):
     try:
         from mcp.server.mcpserver import MCPServer as Server
     except ImportError:  # mcp 1.x
@@ -32,9 +41,32 @@ def _build_app(transport):
         """Return the text it was given."""
         return f"echo: {text}"
 
+    if os.environ.get("MCP_FIXTURE_SLOW_TOOL") == "1":
+        _add_slow_tool(server, events_path)
+
     if transport == "sse":
         return server.sse_app()
     return server.streamable_http_app()
+
+
+def _add_slow_tool(server, events_path):
+    @server.tool()
+    async def slow(seconds: float, tag: str) -> str:
+        """Sleep for ``seconds`` and say so; record whether it was cancelled."""
+        import asyncio
+
+        def note(what):
+            with open(events_path, "a", encoding="utf-8") as fh:
+                fh.write(f"{what} {tag}\n")
+
+        note("start")
+        try:
+            await asyncio.sleep(seconds)
+        except BaseException:
+            note("cancelled")
+            raise
+        note("done")
+        return f"slept {seconds:g}"
 
 
 def _recording(app, log_path, token_path=None):
@@ -61,7 +93,8 @@ def _recording(app, log_path, token_path=None):
 
 def main() -> None:
     port, log_path = int(sys.argv[1]), sys.argv[2]
-    app = _build_app(sys.argv[3] if len(sys.argv) > 3 else "http")
+    app = _build_app(sys.argv[3] if len(sys.argv) > 3 else "http",
+                     log_path + ".events")
     token_path = sys.argv[4] if len(sys.argv) > 4 else None
     uvicorn.run(_recording(app, log_path, token_path), host="127.0.0.1", port=port,
                 log_level="warning")

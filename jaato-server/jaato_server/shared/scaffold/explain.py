@@ -1686,10 +1686,19 @@ def _mcp_transport_lines() -> Tuple[List[str], Dict[str, Any]]:
     lines.extend(f"    {kind:<6} {what}" for kind, what in MR.TRANSPORT_DOCS)
     lines.append("  remote servers (http / sse):")
     lines.extend(f"    - {rule}" for rule in MR.REMOTE_RULES)
+    # The tool-call ceiling and cancellation (#1646), read from the module
+    # the plugin resolves it with.
+    from jaato_server.shared.plugins.mcp import call_timeout as CT
+    lines.append("  tool calls (every transport):")
+    lines.extend(f"    - {rule}" for rule in CT.CALL_TIMEOUT_RULES)
     data = {"transports": [{"type": kind, "description": what}
                            for kind, what in MR.TRANSPORT_DOCS],
             "transport_aliases": dict(MR.TRANSPORT_ALIASES),
-            "remote_rules": list(MR.REMOTE_RULES)}
+            "remote_rules": list(MR.REMOTE_RULES),
+            "call_timeout": {"server_key": CT.SERVER_KEY,
+                             "plugin_key": CT.PLUGIN_KEY,
+                             "default_seconds": CT.DEFAULT_CALL_TIMEOUT,
+                             "rules": list(CT.CALL_TIMEOUT_RULES)}}
     return lines, data
 
 

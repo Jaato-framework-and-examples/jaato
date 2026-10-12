@@ -294,10 +294,25 @@ From 'Atlassian' server:
 
 ### Tool execution timeout
 
-The plugin has a 30-second timeout for tool execution. If tools consistently timeout:
-1. Check MCP server responsiveness
-2. Consider increasing timeout in the plugin code
-3. Verify network connectivity for remote MCP servers
+A tool call waits 30 seconds by default. A tool that legitimately takes
+longer needs a higher ceiling, per server or for the whole plugin:
+
+```json
+{"mcpServers": {"librarian": {"type": "http", "url": "https://...",
+                              "timeout": 180}}}
+```
+
+```yaml
+plugin_configs:
+  mcp:
+    call_timeout: 120    # seconds; 0 = no ceiling
+```
+
+The server entry's `"timeout"` wins over `call_timeout`. A call abandoned on
+its ceiling, or because the session was stopped, is cancelled on the server
+(`notifications/cancelled`), so the server stops working on it. The timeout
+error names the knob to raise. `jaato-scaffold explain plugin mcp` prints the
+rule.
 
 ### JSON-RPC validation errors
 
