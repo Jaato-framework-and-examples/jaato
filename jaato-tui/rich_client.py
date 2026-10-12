@@ -2100,9 +2100,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     _update_sandbox_paths(event.sandbox_paths)
                 if event.services:
                     available_services = event.services
-                if event.tool_id_mappings:
-                    from ui_utils import set_tool_id_registry
-                    set_tool_id_registry(event.tool_id_mappings)
+                from ui_utils import tool_id_names
+                tool_id_names.observe(event)  # seeds the id -> name map (#1650)
 
                 # Track session ID for recovery reattachment
                 if event.session_id:
@@ -2265,8 +2264,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.show_lines(lines)
 
             elif isinstance(event, ToolIdRegistryEvent):
-                from ui_utils import set_tool_id_registry
-                set_tool_id_registry(event.mappings)
+                from ui_utils import tool_id_names
+                tool_id_names.observe(event)
                 ipc_trace(f"  ToolIdRegistryEvent: {len(event.mappings)} mappings")
 
             elif isinstance(event, HistoryEvent):

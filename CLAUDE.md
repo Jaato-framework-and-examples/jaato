@@ -11312,6 +11312,16 @@ neither.
 Both argument displays use it: the tool row and the permission card's
 argument grid.
 
+**The rules live in both SDKs now (#1650)**, so a client does not write its
+own copy: `jaato_sdk.tool_ids` (`ToolIdNames`, `resolve_tool_ids`,
+`tool_id_mappings`) and its mirror `jaato-sdk-ts/src/toolIds.ts`
+(`ToolIdNames`, `resolveToolIds`, `resolveToolArgs`, `toolIdMappings`).
+`ToolIdNames.observe(event)` replaces the map on `tools.id_registry` and on
+a non-empty `session.info.tool_id_mappings`; `track(client)` subscribes to
+both and returns one unsubscribe; `resolve` / `name` are for render time.
+The TUI's `ui_utils` and the web client's `protocol/toolIds.ts` delegate to
+them. Guards: `jaato_sdk/tests/test_tool_ids.py`, `src/toolIds.test.ts`.
+
 ### A Call to a Tool That Does Not Exist, Shown Quietly
 
 A model sometimes names a tool the session never offered (a hallucinated

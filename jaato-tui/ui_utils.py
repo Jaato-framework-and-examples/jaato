@@ -304,35 +304,29 @@ def _looks_like_path(value: str) -> bool:
     return False
 
 
-_tool_id_registry: Dict[str, str] = {}
+# The id -> name map is the SDK's (#1650): one copy of the rules for every
+# client.  Module-level because every renderer in the TUI reads it.
+from jaato_sdk.tool_ids import ToolIdNames
+
+tool_id_names = ToolIdNames()
 
 
 def set_tool_id_registry(mappings: Dict[str, str]) -> None:
-    """Replace the local tool ID → name registry.
+    """Replace the local tool ID → name registry wholesale.
 
-    Called by the client when it receives a ``ToolIdRegistryEvent``
-    from the server. The registry is a flat dict mapping hash-derived
-    IDs (e.g., ``t_a3f2b1c0``) to human-readable names (e.g.,
-    ``readFile``).
+    A thin wrapper over :meth:`jaato_sdk.tool_ids.ToolIdNames.replace`;
+    the event loop calls :meth:`ToolIdNames.observe` directly.
     """
-    _tool_id_registry.clear()
-    _tool_id_registry.update(mappings)
+    tool_id_names.replace(mappings)
 
 
 def resolve_tool_ids(value: Any) -> Any:
-    """Recursively resolve hash-derived IDs in tool argument values.
+    """Resolve hash-derived IDs in tool argument values, for display.
 
-    Walks dicts, lists, and scalar strings, replacing recognized IDs
-    with human-readable names from the registry populated by
-    ``ToolIdRegistryEvent``. Unrecognized values pass through unchanged.
+    :func:`jaato_sdk.tool_ids.resolve_tool_ids` over the map kept by
+    ``tool_id_names``: only a string that IS a known id is replaced.
     """
-    if isinstance(value, str):
-        return _tool_id_registry.get(value, value)
-    if isinstance(value, list):
-        return [resolve_tool_ids(v) for v in value]
-    if isinstance(value, dict):
-        return {k: resolve_tool_ids(v) for k, v in value.items()}
-    return value
+    return tool_id_names.resolve(value)
 
 
 def format_tool_args_summary(

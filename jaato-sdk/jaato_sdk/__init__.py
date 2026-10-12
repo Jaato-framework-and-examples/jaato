@@ -74,6 +74,8 @@ from jaato_sdk.trace import (
 # server source: a credential read MUST go through this rather than
 # ``os.environ``, which concurrent sessions clobber.
 from jaato_sdk.session_env import get_session_env
+# Hashed tool/category ids shown by name (#1650); mirror of toolIds.ts.
+from jaato_sdk.tool_ids import ToolIdNames, resolve_tool_ids, tool_id_mappings
 
 __all__ = [
     # Client
@@ -134,4 +136,8 @@ __all__ = [
     # Session-scoped environment reads (issue #918) -- the plugin-safe
     # alternative to ``os.environ.get`` for a credential.
     "get_session_env",
+    # Hashed tool/category ids, resolved for display (#1650).
+    "ToolIdNames",
+    "resolve_tool_ids",
+    "tool_id_mappings",
 ]
