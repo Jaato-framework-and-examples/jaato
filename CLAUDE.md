@@ -9762,6 +9762,27 @@ those helpers (option 2 of the issue). Guard:
 `jaato_server/server/tests/test_profile_listing_is_the_clients_own_1593.py`,
 three reversions.
 
+### A Validation Run Against a Set Nobody Selected (#1595)
+
+The sibling of #1593. `scaffold.validate` with no set passed only
+`args[0]` to `validate_workspace`, so `discover_profiles` read
+`JAATO_PROFILE_SET` from `get_session_env`, whose `os.environ` fallback is
+empty on a quiet daemon (a profile that lives only in a set was never
+validated, and the answer still said `ok=True`) and is another session's
+overlay mid-turn (a neighbour's set was validated).
+
+The handler now reads the caller's own `.env` (declared `env_file`, else
+`<workspace>/.env`, parsed as #1593 parses it) through
+`CommandRouter._caller_profile_env`: the requested set wins, else the one
+that `.env` selects, else none. `validate_workspace(session_env=)` hands
+that env to `discover_profiles`, so "no set" never becomes the overlay's.
+`ScaffoldValidateEvent.profile_set` is the set APPLIED (no new field, no
+protocol bump), and the SDK shell prints it. Not changed: the local CLI,
+which still reads the set from its own process env when `--set` is
+absent. Guard:
+`jaato_server/server/tests/test_validate_uses_the_callers_profile_set_1595.py`,
+four reversions.
+
 ### What a Picker Needs to Know About a Workspace (protocol 1.27)
 
 The workspace and session pickers asked for facts the daemon held and no

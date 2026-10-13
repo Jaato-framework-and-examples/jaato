@@ -270,6 +270,14 @@ def _checked_sources(sources: Dict[str, Optional[str]]) -> str:
                      for k, v in sources.items())
 
 
+def _profile_set_of(env: Dict[str, str]) -> Optional[str]:
+    """The profile set *env* (a caller's ``.env``) selects, or ``None`` (#1595)."""
+    from jaato_server.shared.plugins.subagent.config import PROFILE_SET_ENV_VAR
+
+    value = env.get(PROFILE_SET_ENV_VAR)
+    return value.strip() or None if isinstance(value, str) else None
+
+
 def _severity_counts(diags: Any) -> Dict[str, int]:
     """``errors`` / ``warnings`` counts of a validate run's findings."""
     return {"errors": sum(1 for d in diags if d.severity == "error"),
@@ -1507,6 +1515,12 @@ class CommandRouter:
         workspace it refuses rather than validating the daemon's own cwd,
         which would report about somebody else's files.
 
+        **Which set (#1595).**  The one the request names, else the one the
+        caller's own ``.env`` selects (:meth:`_caller_profile_env`), else
+        none; never the daemon's ``os.environ``, which another session's
+        turn overlays.  The answer's ``profile_set`` is the set applied, so
+        an ``ok=True`` cannot hide which profiles were looked at.
+
         Every outcome answers with one ``ScaffoldValidateEvent``: the caller
         is blocked on it, and a daemon that answered nothing would be
         indistinguishable from one that does not serve the verb.
@@ -1538,10 +1552,15 @@ class CommandRouter:
                          f"connect with a workspace path")
             return
 
+        # With no set named, the CALLER's .env selects it (#1595), never the
+        # daemon's os.environ, which carries whichever session is mid-turn.
+        caller_env = self._caller_profile_env(client_id, workspace)
+        profile_set = profile_set or _profile_set_of(caller_env)
         try:
             from jaato_server.shared.scaffold import validate as _validate
             diags = _validate.validate_workspace(
-                workspace, profile_set=profile_set, only=only)
+                workspace, profile_set=profile_set, only=only,
+                session_env=caller_env)
         except Exception as exc:
             logger.warning("scaffold.validate: client=%s workspace=%s "
                            "raised: %s", client_id, workspace, exc)
@@ -2139,6 +2158,24 @@ class CommandRouter:
         if not isinstance(workspace, str):
             return None
         return effective_config_root(None, workspace)
+
+    def _caller_profile_env(
+        self, client_id: str, workspace: str,
+    ) -> Dict[str, str]:
+        """The env *client_id*'s profile set is read from, for *workspace* (#1595).
+
+        The client's declared ``env_file``, else ``<workspace>/.env``, read
+        the way ``session.profiles`` reads it (#1593): a missing or
+        unreadable file is an empty env, never the daemon's ``os.environ``.
+        """
+        from jaato_server.server.session_manager import _read_listing_env
+
+        declared = getattr(self._session_manager, "client_declared_config", None)
+        cfg = declared(client_id) if callable(declared) else {}
+        env_file = cfg.get("env_file") if isinstance(cfg, dict) else None
+        if not isinstance(env_file, str) or not env_file:
+            env_file = os.path.join(workspace, ".env")
+        return _read_listing_env(env_file)
 
     def _profile_listing_scope(
         self, client_id: str, workspace_path: Optional[str],

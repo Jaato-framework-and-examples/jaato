@@ -3361,6 +3361,7 @@ def validate_workspace(
     profile_set: Optional[str] = None,
     only: Optional[str] = None,
     config_root: Optional[str] = None,
+    session_env: Optional[Dict[str, str]] = None,
 ) -> List[Diagnostic]:
     """Resolve + validate every profile in a workspace (optionally one set).
 
@@ -3368,6 +3369,13 @@ def validate_workspace(
     effective profiles match what the daemon would load.  ``config_root``
     overrides the ``<workspace>/.jaato`` tier the same way a client's
     ``config_root`` does at session creation (the doctor passes its own).
+
+    ``session_env`` is the caller's own environment (its ``.env``), handed
+    to :func:`discover_profiles` so that, with no ``profile_set``, the set
+    is read from it and never from this process's ``os.environ``.  The
+    daemon's ``scaffold.validate`` passes it (#1595): the daemon's
+    environment carries whichever session is mid-turn.  ``None`` keeps the
+    context-derived behaviour the local CLI relies on.
 
     Findings from validators installed packages contribute through
     ``jaato.scaffold_validators`` (#1306) come last, attributed by ``source``;
@@ -3382,6 +3390,7 @@ def validate_workspace(
         base_path=str(ws),
         config_root=config_root,
         force_profile_set=profile_set,
+        session_env=session_env,
     )
 
     # Source tier per profile.  ``discover_profiles`` merges the workspace tier

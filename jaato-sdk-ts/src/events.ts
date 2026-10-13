@@ -33489,7 +33489,8 @@ export interface ScaffoldIntegrationEvent {
  *         validator.  A run that found errors is ``ok=True`` with
  *         ``errors > 0``; ``ok`` never means "valid".
  *     workspace: The absolute path validated, on the daemon's host.
- *     profile_set: The set overlay applied, or ``""``.
+ *     profile_set: The set overlay applied, or ``""``: the one requested,
+ *         else the one the caller's ``.env`` selects (#1595).
  *     profile: The one profile validated, or ``""`` for all of them.
  *     scope: How the run names what it validated (``all profiles``,
  *         ``profile 'x'``), the same words a local run prints.
