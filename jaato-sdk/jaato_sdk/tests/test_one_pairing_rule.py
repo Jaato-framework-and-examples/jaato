@@ -173,23 +173,30 @@ def test_non_dict_args_are_preserved_under_raw():
     assert build_ledger(wire)[0]["args"] == {"_raw": "not-a-dict"}
 
 
-def test_success_ignores_the_wires_is_error_flag():
-    """One success rule, not two that usually agree.
+def test_success_reads_the_recorded_is_error_flag_on_both_carriers():
+    """One success rule, read from the same facts on both carriers (#1654).
 
-    The wire carries an explicit ``is_error``; the ledger derives success
-    from ``"error" not in result`` on both carriers.  Consulting the flag
-    would make the two carriers answerable differently for the same
-    conversation the moment a provider set it inconsistently.
+    The session records the executor's verdict as ``ToolResult.is_error``
+    and the wire serializes that same flag, so consulting it cannot make
+    the carriers disagree.  Ignoring it let a failure whose body carries no
+    ``error`` key -- an MCP ``isError: true`` answer -- read as a success.
     """
+    body = {"result": {"tool": "t", "isError": True, "content": ["no node"]}}
+    obj = [Message(role=Role.MODEL, parts=[
+               Part(function_call=FunctionCall(id="c", name="t", args={}))]),
+           Message(role=Role.USER, parts=[
+               Part(function_response=ToolResult(
+                   call_id="c", name="t", result=body, is_error=True))])]
     wire = [{"role": "model", "parts": [
                 {"type": "function_call", "name": "t", "args": {},
                  "call_id": "c"}]},
             {"role": "user", "parts": [
                 {"type": "function_response", "name": "t", "call_id": "c",
-                 # flag says error; body says otherwise
-                 "response": {"ok": True}, "is_error": True}]}]
+                 "response": body, "is_error": True}]}]
 
-    assert build_ledger(wire)[0]["success"] is True
+    assert build_ledger(obj)[0]["success"] is False
+    assert build_ledger(wire)[0]["success"] is False
+    assert build_ledger(obj) == build_ledger(wire)
 
 
 def test_enrichment_is_carried_in_process_and_absent_on_the_wire():

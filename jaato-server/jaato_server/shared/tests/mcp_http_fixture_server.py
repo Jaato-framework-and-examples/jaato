@@ -14,6 +14,10 @@ when the call is cancelled by the client -- to ``HEADER_LOG + ".events"``,
 so a test can see whether an abandoned call was stopped on the server
 (#1646).
 
+With ``MCP_FIXTURE_REFUSING_TOOL=1`` it also serves ``get_node``, which
+answers every call with ``isError: true`` naming the node it could not
+find -- the shape a server uses to refuse a call (#1654).
+
 An optional fourth argument names a TOKEN FILE: when given, a request
 whose ``Authorization`` header differs from the file's (stripped) content
 is answered **401** before it reaches the MCP app, so a test can rotate
@@ -43,6 +47,8 @@ def _build_app(transport, events_path):
 
     if os.environ.get("MCP_FIXTURE_SLOW_TOOL") == "1":
         _add_slow_tool(server, events_path)
+    if os.environ.get("MCP_FIXTURE_REFUSING_TOOL") == "1":
+        _add_refusing_tool(server)
 
     if transport == "sse":
         return server.sse_app()
@@ -67,6 +73,22 @@ def _add_slow_tool(server, events_path):
             raise
         note("done")
         return f"slept {seconds:g}"
+
+
+def _add_refusing_tool(server):
+    try:
+        from mcp.server.mcpserver.exceptions import ToolError
+    except ImportError:  # mcp 1.x
+        from mcp.server.fastmcp.exceptions import ToolError
+
+    @server.tool()
+    def get_node(node_id: str) -> str:
+        """Refuse every node: the SDK answers a ToolError with isError.
+
+        A ToolError, not any exception: mcp 2.x hides an unexpected
+        exception's message from the client.
+        """
+        raise ToolError(f"no node {node_id!r}")
 
 
 def _recording(app, log_path, token_path=None):
