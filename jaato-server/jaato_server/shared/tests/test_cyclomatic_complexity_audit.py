@@ -245,7 +245,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession.resolve_fork_point": 17,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession.send_message": 29,
     "jaato-server/jaato_server/shared/lifecycle_tools.py::LifecycleTools._describe_pending_field": 28,
-    "jaato-server/jaato_server/shared/lifecycle_tools.py::LifecycleTools._execute_prepare_completion": 19,
+    "jaato-server/jaato_server/shared/lifecycle_tools.py::LifecycleTools._execute_prepare_completion": 17,
     "jaato-server/jaato_server/shared/lifecycle_tools.py::LifecycleTools._execute_signal_completion": 27,
     "jaato-server/jaato_server/shared/lifecycle_tools.py::LifecycleTools._walk_required": 17,
     "jaato-server/jaato_server/shared/plugins/artifact_tracker/plugin.py::ArtifactTrackerPlugin.enrich_tool_result": 17,

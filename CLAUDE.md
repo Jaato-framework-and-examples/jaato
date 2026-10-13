@@ -727,6 +727,31 @@ drained as a caller-originated turn. Guard:
 four reversions, driving a real session through the real `stop_session`,
 `JaatoServer.stop` and runner handlers.
 
+### An Empty Array, Set Field by Field (#1626)
+
+A required array whose correct value is normally empty (`errors`,
+`warnings`, `blockers`) could not be completed through `prepare_completion`.
+The model's wire (seen on `minimax`) turned `[]` into the string `"[]"`, a
+bare type mismatch was all the rejection said, and the only call ever
+accepted was `prepare_completion("errors[0]", <placeholder>)`, which made
+the array non-empty with the placeholder the schema forbids. 7 of 7
+field-by-field sessions in one sweep flailed on the field.
+
+| Change | Where |
+|---|---|
+| a string value is converted when the path's schema declares a non-string type and the string parses as exactly that type (the #1358 rule, `tool_arg_coercion.coerce_value`, applied to the leaf schema because `value` is an untyped parameter the executor's coercion cannot see into): `"[]"` on an array path is `[]` | `LifecycleTools._validate_leaf_value` |
+| a rejection on an array (or object) path names the accepted shape: `value=[]` for none, never index 0 or a placeholder | `_container_shape_hint` |
+| every pending array field that may be empty (no positive `minItems`) carries `set_empty_with: prepare_completion(field_path='errors', value=[])`, on `prepare_completion` and `query_completion` | `_annotate_empty_array_fields` |
+| the tool and its `value` parameter describe the empty array | `get_tool_schemas` |
+
+`""` is **not** read as `[]`: it is no serialisation of an array, so reading
+it as "none" would guess at what the model meant; it is refused with the
+reason above. A string on a path that admits `string` is never parsed. Not
+done: a schema `default` applied to a never-set required field (the issue's
+third option). Guard:
+`jaato_server/shared/tests/test_an_empty_array_can_be_completed_1626.py`,
+three reversions.
+
 ### A Tier Binds (provider, model), and Half of It Did Not Take
 
 Reported as *"two tiers of the same profile do not share history; each
