@@ -197,12 +197,12 @@ def _forward_via_runner(
         # Transport-level failure (peer disconnect, malformed frame,
         # etc.).  Translate to legacy error-dict shape so the model
         # sees a clean message rather than an opaque traceback.
-        return (False, {
+        return False, {
             "error": (
                 f"{tool_name}: runner RPC failed: "
                 f"{type(exc).__name__}: {exc}"
             ),
-        })
+        }
 
     # Cancellation flows through as a typed error — re-raise so the
     # in-process ToolExecutor classifies the call as cancelled (per
@@ -231,9 +231,9 @@ def _forward_via_runner(
     # Domain failure without a result dict → synthesise one from the
     # error payload.
     if envelope.error is not None:
-        return (False, {"error": envelope.error.message})
+        return False, {"error": envelope.error.message}
 
-    return (False, {"error": f"{tool_name}: empty response from runner"})
+    return False, {"error": f"{tool_name}: empty response from runner"}
 
 
 def _reinject_envelope_telemetry(
