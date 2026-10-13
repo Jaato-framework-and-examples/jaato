@@ -1,0 +1,9 @@
+{
+  "type": "tools.register_client.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "tools": [],
+  "default_timeout_ms": 30000.0,
+  "buffered": false
+}

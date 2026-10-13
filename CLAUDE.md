@@ -1871,6 +1871,35 @@ The server includes its package version (`server_version`) in the `ConnectedEven
 
 Each client declares its own minimum — e.g., the TUI sets `MIN_SERVER_VERSION = "0.2.27"` and refuses to connect if the server is older. If a client doesn't declare a minimum, no check is performed. `IncompatibleServerError` is classified as permanent by the recovery client (no retries).
 
+### A Host Tool's Deadline, Told to the Client (#1625)
+
+The daemon waits for a `client_tools=` handler's result and, past the
+deadline, hands the MODEL `{"error": "Client tool <name> timed out after
+<N>s"}`. A driver whose handlers wrap their own deadline (to return a
+sentence the model can read) set it to 45 s against a daemon limit of 30 s,
+so for 30-45 s handlers its deadline was dead code. The limit was in no
+`explain clients` row, and the per-tool `"timeout"` key (milliseconds) that
+changes it was read by both transports and documented nowhere.
+
+| Piece | Where |
+|---|---|
+| the one rule: the spec's `timeout` ms, else `DEFAULT_CLIENT_TOOL_TIMEOUT_MS` (30000, unchanged); a value that is not a positive finite number (a string, `True`, `0`, NaN) is not honoured, the default applies and the daemon logs why | `jaato_sdk/client_tool_timeout.py` (stdlib only) |
+| both transports enforce through it | `client_tools.client_tool_timeout_seconds`, called by the shared IPC helper and the inlined WS executor |
+| the daemon reports it: `ToolsRegisterClientRequest.request_id`, answered by `ToolsRegisterClientResultEvent` (`tools: [{name, timeout_ms, timeout_s, source, problem?}]`, `buffered` when no session existed yet) | `client_tools.registration_answer`, IPC `_answer_client_tool_registration`, WS `_accept_client_tools` |
+| the client gets it: `register_client_tools()` returns `{name: seconds}` and keeps it on `client.client_tool_timeouts` (facade: `session.client.client_tool_timeouts`) | `IPCClient`, `IPCRecoveryClient`; the embedded client returns `{}` (no round-trip, no deadline) |
+| `explain clients` lists the clock in its TIMEOUTS table, default read from the module | `introspect._client_tool_timeout_rows` |
+
+Protocol **1.39**: the answer is sent only when the request carries a
+`request_id`, so an older client is sent nothing new; the SDK asks only at
+`MIN_CLIENT_TOOL_BUDGET_PROTOCOL` and below it returns the budgets computed
+by the same function (an older daemon applies the same rule). The TS SDK's
+`registerClientTools` sends no `request_id` yet. No env var or profile key:
+the deadline belongs to the client that owns the handler, per tool. Not
+changed: the expiry payload is still the raw `{"error": ...}`.
+
+Guard: `jaato_server/shared/tests/test_client_tool_deadline_is_reported_1625.py`,
+six reversions, over a real `JaatoIPCServer` and `IPCClient`.
+
 ### A Release Nobody Was Told About
 
 jaato ships through two channels and, until now, asked neither anything:

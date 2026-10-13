@@ -437,7 +437,9 @@ class InProcessClient:
         # lead nudges + signals before the subagent delivers its result.
         self._completed_subagent_ids: set = set()
 
-    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+    async def register_client_tools(
+        self, tools: List[Dict[str, Any]], *, timeout: float = 10.0,
+    ) -> Dict[str, float]:
         """Register client-provided ("host") tools the embedded agent can call.
 
         Mirrors :meth:`jaato_sdk.IPCClient.register_client_tools` (same spec
@@ -452,8 +454,13 @@ class InProcessClient:
         ``TOOL_EXECUTE_REQUEST`` round-trip: the ``handler(args) -> Any`` is
         registered directly on the embedded session's ``ToolExecutor``, so it
         runs in the embedding process when the model invokes the tool.
+
+        Returns ``{}``: with no daemon round-trip there is no daemon deadline
+        to report, and a tool spec's ``"timeout"`` bounds nothing here
+        (#1625).  *timeout* is accepted for signature parity only.
         """
         self._client_tools = list(tools) if tools else None
+        return {}
 
     # ---- facade contract: events ----
     def subscribe(

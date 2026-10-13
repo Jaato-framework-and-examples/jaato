@@ -42,7 +42,7 @@ def test_recovery_register_client_tools_remembers_and_delegates():
     tools = [{"name": "t", "description": "d", "parameters": {}}]
     asyncio.run(rc.register_client_tools(tools))
     assert rc._registered_client_tools == tools          # remembered for reconnect
-    rc._client.register_client_tools.assert_awaited_once_with(tools)
+    rc._client.register_client_tools.assert_awaited_once_with(tools, timeout=10.0)
 
 
 def test_recovery_list_sessions_delegates():

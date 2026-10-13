@@ -537,6 +537,9 @@ class IPCClient:
         self._drain_task: Optional[asyncio.Task] = None
         self._event_subscribers: list[asyncio.Queue] = []
         self._buffered_events: list[Event] = []
+        # Host-tool name -> seconds the daemon waits for its result (#1625);
+        # filled by register_client_tools().
+        self.client_tool_timeouts: Dict[str, float] = {}
         # Why the connection ended, when the transport knows a reason a
         # waiter should be told (#1279: a message refused for its size).
         # ``None`` = an ordinary end.  Set by ``_read_message``, read by
@@ -3474,17 +3477,50 @@ class IPCClient:
             error=error,
         ))
 
-    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+    #: The daemon reports each host tool's deadline on registration from
+    #: here (#1625).  Below it, :meth:`register_client_tools` computes the
+    #: same budgets locally (an older daemon applies the same rule).
+    MIN_CLIENT_TOOL_BUDGET_PROTOCOL = "1.39"
+
+    async def register_client_tools(
+        self, tools: List[Dict[str, Any]], *, timeout: float = 10.0,
+    ) -> Dict[str, float]:
         """Register client-provided ("host") tools the agent can call.
 
         Each entry: ``{"name", "description", "parameters", "handler"}`` (plus
-        optional ``"timeout"`` ms / ``"auto_approve"``).  ``handler(args) -> Any``
+        optional ``"timeout"`` / ``"auto_approve"``).  ``handler(args) -> Any``
         runs when the agent invokes the tool; its return (JSON-encoded if not a
         str) is sent back as the result.  Register **before** ``create_session``
         so the schema reaches the runner-tier model (mid-session registration
         isn't seen until a follow-up lands the runner mid-session push).
+
+        **The deadline (#1625).**  The daemon waits ``"timeout"``
+        MILLISECONDS for a tool's result (default
+        :data:`jaato_sdk.client_tool_timeout.DEFAULT_CLIENT_TOOL_TIMEOUT_MS`,
+        30 s); past it the model receives
+        ``{"error": "Client tool <name> timed out after <N>s"}``.  A handler
+        that applies its own deadline to return a readable answer must fire
+        before this one.  A ``timeout`` that is not a positive number is not
+        honoured: the default applies.
+
+        Args:
+            tools: The host-tool specs.
+            timeout: Seconds to wait for the daemon's answer (1.39+).
+
+        Returns:
+            ``{tool name: seconds}`` — the deadline each tool is held to.
+            Reported by the daemon at protocol
+            :attr:`MIN_CLIENT_TOOL_BUDGET_PROTOCOL`+, computed locally with
+            the daemon's own rule below it (or if no answer arrives).  Also
+            kept on :attr:`client_tool_timeouts`.
         """
-        from jaato_sdk.events import ToolsRegisterClientRequest, EventType
+        from jaato_sdk.events import (
+            ToolsRegisterClientRequest, ToolsRegisterClientResultEvent,
+            EventType,
+        )
+        from jaato_sdk.client_tool_timeout import (
+            budgets_by_name, resolve_client_tool_timeouts,
+        )
         if not hasattr(self, "_host_tool_handlers"):
             self._host_tool_handlers: Dict[str, Any] = {}
             self.subscribe(
@@ -3493,8 +3529,31 @@ class IPCClient:
             if t.get("handler"):
                 self._host_tool_handlers[t["name"]] = t["handler"]
         wire = [{k: v for k, v in t.items() if k != "handler"} for t in tools]
-        await self._send_event(
-            ToolsRegisterClientRequest(tools=wire, categories={}))
+        budgets = budgets_by_name(resolve_client_tool_timeouts(wire))
+        request = ToolsRegisterClientRequest(tools=wire, categories={})
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_CLIENT_TOOL_BUDGET_PROTOCOL):
+            try:
+                answer = await self._correlated_request(
+                    "register_client_tools", request, timeout, "tools")
+            except (asyncio.TimeoutError, TimeoutError, ConnectionError,
+                    RequestRefused) as exc:
+                logger.warning(
+                    "register_client_tools: no deadline answer from the "
+                    "daemon (%s); reporting the locally computed budgets", exc)
+            else:
+                if isinstance(answer, ToolsRegisterClientResultEvent):
+                    budgets = {
+                        row["name"]: float(row["timeout_s"])
+                        for row in answer.tools
+                        if isinstance(row, dict) and row.get("name")
+                        and isinstance(row.get("timeout_s"), (int, float))
+                    }
+        else:
+            await self._send_event(request)
+        self.client_tool_timeouts.update(budgets)
+        return dict(budgets)
 
     def _on_tool_execute_request(self, event: Any) -> None:
         """Run the registered host-tool handler for an agent tool call and send

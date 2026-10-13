@@ -760,8 +760,15 @@ class IPCRecoveryClient:
                 answer_attachments=answer_attachments,
             )
 
-    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+    async def register_client_tools(
+        self, tools: List[Dict[str, Any]], *, timeout: float = 10.0,
+    ) -> Dict[str, float]:
         """Register client-provided ("host") tools — proxied to the inner client.
+
+        Returns ``{tool name: seconds}``, the deadline the daemon holds each
+        tool to (#1625; see ``IPCClient.register_client_tools``).  Before the
+        inner client exists the budgets are computed locally with the
+        daemon's rule.
 
         The tool set is REMEMBERED so it is re-registered automatically after a
         reconnect: a reconnect builds a fresh inner client (``_make_client``)
@@ -774,7 +781,22 @@ class IPCRecoveryClient:
         self._registered_client_tools = list(tools)
 
         if self._client:
-            await self._client.register_client_tools(tools)
+            return await self._client.register_client_tools(
+                tools, timeout=timeout)
+        from jaato_sdk.client_tool_timeout import (
+            budgets_by_name, resolve_client_tool_timeouts,
+        )
+        return budgets_by_name(resolve_client_tool_timeouts(tools))
+
+    @property
+    def client_tool_timeouts(self) -> Dict[str, float]:
+        """``{tool name: seconds}`` the daemon waits for each host tool (#1625).
+
+        Read from the current inner client, so it reflects the answer to the
+        latest (re-)registration; empty before any.
+        """
+        inner = getattr(self, "_client", None)
+        return dict(getattr(inner, "client_tool_timeouts", {}) or {})
 
     async def list_sessions(self) -> None:
         """Request the session list — proxied to the inner client."""

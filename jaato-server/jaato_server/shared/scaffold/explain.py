@@ -364,6 +364,15 @@ def _timeouts_block() -> List[str]:
         "    makes a second one.  Raise it (session_timeout= on the facade,",
         "    timeout= on create_session) before retrying; list_sessions().",
     ]
+    if any(t.where.startswith("client_tools=") for t in TO):
+        # #1625: the one clock a TOOL author must stay under.
+        lines += [
+            "    A host tool's handler that applies its own deadline (to return",
+            "    an answer the model can read) must fire BEFORE the daemon's.",
+            "    register_client_tools() returns {name: seconds} per tool, as",
+            "    the daemon reports it (protocol 1.39+), and keeps it on",
+            "    client.client_tool_timeouts — derive the handler's from that.",
+        ]
     return lines
 
 

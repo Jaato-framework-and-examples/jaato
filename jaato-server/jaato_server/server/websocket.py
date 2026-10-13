@@ -3783,23 +3783,13 @@ class JaatoWSServer:
 
         # Handle client-side tool registration
         if isinstance(event, ToolsRegisterClientRequest):
-            # Buffer tools if no session yet (registered after session.new)
-            if not self._event_sink_adapter or not self._event_sink_adapter._client_sessions.get(client_id):
-                if not hasattr(self, '_pending_client_tools'):
-                    self._pending_client_tools = {}
-                self._pending_client_tools[client_id] = event.tools
-                self._pending_client_categories = getattr(self, '_pending_client_categories', {})
-                self._pending_client_categories[client_id] = event.categories
-                # Buffer the SCHEMAS daemon-side too so the session.new flow seeds
-                # JaatoServer.client_tool_schemas BEFORE the spawn reads it for
-                # envelope.client_tools — the proxy-executor apply below (after
-                # handle_request) races the spawn (PR #349 e2e bug).  Transport
-                # keeps its own buffer for the post-session.new executor register.
-                self._command_router._session_manager.buffer_client_tools(
-                    client_id, event.tools)
-                logger.info("Buffered %d client tools for %s (session pending)", len(event.tools), client_id)
-            else:
-                self._register_client_tools(client_id, event.tools, event.categories)
+            buffered = self._accept_client_tools(client_id, event)
+            if getattr(event, "request_id", ""):
+                # The deadline each tool is held to (1.39, #1625); only for a
+                # client that asked, so an older one is sent nothing new.
+                from jaato_server.server.client_tools import registration_answer
+                await self._send_to_client(client_id, registration_answer(
+                    event.tools, event.request_id, buffered=buffered))
             return
 
         # Handle client-side tool execution result
@@ -3954,6 +3944,31 @@ class JaatoWSServer:
     # Client-side tool execution
     # =========================================================================
 
+    def _accept_client_tools(self, client_id: str, event: Any) -> bool:
+        """Register a ``ToolsRegisterClientRequest``'s tools, or buffer them.
+
+        Returns ``True`` when they were BUFFERED because the client has no
+        session yet (they are registered after ``session.new`` /
+        ``session.attach``), ``False`` when registered now.
+        """
+        if not self._event_sink_adapter or not self._event_sink_adapter._client_sessions.get(client_id):
+            if not hasattr(self, '_pending_client_tools'):
+                self._pending_client_tools = {}
+            self._pending_client_tools[client_id] = event.tools
+            self._pending_client_categories = getattr(self, '_pending_client_categories', {})
+            self._pending_client_categories[client_id] = event.categories
+            # Buffer the SCHEMAS daemon-side too so the session.new flow seeds
+            # JaatoServer.client_tool_schemas BEFORE the spawn reads it for
+            # envelope.client_tools — the proxy-executor apply below (after
+            # handle_request) races the spawn (PR #349 e2e bug).  Transport
+            # keeps its own buffer for the post-session.new executor register.
+            self._command_router._session_manager.buffer_client_tools(
+                client_id, event.tools)
+            logger.info("Buffered %d client tools for %s (session pending)", len(event.tools), client_id)
+            return True
+        self._register_client_tools(client_id, event.tools, event.categories)
+        return False
+
     def _register_client_tools(
         self,
         client_id: str,
@@ -3996,7 +4011,9 @@ class JaatoWSServer:
             description = tool_def.get('description', '')
             parameters = tool_def.get('parameters', {})
             category = tool_def.get('category', '')
-            timeout = tool_def.get('timeout', 30000) / 1000.0  # ms -> seconds
+            # One resolver for both transports and the SDK (#1625).
+            from jaato_server.server.client_tools import client_tool_timeout_seconds
+            timeout = client_tool_timeout_seconds(tool_def)
             auto_approve = tool_def.get('auto_approve', True)
 
             # Create a waiting mechanism for this client's responses

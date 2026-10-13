@@ -89,6 +89,7 @@ export type JaatoEvents =
   | ToolIdRegistryEvent
   | ToolDisableRequest
   | ToolsRegisterClientRequest
+  | ToolsRegisterClientResultEvent
   | ToolExecuteRequestEvent
   | ToolExecuteResultEvent
   | HistoryRequest
@@ -259,6 +260,7 @@ export type EventType =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -435,6 +437,7 @@ export type EventType1 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -616,6 +619,7 @@ export type EventType2 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -795,6 +799,7 @@ export type EventType3 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -973,6 +978,7 @@ export type EventType4 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -1159,6 +1165,7 @@ export type EventType5 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -1342,6 +1349,7 @@ export type EventType6 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -1524,6 +1532,7 @@ export type EventType7 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -1700,6 +1709,7 @@ export type EventType8 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -1880,6 +1890,7 @@ export type EventType9 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -2059,6 +2070,7 @@ export type EventType10 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -2249,6 +2261,7 @@ export type EventType11 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -2429,6 +2442,7 @@ export type EventType12 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -2615,6 +2629,7 @@ export type EventType13 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -2802,6 +2817,7 @@ export type EventType14 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -2990,6 +3006,7 @@ export type EventType15 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -3173,6 +3190,7 @@ export type EventType16 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -3351,6 +3369,7 @@ export type EventType17 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -3531,6 +3550,7 @@ export type EventType18 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -3711,6 +3731,7 @@ export type EventType19 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -3897,6 +3918,7 @@ export type EventType20 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -4076,6 +4098,7 @@ export type EventType21 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -4259,6 +4282,7 @@ export type EventType22 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -4437,6 +4461,7 @@ export type EventType23 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -4616,6 +4641,7 @@ export type EventType24 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -4795,6 +4821,7 @@ export type EventType25 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -4972,6 +4999,7 @@ export type EventType26 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -5154,6 +5182,7 @@ export type EventType27 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -5332,6 +5361,7 @@ export type EventType28 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -5509,6 +5539,7 @@ export type EventType29 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -5694,6 +5725,7 @@ export type EventType30 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -5873,6 +5905,7 @@ export type EventType31 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -6053,6 +6086,7 @@ export type EventType32 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -6248,6 +6282,7 @@ export type EventType33 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -6424,6 +6459,7 @@ export type EventType34 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -6619,6 +6655,7 @@ export type EventType35 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -6799,6 +6836,7 @@ export type EventType36 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -6975,6 +7013,7 @@ export type EventType37 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -7159,6 +7198,7 @@ export type EventType38 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -7339,6 +7379,7 @@ export type EventType39 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -7516,6 +7557,7 @@ export type EventType40 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -7692,6 +7734,7 @@ export type EventType41 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -7872,6 +7915,7 @@ export type EventType42 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -8054,6 +8098,7 @@ export type EventType43 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -8234,6 +8279,7 @@ export type EventType44 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -8412,6 +8458,7 @@ export type EventType45 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -8600,6 +8647,7 @@ export type EventType46 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -8798,6 +8846,7 @@ export type EventType47 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -8982,6 +9031,7 @@ export type EventType48 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -9166,6 +9216,7 @@ export type EventType49 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -9350,6 +9401,7 @@ export type EventType50 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -9531,6 +9583,7 @@ export type EventType51 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -9730,6 +9783,7 @@ export type EventType52 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -9908,6 +9962,7 @@ export type EventType53 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -10086,6 +10141,7 @@ export type EventType54 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -10262,6 +10318,7 @@ export type EventType55 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -10470,6 +10527,7 @@ export type EventType56 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -10650,6 +10708,7 @@ export type EventType57 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -10830,6 +10889,7 @@ export type EventType58 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -11008,6 +11068,7 @@ export type EventType59 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -11184,6 +11245,7 @@ export type EventType60 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -11360,6 +11422,7 @@ export type EventType61 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -11537,6 +11600,7 @@ export type EventType62 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -11717,6 +11781,7 @@ export type EventType63 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -11893,6 +11958,7 @@ export type EventType64 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -12069,6 +12135,7 @@ export type EventType65 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -12246,6 +12313,7 @@ export type EventType66 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -12427,6 +12495,7 @@ export type EventType67 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -12604,6 +12673,7 @@ export type EventType68 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -12780,6 +12850,7 @@ export type EventType69 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -12955,6 +13026,7 @@ export type EventType70 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -13133,6 +13205,7 @@ export type EventType71 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -13308,6 +13381,7 @@ export type EventType72 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -13487,6 +13561,7 @@ export type EventType73 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -13662,6 +13737,7 @@ export type EventType74 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -13838,6 +13914,7 @@ export type EventType75 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -13938,6 +14015,7 @@ export type SessionId75 = string;
 export type Tools2 = {
   [k: string]: unknown;
 }[];
+export type RequestId32 = string;
 /**
  * All event types in the protocol.
  */
@@ -14016,6 +14094,7 @@ export type EventType76 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -14113,9 +14192,12 @@ export type EventType76 =
   | "gates.snapshot";
 export type Timestamp76 = string;
 export type SessionId76 = string;
-export type CallId5 = string;
-export type AgentId33 = string;
-export type ToolName13 = string;
+export type RequestId33 = string;
+export type Tools3 = {
+  [k: string]: unknown;
+}[];
+export type DefaultTimeoutMs = number;
+export type Buffered = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14194,6 +14276,7 @@ export type EventType77 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -14291,9 +14374,9 @@ export type EventType77 =
   | "gates.snapshot";
 export type Timestamp77 = string;
 export type SessionId77 = string;
-export type CallId6 = string;
-export type Result1 = string;
-export type Error11 = string;
+export type CallId5 = string;
+export type AgentId33 = string;
+export type ToolName13 = string;
 /**
  * All event types in the protocol.
  */
@@ -14372,6 +14455,7 @@ export type EventType78 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -14469,7 +14553,9 @@ export type EventType78 =
   | "gates.snapshot";
 export type Timestamp78 = string;
 export type SessionId78 = string;
-export type AgentId34 = string;
+export type CallId6 = string;
+export type Result1 = string;
+export type Error11 = string;
 /**
  * All event types in the protocol.
  */
@@ -14548,6 +14634,7 @@ export type EventType79 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -14645,13 +14732,7 @@ export type EventType79 =
   | "gates.snapshot";
 export type Timestamp79 = string;
 export type SessionId79 = string;
-export type AgentId35 = string;
-export type History = {
-  [k: string]: unknown;
-}[];
-export type TurnAccounting = {
-  [k: string]: unknown;
-}[];
+export type AgentId34 = string;
 /**
  * All event types in the protocol.
  */
@@ -14730,6 +14811,7 @@ export type EventType80 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -14827,10 +14909,13 @@ export type EventType80 =
   | "gates.snapshot";
 export type Timestamp80 = string;
 export type SessionId80 = string;
-export type AgentId36 = string;
-export type Before = string;
-export type MaxLines = number;
-export type RequestId32 = string;
+export type AgentId35 = string;
+export type History = {
+  [k: string]: unknown;
+}[];
+export type TurnAccounting = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -14909,6 +14994,7 @@ export type EventType81 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -15006,17 +15092,10 @@ export type EventType81 =
   | "gates.snapshot";
 export type Timestamp81 = string;
 export type SessionId81 = string;
-export type AgentId37 = string;
-export type RequestId33 = string;
-export type Units = {
-  [k: string]: unknown;
-}[];
-export type Before1 = string;
-export type HasMore = boolean;
-export type TotalUnits = number;
-export type Stale = boolean;
-export type Ok5 = boolean;
-export type Error12 = string;
+export type AgentId36 = string;
+export type Before = string;
+export type MaxLines = number;
+export type RequestId34 = string;
 /**
  * All event types in the protocol.
  */
@@ -15095,6 +15174,7 @@ export type EventType82 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -15192,16 +15272,17 @@ export type EventType82 =
   | "gates.snapshot";
 export type Timestamp82 = string;
 export type SessionId82 = string;
-export type TraceLogPath = string | null;
-export type ProviderTraceLog = string | null;
-export type WorkingDir = string | null;
-export type ConfigRoot = string | null;
-export type EnvFile = string | null;
-export type Presentation = {
+export type AgentId37 = string;
+export type RequestId35 = string;
+export type Units = {
   [k: string]: unknown;
-} | null;
-export type PermissionTimeout = number | null;
-export type Apparmor = boolean;
+}[];
+export type Before1 = string;
+export type HasMore = boolean;
+export type TotalUnits = number;
+export type Stale = boolean;
+export type Ok5 = boolean;
+export type Error12 = string;
 /**
  * All event types in the protocol.
  */
@@ -15280,6 +15361,7 @@ export type EventType83 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -15377,8 +15459,16 @@ export type EventType83 =
   | "gates.snapshot";
 export type Timestamp83 = string;
 export type SessionId83 = string;
-export type Text2 = string;
-export type PositionInQueue = number;
+export type TraceLogPath = string | null;
+export type ProviderTraceLog = string | null;
+export type WorkingDir = string | null;
+export type ConfigRoot = string | null;
+export type EnvFile = string | null;
+export type Presentation = {
+  [k: string]: unknown;
+} | null;
+export type PermissionTimeout = number | null;
+export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -15457,6 +15547,7 @@ export type EventType84 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -15554,7 +15645,8 @@ export type EventType84 =
   | "gates.snapshot";
 export type Timestamp84 = string;
 export type SessionId84 = string;
-export type Text3 = string;
+export type Text2 = string;
+export type PositionInQueue = number;
 /**
  * All event types in the protocol.
  */
@@ -15633,6 +15725,7 @@ export type EventType85 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -15730,14 +15823,7 @@ export type EventType85 =
   | "gates.snapshot";
 export type Timestamp85 = string;
 export type SessionId85 = string;
-export type AtPercent = number;
-export type Action1 = string | null;
-export type Origin = string;
-export type Pressure = string;
-export type Usage = {
-  [k: string]: number;
-} | null;
-export type DrivingDimension = string | null;
+export type Text3 = string;
 /**
  * All event types in the protocol.
  */
@@ -15816,6 +15902,7 @@ export type EventType86 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -15913,13 +16000,14 @@ export type EventType86 =
   | "gates.snapshot";
 export type Timestamp86 = string;
 export type SessionId86 = string;
-export type Kind1 = string;
-export type At = number;
-export type Cause = string;
-export type Site = string | null;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type Tier = string | null;
+export type AtPercent = number;
+export type Action1 = string | null;
+export type Origin = string;
+export type Pressure = string;
+export type Usage = {
+  [k: string]: number;
+} | null;
+export type DrivingDimension = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15998,6 +16086,7 @@ export type EventType87 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -16095,8 +16184,13 @@ export type EventType87 =
   | "gates.snapshot";
 export type Timestamp87 = string;
 export type SessionId87 = string;
-export type PartialResponseChars = number;
-export type UserPromptPreview = string;
+export type Kind1 = string;
+export type At = number;
+export type Cause = string;
+export type Site = string | null;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type Tier = string | null;
 /**
  * All event types in the protocol.
  */
@@ -16175,6 +16269,7 @@ export type EventType88 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -16272,9 +16367,8 @@ export type EventType88 =
   | "gates.snapshot";
 export type Timestamp88 = string;
 export type SessionId88 = string;
-export type AgentId38 = string;
-export type RecoveredCalls = number;
-export type ActionTaken = string;
+export type PartialResponseChars = number;
+export type UserPromptPreview = string;
 /**
  * All event types in the protocol.
  */
@@ -16353,6 +16447,7 @@ export type EventType89 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -16450,6 +16545,9 @@ export type EventType89 =
   | "gates.snapshot";
 export type Timestamp89 = string;
 export type SessionId89 = string;
+export type AgentId38 = string;
+export type RecoveredCalls = number;
+export type ActionTaken = string;
 /**
  * All event types in the protocol.
  */
@@ -16528,6 +16626,7 @@ export type EventType90 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -16625,10 +16724,6 @@ export type EventType90 =
   | "gates.snapshot";
 export type Timestamp90 = string;
 export type SessionId90 = string;
-export type Root = string;
-export type Workspaces = {
-  [k: string]: unknown;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -16707,6 +16802,7 @@ export type EventType91 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -16804,7 +16900,10 @@ export type EventType91 =
   | "gates.snapshot";
 export type Timestamp91 = string;
 export type SessionId91 = string;
-export type Name3 = string;
+export type Root = string;
+export type Workspaces = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -16883,6 +16982,7 @@ export type EventType92 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -16980,8 +17080,7 @@ export type EventType92 =
   | "gates.snapshot";
 export type Timestamp92 = string;
 export type SessionId92 = string;
-export type Name4 = string;
-export type Path1 = string;
+export type Name3 = string;
 /**
  * All event types in the protocol.
  */
@@ -17060,6 +17159,7 @@ export type EventType93 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -17157,8 +17257,8 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type Name5 = string;
-export type StopSessions = boolean;
+export type Name4 = string;
+export type Path1 = string;
 /**
  * All event types in the protocol.
  */
@@ -17237,6 +17337,7 @@ export type EventType94 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -17334,9 +17435,8 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type Name6 = string;
-export type Ok6 = boolean;
-export type Error13 = string;
+export type Name5 = string;
+export type StopSessions = boolean;
 /**
  * All event types in the protocol.
  */
@@ -17415,6 +17515,7 @@ export type EventType95 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -17512,8 +17613,9 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type Name7 = string;
-export type RequestId34 = string;
+export type Name6 = string;
+export type Ok6 = boolean;
+export type Error13 = string;
 /**
  * All event types in the protocol.
  */
@@ -17592,6 +17694,7 @@ export type EventType96 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -17689,15 +17792,8 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type Name8 = string;
-export type RequestId35 = string;
-export type Ok7 = boolean;
-export type Error14 = string;
-export type Path2 = string;
-export type SizeBytes = number | null;
-export type Repos = {
-  [k: string]: unknown;
-}[];
+export type Name7 = string;
+export type RequestId36 = string;
 /**
  * All event types in the protocol.
  */
@@ -17776,6 +17872,7 @@ export type EventType97 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -17873,10 +17970,14 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type Name9 = string;
-export type RequestId36 = string;
-export type Repos1 = {
-  [k: string]: string;
+export type Name8 = string;
+export type RequestId37 = string;
+export type Ok7 = boolean;
+export type Error14 = string;
+export type Path2 = string;
+export type SizeBytes = number | null;
+export type Repos = {
+  [k: string]: unknown;
 }[];
 /**
  * All event types in the protocol.
@@ -17956,6 +18057,7 @@ export type EventType98 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -18053,15 +18155,11 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type Name10 = string;
-export type RequestId37 = string;
-export type Repo = string;
-export type Branch = string;
-export type State = string;
-export type Percent = number;
-export type Error15 = string;
-export type Done = number;
-export type Total = number;
+export type Name9 = string;
+export type RequestId38 = string;
+export type Repos1 = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -18140,6 +18238,7 @@ export type EventType99 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -18237,7 +18336,15 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type Name11 = string;
+export type Name10 = string;
+export type RequestId39 = string;
+export type Repo = string;
+export type Branch = string;
+export type State = string;
+export type Percent = number;
+export type Error15 = string;
+export type Done = number;
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -18316,6 +18423,7 @@ export type EventType100 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -18413,12 +18521,7 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type Workspace1 = string;
-export type Configured = boolean;
-export type Provider2 = string | null;
-export type Model2 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type Name11 = string;
 /**
  * All event types in the protocol.
  */
@@ -18497,6 +18600,7 @@ export type EventType101 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -18594,10 +18698,12 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type ApiKey = string | null;
-export type KeyOnly = boolean;
+export type Workspace1 = string;
+export type Configured = boolean;
+export type Provider2 = string | null;
+export type Model2 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -18676,6 +18782,7 @@ export type EventType102 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -18773,11 +18880,10 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type Workspace2 = string;
-export type Provider4 = string;
-export type Model4 = string | null;
-export type Success3 = boolean;
-export type Error16 = string | null;
+export type Provider3 = string;
+export type Model3 = string | null;
+export type ApiKey = string | null;
+export type KeyOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -18856,6 +18962,7 @@ export type EventType103 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -18953,11 +19060,11 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
-export type Seq = number | null;
-export type Epoch = string | null;
+export type Workspace2 = string;
+export type Provider4 = string;
+export type Model4 = string | null;
+export type Success3 = boolean;
+export type Error16 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -19036,6 +19143,7 @@ export type EventType104 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -19133,12 +19241,11 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type Files = {
+export type Changes = {
   [k: string]: string;
 }[];
-export type Total1 = number;
-export type Seq1 = number | null;
-export type Epoch1 = string | null;
+export type Seq = number | null;
+export type Epoch = string | null;
 /**
  * All event types in the protocol.
  */
@@ -19217,6 +19324,7 @@ export type EventType105 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -19314,11 +19422,12 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type Path3 = string;
-export type Ignored = boolean;
-export type Ok8 = boolean;
-export type Error17 = string;
-export type GitignorePath = string;
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total1 = number;
+export type Seq1 = number | null;
+export type Epoch1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -19397,6 +19506,7 @@ export type EventType106 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -19494,19 +19604,11 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type RequestId38 = string;
-export type Action2 = string;
-export type ClaimId = string;
-export type Ok9 = boolean;
-export type Category5 = string;
-export type Error18 = string;
-export type ReferenceId = string;
-export type ReferenceFile = string;
-export type Warnings1 = string[];
-export type Bundle = string;
-export type Reconcile = string;
-export type ReconcileDetail = string;
-export type Revised = boolean;
+export type Path3 = string;
+export type Ignored = boolean;
+export type Ok8 = boolean;
+export type Error17 = string;
+export type GitignorePath = string;
 /**
  * All event types in the protocol.
  */
@@ -19585,6 +19687,7 @@ export type EventType107 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -19682,18 +19785,19 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type RequestId39 = string;
-export type Ok10 = boolean;
-export type Category6 = string;
-export type Error19 = string;
-export type Claims = {
-  [k: string]: unknown;
-}[];
-export type Unreadable = string[];
-export type MayCurate1 = boolean;
-export type Bundles = {
-  [k: string]: unknown;
-}[];
+export type RequestId40 = string;
+export type Action2 = string;
+export type ClaimId = string;
+export type Ok9 = boolean;
+export type Category5 = string;
+export type Error18 = string;
+export type ReferenceId = string;
+export type ReferenceFile = string;
+export type Warnings1 = string[];
+export type Bundle = string;
+export type Reconcile = string;
+export type ReconcileDetail = string;
+export type Revised = boolean;
 /**
  * All event types in the protocol.
  */
@@ -19772,6 +19876,7 @@ export type EventType108 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -19869,7 +19974,18 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type RequestId40 = string;
+export type RequestId41 = string;
+export type Ok10 = boolean;
+export type Category6 = string;
+export type Error19 = string;
+export type Claims = {
+  [k: string]: unknown;
+}[];
+export type Unreadable = string[];
+export type MayCurate1 = boolean;
+export type Bundles = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -19948,6 +20064,7 @@ export type EventType109 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -20045,10 +20162,7 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type RequestId41 = string;
-export type Action3 = string;
-export type ClaimId1 = string;
-export type Bundle1 = string;
+export type RequestId42 = string;
 /**
  * All event types in the protocol.
  */
@@ -20127,6 +20241,7 @@ export type EventType110 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -20224,15 +20339,10 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type RequestId42 = string;
-export type Ok11 = boolean;
-export type Category7 = string;
-export type Error20 = string;
-export type References = {
-  [k: string]: unknown;
-}[];
-export type Unreadable1 = string[];
-export type MayCurate2 = boolean;
+export type RequestId43 = string;
+export type Action3 = string;
+export type ClaimId1 = string;
+export type Bundle1 = string;
 /**
  * All event types in the protocol.
  */
@@ -20311,6 +20421,7 @@ export type EventType111 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -20408,7 +20519,15 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type RequestId43 = string;
+export type RequestId44 = string;
+export type Ok11 = boolean;
+export type Category7 = string;
+export type Error20 = string;
+export type References = {
+  [k: string]: unknown;
+}[];
+export type Unreadable1 = string[];
+export type MayCurate2 = boolean;
 /**
  * All event types in the protocol.
  */
@@ -20487,6 +20606,7 @@ export type EventType112 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -20584,11 +20704,7 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type RequestId44 = string;
-export type ReferenceId1 = string;
-export type Links = {
-  [k: string]: unknown;
-}[];
+export type RequestId45 = string;
 /**
  * All event types in the protocol.
  */
@@ -20667,6 +20783,7 @@ export type EventType113 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -20764,16 +20881,11 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type RequestId45 = string;
-export type ReferenceId2 = string;
-export type Ok12 = boolean;
-export type Category8 = string;
-export type Error21 = string;
-export type ReferenceFile1 = string;
-export type Links1 = {
+export type RequestId46 = string;
+export type ReferenceId1 = string;
+export type Links = {
   [k: string]: unknown;
 }[];
-export type Warnings2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -20852,6 +20964,7 @@ export type EventType114 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -20949,8 +21062,16 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type RequestId46 = string;
-export type Name12 = string;
+export type RequestId47 = string;
+export type ReferenceId2 = string;
+export type Ok12 = boolean;
+export type Category8 = string;
+export type Error21 = string;
+export type ReferenceFile1 = string;
+export type Links1 = {
+  [k: string]: unknown;
+}[];
+export type Warnings2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -21029,6 +21150,7 @@ export type EventType115 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -21126,15 +21248,8 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type RequestId47 = string;
-export type Ok13 = boolean;
-export type Category9 = string;
-export type Error22 = string;
-export type Bundle2 = string;
-export type Indexed = boolean;
-export type Bundles1 = {
-  [k: string]: unknown;
-}[];
+export type RequestId48 = string;
+export type Name12 = string;
 /**
  * All event types in the protocol.
  */
@@ -21213,6 +21328,7 @@ export type EventType116 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -21310,13 +21426,15 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type RequestId48 = string;
-export type Plugin1 = string;
-export type Tool = string;
-export type Profile = string;
-export type PluginConfigs1 = {
+export type RequestId49 = string;
+export type Ok13 = boolean;
+export type Category9 = string;
+export type Error22 = string;
+export type Bundle2 = string;
+export type Indexed = boolean;
+export type Bundles1 = {
   [k: string]: unknown;
-} | null;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -21395,6 +21513,7 @@ export type EventType117 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -21492,14 +21611,11 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type RequestId49 = string;
-export type Ok14 = boolean;
-export type Category10 = string;
-export type Error23 = string;
-export type Exists = boolean;
-export type Reason1 = string;
-export type Detail = string;
-export type ToolSchema = {
+export type RequestId50 = string;
+export type Plugin1 = string;
+export type Tool = string;
+export type Profile = string;
+export type PluginConfigs1 = {
   [k: string]: unknown;
 } | null;
 /**
@@ -21580,6 +21696,7 @@ export type EventType118 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -21677,14 +21794,16 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type RequestId50 = string;
-export type Plugin2 = string;
-export type Tool1 = string;
-export type Profile1 = string;
-export type PluginConfigs2 = {
+export type RequestId51 = string;
+export type Ok14 = boolean;
+export type Category10 = string;
+export type Error23 = string;
+export type Exists = boolean;
+export type Reason1 = string;
+export type Detail = string;
+export type ToolSchema = {
   [k: string]: unknown;
 } | null;
-export type Timeout = number;
 /**
  * All event types in the protocol.
  */
@@ -21763,6 +21882,7 @@ export type EventType119 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -21860,11 +21980,14 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type RequestId51 = string;
-export type Ok15 = boolean;
-export type Category11 = string;
-export type Error24 = string;
-export type Success4 = boolean;
+export type RequestId52 = string;
+export type Plugin2 = string;
+export type Tool1 = string;
+export type Profile1 = string;
+export type PluginConfigs2 = {
+  [k: string]: unknown;
+} | null;
+export type Timeout = number;
 /**
  * All event types in the protocol.
  */
@@ -21943,6 +22066,7 @@ export type EventType120 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -22040,14 +22164,11 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type Topic = string;
-export type Ok16 = boolean;
-export type Text4 = string;
-export type Topics = {
-  [k: string]: unknown;
-}[];
-export type Error25 = string;
-export type ServerVersion1 = string;
+export type RequestId53 = string;
+export type Ok15 = boolean;
+export type Category11 = string;
+export type Error24 = string;
+export type Success4 = boolean;
 /**
  * All event types in the protocol.
  */
@@ -22126,6 +22247,7 @@ export type EventType121 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -22223,22 +22345,14 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type RequestId52 = string | null;
-export type Target = string;
-export type Status3 = string;
-export type Ok17 = boolean;
-export type MessageId = string;
-export type TargetSessionId = string;
-export type SiblingName = string;
-export type GroupKey = string;
-export type Woken = boolean;
-export type Headless = boolean;
-export type Spooled = boolean;
-export type Candidates = string[];
-export type Files1 = {
+export type Topic = string;
+export type Ok16 = boolean;
+export type Text4 = string;
+export type Topics = {
   [k: string]: unknown;
 }[];
-export type Error26 = string;
+export type Error25 = string;
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -22317,6 +22431,7 @@ export type EventType122 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -22414,17 +22529,22 @@ export type EventType122 =
   | "gates.snapshot";
 export type Timestamp122 = string;
 export type SessionId122 = string;
-export type Integration = string;
-export type Ok18 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target1 = string;
-export type Text5 = string;
-export type Error27 = string;
-export type Available = string[];
-export type ServerVersion2 = string;
+export type RequestId54 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok17 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
+}[];
+export type Error26 = string;
 /**
  * All event types in the protocol.
  */
@@ -22503,6 +22623,7 @@ export type EventType123 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -22600,18 +22721,17 @@ export type EventType123 =
   | "gates.snapshot";
 export type Timestamp123 = string;
 export type SessionId123 = string;
-export type Ok19 = boolean;
-export type Workspace3 = string;
-export type ProfileSet = string;
-export type Profile2 = string;
-export type Scope = string;
-export type Findings = {
-  [k: string]: unknown;
-}[];
-export type Errors = number;
-export type Warnings3 = number;
-export type Error28 = string;
-export type ServerVersion3 = string;
+export type Integration = string;
+export type Ok18 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error27 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
 /**
  * All event types in the protocol.
  */
@@ -22690,6 +22810,7 @@ export type EventType124 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -22787,12 +22908,18 @@ export type EventType124 =
   | "gates.snapshot";
 export type Timestamp124 = string;
 export type SessionId124 = string;
-export type WorkspaceId = string;
-export type Name13 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files2 = StagedFileSpec[];
+export type Ok19 = boolean;
+export type Workspace3 = string;
+export type ProfileSet = string;
+export type Profile2 = string;
+export type Scope = string;
+export type Findings = {
+  [k: string]: unknown;
+}[];
+export type Errors = number;
+export type Warnings3 = number;
+export type Error28 = string;
+export type ServerVersion3 = string;
 /**
  * All event types in the protocol.
  */
@@ -22871,6 +22998,7 @@ export type EventType125 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -22968,11 +23096,12 @@ export type EventType125 =
   | "gates.snapshot";
 export type Timestamp125 = string;
 export type SessionId125 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type WorkspaceId = string;
+export type Name13 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -23051,6 +23180,7 @@ export type EventType126 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -23148,9 +23278,11 @@ export type EventType126 =
   | "gates.snapshot";
 export type Timestamp126 = string;
 export type SessionId126 = string;
-export type RequestId53 = string;
-export type Path4 = string;
-export type MetadataOnly = boolean;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -23229,6 +23361,7 @@ export type EventType127 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -23326,15 +23459,9 @@ export type EventType127 =
   | "gates.snapshot";
 export type Timestamp127 = string;
 export type SessionId127 = string;
-export type RequestId54 = string;
-export type Ok20 = boolean;
-export type Path5 = string;
-export type Name14 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category12 = string;
-export type Error29 = string;
+export type RequestId55 = string;
+export type Path4 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -23413,6 +23540,7 @@ export type EventType128 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -23510,9 +23638,15 @@ export type EventType128 =
   | "gates.snapshot";
 export type Timestamp128 = string;
 export type SessionId128 = string;
-export type RequestId55 = string;
-export type Query = string;
-export type MaxResults = number;
+export type RequestId56 = string;
+export type Ok20 = boolean;
+export type Path5 = string;
+export type Name14 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category12 = string;
+export type Error29 = string;
 /**
  * All event types in the protocol.
  */
@@ -23591,6 +23725,7 @@ export type EventType129 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -23688,16 +23823,9 @@ export type EventType129 =
   | "gates.snapshot";
 export type Timestamp129 = string;
 export type SessionId129 = string;
-export type RequestId56 = string;
-export type Ok21 = boolean;
-export type Query1 = string;
-export type Matches = {
-  [k: string]: unknown;
-}[];
-export type Total2 = number;
-export type Truncated = boolean;
-export type Category13 = string;
-export type Error30 = string;
+export type RequestId57 = string;
+export type Query = string;
+export type MaxResults = number;
 /**
  * All event types in the protocol.
  */
@@ -23776,6 +23904,7 @@ export type EventType130 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -23873,20 +24002,16 @@ export type EventType130 =
   | "gates.snapshot";
 export type Timestamp130 = string;
 export type SessionId130 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion4 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags1 = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId58 = string;
+export type Ok21 = boolean;
+export type Query1 = string;
+export type Matches = {
+  [k: string]: unknown;
+}[];
+export type Total2 = number;
+export type Truncated = boolean;
+export type Category13 = string;
+export type Error30 = string;
 /**
  * All event types in the protocol.
  */
@@ -23965,6 +24090,7 @@ export type EventType131 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -24062,17 +24188,20 @@ export type EventType131 =
   | "gates.snapshot";
 export type Timestamp131 = string;
 export type SessionId131 = string;
-export type RequestId57 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion4 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -24151,6 +24280,7 @@ export type EventType132 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -24248,8 +24378,17 @@ export type EventType132 =
   | "gates.snapshot";
 export type Timestamp132 = string;
 export type SessionId132 = string;
-export type RequestId58 = string;
-export type RemoteAgentId = string;
+export type RequestId59 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -24328,6 +24467,7 @@ export type EventType133 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -24425,8 +24565,8 @@ export type EventType133 =
   | "gates.snapshot";
 export type Timestamp133 = string;
 export type SessionId133 = string;
-export type RequestId59 = string;
-export type Reason2 = string;
+export type RequestId60 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -24505,6 +24645,7 @@ export type EventType134 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -24602,10 +24743,8 @@ export type EventType134 =
   | "gates.snapshot";
 export type Timestamp134 = string;
 export type SessionId134 = string;
-export type RequestId60 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source7 = string;
+export type RequestId61 = string;
+export type Reason2 = string;
 /**
  * All event types in the protocol.
  */
@@ -24684,6 +24823,7 @@ export type EventType135 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -24781,12 +24921,10 @@ export type EventType135 =
   | "gates.snapshot";
 export type Timestamp135 = string;
 export type SessionId135 = string;
-export type RequestId61 = string;
-export type RemoteAgentId2 = string;
-export type Success5 = boolean;
-export type Summary = string;
-export type Error31 = string;
-export type WorkspaceModified = boolean;
+export type RequestId62 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source7 = string;
 /**
  * All event types in the protocol.
  */
@@ -24865,6 +25003,7 @@ export type EventType136 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -24962,8 +25101,12 @@ export type EventType136 =
   | "gates.snapshot";
 export type Timestamp136 = string;
 export type SessionId136 = string;
-export type RequestId62 = string;
-export type RemoteAgentId3 = string;
+export type RequestId63 = string;
+export type RemoteAgentId2 = string;
+export type Success5 = boolean;
+export type Summary = string;
+export type Error31 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -25042,6 +25185,7 @@ export type EventType137 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -25139,8 +25283,8 @@ export type EventType137 =
   | "gates.snapshot";
 export type Timestamp137 = string;
 export type SessionId137 = string;
-export type RequestId63 = string;
-export type RemoteAgentId4 = string;
+export type RequestId64 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -25219,6 +25363,7 @@ export type EventType138 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -25316,10 +25461,8 @@ export type EventType138 =
   | "gates.snapshot";
 export type Timestamp138 = string;
 export type SessionId138 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId65 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -25398,6 +25541,7 @@ export type EventType139 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -25495,14 +25639,10 @@ export type EventType139 =
   | "gates.snapshot";
 export type Timestamp139 = string;
 export type SessionId139 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -25581,6 +25721,7 @@ export type EventType140 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -25678,17 +25819,14 @@ export type EventType140 =
   | "gates.snapshot";
 export type Timestamp140 = string;
 export type SessionId140 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State1 = string;
-export type Owner2 = string | null;
-export type Intent1 = {
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
 } | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -25767,6 +25905,7 @@ export type EventType141 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -25864,13 +26003,17 @@ export type EventType141 =
   | "gates.snapshot";
 export type Timestamp141 = string;
 export type SessionId141 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
   [k: string]: unknown;
-}[];
-export type RequestId64 = string | null;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -25949,6 +26092,7 @@ export type EventType142 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -26046,9 +26190,13 @@ export type EventType142 =
   | "gates.snapshot";
 export type Timestamp142 = string;
 export type SessionId142 = string;
-export type RequestId65 = string;
-export type Status4 = string;
-export type Detail1 = string | null;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId66 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -26127,6 +26275,7 @@ export type EventType143 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -26224,13 +26373,9 @@ export type EventType143 =
   | "gates.snapshot";
 export type Timestamp143 = string;
 export type SessionId143 = string;
-export type RequestId66 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type RequestId67 = string;
+export type Status4 = string;
+export type Detail1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -26309,6 +26454,7 @@ export type EventType144 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -26406,9 +26552,13 @@ export type EventType144 =
   | "gates.snapshot";
 export type Timestamp144 = string;
 export type SessionId144 = string;
-export type RequestId67 = string;
-export type ResponseText = string;
-export type Error32 = string;
+export type RequestId68 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -26487,6 +26637,7 @@ export type EventType145 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -26584,10 +26735,9 @@ export type EventType145 =
   | "gates.snapshot";
 export type Timestamp145 = string;
 export type SessionId145 = string;
-export type RequestId68 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId69 = string;
+export type ResponseText = string;
+export type Error32 = string;
 /**
  * All event types in the protocol.
  */
@@ -26666,6 +26816,7 @@ export type EventType146 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -26763,9 +26914,10 @@ export type EventType146 =
   | "gates.snapshot";
 export type Timestamp146 = string;
 export type SessionId146 = string;
-export type RequestId69 = string;
-export type ForkIndex = number;
-export type Error33 = string;
+export type RequestId70 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -26844,6 +26996,7 @@ export type EventType147 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -26941,11 +27094,9 @@ export type EventType147 =
   | "gates.snapshot";
 export type Timestamp147 = string;
 export type SessionId147 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail2 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId71 = string;
+export type ForkIndex = number;
+export type Error33 = string;
 /**
  * All event types in the protocol.
  */
@@ -27024,6 +27175,7 @@ export type EventType148 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -27121,8 +27273,11 @@ export type EventType148 =
   | "gates.snapshot";
 export type Timestamp148 = string;
 export type SessionId148 = string;
-export type WakeRef1 = string;
-export type Source8 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail2 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -27201,6 +27356,7 @@ export type EventType149 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -27298,8 +27454,8 @@ export type EventType149 =
   | "gates.snapshot";
 export type Timestamp149 = string;
 export type SessionId149 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef1 = string;
+export type Source8 = string;
 /**
  * All event types in the protocol.
  */
@@ -27378,6 +27534,7 @@ export type EventType150 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -27476,7 +27633,7 @@ export type EventType150 =
 export type Timestamp150 = string;
 export type SessionId150 = string;
 export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -27555,6 +27712,7 @@ export type EventType151 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -27652,9 +27810,8 @@ export type EventType151 =
   | "gates.snapshot";
 export type Timestamp151 = string;
 export type SessionId151 = string;
-export type Target2 = string;
 export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -27733,6 +27890,7 @@ export type EventType152 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -27830,7 +27988,9 @@ export type EventType152 =
   | "gates.snapshot";
 export type Timestamp152 = string;
 export type SessionId152 = string;
-export type Target3 = string;
+export type Target2 = string;
+export type Tools6 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -27909,6 +28069,7 @@ export type EventType153 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -28006,7 +28167,7 @@ export type EventType153 =
   | "gates.snapshot";
 export type Timestamp153 = string;
 export type SessionId153 = string;
-export type Policy1 = string;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -28085,6 +28246,7 @@ export type EventType154 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -28182,7 +28344,7 @@ export type EventType154 =
   | "gates.snapshot";
 export type Timestamp154 = string;
 export type SessionId154 = string;
-export type RequestId70 = string;
+export type Policy1 = string;
 /**
  * All event types in the protocol.
  */
@@ -28261,6 +28423,7 @@ export type EventType155 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -28358,15 +28521,7 @@ export type EventType155 =
   | "gates.snapshot";
 export type Timestamp155 = string;
 export type SessionId155 = string;
-export type RequestId71 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type RequestId72 = string;
 /**
  * All event types in the protocol.
  */
@@ -28445,6 +28600,7 @@ export type EventType156 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -28542,10 +28698,15 @@ export type EventType156 =
   | "gates.snapshot";
 export type Timestamp156 = string;
 export type SessionId156 = string;
-export type RequestId72 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type RequestId73 = string;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -28624,6 +28785,7 @@ export type EventType157 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -28721,13 +28883,10 @@ export type EventType157 =
   | "gates.snapshot";
 export type Timestamp157 = string;
 export type SessionId157 = string;
-export type RequestId73 = string;
-export type Status5 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail3 = string | null;
+export type RequestId74 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -28806,6 +28965,7 @@ export type EventType158 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -28903,9 +29063,13 @@ export type EventType158 =
   | "gates.snapshot";
 export type Timestamp158 = string;
 export type SessionId158 = string;
-export type RequestId74 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type RequestId75 = string;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail3 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -28984,6 +29148,7 @@ export type EventType159 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -29081,10 +29246,9 @@ export type EventType159 =
   | "gates.snapshot";
 export type Timestamp159 = string;
 export type SessionId159 = string;
-export type RequestId75 = string;
-export type Status6 = string;
-export type Revoked = number;
-export type Detail4 = string | null;
+export type RequestId76 = string;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -29163,6 +29327,7 @@ export type EventType160 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -29260,10 +29425,10 @@ export type EventType160 =
   | "gates.snapshot";
 export type Timestamp160 = string;
 export type SessionId160 = string;
-export type RequestId76 = string;
-export type User2 = string;
-export type Workspace4 = string;
-export type Name15 = string;
+export type RequestId77 = string;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail4 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -29342,6 +29507,7 @@ export type EventType161 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -29439,11 +29605,10 @@ export type EventType161 =
   | "gates.snapshot";
 export type Timestamp161 = string;
 export type SessionId161 = string;
-export type RequestId77 = string;
-export type Status7 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail5 = string | null;
+export type RequestId78 = string;
+export type User2 = string;
+export type Workspace4 = string;
+export type Name15 = string;
 /**
  * All event types in the protocol.
  */
@@ -29522,6 +29687,7 @@ export type EventType162 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -29619,8 +29785,11 @@ export type EventType162 =
   | "gates.snapshot";
 export type Timestamp162 = string;
 export type SessionId162 = string;
-export type RequestId78 = string;
-export type User3 = string;
+export type RequestId79 = string;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail5 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -29699,6 +29868,7 @@ export type EventType163 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -29796,10 +29966,8 @@ export type EventType163 =
   | "gates.snapshot";
 export type Timestamp163 = string;
 export type SessionId163 = string;
-export type RequestId79 = string;
-export type Status8 = string;
-export type Reloaded = number;
-export type Detail6 = string | null;
+export type RequestId80 = string;
+export type User3 = string;
 /**
  * All event types in the protocol.
  */
@@ -29878,6 +30046,7 @@ export type EventType164 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -29975,12 +30144,10 @@ export type EventType164 =
   | "gates.snapshot";
 export type Timestamp164 = string;
 export type SessionId164 = string;
-export type RequestId80 = string;
-export type User4 = string;
-export type Workspace5 = string;
-export type Files3 = {
-  [k: string]: unknown;
-}[];
+export type RequestId81 = string;
+export type Status8 = string;
+export type Reloaded = number;
+export type Detail6 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -30059,6 +30226,7 @@ export type EventType165 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -30156,12 +30324,12 @@ export type EventType165 =
   | "gates.snapshot";
 export type Timestamp165 = string;
 export type SessionId165 = string;
-export type RequestId81 = string;
-export type Status9 = string;
-export type Files4 = {
+export type RequestId82 = string;
+export type User4 = string;
+export type Workspace5 = string;
+export type Files3 = {
   [k: string]: unknown;
 }[];
-export type Detail7 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -30240,6 +30408,7 @@ export type EventType166 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -30337,9 +30506,12 @@ export type EventType166 =
   | "gates.snapshot";
 export type Timestamp166 = string;
 export type SessionId166 = string;
-export type RequestId82 = string;
-export type TargetSize = number | null;
-export type MaxSize = number | null;
+export type RequestId83 = string;
+export type Status9 = string;
+export type Files4 = {
+  [k: string]: unknown;
+}[];
+export type Detail7 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -30418,6 +30590,7 @@ export type EventType167 =
   | "tools.id_registry"
   | "tools.disable"
   | "tools.register_client"
+  | "tools.register_client.result"
   | "tool.execute_request"
   | "tool.execute_result"
   | "history.request"
@@ -30515,7 +30688,186 @@ export type EventType167 =
   | "gates.snapshot";
 export type Timestamp167 = string;
 export type SessionId167 = string;
-export type RequestId83 = string;
+export type RequestId84 = string;
+export type TargetSize = number | null;
+export type MaxSize = number | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType168 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "tool.result_enriched"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tools.register_client.result"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "history.page.request"
+  | "history.page"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "workspace.files.search"
+  | "workspace.files.search_result"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "reference.curation.result"
+  | "reference.claims"
+  | "reference.claims.request"
+  | "reference.curation.request"
+  | "reference.catalog"
+  | "reference.catalog.request"
+  | "reference.links.request"
+  | "reference.links.result"
+  | "reference.bundle.create.request"
+  | "reference.bundle.create.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "scaffold.validate.result"
+  | "pool.status.request"
+  | "pool.status"
+  | "plugin.tool.describe.request"
+  | "plugin.tool.describe.result"
+  | "plugin.tool.invoke.request"
+  | "plugin.tool.invoke.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "workspace.app_write"
+  | "workspace.app_write.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp168 = string;
+export type SessionId168 = string;
+export type RequestId85 = string;
 export type Ok22 = boolean;
 export type Category14 = string;
 export type Error34 = string;
@@ -32266,17 +32618,43 @@ export interface ToolsRegisterClientRequest {
   session_id?: SessionId75;
   tools?: Tools2;
   categories?: Categories;
+  request_id?: RequestId32;
 }
 export interface Categories {
   [k: string]: string;
 }
 /**
- * Server requests the WS client to execute a client-registered tool.
+ * The daemon's answer to a ``ToolsRegisterClientRequest`` (1.39, #1625).
+ *
+ * Sent only when the request carried a ``request_id``.  ``tools`` holds one
+ * ``{name, timeout_ms, timeout_s, source[, problem]}`` row per registered
+ * tool: the deadline the daemon waits for that tool's
+ * ``ToolExecuteResultEvent`` before handing the model
+ * ``{"error": "Client tool <name> timed out after <N>s"}``.  ``source`` is
+ * ``"client"`` when the spec's ``timeout`` (ms) was honoured, ``"default"``
+ * otherwise; ``problem`` says why a declared value was not.  Computed by
+ * ``jaato_sdk.client_tool_timeout.resolve_client_tool_timeout``, the same
+ * function the daemon enforces with.
+ *
+ * ``buffered`` is ``True`` when no session existed yet: the tools are
+ * registered when the session is created, under these same budgets.
  */
-export interface ToolExecuteRequestEvent {
+export interface ToolsRegisterClientResultEvent {
   type?: EventType76;
   timestamp?: Timestamp76;
   session_id?: SessionId76;
+  request_id?: RequestId33;
+  tools?: Tools3;
+  default_timeout_ms?: DefaultTimeoutMs;
+  buffered?: Buffered;
+}
+/**
+ * Server requests the WS client to execute a client-registered tool.
+ */
+export interface ToolExecuteRequestEvent {
+  type?: EventType77;
+  timestamp?: Timestamp77;
+  session_id?: SessionId77;
   call_id?: CallId5;
   agent_id?: AgentId33;
   tool_name?: ToolName13;
@@ -32289,9 +32667,9 @@ export interface ToolArgs3 {
  * Client returns the result of a client-side tool execution.
  */
 export interface ToolExecuteResultEvent {
-  type?: EventType77;
-  timestamp?: Timestamp77;
-  session_id?: SessionId77;
+  type?: EventType78;
+  timestamp?: Timestamp78;
+  session_id?: SessionId78;
   call_id?: CallId6;
   result?: Result1;
   error?: Error11;
@@ -32300,18 +32678,18 @@ export interface ToolExecuteResultEvent {
  * Client request for conversation history.
  */
 export interface HistoryRequest {
-  type?: EventType78;
-  timestamp?: Timestamp78;
-  session_id?: SessionId78;
+  type?: EventType79;
+  timestamp?: Timestamp79;
+  session_id?: SessionId79;
   agent_id?: AgentId34;
 }
 /**
  * Conversation history from server.
  */
 export interface HistoryEvent {
-  type?: EventType79;
-  timestamp?: Timestamp79;
-  session_id?: SessionId79;
+  type?: EventType80;
+  timestamp?: Timestamp80;
+  session_id?: SessionId80;
   agent_id?: AgentId35;
   history?: History;
   turn_accounting?: TurnAccounting;
@@ -32335,13 +32713,13 @@ export interface HistoryEvent {
  *     request_id: Echoed on the answer.
  */
 export interface HistoryPageRequest {
-  type?: EventType80;
-  timestamp?: Timestamp80;
-  session_id?: SessionId80;
+  type?: EventType81;
+  timestamp?: Timestamp81;
+  session_id?: SessionId81;
   agent_id?: AgentId36;
   before?: Before;
   max_lines?: MaxLines;
-  request_id?: RequestId32;
+  request_id?: RequestId34;
 }
 /**
  * One page of the transcript as renderable units (1.28).
@@ -32378,11 +32756,11 @@ export interface HistoryPageRequest {
  *     error: Why, when ``ok`` is ``False``.
  */
 export interface HistoryPageEvent {
-  type?: EventType81;
-  timestamp?: Timestamp81;
-  session_id?: SessionId81;
+  type?: EventType82;
+  timestamp?: Timestamp82;
+  session_id?: SessionId82;
   agent_id?: AgentId37;
-  request_id?: RequestId33;
+  request_id?: RequestId35;
   units?: Units;
   before?: Before1;
   has_more?: HasMore;
@@ -32399,9 +32777,9 @@ export interface HistoryPageEvent {
  * a ``PresentationContext`` on the server side.
  */
 export interface ClientConfigRequest {
-  type?: EventType82;
-  timestamp?: Timestamp82;
-  session_id?: SessionId82;
+  type?: EventType83;
+  timestamp?: Timestamp83;
+  session_id?: SessionId83;
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
@@ -32419,9 +32797,9 @@ export interface ClientConfigRequest {
  * pause point (between tool executions, after subagent completion, etc.).
  */
 export interface MidTurnPromptQueuedEvent {
-  type?: EventType83;
-  timestamp?: Timestamp83;
-  session_id?: SessionId83;
+  type?: EventType84;
+  timestamp?: Timestamp84;
+  session_id?: SessionId84;
   text?: Text2;
   position_in_queue?: PositionInQueue;
 }
@@ -32432,9 +32810,9 @@ export interface MidTurnPromptQueuedEvent {
  * by the model.
  */
 export interface MidTurnPromptInjectedEvent {
-  type?: EventType84;
-  timestamp?: Timestamp84;
-  session_id?: SessionId84;
+  type?: EventType85;
+  timestamp?: Timestamp85;
+  session_id?: SessionId85;
   text?: Text3;
 }
 /**
@@ -32485,9 +32863,9 @@ export interface MidTurnPromptInjectedEvent {
  *         ``notify`` checkpoint and every action-only rung.
  */
 export interface BudgetRungFiredEvent {
-  type?: EventType85;
-  timestamp?: Timestamp85;
-  session_id?: SessionId85;
+  type?: EventType86;
+  timestamp?: Timestamp86;
+  session_id?: SessionId86;
   at_percent?: AtPercent;
   action?: Action1;
   origin?: Origin;
@@ -32530,9 +32908,9 @@ export interface TierChanges {
  *         there was one.  Absent rather than ``null`` when unknown.
  */
 export interface IncidentEvent {
-  type?: EventType86;
-  timestamp?: Timestamp86;
-  session_id?: SessionId86;
+  type?: EventType87;
+  timestamp?: Timestamp87;
+  session_id?: SessionId87;
   kind?: Kind1;
   at?: At;
   cause?: Cause;
@@ -32549,9 +32927,9 @@ export interface IncidentEvent {
  * The partial response is preserved and the user's prompt is being processed.
  */
 export interface MidTurnInterruptEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
-  session_id?: SessionId87;
+  type?: EventType88;
+  timestamp?: Timestamp88;
+  session_id?: SessionId88;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -32563,9 +32941,9 @@ export interface MidTurnInterruptEvent {
  * for any pending tool calls.
  */
 export interface InterruptedTurnRecoveredEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
-  session_id?: SessionId88;
+  type?: EventType89;
+  timestamp?: Timestamp89;
+  session_id?: SessionId89;
   agent_id?: AgentId38;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
@@ -32574,17 +32952,17 @@ export interface InterruptedTurnRecoveredEvent {
  * Client requests list of available workspaces.
  */
 export interface WorkspaceListRequest {
-  type?: EventType89;
-  timestamp?: Timestamp89;
-  session_id?: SessionId89;
+  type?: EventType90;
+  timestamp?: Timestamp90;
+  session_id?: SessionId90;
 }
 /**
  * Response to workspace.list - list of available workspaces.
  */
 export interface WorkspaceListEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
-  session_id?: SessionId90;
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  session_id?: SessionId91;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -32592,9 +32970,9 @@ export interface WorkspaceListEvent {
  * Client requests creation of a new workspace.
  */
 export interface WorkspaceCreateRequest {
-  type?: EventType91;
-  timestamp?: Timestamp91;
-  session_id?: SessionId91;
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  session_id?: SessionId92;
   name?: Name3;
 }
 /**
@@ -32609,9 +32987,9 @@ export interface WorkspaceCreateRequest {
  * learned of a created workspace as one with no name.
  */
 export interface WorkspaceCreatedEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
-  session_id?: SessionId92;
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
   name?: Name4;
   path?: Path1;
   workspace?: Workspace;
@@ -32626,9 +33004,9 @@ export interface Workspace {
  * ``WorkspaceDeletedEvent``.
  */
 export interface WorkspaceDeleteRequest {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
   name?: Name5;
   stop_sessions?: StopSessions;
 }
@@ -32644,9 +33022,9 @@ export interface WorkspaceDeleteRequest {
  * gone and the deleting client's selection of it is cleared.
  */
 export interface WorkspaceDeletedEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
   name?: Name6;
   ok?: Ok6;
   error?: Error13;
@@ -32657,11 +33035,11 @@ export interface WorkspaceDeletedEvent {
  * Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
  */
 export interface WorkspaceInspectRequest {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
   name?: Name7;
-  request_id?: RequestId34;
+  request_id?: RequestId36;
 }
 /**
  * Answer to ``workspace.inspect`` (protocol 1.27).
@@ -32681,11 +33059,11 @@ export interface WorkspaceInspectRequest {
  * tree, ``None`` when the walk was too large or too slow to finish.
  */
 export interface WorkspaceInspectEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
   name?: Name8;
-  request_id?: RequestId35;
+  request_id?: RequestId37;
   ok?: Ok7;
   error?: Error14;
   path?: Path2;
@@ -32707,11 +33085,11 @@ export interface Sessions2 {
  * :class:`WorkspaceCloneProgressEvent` echoing ``request_id``.
  */
 export interface WorkspaceCloneRequest {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
   name?: Name9;
-  request_id?: RequestId36;
+  request_id?: RequestId38;
   repos?: Repos1;
 }
 /**
@@ -32726,11 +33104,11 @@ export interface WorkspaceCloneRequest {
  * ``repo == ""``.  A retry is a new request naming the one repo.
  */
 export interface WorkspaceCloneProgressEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
   name?: Name10;
-  request_id?: RequestId37;
+  request_id?: RequestId39;
   repo?: Repo;
   branch?: Branch;
   state?: State;
@@ -32743,18 +33121,18 @@ export interface WorkspaceCloneProgressEvent {
  * Client selects a workspace to use for the session.
  */
 export interface WorkspaceSelectRequest {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
   name?: Name11;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
   workspace?: Workspace1;
   configured?: Configured;
   provider?: Provider2;
@@ -32766,9 +33144,9 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
   provider?: Provider3;
   model?: Model3;
   api_key?: ApiKey;
@@ -32778,9 +33156,9 @@ export interface ConfigUpdateRequest {
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   workspace?: Workspace2;
   provider?: Provider4;
   model?: Model4;
@@ -32801,9 +33179,9 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
   changes?: Changes;
   seq?: Seq;
   epoch?: Epoch;
@@ -32816,9 +33194,9 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   files?: Files;
   total?: Total1;
   seq?: Seq1;
@@ -32857,9 +33235,9 @@ export interface Seqs {
  *     gitignore_path: The file that was edited, so a client can name it.
  */
 export interface WorkspaceIgnoreResultEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   path?: Path3;
   ignored?: Ignored;
   ok?: Ok8;
@@ -32916,10 +33294,10 @@ export interface WorkspaceIgnoreResultEvent {
  *         daemon never sends it (and answers a revision ``collision``).
  */
 export interface ReferenceCurationResultEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
-  request_id?: RequestId38;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
+  request_id?: RequestId40;
   action?: Action2;
   claim_id?: ClaimId;
   ok?: Ok9;
@@ -32975,10 +33353,10 @@ export interface ReferenceCurationResultEvent {
  * listed.
  */
 export interface ReferenceClaimsEvent {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
-  request_id?: RequestId39;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
+  request_id?: RequestId41;
   ok?: Ok10;
   category?: Category6;
   error?: Error19;
@@ -32994,10 +33372,10 @@ export interface ReferenceClaimsEvent {
  * Writes nothing; any connection whose workspace it is may list.
  */
 export interface ReferenceClaimsRequest {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
-  request_id?: RequestId40;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId42;
 }
 /**
  * Promote or dismiss one reference claim (1.33).
@@ -33009,10 +33387,10 @@ export interface ReferenceClaimsRequest {
  * root); ``dismiss`` ignores it.
  */
 export interface ReferenceCurationRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
-  request_id?: RequestId41;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId43;
   action?: Action3;
   claim_id?: ClaimId1;
   bundle?: Bundle1;
@@ -33037,10 +33415,10 @@ export interface ReferenceCurationRequest {
  * show.  ``may_curate`` says whether THIS connection may edit links.
  */
 export interface ReferenceCatalogEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
-  request_id?: RequestId42;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId44;
   ok?: Ok11;
   category?: Category7;
   error?: Error20;
@@ -33055,10 +33433,10 @@ export interface ReferenceCatalogEvent {
  * Writes nothing.
  */
 export interface ReferenceCatalogRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId43;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId45;
 }
 /**
  * Replace one catalog reference's typed links (1.33).
@@ -33068,10 +33446,10 @@ export interface ReferenceCatalogRequest {
  * :class:`ReferenceLinksUpdateResultEvent` carrying this ``request_id``.
  */
 export interface ReferenceLinksUpdateRequest {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
-  request_id?: RequestId44;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
+  request_id?: RequestId46;
   reference_id?: ReferenceId1;
   links?: Links;
 }
@@ -33097,10 +33475,10 @@ export interface ReferenceLinksUpdateRequest {
  *         not hold, or a ``supersedes`` another reference also declares.
  */
 export interface ReferenceLinksUpdateResultEvent {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
-  request_id?: RequestId45;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
+  request_id?: RequestId47;
   reference_id?: ReferenceId2;
   ok?: Ok12;
   category?: Category8;
@@ -33118,10 +33496,10 @@ export interface ReferenceLinksUpdateResultEvent {
  * adds a vector index later, from a session with an embedding provider.
  */
 export interface ReferenceBundleCreateRequest {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
-  request_id?: RequestId46;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId48;
   name?: Name12;
 }
 /**
@@ -33144,10 +33522,10 @@ export interface ReferenceBundleCreateRequest {
  *         says whether the existing one is indexed.
  */
 export interface ReferenceBundleCreateResultEvent {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
-  request_id?: RequestId47;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
+  request_id?: RequestId49;
   ok?: Ok13;
   category?: Category9;
   error?: Error22;
@@ -33168,10 +33546,10 @@ export interface ReferenceBundleCreateResultEvent {
  * ``narrow_tool_schema`` and the profile's settings included.
  */
 export interface PluginToolDescribeRequest {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
-  request_id?: RequestId48;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
+  request_id?: RequestId50;
   plugin?: Plugin1;
   tool?: Tool;
   profile?: Profile;
@@ -33201,10 +33579,10 @@ export interface PluginToolDescribeRequest {
  *         ``traits``.
  */
 export interface PluginToolDescribeEvent {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  request_id?: RequestId49;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
+  request_id?: RequestId51;
   ok?: Ok14;
   category?: Category10;
   error?: Error23;
@@ -33226,10 +33604,10 @@ export interface PluginToolDescribeEvent {
  * ``0`` or less means the daemon's default).
  */
 export interface PluginToolInvokeRequest {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
-  request_id?: RequestId50;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  request_id?: RequestId52;
   plugin?: Plugin2;
   tool?: Tool1;
   args?: Args1;
@@ -33260,10 +33638,10 @@ export interface Args1 {
  *         ``_telemetry``) included, as a session receives it.
  */
 export interface PluginToolInvokeResultEvent {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
-  request_id?: RequestId51;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
+  request_id?: RequestId53;
   ok?: Ok15;
   category?: Category11;
   error?: Error24;
@@ -33316,9 +33694,9 @@ export interface Result2 {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
   topic?: Topic;
   ok?: Ok16;
   text?: Text4;
@@ -33392,10 +33770,10 @@ export interface Data2 {
  *     error: Why not, when ``ok`` is ``False``.
  */
 export interface SessionMessageResultEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId52;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId54;
   target?: Target;
   status?: Status3;
   ok?: Ok17;
@@ -33457,9 +33835,9 @@ export interface SessionMessageResultEvent {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
   integration?: Integration;
   ok?: Ok18;
   changed?: Changed;
@@ -33504,9 +33882,9 @@ export interface ScaffoldIntegrationEvent {
  *         says whose install produced the findings.
  */
 export interface ScaffoldValidateEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
   ok?: Ok19;
   workspace?: Workspace3;
   profile_set?: ProfileSet;
@@ -33558,9 +33936,9 @@ export interface ScaffoldValidateEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
   workspace_id?: WorkspaceId;
   files?: Files2;
 }
@@ -33608,9 +33986,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -33636,10 +34014,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
-  request_id?: RequestId53;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId55;
   path?: Path4;
   metadata_only?: MetadataOnly;
 }
@@ -33665,10 +34043,10 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
-  request_id?: RequestId54;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId56;
   ok?: Ok20;
   path?: Path5;
   name?: Name14;
@@ -33689,10 +34067,10 @@ export interface WorkspaceFileContentEvent {
  * :class:`WorkspaceFilesSearchResultEvent` carrying the same ``request_id``.
  */
 export interface WorkspaceFilesSearchRequest {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
-  request_id?: RequestId55;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId57;
   query?: Query;
   max_results?: MaxResults;
 }
@@ -33712,10 +34090,10 @@ export interface WorkspaceFilesSearchRequest {
  * (this connection is in no workspace).
  */
 export interface WorkspaceFilesSearchResultEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
-  request_id?: RequestId56;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId58;
   ok?: Ok21;
   query?: Query1;
   matches?: Matches;
@@ -33732,9 +34110,9 @@ export interface WorkspaceFilesSearchResultEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType130;
-  timestamp?: Timestamp130;
-  session_id?: SessionId130;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion4;
@@ -33759,10 +34137,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType131;
-  timestamp?: Timestamp131;
-  session_id?: SessionId131;
-  request_id?: RequestId57;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
+  request_id?: RequestId59;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -33781,10 +34159,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType132;
-  timestamp?: Timestamp132;
-  session_id?: SessionId132;
-  request_id?: RequestId58;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
+  request_id?: RequestId60;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -33794,10 +34172,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType133;
-  timestamp?: Timestamp133;
-  session_id?: SessionId133;
-  request_id?: RequestId59;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
+  request_id?: RequestId61;
   reason?: Reason2;
 }
 /**
@@ -33808,10 +34186,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType134;
-  timestamp?: Timestamp134;
-  session_id?: SessionId134;
-  request_id?: RequestId60;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
+  request_id?: RequestId62;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source7;
@@ -33824,10 +34202,10 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType135;
-  timestamp?: Timestamp135;
-  session_id?: SessionId135;
-  request_id?: RequestId61;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
+  request_id?: RequestId63;
   remote_agent_id?: RemoteAgentId2;
   success?: Success5;
   summary?: Summary;
@@ -33841,20 +34219,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType136;
-  timestamp?: Timestamp136;
-  session_id?: SessionId136;
-  request_id?: RequestId62;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
+  request_id?: RequestId64;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType137;
-  timestamp?: Timestamp137;
-  session_id?: SessionId137;
-  request_id?: RequestId63;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
+  request_id?: RequestId65;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -33866,9 +34244,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType138;
-  timestamp?: Timestamp138;
-  session_id?: SessionId138;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -33888,9 +34266,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType139;
-  timestamp?: Timestamp139;
-  session_id?: SessionId139;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -33906,9 +34284,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType140;
-  timestamp?: Timestamp140;
-  session_id?: SessionId140;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -33959,14 +34337,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType141;
-  timestamp?: Timestamp141;
-  session_id?: SessionId141;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId64;
+  request_id?: RequestId66;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -34018,10 +34396,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType142;
-  timestamp?: Timestamp142;
-  session_id?: SessionId142;
-  request_id?: RequestId65;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
+  request_id?: RequestId67;
   status?: Status4;
   detail?: Detail1;
 }
@@ -34040,10 +34418,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType143;
-  timestamp?: Timestamp143;
-  session_id?: SessionId143;
-  request_id?: RequestId66;
+  type?: EventType144;
+  timestamp?: Timestamp144;
+  session_id?: SessionId144;
+  request_id?: RequestId68;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -34051,10 +34429,10 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType144;
-  timestamp?: Timestamp144;
-  session_id?: SessionId144;
-  request_id?: RequestId67;
+  type?: EventType145;
+  timestamp?: Timestamp145;
+  session_id?: SessionId145;
+  request_id?: RequestId69;
   response_text?: ResponseText;
   error?: Error32;
 }
@@ -34074,10 +34452,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType145;
-  timestamp?: Timestamp145;
-  session_id?: SessionId145;
-  request_id?: RequestId68;
+  type?: EventType146;
+  timestamp?: Timestamp146;
+  session_id?: SessionId146;
+  request_id?: RequestId70;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -34086,10 +34464,10 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType146;
-  timestamp?: Timestamp146;
-  session_id?: SessionId146;
-  request_id?: RequestId69;
+  type?: EventType147;
+  timestamp?: Timestamp147;
+  session_id?: SessionId147;
+  request_id?: RequestId71;
   fork_index?: ForkIndex;
   error?: Error33;
 }
@@ -34103,9 +34481,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType147;
-  timestamp?: Timestamp147;
-  session_id?: SessionId147;
+  type?: EventType148;
+  timestamp?: Timestamp148;
+  session_id?: SessionId148;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail2;
@@ -34132,9 +34510,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType148;
-  timestamp?: Timestamp148;
-  session_id?: SessionId148;
+  type?: EventType149;
+  timestamp?: Timestamp149;
+  session_id?: SessionId149;
   wake_ref?: WakeRef1;
   source?: Source8;
 }
@@ -34147,10 +34525,10 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType149;
-  timestamp?: Timestamp149;
-  session_id?: SessionId149;
-  tools?: Tools3;
+  type?: EventType150;
+  timestamp?: Timestamp150;
+  session_id?: SessionId150;
+  tools?: Tools4;
   patterns?: Patterns;
 }
 /**
@@ -34161,10 +34539,10 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType150;
-  timestamp?: Timestamp150;
-  session_id?: SessionId150;
-  tools?: Tools4;
+  type?: EventType151;
+  timestamp?: Timestamp151;
+  session_id?: SessionId151;
+  tools?: Tools5;
   patterns?: Patterns1;
 }
 /**
@@ -34174,11 +34552,11 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType151;
-  timestamp?: Timestamp151;
-  session_id?: SessionId151;
+  type?: EventType152;
+  timestamp?: Timestamp152;
+  session_id?: SessionId152;
   target?: Target2;
-  tools?: Tools5;
+  tools?: Tools6;
   patterns?: Patterns2;
 }
 /**
@@ -34190,9 +34568,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType152;
-  timestamp?: Timestamp152;
-  session_id?: SessionId152;
+  type?: EventType153;
+  timestamp?: Timestamp153;
+  session_id?: SessionId153;
   target?: Target3;
 }
 /**
@@ -34203,19 +34581,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType153;
-  timestamp?: Timestamp153;
-  session_id?: SessionId153;
+  type?: EventType154;
+  timestamp?: Timestamp154;
+  session_id?: SessionId154;
   policy?: Policy1;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType154;
-  timestamp?: Timestamp154;
-  session_id?: SessionId154;
-  request_id?: RequestId70;
+  type?: EventType155;
+  timestamp?: Timestamp155;
+  session_id?: SessionId155;
+  request_id?: RequestId72;
 }
 /**
  * Structured permission policy snapshot.
@@ -34226,10 +34604,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType155;
-  timestamp?: Timestamp155;
-  session_id?: SessionId155;
-  request_id?: RequestId71;
+  type?: EventType156;
+  timestamp?: Timestamp156;
+  session_id?: SessionId156;
+  request_id?: RequestId73;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -34278,10 +34656,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType156;
-  timestamp?: Timestamp156;
-  session_id?: SessionId156;
-  request_id?: RequestId72;
+  type?: EventType157;
+  timestamp?: Timestamp157;
+  session_id?: SessionId157;
+  request_id?: RequestId74;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -34329,10 +34707,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType157;
-  timestamp?: Timestamp157;
-  session_id?: SessionId157;
-  request_id?: RequestId73;
+  type?: EventType158;
+  timestamp?: Timestamp158;
+  session_id?: SessionId158;
+  request_id?: RequestId75;
   status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -34369,10 +34747,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType158;
-  timestamp?: Timestamp158;
-  session_id?: SessionId158;
-  request_id?: RequestId74;
+  type?: EventType159;
+  timestamp?: Timestamp159;
+  session_id?: SessionId159;
+  request_id?: RequestId76;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -34398,10 +34776,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType159;
-  timestamp?: Timestamp159;
-  session_id?: SessionId159;
-  request_id?: RequestId75;
+  type?: EventType160;
+  timestamp?: Timestamp160;
+  session_id?: SessionId160;
+  request_id?: RequestId77;
   status?: Status6;
   revoked?: Revoked;
   detail?: Detail4;
@@ -34443,10 +34821,10 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType160;
-  timestamp?: Timestamp160;
-  session_id?: SessionId160;
-  request_id?: RequestId76;
+  type?: EventType161;
+  timestamp?: Timestamp161;
+  session_id?: SessionId161;
+  request_id?: RequestId78;
   user?: User2;
   workspace?: Workspace4;
   name?: Name15;
@@ -34485,10 +34863,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType161;
-  timestamp?: Timestamp161;
-  session_id?: SessionId161;
-  request_id?: RequestId77;
+  type?: EventType162;
+  timestamp?: Timestamp162;
+  session_id?: SessionId162;
+  request_id?: RequestId79;
   status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -34513,10 +34891,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType162;
-  timestamp?: Timestamp162;
-  session_id?: SessionId162;
-  request_id?: RequestId78;
+  type?: EventType163;
+  timestamp?: Timestamp163;
+  session_id?: SessionId163;
+  request_id?: RequestId80;
   user?: User3;
 }
 /**
@@ -34537,10 +34915,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType163;
-  timestamp?: Timestamp163;
-  session_id?: SessionId163;
-  request_id?: RequestId79;
+  type?: EventType164;
+  timestamp?: Timestamp164;
+  session_id?: SessionId164;
+  request_id?: RequestId81;
   status?: Status8;
   reloaded?: Reloaded;
   detail?: Detail6;
@@ -34586,10 +34964,10 @@ export interface SecretReloadResultEvent {
  *         copy the user made their own survives.  A removal requires it.
  */
 export interface WorkspaceAppWriteRequest {
-  type?: EventType164;
-  timestamp?: Timestamp164;
-  session_id?: SessionId164;
-  request_id?: RequestId80;
+  type?: EventType165;
+  timestamp?: Timestamp165;
+  session_id?: SessionId165;
+  request_id?: RequestId82;
   user?: User4;
   workspace?: Workspace5;
   env?: Env;
@@ -34617,10 +34995,10 @@ export interface Env {
  *     detail: Human-readable elaboration.
  */
 export interface WorkspaceAppWriteResultEvent {
-  type?: EventType165;
-  timestamp?: Timestamp165;
-  session_id?: SessionId165;
-  request_id?: RequestId81;
+  type?: EventType166;
+  timestamp?: Timestamp166;
+  session_id?: SessionId166;
+  request_id?: RequestId83;
   status?: Status9;
   env?: Env1;
   files?: Files4;
@@ -34643,10 +35021,10 @@ export interface Env1 {
  * daemon process, never of a session or a remote client.
  */
 export interface PoolStatusRequest {
-  type?: EventType166;
-  timestamp?: Timestamp166;
-  session_id?: SessionId166;
-  request_id?: RequestId82;
+  type?: EventType167;
+  timestamp?: Timestamp167;
+  session_id?: SessionId167;
+  request_id?: RequestId84;
   target_size?: TargetSize;
   max_size?: MaxSize;
 }
@@ -34689,10 +35067,10 @@ export interface PoolStatusRequest {
  *         friends), the numbers a resize is decided from.
  */
 export interface PoolStatusEvent {
-  type?: EventType167;
-  timestamp?: Timestamp167;
-  session_id?: SessionId167;
-  request_id?: RequestId83;
+  type?: EventType168;
+  timestamp?: Timestamp168;
+  session_id?: SessionId168;
+  request_id?: RequestId85;
   ok?: Ok22;
   category?: Category14;
   error?: Error34;
@@ -34810,6 +35188,7 @@ export const EventTypeValue = {
   TOOL_ID_REGISTRY: "tools.id_registry",
   TOOL_DISABLE_REQUEST: "tools.disable",
   TOOLS_REGISTER_CLIENT: "tools.register_client",
+  TOOLS_REGISTER_CLIENT_RESULT: "tools.register_client.result",
   TOOL_EXECUTE_REQUEST: "tool.execute_request",
   TOOL_EXECUTE_RESULT: "tool.execute_result",
   HISTORY_REQUEST: "history.request",

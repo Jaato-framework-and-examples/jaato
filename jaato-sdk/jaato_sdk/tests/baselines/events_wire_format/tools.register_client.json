@@ -3,5 +3,6 @@
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "tools": [],
-  "categories": {}
+  "categories": {},
+  "request_id": ""
 }

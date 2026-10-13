@@ -528,7 +528,36 @@ def client_timeouts() -> List[ClientTimeout]:
             on_expiry="TurnTimeout — stops WAITING, not the session",
         ),
     ]
+    rows += _client_tool_timeout_rows()
     return rows
+
+
+def _client_tool_timeout_rows() -> List[ClientTimeout]:
+    """The host-tool deadline (#1625), READ from the module the daemon uses.
+
+    The one clock in the table a client TOOL AUTHOR must stay under: the
+    daemon waits this long for a ``client_tools=`` handler's result, then
+    hands the model a transport error instead of the handler's answer.  It
+    was missing, and a table that claims to list every clock reads an
+    omission as "no such clock".  The default comes from
+    :mod:`jaato_sdk.client_tool_timeout`, which both transports enforce with,
+    so it cannot drift; ``[]`` when that module is not importable.
+    """
+    try:
+        from jaato_sdk.client_tool_timeout import (
+            CLIENT_TOOL_TIMEOUT_KEY, DEFAULT_CLIENT_TOOL_TIMEOUT_MS,
+        )
+    except Exception:  # pragma: no cover - SDK predates #1625
+        return []
+    return [ClientTimeout(
+        name=CLIENT_TOOL_TIMEOUT_KEY,
+        where=f"client_tools=[{{'{CLIENT_TOOL_TIMEOUT_KEY}': <ms>}}] per tool",
+        default=DEFAULT_CLIENT_TOOL_TIMEOUT_MS / 1000.0,
+        bounds="ONE host-tool call, daemon-side (the spec value is in ms)",
+        settable_via="both",
+        on_expiry=('the MODEL gets {"error": "Client tool <name> timed out '
+                   'after <N>s"}; the turn goes on'),
+    )]
 
 
 # ------------------------------------------------------ session-level tools
