@@ -283,6 +283,9 @@ class IPCRecoveryClient:
         # ``events()`` — the gap that hung the convenience facade over a
         # recovery client) AND fans out to ``events()`` consumer queues.
         self._event_subscribers: "list[asyncio.Queue]" = []
+        # The last inner connection's named close cause (#1279); see
+        # ``close_cause``.
+        self._close_cause: Optional[BaseException] = None
         self._event_pump_task: Optional[asyncio.Task] = None
 
     # =========================================================================
@@ -338,6 +341,24 @@ class IPCRecoveryClient:
         """
         if self._client:
             return self._client.server_version
+        return None
+
+    @property
+    def close_cause(self) -> Optional[BaseException]:
+        """Why the last inner connection ended, when the transport knew (#1279).
+
+        Kept across the reconnect that replaces the inner client, so a
+        caller woken by the ``MessageTooLarge`` event can still read the
+        exception after "Reconnection successful!".  ``None`` until a
+        connection has ended for a named reason.
+        """
+        return self._close_cause
+
+    @property
+    def server_max_message_size(self) -> Optional[int]:
+        """The current inner client's ``server_max_message_size``."""
+        if self._client:
+            return self._client.server_max_message_size
         return None
 
     # =========================================================================
@@ -1520,7 +1541,10 @@ class IPCRecoveryClient:
                             self._registry.dispatch(event)
                             self._fanout(event)
 
-                        # Inner stream ended → connection lost.
+                        # Inner stream ended → connection lost.  Keep its
+                        # cause: the reconnect replaces the inner client.
+                        self._close_cause = getattr(
+                            self._client, "close_cause", None)
                         if self._events_running and self._state == ConnectionState.CONNECTED:
                             logger.info("Connection lost, starting recovery...")
                             await self._start_reconnection()

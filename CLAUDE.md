@@ -12487,6 +12487,39 @@ Guard: `jaato_server/shared/tests/test_facade_forwards_session_timeout_1450.py`,
 five reversions. Still open (#1129): recovering a session that was created
 after `SessionNotConfirmed` fired.
 
+### A Reply the Client Refused for Its Size (#1279, #1586)
+
+The daemon accepts and sends WebSocket messages up to 16 MiB
+(`--ws-max-message-size`). The SDK's `WSClient` passed no `max_size` to
+`websockets.connect`, so it RECEIVED at most the library's 1 MiB. A daemon
+message in between (a 1.2 MB `session.list`, the user echo of a long voice
+note) made the CLIENT close with 1009; `_read_message` swallowed it; the
+recovery client reconnected; and the waiting call raised `TimeoutError` with
+nothing saying a frame was refused. The daemon's log blamed its own 16 MiB
+limit, because it reported the 1009 it ECHOED as the one it sent.
+
+| Piece | Where |
+|---|---|
+| one default for both ends (`DEFAULT_WS_MAX_MESSAGE_SIZE`, `LEGACY_WS_MAX_MESSAGE_SIZE`); the daemon imports it | `jaato_sdk/ws_limits.py` |
+| `max_message_size=` on `WSClient`, `WSRecoveryClient` and both `session()` entry points, passed as `max_size`; a non-positive or non-int value is a `ValueError` at construction | `jaato_sdk/client/ws.py` |
+| a 1009 close recorded as `MessageTooLarge` (a builtin `ConnectionError`; `direction` inbound/outbound, `limit`, `size`, `close_code`, `reason`) on `close_cause`, and raised by every correlated wait (`_connection_lost`) | `ws.py::_read_message`, `ipc.py` |
+| the same cause put on the event stream as a client-originated `ErrorEvent(error_type="MessageTooLarge")` before the end-of-stream sentinel, so event-driven waiters (the facade, a recovery client's subscribers) learn it; the facade's `ask` / `stream` / `complete` raise it | `IPCClient._announce_close_cause`, `_TurnWatch.on_error`; `IPCRecoveryClient.close_cause` keeps it across the reconnect |
+| a message over the daemon's advertised `server_info.max_message_size` refused BEFORE sending, connection intact | `WSClient._write_message`, `_send_event` re-raises it |
+| who STARTED a close, read from `rcvd_then_sent` (the receiving end echoes the code) | `ws_limits.close_frame_of`, used by the daemon's `describe_connection_close` and its 1009 log hint |
+
+`max_size` is fixed at connect, and `server_info` arrives on the connection
+it configured, so a client cannot adopt the daemon's limit; it WARNs naming
+the knob when the daemon advertises more than it receives. The IPC transport's
+10 MB frame cap now ends the connection with the same `MessageTooLarge`
+instead of an unexpected-error log. `WSClient.is_connected` read `False` on
+every live connection (it tested the IPC writer) and is fixed. The TS SDK
+needed nothing: it uses the standard `WebSocket` (no receive cap; Node 22's
+received 20 MiB) and already rejects pending requests on a 1009
+(`RequestInterruptedError`).
+
+Guard: `jaato_server/shared/tests/test_a_large_ws_frame_reaches_the_client_1279.py`,
+seven reversions, over a real `JaatoWSServer` and a real `WSClient`.
+
 ### A Request the Daemon Wrote and the Runner Does Not Have (#856)
 
 #988 is a cancel that lost a race inside the runner. This is the turn
