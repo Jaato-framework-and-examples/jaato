@@ -46,6 +46,12 @@ that its own caller reads, which is not a tool result).  One guard, one rule
 so ``normalize_result_dict`` now collapses them to the bare error string:
 the text the model reads is unchanged, the JSON wrapper around it is not
 (see ``test_file_tool_failures_are_failures_1614``).
+
+#1654 ADDED ``mcp``, whose one executor body is ``_execute`` (not
+``_execute_*``), so the executor rule names it too.  Its ``isError: true``
+answer carries no ``error`` key and no ``success`` field, so no AST rule
+can see it; ``test_an_mcp_error_is_a_failure_1654`` pins that one against a
+real server.
 """
 
 from __future__ import annotations
@@ -59,8 +65,9 @@ from jaato_server.shared.tool_result_builder import normalize_result_dict, split
 _PLUGIN = "jaato-server/jaato_server/shared/plugins/subagent/plugin.py"
 _FILE_EDIT = "jaato-server/jaato_server/shared/plugins/file_edit/plugin.py"
 _FS_QUERY = "jaato-server/jaato_server/shared/plugins/filesystem_query/plugin.py"
+_MCP = "jaato-server/jaato_server/shared/plugins/mcp/plugin.py"
 #: Every plugin whose executors this guard holds to the explicit contract.
-_PLUGINS = (_PLUGIN, _FILE_EDIT, _FS_QUERY)
+_PLUGINS = (_PLUGIN, _FILE_EDIT, _FS_QUERY, _MCP)
 _ROOT = pathlib.Path(__file__).resolve().parents[4]
 
 
@@ -105,6 +112,16 @@ REVERSIONS = [
         because=(
             "readFile's OSError path returns a bare dict again -- the "
             "kernel-refused read #1614 found persisted as is_error=false"
+        ),
+    ),
+    Reversion(
+        target=_MCP,
+        find="                return False, {'error': result}\n\n            return self._answer_from_result(",
+        replace="                return {'error': result}\n\n            return self._answer_from_result(",
+        test="test_no_failure_return_is_a_bare_value",
+        because=(
+            "an MCP call that failed in transport returns a bare dict again, "
+            "so ToolExecutor reports it as ok=True (#1654)"
         ),
     ),
     Reversion(
@@ -186,11 +203,15 @@ def _returned_values(tree: ast.AST):
 
 
 def _executor_lines(tree: ast.AST) -> set:
-    """Line numbers of the returns inside ``_execute_*`` executors."""
+    """Line numbers of the returns inside ``_execute_*`` executors.
+
+    ``_execute`` itself counts too: it is the MCP plugin's one executor
+    body, behind every per-tool closure (#1654).
+    """
     lines = set()
     for fn in ast.walk(tree):
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and fn.name.startswith("_execute_"):
+                and (fn.name == "_execute" or fn.name.startswith("_execute_")):
             lines.update(lineno for lineno, _ in _returned_values(fn))
     return lines
 

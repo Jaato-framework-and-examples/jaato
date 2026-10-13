@@ -1596,9 +1596,35 @@ explicit failure and marks the task FAILED. Not covered: the `-stream`
 variants (they yield `chunk_type="error"` chunks, judged by the streaming
 path), `grep_content` skipping a file it cannot read (a directory search
 treats that as "no match", which a single-file search inherits), and the
-daemon-side `_forward_via_runner`, which returns a runner's `ok=False` dict
-bare. Guard: `test_file_tool_failures_are_failures_1614.py`, two
-reversions, through a real `ToolExecutor`.
+daemon-side `_forward_via_runner`, which returned a runner's `ok=False` dict
+bare (fixed by #1654, below). Guard:
+`test_file_tool_failures_are_failures_1614.py`, two reversions, through a
+real `ToolExecutor`.
+
+**#1654: an MCP server's `isError: true` answer.** An MCP server refuses a
+call by ANSWERING it with `isError: true`, and `MCPToolPlugin._execute`
+returned that answer as a bare dict, so the refusal reached the tool-call
+events, the persisted `is_error`, the reliability plugin and the telemetry
+span as a success. Four places lost the verdict:
+
+| Where | Change |
+|---|---|
+| reading the flag | `mcp_result_is_error` reads `isError` (mcp 1.x) and `is_error` (mcp 2.x, where `isError` is only the JSON alias). The plugin read `isError` alone, so on 2.x every refusal was `False`, the payload's own `isError` included |
+| `_execute` | an `isError` answer is `(False, payload)`, payload unchanged; its transport, timeout and lookup failures are `(False, {"error": ...})`. The #1053 AST guard covers `mcp`, and its executor rule names `_execute` beside `_execute_*` |
+| `_forward_via_runner` | a runner answer with `ok=False`, a failed RPC and an empty answer are `(False, payload)` for every forwarded plugin |
+| `build_ledger` | `success` is `not is_error and "error" not in result`, on both carriers (`ToolResult.is_error` and the wire's `is_error` are the same recorded flag). It ignored the flag, so a failure with no `error` key, including an `error`-only payload the session collapsed to a string (#1614), read as a success to a completion processor |
+
+`tool_result_is_error` is unchanged: it answers "an error even though the
+call succeeded", and a nested `isError` would reclassify every result dict
+carrying that key. What the model reads for an `isError` answer is the same
+dict, now beside the wire's error flag; on mcp 2.x its `isError` field is
+now `true` where it used to say `false`. The transport failures collapse to
+the bare error string, as #1614's did. Not covered: the `-stream` variant
+(a stream that started is a successful call; its final chunk's metadata now
+carries the right `isError`), and `structuredContent`, which mcp 2.x names
+`structured_content` and the plugin still reads under the 1.x name only.
+Guard: `test_an_mcp_error_is_a_failure_1654.py`, four reversions, against a
+real MCP server through a real `ToolExecutor`.
 
 ### Marking Generated Output (#1117)
 

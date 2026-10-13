@@ -167,8 +167,11 @@ def _forward_via_runner(
     ``shared.ai_tool_runner._thread_local`` and threads them through
     so the runner-side dispatcher can route stream frames back +
     honour cancel.  Translates the typed envelope back to the
-    legacy result-dict shape every plugin's ``_execute_*`` returns
-    today.
+    executor contract: a successful call is the bare result dict, a
+    failed one (the runner's executor said ``ok=False``, the RPC
+    failed, or the runner answered nothing) is ``(False, payload)``
+    with the payload unchanged (#1654).  A bare dict would read as a
+    success on this side whatever the runner decided.
 
     Module-level (not instance method) so it can be unit-tested
     without constructing a plugin instance.
@@ -194,12 +197,12 @@ def _forward_via_runner(
         # Transport-level failure (peer disconnect, malformed frame,
         # etc.).  Translate to legacy error-dict shape so the model
         # sees a clean message rather than an opaque traceback.
-        return {
+        return (False, {
             "error": (
                 f"{tool_name}: runner RPC failed: "
                 f"{type(exc).__name__}: {exc}"
             ),
-        }
+        })
 
     # Cancellation flows through as a typed error — re-raise so the
     # in-process ToolExecutor classifies the call as cancelled (per
@@ -214,18 +217,23 @@ def _forward_via_runner(
     if envelope.ok and isinstance(envelope.result, dict):
         return _reinject_envelope_telemetry(envelope.result, envelope.telemetry)
 
-    # Domain failure with structured result → unchanged so the model
-    # sees the same shape (e.g. ``{"error": "executable not found",
-    # "hint": "..."}``).
+    # Domain failure with structured result → the same payload, so the
+    # model sees the same shape (e.g. ``{"error": "executable not found",
+    # "hint": "..."}``), under the explicit ``(False, payload)`` contract:
+    # the runner's executor said ``ok=False``, and a bare dict would read
+    # as a success on this side -- for an MCP ``isError: true`` answer,
+    # whose payload carries no ``error`` key, nothing else would say so
+    # (#1654, the #1053 rule).
     if isinstance(envelope.result, dict):
-        return _reinject_envelope_telemetry(envelope.result, envelope.telemetry)
+        return (False, _reinject_envelope_telemetry(
+            envelope.result, envelope.telemetry))
 
     # Domain failure without a result dict → synthesise one from the
     # error payload.
     if envelope.error is not None:
-        return {"error": envelope.error.message}
+        return (False, {"error": envelope.error.message})
 
-    return {"error": f"{tool_name}: empty response from runner"}
+    return (False, {"error": f"{tool_name}: empty response from runner"})
 
 
 def _reinject_envelope_telemetry(

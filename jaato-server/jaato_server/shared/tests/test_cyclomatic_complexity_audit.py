@@ -298,7 +298,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/lsp/tests/test_plugin.py::TestLSPClientUtilities.test_guess_language_id": 19,
     "jaato-server/jaato_server/shared/plugins/mcp/plugin.py::MCPToolPlugin._cmd_logs": 18,
     "jaato-server/jaato_server/shared/plugins/mcp/plugin.py::MCPToolPlugin._cmd_reload": 26,
-    "jaato-server/jaato_server/shared/plugins/mcp/plugin.py::MCPToolPlugin._execute": 19,
     "jaato-server/jaato_server/shared/plugins/mcp/plugin.py::MCPToolPlugin._thread_main.run_mcp_server": 30,
     "jaato-server/jaato_server/shared/plugins/mcp/plugin.py::MCPToolPlugin.execute_streaming": 22,
     "jaato-server/jaato_server/shared/plugins/mcp/plugin.py::MCPToolPlugin.get_command_completions": 22,

@@ -160,7 +160,8 @@ def test_a_call_past_its_ceiling_is_cancelled_on_the_server(tmp_path, server):
     plugin = _plugin(tmp_path, server, entry={"timeout": 1})
     try:
         started = time.monotonic()
-        out = plugin._execute("slow", {"seconds": 4, "tag": "a"})
+        ok, out = plugin._execute("slow", {"seconds": 4, "tag": "a"})
+        assert ok is False
         assert time.monotonic() - started < 3
         assert "timed out after 1s" in out["error"]
         assert "\"timeout\" on the .mcp.json entry for 'fixture'" in out["error"]
@@ -220,7 +221,8 @@ def test_a_slow_call_does_not_hold_another(tmp_path, server):
 def test_the_plugin_config_sets_the_ceiling(tmp_path, server):
     plugin = _plugin(tmp_path, server, plugin_cfg={"call_timeout": 1})
     try:
-        out = plugin._execute("slow", {"seconds": 3, "tag": "d"})
+        ok, out = plugin._execute("slow", {"seconds": 3, "tag": "d"})
+        assert ok is False
         assert "timed out after 1s" in out["error"]
         assert "plugin_configs.mcp.call_timeout" in out["error"]
     finally:

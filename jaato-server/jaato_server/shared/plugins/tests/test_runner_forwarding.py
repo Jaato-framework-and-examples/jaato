@@ -6,10 +6,10 @@ plugin migration ship as a 2-line change.  Pin the contract:
 - Runner attached → tool.execute RPC with name/args + thread-local
   callbacks threaded through.
 - ok=True dict result → returned unchanged.
-- Domain failure dict result → returned unchanged (model sees the
-  same shape).
+- Domain failure dict result → ``(False, payload)`` with the payload
+  unchanged (model sees the same shape; the flag says failure, #1654).
 - CancelledException → re-raised locally.
-- Transport failure → legacy error-dict.
+- Transport failure → ``(False, {"error": ...})``.
 """
 
 from __future__ import annotations
@@ -205,7 +205,8 @@ def test_runner_domain_failure_dict_returned_unchanged() -> None:
     )
     plugin._plugin_registry = MagicMock(runner_rpc=rpc)
 
-    result = plugin.get_executors()["alpha"]({})
+    ok, result = plugin.get_executors()["alpha"]({})
+    assert ok is False
     assert "not found" in result["error"]
     assert result["hint"] == "configure extra_paths"
 
@@ -221,8 +222,7 @@ def test_runner_domain_failure_no_result_synthesises_error_dict() -> None:
     )
     plugin._plugin_registry = MagicMock(runner_rpc=rpc)
 
-    result = plugin.get_executors()["alpha"]({})
-    assert result == {"error": "bad arg"}
+    assert plugin.get_executors()["alpha"]({}) == (False, {"error": "bad arg"})
 
 
 def test_runner_cancelled_exception_propagates() -> None:
@@ -256,7 +256,8 @@ def test_runner_transport_failure_translated_to_error_dict() -> None:
     rpc.next_raise = RunnerCallError("runner closed mid-call")
     plugin._plugin_registry = MagicMock(runner_rpc=rpc)
 
-    result = plugin.get_executors()["alpha"]({})
+    ok, result = plugin.get_executors()["alpha"]({})
+    assert ok is False
     assert "runner RPC failed" in result["error"]
     assert "RunnerCallError" in result["error"]
 
@@ -402,6 +403,7 @@ def test_envelope_telemetry_reinjected_on_domain_failure() -> None:
         error=ErrorPayload(type="ToolError", message="exec not found"),
         telemetry={"jaato.cli.command": "missing_cmd"},
     )
-    result = _forward_via_runner(rpc, "cli_based_tool", {"command": "missing_cmd"})
+    ok, result = _forward_via_runner(rpc, "cli_based_tool", {"command": "missing_cmd"})
+    assert ok is False
     assert "exec not found" in result["error"]
     assert result["_telemetry"] == {"jaato.cli.command": "missing_cmd"}

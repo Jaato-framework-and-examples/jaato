@@ -108,6 +108,22 @@ SEAM_MODEL = "model"
 SEAM_ADAPTER = "adapter"
 
 
+def mcp_result_is_error(result: Any) -> bool:
+    """Did the MCP server answer this call with ``isError: true``?
+
+    The SDK names the field after its generation: ``isError`` on mcp 1.x,
+    ``is_error`` on mcp 2.x (snake_case model fields, with ``isError`` only
+    as the JSON alias).  ``mcp[cli]`` is unpinned, so reading one spelling
+    is reading nothing on the other -- ``getattr(result, 'isError', False)``
+    answered ``False`` for every refusal on 2.x (#1654).  Only a real
+    ``True`` counts.
+    """
+    for name in ('isError', 'is_error'):
+        if getattr(result, name, None) is True:
+            return True
+    return False
+
+
 def detect_jsonrpc_seam(mcp_types) -> Optional[str]:
     """Which JSON-RPC decode entry point does this ``mcp.types`` expose?
 
@@ -823,7 +839,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 normalized_name = self._normalize_tool_name(server_name, tool.name)
                 # Create a closure that captures the ORIGINAL tool name for MCP server calls
                 def make_executor(original_name: str):
-                    def executor(args: Dict[str, Any]) -> Dict[str, Any]:
+                    def executor(args: Dict[str, Any]) -> Any:
                         return self._execute(original_name, args)
                     return executor
                 executors[normalized_name] = make_executor(tool.name)
@@ -2058,7 +2074,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
                             metadata={
                                 'is_final': True,
                                 'tool': tool_name,
-                                'isError': getattr(result, 'isError', False),
+                                'isError': mcp_result_is_error(result),
                             },
                         )
 
@@ -2484,7 +2500,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 reply.put(('complete', {'error': str(exc)}) if streaming
                           else ('error', str(exc)))
             return
-        if getattr(res, 'isError', False):
+        if mcp_result_is_error(res):
             self._log_event(LOG_WARN, f"Tool returned error: {toolname}",
                             server=server_name)
         else:
@@ -2542,7 +2558,69 @@ class MCPToolPlugin(RunnerForwardingMixin):
             except queue.Empty:
                 continue
 
-    def _execute(self, toolname: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _answer_from_result(self, toolname: str, server: str,
+                            result: Any) -> Any:
+        """Turn the server's answer to one call into the executor's return.
+
+        Returns ``{'result': {'tool', 'isError', 'content'[, 'structured']},
+        '_telemetry': {...}}`` -- bare when the server answered normally,
+        ``(False, <that dict>)`` when it answered ``isError: true`` (#1654).
+
+        Args:
+            toolname: The MCP server's own name for the tool.
+            server: The server that answered.
+            result: The SDK's ``CallToolResult``.
+        """
+        # Extract content from MCP result
+        content_list = [getattr(c, 'text', None) for c in getattr(result, 'content', [])]
+        structured_content = getattr(result, 'structuredContent', None)
+
+        # Build result dict - only include structured if content is empty
+        # to avoid duplication (many MCPs return data in both fields)
+        out = {
+            'tool': toolname,
+            'isError': mcp_result_is_error(result),
+            'content': content_list,
+        }
+
+        # Only include structured content if text content is empty
+        # This prevents duplication when MCP returns same data in both fields
+        if not content_list or all(c is None or c == '' for c in content_list):
+            if structured_content is not None:
+                out['structured'] = structured_content
+
+        # Estimate size and log warning for large results
+        result_str = json.dumps(out)
+        estimated_tokens = len(result_str) / 4  # ~4 chars per token
+        if estimated_tokens > 50000:
+            self._log_event(
+                LOG_WARN,
+                f"Large MCP result: {toolname}",
+                details=f"~{int(estimated_tokens):,} tokens ({len(result_str):,} chars)"
+            )
+
+        payload = {
+            'result': out,
+            # _telemetry: Convention-based telemetry
+            '_telemetry': {
+                'jaato.mcp.server_name': server,
+                'jaato.mcp.original_tool': toolname,
+                'jaato.mcp.is_error': mcp_result_is_error(result),
+                'jaato.mcp.content_items': len(content_list),
+                'jaato.mcp.estimated_tokens': int(estimated_tokens),
+            },
+        }
+        # The server refused the call (``isError: true``).  Say so with
+        # the explicit ``(False, payload)`` contract: ToolExecutor reads
+        # a bare dict as a success, so the refusal reached the tool-call
+        # events, the history's ``is_error``, the ledger, the
+        # reliability plugin and the telemetry span as a success
+        # (#1654, the #1053 / #1614 class).  The payload is unchanged.
+        if out['isError'] is True:
+            return False, payload
+        return payload
+
+    def _execute(self, toolname: str, args: Dict[str, Any]) -> Any:
         """Execute an MCP tool via the background connection.
 
         Args:
@@ -2550,7 +2628,13 @@ class MCPToolPlugin(RunnerForwardingMixin):
             args: Dict containing tool parameters.
 
         Returns:
-            Dict with 'result' containing tool invocation details or 'error'.
+            A bare dict ``{'result': {'tool', 'isError', 'content', ...},
+            '_telemetry': {...}}`` when the server answered the call, or
+            ``(False, <that dict>)`` when the server answered it with
+            ``isError: true`` -- an MCP server reports a refused call that
+            way rather than as a JSON-RPC error, and a bare dict reads as a
+            success (#1654).  A transport, timeout or lookup failure is
+            ``(False, {'error': ...})``, for the same reason.
         """
         self._trace(f"execute: tool={toolname}")
 
@@ -2559,7 +2643,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
             self.initialize()
 
         if not self._tool_cache:
-            return {'error': 'MCP tools not available'}
+            return False, {'error': 'MCP tools not available'}
 
         # Verify tool exists and find its server
         found = False
@@ -2574,7 +2658,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 break
 
         if not found:
-            return {'error': f"Tool '{toolname}' not found on any MCP server"}
+            return False, {'error': f"Tool '{toolname}' not found on any MCP server"}
 
         try:
             call_id = next(self._call_ids)
@@ -2587,56 +2671,19 @@ class MCPToolPlugin(RunnerForwardingMixin):
             if status == 'timeout':
                 self._log_event(LOG_ERROR, f"Tool call timed out: {toolname}",
                                 server=server_name_for_tool, details=result)
-                return {'error': result}
+                return False, {'error': result}
 
             if status == 'error':
-                return {'error': result}
+                return False, {'error': result}
 
-            # Extract content from MCP result
-            content_list = [getattr(c, 'text', None) for c in getattr(result, 'content', [])]
-            structured_content = getattr(result, 'structuredContent', None)
-
-            # Build result dict - only include structured if content is empty
-            # to avoid duplication (many MCPs return data in both fields)
-            out = {
-                'tool': toolname,
-                'isError': getattr(result, 'isError', False),
-                'content': content_list,
-            }
-
-            # Only include structured content if text content is empty
-            # This prevents duplication when MCP returns same data in both fields
-            if not content_list or all(c is None or c == '' for c in content_list):
-                if structured_content is not None:
-                    out['structured'] = structured_content
-
-            # Estimate size and log warning for large results
-            result_str = json.dumps(out)
-            estimated_tokens = len(result_str) / 4  # ~4 chars per token
-            if estimated_tokens > 50000:
-                self._log_event(
-                    LOG_WARN,
-                    f"Large MCP result: {toolname}",
-                    details=f"~{int(estimated_tokens):,} tokens ({len(result_str):,} chars)"
-                )
-
-            return {
-                'result': out,
-                # _telemetry: Convention-based telemetry
-                '_telemetry': {
-                    'jaato.mcp.server_name': server_name_for_tool,
-                    'jaato.mcp.original_tool': toolname,
-                    'jaato.mcp.is_error': getattr(result, 'isError', False),
-                    'jaato.mcp.content_items': len(content_list),
-                    'jaato.mcp.estimated_tokens': int(estimated_tokens),
-                },
-            }
+            return self._answer_from_result(
+                toolname, server_name_for_tool, result)
 
         except CancelledException:
             raise
         except Exception as exc:
             self._log_event(LOG_ERROR, f"Tool call failed: {toolname}", details=str(exc), include_traceback=True)
-            return {'error': f"{type(exc).__name__}: {exc}"}
+            return False, {'error': f"{type(exc).__name__}: {exc}"}
 
 
 def create_plugin() -> MCPToolPlugin:

@@ -49,7 +49,9 @@ class ToolCallEntry(TypedDict):
             ``{"error": "...", "message": "..."}``.  Calls without a
             matching ``function_response`` (e.g. terminal-turn pending
             calls) carry ``{"error": "no_response"}``.
-        success: ``True`` iff ``"error"`` is not a key of ``result``.
+        success: ``True`` iff the response was not recorded as an error
+            (``ToolResult.is_error`` / the wire's ``is_error``) AND
+            ``"error"`` is not a key of ``result``.
             **THIS IS THE CANONICAL SUCCESS INDICATOR.**  Use it
             instead of reaching into ``result["status"]``:
 
@@ -142,6 +144,7 @@ def _read_part(part: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
             return ("response", {
                 "call_id": part.get("call_id") or "",
                 "result": part.get("response"),
+                "is_error": bool(part.get("is_error")),
                 # The wire carries no enrichment metadata: it is in-memory
                 # only and is not part of the serialized part shape.  ``None``
                 # here means "not transported", NOT "the tool produced none" —
@@ -164,6 +167,7 @@ def _read_part(part: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         return ("response", {
             "call_id": getattr(fr, "call_id", None) or "",
             "result": getattr(fr, "result", None),
+            "is_error": bool(getattr(fr, "is_error", False)),
             "enrichment_metadata": getattr(fr, "enrichment_metadata", None),
         })
     return None
@@ -213,10 +217,17 @@ def build_ledger(history: List[Any]) -> List[ToolCallEntry]:
           ``result={"error": "no_response"}``, so a validator's "claimed but
           never successfully called" check fires deterministically rather
           than finding nothing to look at.
-        - ``success`` is ``"error" not in result``, on BOTH carriers.  The
-          wire shape also carries an explicit ``is_error`` flag; it is
-          deliberately not consulted, because two success rules that usually
-          agree are worse than one that always does.
+        - ``success`` is ``not is_error and "error" not in result``, on BOTH
+          carriers.  ``is_error`` is the flag the session recorded from the
+          executor's own verdict (``ToolResult.is_error``, serialized as the
+          wire's ``is_error``), so both carriers read the same value.  It
+          used to be ignored, and that let a failure whose payload carries
+          no ``error`` key read as a success: an MCP server's
+          ``isError: true`` answer, and an explicit failure whose
+          ``error``-only payload the session collapses to a bare string
+          (#1654).  The ``error`` key is still read, for the
+          ``no_response`` sentinel and for a tool that reports a failure
+          in its body only.
         - ``enrichment_metadata`` is present only on the in-process carrier.
           Over the wire it is always ``None`` — not transported, rather than
           absent.
@@ -224,7 +235,7 @@ def build_ledger(history: List[Any]) -> List[ToolCallEntry]:
           share one, the LAST wins.  That mirrors the original behaviour and
           is not a decision this function is in a position to make better.
     """
-    responses: Dict[str, Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = {}
+    responses: Dict[str, Tuple[Dict[str, Any], Optional[Dict[str, Any]], bool]] = {}
     for message in history:
         for part in _parts_of(message):
             read = _read_part(part)
@@ -238,7 +249,7 @@ def build_ledger(history: List[Any]) -> List[ToolCallEntry]:
                 # applies rather than raising on a string.
                 body = {"result": body}
             responses[fields["call_id"]] = (
-                body, fields["enrichment_metadata"],
+                body, fields["enrichment_metadata"], fields["is_error"],
             )
 
     ledger: List[ToolCallEntry] = []
@@ -254,13 +265,14 @@ def build_ledger(history: List[Any]) -> List[ToolCallEntry]:
             if paired is None:
                 result: Dict[str, Any] = {"error": "no_response"}
                 enrichment: Optional[Dict[str, Any]] = None
+                recorded_error = True
             else:
-                result, enrichment = paired
+                result, enrichment, recorded_error = paired
             ledger.append({
                 "name": fields["name"],
                 "args": args,
                 "result": result,
-                "success": "error" not in result,
+                "success": not recorded_error and "error" not in result,
                 "call_id": fields["call_id"],
                 "turn_index": turn_index,
                 "enrichment_metadata": enrichment,
