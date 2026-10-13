@@ -198,6 +198,65 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+
+def _declares(schema: Any, type_name: str) -> bool:
+    """Whether ``schema`` declares ``type_name`` (alone or in a union)."""
+    if not isinstance(schema, dict):
+        return False
+    declared = schema.get("type")
+    if isinstance(declared, list):
+        return type_name in declared
+    return declared == type_name
+
+
+def _container_shape_hint(leaf_schema: Any, value: Any) -> Optional[str]:
+    """The accepted shape, for a rejection on an array or object path (#1626).
+
+    A bare type-mismatch message ("'' is not of type 'array'") told a
+    model eight times what was wrong and never what would be right, and
+    the only shape it found that was accepted, ``errors[0]``, filled the
+    array it meant to leave empty.  Returns ``None`` when the leaf is
+    not a container or the value already has the container's type (the
+    rejection is about its contents, and the plain message says which).
+    """
+    if _declares(leaf_schema, "array") and not isinstance(value, list):
+        return (
+            "This path expects an ARRAY: pass a JSON array as value, "
+            "e.g. value=[] when there is nothing to report (an empty "
+            "array is a valid value and satisfies a required field), "
+            "or value=[\"first\", \"second\"].  Do not index element 0 "
+            "or put a placeholder in it to mean 'none'"
+        )
+    if _declares(leaf_schema, "object") and not isinstance(value, dict):
+        return (
+            "This path expects an OBJECT: pass a JSON object as value, "
+            "e.g. value={\"key\": \"...\"}, or set one key at a time "
+            "with field_path=\"<path>.<key>\""
+        )
+    return None
+
+
+def _annotate_empty_array_fields(pending: List[Dict[str, Any]]) -> None:
+    """Say, on each pending array field, how to set it empty (#1626).
+
+    A required array whose correct value is normally empty
+    (``errors``, ``warnings``, ``blockers``) stays pending until
+    something is set.  When the field allows zero items (no positive
+    ``minItems``), its descriptor gains ``set_empty_with`` naming the
+    exact call, so ``query_completion`` and every ``prepare_completion``
+    answer report which pending fields emptiness satisfies.
+    """
+    for entry in pending:
+        if not _declares(entry, "array"):
+            continue
+        min_items = entry.get("minItems")
+        if isinstance(min_items, int) and min_items > 0:
+            continue
+        path = entry.get("path", "")
+        entry["set_empty_with"] = (
+            f"prepare_completion(field_path={path!r}, value=[])"
+        )
+
 class LifecycleTools:
     """Agent lifecycle signaling tools.
 
@@ -424,7 +483,16 @@ class LifecycleTools:
                             "\"endpoints[0].operation\", value=\"create\")\n"
                             "  prepare_completion(field_path="
                             "\"endpoints[2]\", value="
-                            "{\"operation\": \"delete\", \"path\": \"/x\"})"
+                            "{\"operation\": \"delete\", \"path\": \"/x\"})\n"
+                            "  prepare_completion(field_path=\"errors\", "
+                            "value=[])\n\n"
+                            "An array field whose answer is 'none' takes "
+                            "the EMPTY array, value=[]: it satisfies a "
+                            "required field.  Never index element 0 or "
+                            "insert a placeholder such as \"none\" to mean "
+                            "empty.  A JSON-encoded string is read as the "
+                            "type the path declares, so value=\"[]\" on an "
+                            "array path is also the empty array."
                         ),
                         parameters={
                             "type": "object",
@@ -450,7 +518,8 @@ class LifecycleTools:
                                         "integer, object, array, etc.  For "
                                         "setting a whole nested object at an "
                                         "array index, pass the object as "
-                                        "value."
+                                        "value.  For an array with nothing "
+                                        "in it, pass the empty array []."
                                     ),
                                 },
                             },
@@ -1210,54 +1279,18 @@ class LifecycleTools:
 
         # Validate the value against the leaf's schema (relaxed —
         # required[] stripped so partial objects are allowed; type /
-        # enum / format remain enforced).
-        #
-        # $ref resolution (PR-fix 2026-06-09): the kb's
-        # generation_context.schema.json uses ``$ref: #/$defs/Field``
-        # patterns where ``$defs`` lives at ROOT.  Validating the
-        # isolated leaf schema without a root-context resolver fails
-        # with ``PointerToNowhere: '/$defs/Field' does not exist``
-        # for ANY field whose value-schema embeds a $ref.  Wide-impact
-        # class — most non-trivial generation_context fields (model,
-        # modules, endpoints) hit it.  Fix: relax the WHOLE root
-        # schema (including $defs entries) + bind a RefResolver to
-        # the relaxed root so references resolve correctly during
-        # value validation.
-        relaxed_root = self._strip_required_recursive(self._payload_schema)
-        relaxed_leaf = self._resolve_path_schema(segments, relaxed_root)
-        if relaxed_leaf is None:
-            # Should not happen — _resolve_path_schema already returned
-            # non-None on the original schema above.  Defensive fallback.
-            relaxed_leaf = self._strip_required_recursive(leaf_schema)
-        try:
-            import warnings
-            import jsonschema
-            # RefResolver works through jsonschema 4.x but emits a
-            # DeprecationWarning since 4.18 (the ``referencing``
-            # library is the replacement).  Suppress the warning
-            # locally so it doesn't spam the daemon log on every
-            # prepare_completion call — migration to ``referencing``
-            # is a follow-up if/when jsonschema 5.x ships.
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore", category=DeprecationWarning,
-                    module="jsonschema",
-                )
-                resolver = jsonschema.RefResolver.from_schema(relaxed_root)
-                validator_cls = jsonschema.validators.validator_for(
-                    relaxed_root, default=jsonschema.Draft7Validator,
-                )
-                validator = validator_cls(relaxed_leaf, resolver=resolver)
-                validator.validate(value)
-        except jsonschema.ValidationError as exc:
+        # enum / format remain enforced).  A JSON-encoded string where
+        # the leaf declares an array or object is converted first
+        # (#1626, the #1358 rule): ``"[]"`` on an array path is the
+        # empty array, which is otherwise unreachable for a model whose
+        # wire turns ``[]`` into a string.
+        value, rejection = self._validate_leaf_value(
+            segments, leaf_schema, value,
+        )
+        if rejection is not None:
             return {
                 "accepted": {},
-                "rejected": {
-                    field_path: (
-                        f"{exc.message} (at "
-                        f"{'.'.join(str(p) for p in exc.absolute_path)})"
-                    ),
-                },
+                "rejected": {field_path: rejection},
                 "pending_required_fields_with_descriptions":
                     self._compute_pending_required_fields(
                         self._accumulated_payload, self._payload_schema,
@@ -1385,6 +1418,74 @@ class LifecycleTools:
                     )
                 remaining = remaining[close + 1:]
         return segments
+
+    def _validate_leaf_value(
+        self,
+        segments: List[Any],
+        leaf_schema: Dict[str, Any],
+        value: Any,
+    ) -> "tuple[Any, Optional[str]]":
+        """Coerce and validate a ``prepare_completion`` value (#1626).
+
+        Validation is against a RELAXED copy of the root schema
+        (``required[]`` stripped so partial objects are allowed; type /
+        enum / format still enforced), with a ``RefResolver`` bound to
+        that root so ``$ref: #/$defs/...`` resolves (PR-fix 2026-06-09:
+        validating the isolated leaf failed with ``PointerToNowhere``).
+
+        Before validating, a STRING value is converted when the leaf
+        declares a non-string type and the string parses as exactly
+        that type -- :func:`tool_arg_coercion.coerce_value`, the #1358
+        rule applied one level down, because ``value`` is an untyped
+        tool parameter and the executor's coercion cannot see the
+        schema of the path it names.  So ``"[]"`` on an array path is
+        the empty array.  ``""`` is NOT: it parses as no JSON array,
+        and reading it as "none" would be a guess about what the model
+        meant; it is refused with a reason that names ``[]``.
+
+        Returns:
+            ``(value, None)`` on success, ``value`` possibly converted;
+            ``(value, reason)`` when the value does not fit the schema.
+        """
+        from .tool_arg_coercion import coerce_value
+
+        relaxed_root = self._strip_required_recursive(self._payload_schema)
+        relaxed_leaf = self._resolve_path_schema(segments, relaxed_root)
+        if relaxed_leaf is None:
+            # Should not happen — _resolve_path_schema already returned
+            # non-None on the original schema.  Defensive fallback.
+            relaxed_leaf = self._strip_required_recursive(leaf_schema)
+        coerced, value = coerce_value(value, relaxed_leaf)
+        if coerced:
+            logger.info(
+                "prepare_completion: coerced a JSON string to %s at %s "
+                "(#1626)", type(value).__name__,
+                ".".join(str(s) for s in segments),
+            )
+        import warnings
+        import jsonschema
+        try:
+            # RefResolver is deprecated since jsonschema 4.18; suppress
+            # the warning so it does not spam the daemon log per call.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", category=DeprecationWarning,
+                    module="jsonschema",
+                )
+                resolver = jsonschema.RefResolver.from_schema(relaxed_root)
+                validator_cls = jsonschema.validators.validator_for(
+                    relaxed_root, default=jsonschema.Draft7Validator,
+                )
+                validator = validator_cls(relaxed_leaf, resolver=resolver)
+                validator.validate(value)
+        except jsonschema.ValidationError as exc:
+            reason = (
+                f"{exc.message} (at "
+                f"{'.'.join(str(p) for p in exc.absolute_path)})"
+            )
+            hint = _container_shape_hint(relaxed_leaf, value)
+            return value, (f"{reason}. {hint}" if hint else reason)
+        return value, None
 
     def _resolve_path_schema(
         self,
@@ -1609,6 +1710,7 @@ class LifecycleTools:
             accumulated, schema, path_prefix="", pending=pending,
             root_schema=schema,
         )
+        _annotate_empty_array_fields(pending)
         return pending
 
     def _walk_required(
