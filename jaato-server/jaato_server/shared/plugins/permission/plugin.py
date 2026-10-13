@@ -709,6 +709,9 @@ class PermissionPlugin(RunnerForwardingMixin):
         )
         self._effective_policy = effective
         self._policy = PermissionPolicy.from_config(effective.policy)
+        # Relative path argument rules resolve against the workspace, as
+        # the file tools resolve a relative ``path`` (#1578).
+        self._policy.path_base = self._workspace_path
         announce_effective_policy(effective, session_id=self._session_id)
 
         # plugin_configs.permission.auto_allow_housekeeping (#1304 phase 3).
@@ -1079,7 +1082,15 @@ class PermissionPlugin(RunnerForwardingMixin):
                                 },
                                 "arguments": {
                                     "type": "object",
-                                    "description": "Per-tool argument patterns to blacklist",
+                                    "description": (
+                                        "Per-tool argument rules to deny: "
+                                        "{\"<tool>\": {\"<arg>\": [\"<value>\", ...]}}. "
+                                        "A string argument is denied when it starts with a value "
+                                        "or contains it as a whole word. A path argument "
+                                        "(path, file_path, dir, cwd, ...) is ALSO denied when it "
+                                        "lies inside the value after resolving '..' and symlinks "
+                                        "against the workspace"
+                                    ),
                                     "additionalProperties": {
                                         "type": "object",
                                         "additionalProperties": {
@@ -1108,7 +1119,16 @@ class PermissionPlugin(RunnerForwardingMixin):
                                 },
                                 "arguments": {
                                     "type": "object",
-                                    "description": "Per-tool argument patterns to whitelist",
+                                    "description": (
+                                        "Per-tool argument rules to allow: "
+                                        "{\"<tool>\": {\"<arg>\": [\"<value>\", ...]}}. "
+                                        "A string argument is allowed when it starts with a value. "
+                                        "A path argument (path, file_path, dir, cwd, ...) is "
+                                        "allowed only when it lies inside the value by path "
+                                        "component, after resolving '..' and symlinks against "
+                                        "the workspace: 'out/../x' and the sibling 'out2' do not "
+                                        "match 'out'"
+                                    ),
                                     "additionalProperties": {
                                         "type": "object",
                                         "additionalProperties": {
@@ -1215,6 +1235,7 @@ class PermissionPlugin(RunnerForwardingMixin):
             if evaluators:
                 policy.set_evaluators(evaluators)
         _load_decision_gate(policy, config, f"scope:{scope}")
+        policy.path_base = self._workspace_path  # #1578, as the runtime policy
         # auto_allow_housekeeping is per-block, not propagated through
         # _auto_whitelisted (#1304 phase 3, see the field's own docstring):
         # a subagent whose OWN block does not opt in must not inherit the

