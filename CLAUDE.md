@@ -10882,6 +10882,41 @@ Guard: `jaato_server/shared/tests/test_permissions_file_decides_a_session_1474.p
 nine reversions, through the real `build_session_permission_plugin`. Not
 verified on an enforcing kernel.
 
+### A Path Rule That Was a String Prefix (#1578)
+
+`whitelist.arguments` / `blacklist.arguments` are
+`{"<tool>": {"<arg>": ["<value>", ...]}}`, and every argument was matched
+with `str.startswith`. For a path that is not containment:
+`{"writeNewFile": {"path": ["out/"]}}` allowed `out/../../anywhere.py`, and
+a rule `out` allowed the sibling `out2`. `sanitization.path_scope` does
+contain paths, but runs only for `cli_based_tool`, and `file_edit` accepts
+any path inside the workspace, so nothing else caught it.
+
+An argument whose NAME is a path name (`argument_paths.PATH_ARGUMENT_NAMES`:
+`path`, `file_path`, `dir`, `cwd`, `notebook_path`, ...) is now matched by
+containment. Both sides are made absolute against the policy's `cwd`, else
+the session workspace (`PermissionPolicy.path_base`, set by the plugin on the
+runtime and every #957 scoped policy, which is what the file tools resolve a
+relative `path` against), normalised, and compared by path component:
+
+| List | Matches when |
+|---|---|
+| whitelist | the value is inside the rule lexically (`..` collapsed) AND after symlink resolution; anything undecidable is no allow |
+| blacklist | the old string test (prefix, or a whole word), OR inside lexically, OR inside after symlinks: normalisation only widens a deny |
+| any other argument | unchanged: string prefix, and on `cli_based_tool` no uncovered shell operator |
+
+Behaviour change: a path whitelist rule now means "this directory or a file
+under it". A rule used as a filename prefix (`notes-` to allow
+`notes-1.md`) no longer matches, nor does a sibling sharing the prefix.
+Classifying a non-path argument by its name is the safe direction in both
+lists. `explain plugin permission` documents the shape and both semantics.
+Not done: applying `path_scope` (`allowed_roots`) to tools other than
+`cli_based_tool`.
+
+Guard: `jaato_server/shared/tests/test_a_path_rule_is_containment_not_prefix_1578.py`,
+five reversions, through the real runner enforcer builder and
+`check_permission`.
+
 ### A Memory Store Nobody Could See From the Browser (#1232)
 
 The web client had no view of the session's memories. The only route was
