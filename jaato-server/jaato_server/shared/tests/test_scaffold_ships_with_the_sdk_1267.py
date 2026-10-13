@@ -313,7 +313,8 @@ def test_a_server_verb_handed_in_directly_is_mounted(monkeypatch, capsys):
 def test_the_console_script_has_one_owner():
     sdk = _pyproject("jaato-sdk")["project"]
     server = _pyproject("jaato-server")["project"]
-    assert sdk["scripts"].get("jaato-scaffold") == "jaato_sdk.scaffold.cli:main"
+    # Through the launcher (#1643), which ends in jaato_sdk.scaffold.cli:main.
+    assert sdk["scripts"].get("jaato-scaffold") == "jaato_tool_launch:scaffold"
     assert "jaato-scaffold" not in server.get("scripts", {}), (
         "jaato-scaffold is declared by jaato-sdk only (#1267)")
     verbs = server["entry-points"]["jaato.scaffold_verbs"]

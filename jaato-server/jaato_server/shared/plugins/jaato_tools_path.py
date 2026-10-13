@@ -30,10 +30,17 @@ never inside the workspace, so nothing appears in the Files panel or in git.
 The allow-list is deliberate: ``jaato-server`` starts and stops the daemon
 and ``jaato`` is the TUI; neither belongs in a model's hands.
 
-Known limitation: a symlink cannot reset the environment, so a tool started
-this way sees the subprocess ``PYTHONPATH``, which a workspace venv prepends
-its site-packages to (``apply_venv_to_env``).  A conflicting package the
-model installed there could shadow one of jaato's own dependencies.
+A symlink cannot reset the environment, so a tool started this way sees
+the subprocess ``PYTHONPATH``, which a workspace venv prepends its
+site-packages to (``apply_venv_to_env``).  Left alone, a ``jaato-sdk`` the
+model installed there made the daemon's own ``jaato-scaffold`` import the
+WORKSPACE's ``jaato_sdk`` and describe another framework, exit 0 (#1643).
+So beside the directory the environment carries
+:data:`TRUSTED_PYTHONPATH_ENV` -- the runner's OWN ``PYTHONPATH`` -- and the
+tools' launcher (``jaato_tool_launch`` in jaato-sdk) drops every other
+``PYTHONPATH`` entry from ``sys.path`` before it imports ``jaato_sdk``.  The
+same drop keeps a conflicting dependency in the workspace venv (an older
+``pydantic``) from shadowing jaato's own.
 """
 
 from __future__ import annotations
@@ -50,6 +57,13 @@ logger = logging.getLogger(__name__)
 #: The jaato console scripts a model may run: the two introspection tools
 #: the ``jaato-sdk`` skill names.  An allow-list, never "every jaato script".
 JAATO_TOOL_NAMES = ("jaato-doctor", "jaato-scaffold")
+
+#: Marker the tools' launcher reads (``jaato_tool_launch.TRUSTED_PYTHONPATH_ENV``
+#: in jaato-sdk; spelled out here because a runner may pair with an SDK that
+#: predates it, and then the variable is simply ignored).  Its value is the
+#: runner's own ``PYTHONPATH``: the entries the framework the session runs on
+#: imports from, and so the only ones a jaato tool keeps (#1643).
+TRUSTED_PYTHONPATH_ENV = "JAATO_TOOLS_TRUSTED_PYTHONPATH"
 
 #: Directory name under the session tmpdir.
 _TOOLS_DIRNAME = "jaato-tools"
@@ -138,8 +152,27 @@ def append_path_entry(env: MutableMapping[str, str], directory: str) -> None:
     env["PATH"] = f"{current}{os.pathsep}{directory}" if current else directory
 
 
+def stamp_trusted_pythonpath(env: MutableMapping[str, str]) -> None:
+    """Record the runner's own ``PYTHONPATH`` in ``env`` for the jaato tools.
+
+    Read from THIS process's ``os.environ``, never from ``env``: by the time
+    a caller stamps, ``env`` may already carry the workspace venv's
+    site-packages (``apply_venv_to_env``), which is exactly what the tools
+    must not trust.  Stamped even when empty -- an empty value means "keep
+    no ``PYTHONPATH`` entry", which is the common case (#1643).
+    """
+    env[TRUSTED_PYTHONPATH_ENV] = os.environ.get("PYTHONPATH", "")
+
+
 def apply_jaato_tools_to_env(env: MutableMapping[str, str]) -> None:
-    """Append the jaato tools directory to ``env['PATH']`` when there is one."""
+    """Expose the jaato tools in ``env``, when there are any to expose.
+
+    Appends their directory to ``env['PATH']`` and stamps
+    :data:`TRUSTED_PYTHONPATH_ENV` (:func:`stamp_trusted_pythonpath`), so a
+    tool started from this environment imports the framework the runner
+    runs on, not a ``jaato-sdk`` the model installed in the workspace venv.
+    """
     directory = jaato_tools_dir()
     if directory:
         append_path_entry(env, directory)
+        stamp_trusted_pythonpath(env)

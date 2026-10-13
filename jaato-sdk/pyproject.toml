@@ -31,14 +31,18 @@ Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 [project.scripts]
 # Client-side preflight doctor — diagnoses an SDK client's env / socket /
 # daemon / auth before it ever calls connect().
-jaato-doctor = "jaato_sdk.doctor:main"
+# Both tools start in `jaato_tool_launch` (a top-level module, #1643), which
+# drops the PYTHONPATH entries a session did not inherit from its runner
+# before jaato_sdk is imported, so a workspace venv holding another jaato-sdk
+# cannot make the daemon's own tool describe a different framework.
+jaato-doctor = "jaato_tool_launch:doctor"
 # The ONE declaration of jaato-scaffold (#1267).  The shell and the authoring
 # verbs (`new`, `integration`) ship here, because application developers
 # install only the SDK.  jaato-server contributes `explain` / `validate` /
 # `dependencies` / `releases` through the `jaato.scaffold_verbs` entry-point
 # group in its own pyproject; it must never declare this script too, or two
 # distributions would fight over one file in bin/.
-jaato-scaffold = "jaato_sdk.scaffold.cli:main"
+jaato-scaffold = "jaato_tool_launch:scaffold"
 
 [project.optional-dependencies]
 dev = [
@@ -50,6 +54,11 @@ dev = [
 ws = [
     "websockets>=12.0",
 ]
+
+[tool.setuptools]
+# The console-script launcher (#1643): top-level so a shadowing jaato_sdk's
+# __init__ is never imported before it runs.
+py-modules = ["jaato_tool_launch"]
 
 [tool.setuptools.packages.find]
 where = ["."]

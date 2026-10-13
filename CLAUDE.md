@@ -12839,9 +12839,32 @@ starts and stops the daemon) and `jaato` (the TUI) are excluded.
 path. The targets are `{venv_path}/bin/*`, which the runner profile already
 grants `ix`, while the tmpdir is `rw` without exec, so a wrapper script there
 would be refused. The directory is rebuilt if the session tmpdir is reaped.
-**Known limitation:** a symlink cannot reset the environment, so a tool started
-this way sees the workspace venv's site-packages on `PYTHONPATH`, and a
-conflicting package installed there could shadow one of jaato's dependencies.
+**A symlink cannot reset the environment, so the tools reset it themselves
+(#1643).** A tool started this way inherits the subprocess `PYTHONPATH`, and
+`apply_venv_to_env` puts the workspace venv's site-packages first. An agent
+writing a cascade driver installs `jaato-sdk` there, and from then on the
+daemon's own `jaato-scaffold` imported the WORKSPACE's `jaato_sdk`: `explain`
+exited 0 with three plugins missing (`template`, `references`,
+`multimodal`), the cause on stderr only.
+
+| Piece | Where |
+|---|---|
+| wherever the tools dir is put on a `PATH` (cli, interactive_shell, the notebook kernel), the env also gets `JAATO_TOOLS_TRUSTED_PYTHONPATH` = the RUNNER's own `PYTHONPATH`, read from `os.environ`, never from the env being built | `jaato_tools_path.stamp_trusted_pythonpath` |
+| both console scripts start in `jaato_tool_launch` (a top-level module of jaato-sdk), whose `isolate()` drops every `PYTHONPATH` entry the marker does not name from `sys.path`, and narrows `PYTHONPATH` the same way for the tool's children, BEFORE `jaato_sdk` is imported | `jaato-sdk/jaato_tool_launch.py` |
+
+Top-level because the console script imports it first: `from jaato_sdk...`
+would already have run the shadow's `__init__`. An older shadow does not ship
+the module; a newer one ships the same rule. The same drop keeps an older
+`pydantic` in the workspace venv from shadowing jaato's own. No marker means
+the launch is not a session's, and a `PYTHONPATH` is honoured as before (a
+developer's checkout, which `jaato-doctor`'s client-side checks exist to
+diagnose). The interpreter's own library directories are never dropped. Not
+a security boundary: the model can unset the marker or run
+`python -m jaato_sdk.scaffold.cli`. No AppArmor change: the exec target is
+still `{venv_path}/bin/<tool>`. Not done: a tool exiting non-zero when a
+plugin fails to load (a load failure can also be a missing optional extra).
+Guard: `jaato_server/shared/tests/test_jaato_tools_ignore_the_workspace_sdk_1643.py`,
+five reversions.
 
 **The tool-venv imports nothing of the daemon's but pip (#1322).** The venv is
 created `--without-pip`, so a `.pth` in it makes the runner's `pip` importable

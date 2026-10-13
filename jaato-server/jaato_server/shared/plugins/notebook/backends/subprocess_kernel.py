@@ -42,7 +42,9 @@ from ...workspace_venv import (
     kernel_import_dirs,
 )
 from ...workspace_home import resolve_home_path, apply_home_to_env
-from ...jaato_tools_path import append_path_entry, jaato_tools_dir
+from ...jaato_tools_path import (
+    append_path_entry, jaato_tools_dir, stamp_trusted_pythonpath,
+)
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
 from jaato_server.shared.lsm_label import (
@@ -927,6 +929,7 @@ class SubprocessKernelBackend(NotebookBackend):
             if kernel_env is None:
                 kernel_env = os.environ.copy()
             append_path_entry(kernel_env, tools_dir)
+            stamp_trusted_pythonpath(kernel_env)
 
         r2k_r, r2k_w = os.pipe()   # runner → kernel
         k2r_r, k2r_w = os.pipe()   # kernel → runner
