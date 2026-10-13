@@ -94,10 +94,15 @@ def _make_install(root, dist: str, pkg: str, version: str):
 
 
 def _daemon(env):
-    """A listening daemon whose environ is ``env`` and whose exe is ours."""
+    """A listening daemon whose environ is ``env``, in OUR environment.
+
+    ``prefix`` is set beside ``executable`` since #1610: an interpreter binary
+    in common is not an environment in common, and a daemon whose environment
+    is unknown is reported as "cannot tell", never compared.
+    """
     return D.DaemonInfo(socket_path="/tmp/x.sock", socket_exists=True,
                         listening=True, pid=1234, pid_alive=True,
-                        env=env, executable=sys.executable)
+                        env=env, executable=sys.executable, prefix=sys.prefix)
 
 
 @pytest.fixture
@@ -299,6 +304,7 @@ def test_every_probe_survives_a_hostile_filesystem(tmp_path):
     assert D._is_working_tree(missing) is False
     assert D._resolve_package_on(["", "\0bad", str(tmp_path)], "jaato_sdk") is None
     assert D._proc_exe(-1) is None
+    assert D._proc_argv0(-1) is None
 
 
 def _version(pkgdir):
