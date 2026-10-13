@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
 from jaato_sdk.client.errors import (
+    MessageTooLarge,
     RequestRefused,
     SessionCreateFailed,
     SessionNotConfirmed,
@@ -54,6 +55,7 @@ from jaato_sdk.client._handler_registry import (
     _HandlerRegistry,
 )
 from jaato_sdk.path_boundary import require_absolute_path
+from jaato_sdk.ws_limits import MESSAGE_TOO_LARGE_ERROR_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +128,18 @@ from jaato_sdk.events import (
 # Message framing: 4-byte length prefix (big-endian) + JSON payload
 HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
+
+
+def _advertised_size(value: Any) -> Optional[int]:
+    """``server_info.max_message_size`` as a positive int, else ``None``.
+
+    Anything else -- absent, ``0``, a string, a bool -- is "not advertised":
+    a pre-send check built on a malformed number would refuse messages the
+    daemon accepts.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
 
 # Windows named pipe prefix (\\.\pipe\)
 WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\"
@@ -523,6 +537,16 @@ class IPCClient:
         self._drain_task: Optional[asyncio.Task] = None
         self._event_subscribers: list[asyncio.Queue] = []
         self._buffered_events: list[Event] = []
+        # Why the connection ended, when the transport knows a reason a
+        # waiter should be told (#1279: a message refused for its size).
+        # ``None`` = an ordinary end.  Set by ``_read_message``, read by
+        # every waiter through :meth:`_connection_lost`, reset by
+        # ``_handshake`` when a new connection opens.
+        self._close_cause: Optional[BaseException] = None
+        # ``server_info.max_message_size``: the largest message the daemon
+        # accepts, when it advertised one (a WebSocket daemon does; IPC
+        # does not).  Read by a transport's pre-send check.
+        self._server_max_message_size: Optional[int] = None
 
     def _get_pipe_path(self) -> str:
         """Get the full Windows named pipe path."""
@@ -656,6 +680,64 @@ class IPCClient:
         on its own says nothing about wire compatibility.
         """
         return self._server_version
+
+    @property
+    def close_cause(self) -> Optional[BaseException]:
+        """Why the last connection ended, when the transport knows (#1279).
+
+        A :class:`~jaato_sdk.client.errors.MessageTooLarge` after a message
+        was refused for its size (close code 1009, or the IPC frame cap);
+        ``None`` for an ordinary close.  The same exception is raised to the
+        call that was waiting.
+        """
+        return self._close_cause
+
+    @property
+    def server_max_message_size(self) -> Optional[int]:
+        """``server_info.max_message_size``: what the daemon accepts, in bytes.
+
+        ``None`` when the daemon advertised none (IPC, or a WebSocket daemon
+        older than the advertisement).
+        """
+        return self._server_max_message_size
+
+    def _connection_lost(self, message: str) -> BaseException:
+        """The exception for a waiter whose connection closed under it.
+
+        The transport's recorded cause when it has one -- a
+        :class:`MessageTooLarge` tells the caller that retrying will refuse
+        the same message again -- else a plain ``ConnectionError(message)``.
+        """
+        if self._close_cause is not None:
+            return self._close_cause
+        return ConnectionError(message)
+
+    def _announce_close_cause(self) -> None:
+        """Put the recorded close cause on the event stream, once.
+
+        Event-driven waiters -- the facade's ``ask`` / ``stream`` /
+        ``complete``, a recovery client's subscribers, a driver awaiting a
+        ``SESSION_LIST`` -- see events, not exceptions.  A connection that
+        ended on a refused message used to end their stream with nothing in
+        it, and they waited out their timeout (#1586).  The event is
+        client-originated (the daemon never sends this ``error_type``) and
+        carries the cause's fields in ``details``.  Called by the drain loop
+        just before it wakes waiters with the end-of-stream sentinel.
+        """
+        cause = self._close_cause
+        if not isinstance(cause, MessageTooLarge):
+            return
+        event = ErrorEvent(
+            error=str(cause),
+            error_type=MESSAGE_TOO_LARGE_ERROR_TYPE,
+            recoverable=True,
+            details=cause.details(),
+        )
+        self._dispatch(event)
+        for q in list(self._event_subscribers):
+            q.put_nowait(event)
+        if not self._event_subscribers:
+            self._buffered_events.append(event)
 
     @property
     def server_protocol_version(self) -> Optional[str]:
@@ -901,6 +983,7 @@ class IPCClient:
         swap the transport (see ``WSClient``) reuse this verbatim — only the
         ``_read_message`` / ``_write_message`` / connection setup differ.
         """
+        self._close_cause = None
         # Wait for connected event
         try:
             message = await self._read_message()
@@ -910,6 +993,8 @@ class IPCClient:
                     self._client_id = event.server_info.get("client_id")
                     self._server_version = event.server_info.get("server_version")
                     self._server_protocol_version = event.protocol_version
+                    self._server_max_message_size = _advertised_size(
+                        event.server_info.get("max_message_size"))
 
                     # Wire-protocol compat gate.  Refuse to keep the
                     # connection alive when the server's protocol
@@ -1030,9 +1115,11 @@ class IPCClient:
                     break
 
                 if message is None:
-                    # Clean close from server side
+                    # Clean close from server side -- or a refused message,
+                    # whose cause the waiters are told before the sentinel.
                     logger.debug("_drain_loop: connection closed")
                     self._connected = False
+                    self._announce_close_cause()
                     break
 
                 try:
@@ -1477,7 +1564,15 @@ class IPCClient:
 
             length = struct.unpack(">I", header)[0]
             if length > MAX_MESSAGE_SIZE:
-                raise ValueError(f"Message too large: {length}")
+                # The frame cannot be skipped (the stream is now mid-frame),
+                # so the connection ends -- but with its reason recorded,
+                # the same named error the WebSocket transport gives (#1279).
+                self._close_cause = MessageTooLarge(
+                    f"the daemon sent a {length}-byte message, over this "
+                    f"client's {MAX_MESSAGE_SIZE}-byte IPC frame limit",
+                    direction="inbound", limit=MAX_MESSAGE_SIZE, size=length)
+                logger.warning("IPC: %s", self._close_cause)
+                return None
 
             # Read payload
             payload = await self._reader.readexactly(length)
@@ -1532,6 +1627,10 @@ class IPCClient:
         try:
             await self._write_message(serialize_event(event))
             return True
+        except MessageTooLarge:
+            # Refused BEFORE anything was written (#1279): the connection is
+            # intact and the caller, not a log line, must learn why.
+            raise
         except ConnectionError as e:
             # Log and swallow the error to avoid unhandled exceptions in
             # background tasks (stop()/other commands may be called when
@@ -2958,7 +3057,7 @@ class IPCClient:
             if incidental and not self._event_subscribers:
                 self._buffered_events.extend(incidental)
         if answer is None:
-            raise ConnectionError(
+            raise self._connection_lost(
                 f"{method}: the connection closed before the daemon answered")
         if isinstance(answer, ErrorEvent):
             # A correlated refusal (#1475): the daemon refused the request
@@ -3135,7 +3234,7 @@ class IPCClient:
             if incidental and not self._event_subscribers:
                 self._buffered_events.extend(incidental)
         if answer is None:
-            raise ConnectionError(
+            raise self._connection_lost(
                 "get_diagnostics: the connection closed before the "
                 "daemon answered")
         return answer  # type: ignore[return-value]

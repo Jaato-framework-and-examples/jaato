@@ -50,6 +50,7 @@ from __future__ import annotations
 from typing import Optional
 
 __all__ = [
+    "MessageTooLarge",
     "RequestRefused",
     "SessionCreateFailed",
     "SessionNotSent",
@@ -207,3 +208,62 @@ class RequestRefused(RuntimeError):
         self.details = dict(details or {})
         self.category = str(self.details.get("category") or "")
         super().__init__(f"{method}: refused by the daemon: {error}")
+
+
+class MessageTooLarge(ConnectionError):
+    """A WebSocket message was refused for its size (close code 1009) (#1279).
+
+    Subclasses the BUILTIN ``ConnectionError`` because that is what it is to
+    every existing handler: the connection that carried the message is gone
+    (or, for a refusal made before sending, would have been).  What it adds is
+    the reason, so a caller can tell "a frame was too big" -- which retrying
+    will reproduce -- from a network blip, which retrying fixes.
+
+    Raised to the call that was waiting when the connection ended on a 1009
+    (a correlated request, the facade's ``ask`` / ``stream`` / ``complete``),
+    and by a send whose message is larger than the daemon advertised it
+    accepts (``server_info.max_message_size``), BEFORE anything is written --
+    so the connection survives that one.
+
+    Attributes:
+        direction: ``"inbound"`` -- this client refused a message the daemon
+            sent (raise ``max_message_size=`` on the client); ``"outbound"``
+            -- the daemon refused, or would refuse, a message this client
+            sent (raise ``--ws-max-message-size`` on the daemon, or send
+            less).
+        limit: The ceiling that refused it, in bytes, when known.
+        size: The message's size in bytes, when known (a pre-send refusal
+            knows it; a 1009 from the other end does not say).
+        close_code: 1009 when a close frame carried it, else ``None`` (a
+            refusal made before sending, or by the IPC framing).
+        reason: The close frame's reason, verbatim, when there was one.
+    """
+
+    def __init__(self, message: str, *, direction: str,
+                 limit: Optional[int] = None, size: Optional[int] = None,
+                 close_code: Optional[int] = None, reason: str = "") -> None:
+        super().__init__(message)
+        self.direction = direction
+        self.limit = limit
+        self.size = size
+        self.close_code = close_code
+        self.reason = reason
+
+    def details(self) -> dict:
+        """The machine-readable fields, as an ``ErrorEvent.details`` dict."""
+        return {
+            "direction": self.direction,
+            "limit": self.limit,
+            "size": self.size,
+            "close_code": self.close_code,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_details(cls, message: str, details: Optional[dict]) -> "MessageTooLarge":
+        """Rebuild from :meth:`details` (the event a waiter was woken by)."""
+        d = dict(details or {})
+        return cls(message, direction=str(d.get("direction") or "inbound"),
+                   limit=d.get("limit"), size=d.get("size"),
+                   close_code=d.get("close_code"),
+                   reason=str(d.get("reason") or ""))

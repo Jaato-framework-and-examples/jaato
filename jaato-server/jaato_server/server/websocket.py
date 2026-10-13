@@ -56,6 +56,11 @@ from .session_logging import set_logging_context, clear_logging_context
 from .transfer_limits import STAGE_PER_FILE_LIMIT, STAGE_TOTAL_LIMIT
 from .contained_write import PathLeavesRoot, write_contained
 from jaato_server.shared.workspace_ownership import inherit_owner_tree
+from jaato_sdk.ws_limits import (
+    DEFAULT_WS_MAX_MESSAGE_SIZE as _SDK_DEFAULT_WS_MAX_MESSAGE_SIZE,
+    LEGACY_WS_MAX_MESSAGE_SIZE as _SDK_LEGACY_WS_MAX_MESSAGE_SIZE,
+    close_frame_of,
+)
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -353,8 +358,11 @@ DEFAULT_STAGE_TOTAL_LIMIT    = STAGE_TOTAL_LIMIT
 #: ``--ws-max-message-size`` overrides it; the effective value is
 #: advertised to clients in ``ConnectedEvent.server_info`` as
 #: ``max_message_size`` so a client can refuse a file BEFORE sending it.
+#: The value itself lives in :mod:`jaato_sdk.ws_limits` since #1279: the SDK
+#: client passes the same number as its receive ``max_size``, and two copies
+#: of one ceiling are how the client sat at 1 MiB while this was 16 MiB.
 WS_MESSAGE_ENVELOPE_HEADROOM = 1024 * 1024
-DEFAULT_WS_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
+DEFAULT_WS_MAX_MESSAGE_SIZE = _SDK_DEFAULT_WS_MAX_MESSAGE_SIZE
 
 #: The value ``websockets`` applies when none is passed, and so the limit
 #: every daemon before ``max_message_size`` was advertised enforced.  A
@@ -362,7 +370,7 @@ DEFAULT_WS_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
 #: to such a daemon and should assume this.  Also the floor the
 #: ``--ws-max-message-size`` flag accepts: going below it would refuse
 #: messages every existing client already sends.
-LEGACY_WS_MAX_MESSAGE_SIZE = 1024 * 1024
+LEGACY_WS_MAX_MESSAGE_SIZE = _SDK_LEGACY_WS_MAX_MESSAGE_SIZE
 
 #: WebSocket close codes that are an ordinary end of a connection: a
 #: normal close (1000), a peer going away (1001, a browser tab closing),
@@ -377,22 +385,43 @@ def describe_connection_close(exc: BaseException) -> "tuple[Optional[int], str]"
     """Return ``(code, text)`` for a ``ConnectionClosed``.
 
     ``code`` is the close code this server SENT when it initiated the
-    close (the case that matters: a 1009 is the daemon refusing a
-    message), else the one it received, else ``None`` when neither side
-    sent a close frame.  ``text`` is a one-line rendering for a log line.
-    Tolerates objects without ``sent``/``rcvd`` so a future
-    ``websockets`` that reshapes the exception degrades to "unknown"
-    rather than raising inside the connection handler's ``except``.
+    close, else the one the peer initiated it with, else ``None`` when
+    neither side sent a close frame.  ``text`` is a one-line rendering for a
+    log line.
+
+    "Initiated" rather than "sent" (#1586): the end that receives a close
+    echoes it, so when a CLIENT refused a daemon message with 1009 this
+    side also "sent close 1009", and preferring ``sent`` blamed the daemon's
+    limit for the client's.  :func:`jaato_sdk.ws_limits.close_frame_of`
+    reads ``rcvd_then_sent`` to tell the two apart.  Tolerates objects
+    without the attributes, so a future ``websockets`` that reshapes the
+    exception degrades to "unknown" rather than raising inside the
+    connection handler's ``except``.
     """
-    sent = getattr(exc, "sent", None)
-    rcvd = getattr(exc, "rcvd", None)
-    frame = sent if sent is not None else rcvd
+    frame, initiator = close_frame_of(exc)
     if frame is None:
         return None, "no close frame (connection dropped)"
     code = getattr(frame, "code", None)
     reason = getattr(frame, "reason", "") or ""
-    side = "sent" if frame is sent else "received"
+    side = "sent" if initiator == "self" else "received"
     return code, f"{side} close {code}" + (f" ({reason})" if reason else "")
+
+
+def _close_1009_hint(code: Optional[int], text: str, limit: int) -> str:
+    """The log hint for a 1009 close: WHOSE limit refused the message.
+
+    A close this daemon received (``text`` starts ``received``) is the
+    CLIENT refusing a message the daemon sent -- the client's receive limit,
+    not ``--ws-max-message-size``, is what to raise (#1586).
+    """
+    if code != 1009:
+        return ""
+    if text.startswith("received"):
+        return (" -- the CLIENT refused a message this daemon sent as over its "
+                "own limit; raise the client's max_message_size (jaato-sdk "
+                "WSClient(max_message_size=...))")
+    return (f" -- a message exceeded max_message_size "
+            f"({limit} bytes; --ws-max-message-size)")
 
 
 def parse_ws_max_message_size(value: str) -> int:
@@ -2540,11 +2569,7 @@ class JaatoWSServer:
         if code is None or code in _ORDINARY_CLOSE_CODES:
             logger.debug(f"Client {client_id} connection closed: {text}")
             return
-        hint = (
-            f" -- a message exceeded max_message_size "
-            f"({self._max_message_size} bytes; --ws-max-message-size)"
-            if code == 1009 else ""
-        )
+        hint = _close_1009_hint(code, text, self._max_message_size)
         logger.warning(f"Client {client_id} connection closed abnormally: {text}{hint}")
 
     async def _dispatch_client_message(self, client_id: str, message: str) -> None:

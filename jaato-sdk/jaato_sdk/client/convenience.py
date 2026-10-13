@@ -58,6 +58,8 @@ from typing import (Any, AsyncIterator, Callable, Collection, Dict,
                     Optional)
 
 from ..events import ClientType, EventType
+from ..ws_limits import MESSAGE_TOO_LARGE_ERROR_TYPE
+from .errors import MessageTooLarge
 
 
 #: Seconds ``Session.complete`` will wait for the ``AGENT_STATUS_CHANGED`` that
@@ -373,7 +375,12 @@ class _TurnWatch:
             self._settle(ev)
 
     def on_error(self, ev: Any) -> None:
-        """``ErrorEvent``: fail fast when it says this session is not there.
+        """``ErrorEvent``: fail fast when it says this session is not there,
+        or when the connection ended on a message refused for its size.
+
+        The second is the client's own ``error_type="MessageTooLarge"`` event
+        (#1279), put on the stream when a 1009 closed the connection; it
+        settles every call, because the event the call waited for was lost.
 
         Narrow on purpose.  ``error_type == "SessionError"`` is the daemon's
         four "this request could not reach a session" replies and nothing
@@ -385,6 +392,15 @@ class _TurnWatch:
         accepted, because a daemon predating the stamp on this reply sends it
         unattributed and degrading to "wait forever" is the defect.
         """
+        if getattr(ev, "error_type", None) == MESSAGE_TOO_LARGE_ERROR_TYPE:
+            # The connection this call was waiting on ended on a refused
+            # message (#1279, #1586).  The client put this event on its own
+            # stream; the answer it was waiting for will never arrive.
+            self.box["too_large"] = MessageTooLarge.from_details(
+                getattr(ev, "error", "") or "message too large",
+                getattr(ev, "details", None))
+            self._finish()
+            return
         if getattr(ev, "error_type", None) != "SessionError":
             return
         sid = getattr(ev, "session_id", None)
@@ -560,6 +576,11 @@ class Session:
         # ``SessionEnded``, losing the ``error_type`` the caller branches on.
         if "error" in (box.get("reason"), box.get("end_reason")):
             raise AgentError(box.get("error_type"), box.get("error_summary"))
+        # The connection ended on a message refused for its size: whatever
+        # this call waited for was lost with it, and retrying the same call
+        # will refuse it again.  Every verb fails on this.
+        if box.get("too_large") is not None:
+            raise box["too_large"]
         # The daemon told us the session is not there.  Every verb fails on
         # this -- it is not a terminus anybody drove to, it is a request that
         # reached nothing.

@@ -24,18 +24,81 @@ parameter on the Upgrade URL (the browser-compatible form the server accepts;
 the server also accepts an ``Authorization: Bearer`` header). A bad token is
 closed by the server with WS code 1008 before any session work — surfaced here
 as a ``ConnectionError`` from the handshake.
+
+Message size (#1279, #1586): the client RECEIVES up to ``max_message_size``
+bytes per message, default :data:`~jaato_sdk.ws_limits.DEFAULT_WS_MAX_MESSAGE_SIZE`
+(16 MiB, the daemon's own default).  It used to pass no ``max_size`` and so
+kept ``websockets``' 1 MiB: a larger daemon message closed the connection with
+1009 and the waiting call timed out.  A connection that ends on a 1009 now
+records a :class:`~jaato_sdk.client.errors.MessageTooLarge`, raised to the
+waiting call and announced on the event stream; a message larger than the
+daemon advertises it accepts is refused before it is sent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Optional
 
 from jaato_sdk.events import ClientType
 
+from jaato_sdk.ws_limits import (
+    DEFAULT_WS_MAX_MESSAGE_SIZE,
+    MESSAGE_TOO_BIG_CLOSE_CODE,
+    close_frame_of,
+)
+
 from .config import RecoveryConfig
+from .errors import MessageTooLarge
 from .ipc import IPCClient
 from .recovery import IPCRecoveryClient, StatusCallback
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_max_message_size(value: Optional[int]) -> int:
+    """Validate ``max_message_size=``: ``None`` = the shared default.
+
+    A non-positive or non-integer value is refused at construction rather
+    than handed to ``websockets`` (where ``None`` means "no limit at all" and
+    ``0`` refuses every message) -- a typo must not silently change what the
+    client can receive.
+    """
+    if value is None:
+        return DEFAULT_WS_MAX_MESSAGE_SIZE
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"max_message_size must be a positive number of bytes, got {value!r}")
+    return value
+
+
+def _too_large_from_close(exc: BaseException, limit: int,
+                          advertised: Optional[int]) -> Optional[MessageTooLarge]:
+    """The :class:`MessageTooLarge` a 1009 close means, else ``None``.
+
+    Who STARTED the close decides the direction: this client refusing an
+    inbound message, or the daemon refusing one this client sent.  The
+    other end echoes the code, so both frames read 1009 either way.
+    """
+    frame, initiator = close_frame_of(exc)
+    if frame is None or getattr(frame, "code", None) != MESSAGE_TOO_BIG_CLOSE_CODE:
+        return None
+    reason = getattr(frame, "reason", "") or ""
+    if initiator == "self":
+        return MessageTooLarge(
+            f"the daemon sent a message larger than this client's "
+            f"{limit}-byte limit (1009: {reason}); raise max_message_size= "
+            f"on the client to match the daemon's --ws-max-message-size",
+            direction="inbound", limit=limit,
+            close_code=MESSAGE_TOO_BIG_CLOSE_CODE, reason=reason)
+    return MessageTooLarge(
+        f"the daemon refused a message this client sent as too large "
+        f"(1009: {reason}); its limit is "
+        f"{advertised if advertised else 'not advertised'} bytes "
+        f"(--ws-max-message-size)",
+        direction="outbound", limit=advertised,
+        close_code=MESSAGE_TOO_BIG_CLOSE_CODE, reason=reason)
 
 
 def _ws_module() -> Any:
@@ -77,6 +140,7 @@ class WSClient(IPCClient):
         ssl: Any = None,
         ca: Optional[str] = None,
         presentation: Optional[Any] = None,
+        max_message_size: Optional[int] = None,
     ) -> None:
         super().__init__(
             socket_path="",  # unused — a WebSocket has no socket file / pipe
@@ -90,6 +154,13 @@ class WSClient(IPCClient):
         )
         self._url = url
         self._token = token
+        # The largest message this client RECEIVES, in bytes (#1279).  Fixed
+        # at ``websockets.connect`` time -- the daemon's advertised limit
+        # arrives only in the ConnectedEvent that connection carries, too
+        # late to configure it -- so the default is the daemon's own default
+        # rather than ``websockets``' 1 MiB.  A deployment that raised
+        # ``--ws-max-message-size`` raises this to match.
+        self._max_message_size = _resolve_max_message_size(max_message_size)
         # TLS for wss://. ``ssl`` is passed straight to ``websockets.connect``
         # (an ``ssl.SSLContext``, or ``True``/``False``); ``ca`` is a
         # convenience — a CA-bundle path we load into a default context (the
@@ -123,6 +194,7 @@ class WSClient(IPCClient):
         ssl: Any = None,
         ca: Optional[str] = None,
         presentation: Optional[Any] = None,
+        max_message_size: Optional[int] = None,
         **_ignored: Any,
     ) -> Any:
         """Async context manager that connects + creates a session over a
@@ -142,6 +214,8 @@ class WSClient(IPCClient):
         ``session_timeout`` bounds the wait for the ``session.new``
         confirmation (unset = ``create_session``'s own 60s); it is distinct
         from ``connect_timeout``.  See :func:`~.convenience.open_session`.
+        ``max_message_size`` is the client's receive ceiling (see the
+        constructor).
         """
         from .convenience import _SessionContext, facade_create_kwargs
 
@@ -156,6 +230,7 @@ class WSClient(IPCClient):
             ssl=ssl,
             ca=ca,
             presentation=presentation,
+            max_message_size=max_message_size,
         )
         # The shared builder, so a knob forwarded over IPC is forwarded here
         # too -- ``**_ignored`` above would otherwise swallow it silently.
@@ -173,6 +248,20 @@ class WSClient(IPCClient):
             connect_timeout,
             client_tools=client_tools,
         )
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the WebSocket is open.
+
+        The inherited property tests the IPC ``_writer``, which a WebSocket
+        client never has, so it read ``False`` on every live WS connection.
+        """
+        return self._connected and self._ws is not None
+
+    @property
+    def max_message_size(self) -> int:
+        """The largest message this client receives, in bytes (#1279)."""
+        return self._max_message_size
 
     # ---- transport overrides (the only IPC-vs-WS difference) ----
 
@@ -199,7 +288,7 @@ class WSClient(IPCClient):
         if self._token:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}token={self._token}"
-        connect_kwargs: dict = {}
+        connect_kwargs: dict = {"max_size": self._max_message_size}
         ssl_arg = self._resolve_ssl()
         if ssl_arg is not None:
             connect_kwargs["ssl"] = ssl_arg
@@ -217,7 +306,25 @@ class WSClient(IPCClient):
         self._connected = True
         # The shared handshake reads the ConnectedEvent, gates protocol compat,
         # sends workspace + client config, and starts the drain reader.
-        return await self._handshake()
+        ok = await self._handshake()
+        self._warn_if_daemon_sends_more()
+        return ok
+
+    def _warn_if_daemon_sends_more(self) -> None:
+        """Say so when the daemon accepts more than this client receives.
+
+        The daemon's ceiling governs both directions on its side, so a
+        daemon that accepts 64 MiB may also SEND that much, and this client
+        would refuse it with 1009.  The limit cannot be raised on a live
+        connection, so this is a WARNING naming the knob, once per connect.
+        """
+        advertised = self._server_max_message_size
+        if advertised and advertised > self._max_message_size:
+            logger.warning(
+                "WSClient: the daemon accepts messages up to %d bytes but this "
+                "client receives at most %d; a larger daemon message will close "
+                "the connection with 1009.  Pass max_message_size=%d to match.",
+                advertised, self._max_message_size, advertised)
 
     async def _read_message(self) -> Optional[str]:
         """Read one WebSocket frame (already delimited — no length prefix).
@@ -229,18 +336,37 @@ class WSClient(IPCClient):
             return None
         try:
             msg = await self._ws.recv()
-        except Exception:
+        except Exception as exc:
             # ConnectionClosed (normal/abnormal) or any recv error -> the stream
-            # has ended; signal end-of-stream like the IPC transport does.
+            # has ended; signal end-of-stream like the IPC transport does.  A
+            # 1009 is recorded first, so the waiter is told WHY (#1279).
+            cause = _too_large_from_close(
+                exc, self._max_message_size, self._server_max_message_size)
+            if cause is not None:
+                logger.warning("WSClient: connection closed: %s", cause)
+                self._close_cause = cause
             return None
         if isinstance(msg, (bytes, bytearray)):
             return msg.decode("utf-8")
         return msg
 
     async def _write_message(self, message: str) -> None:
-        """Send one WebSocket text frame (no length prefix)."""
+        """Send one WebSocket text frame (no length prefix).
+
+        Raises :class:`MessageTooLarge` BEFORE sending a message larger than
+        the daemon advertised it accepts: sent, it would be answered with a
+        1009 that ends the connection and loses everything in flight on it.
+        """
         if self._ws is None:
             raise ConnectionError("Not connected")
+        limit = self._server_max_message_size
+        if limit:
+            size = len(message.encode("utf-8"))
+            if size > limit:
+                raise MessageTooLarge(
+                    f"this message is {size} bytes and the daemon accepts at "
+                    f"most {limit} (--ws-max-message-size); it was not sent",
+                    direction="outbound", limit=limit, size=size)
         try:
             await self._ws.send(message)
         except Exception as exc:
@@ -288,6 +414,7 @@ class WSRecoveryClient(IPCRecoveryClient):
         ssl: Any = None,
         ca: Optional[str] = None,
         presentation: Optional[Any] = None,
+        max_message_size: Optional[int] = None,
     ) -> None:
         super().__init__(
             socket_path="",  # unused — a WebSocket has no socket file / pipe
@@ -305,6 +432,9 @@ class WSRecoveryClient(IPCRecoveryClient):
         self._config_root = config_root
         self._ssl = ssl
         self._ca = ca
+        # Validated now, so a bad value fails at construction rather than on
+        # the first (re)connect; every inner client is built with it.
+        self._max_message_size = _resolve_max_message_size(max_message_size)
 
     def _make_client(self, *, auto_start: bool) -> IPCClient:
         """Build the inner :class:`WSClient`. ``auto_start`` is meaningless for
@@ -322,6 +452,7 @@ class WSRecoveryClient(IPCRecoveryClient):
             ssl=self._ssl,
             ca=self._ca,
             presentation=self._presentation,
+            max_message_size=self._max_message_size,
         )
 
     @classmethod
@@ -347,6 +478,7 @@ class WSRecoveryClient(IPCRecoveryClient):
         ssl: Any = None,
         ca: Optional[str] = None,
         presentation: Optional[Any] = None,
+        max_message_size: Optional[int] = None,
         **_ignored: Any,
     ) -> Any:
         """Auto-reconnect WS analog of :meth:`IPCRecoveryClient.session`: the
@@ -377,6 +509,7 @@ class WSRecoveryClient(IPCRecoveryClient):
             ssl=ssl,
             ca=ca,
             presentation=presentation,
+            max_message_size=max_message_size,
         )
         # Same shared builder as WSClient.session -- ``**_ignored`` would
         # otherwise swallow a forwarded knob here too.
