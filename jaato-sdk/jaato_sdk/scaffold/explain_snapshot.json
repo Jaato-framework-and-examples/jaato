@@ -18111,7 +18111,7 @@
          "type": "object"
         },
         "insecure": {
-         "description": "Skip SSL certificate verification for this request. Only use after the user explicitly confirms they trust the service. When used with a named service, marks the service as trusted for future requests.",
+         "description": "Skip SSL certificate verification for this request. Only use after the user explicitly confirms they trust the service. When used with a named service, marks the service as trusted for future requests. Refused for a service whose definition names a ca_file.",
          "type": "boolean"
         },
         "method": {

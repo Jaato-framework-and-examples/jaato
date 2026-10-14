@@ -359,6 +359,13 @@ class ServiceConfig:
             configured proxy for this service (e.g., because the service is
             on a local network or the proxy blocks it). When True, requests
             to this service connect directly. Defaults to False (use proxy).
+        ca_file: Optional PEM bundle this service's TLS is verified against,
+            ALONE (#1671).  Kept as written in the definition; resolved by
+            ``ca_bundle.resolve_ca_file`` against ``source_dir``.  When set,
+            it outranks ``ssl_trusted``.
+        source_dir: Directory the definition was read from, set by the schema
+            store on load so a relative ``ca_file`` resolves beside its
+            ``_service.yaml``.  Not serialized.
     """
     name: str
     base_url: str
@@ -370,6 +377,8 @@ class ServiceConfig:
     timeout: int = 30000
     ssl_trusted: bool = False
     proxy_bypass: bool = False
+    ca_file: Optional[str] = None
+    source_dir: Optional[str] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServiceConfig":
@@ -389,6 +398,7 @@ class ServiceConfig:
             timeout=data.get("timeout", 30000),
             ssl_trusted=data.get("ssl_trusted", False),
             proxy_bypass=data.get("proxy_bypass", False),
+            ca_file=data.get("ca_file"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -414,6 +424,8 @@ class ServiceConfig:
             result["ssl_trusted"] = True
         if self.proxy_bypass:
             result["proxy_bypass"] = True
+        if self.ca_file:
+            result["ca_file"] = self.ca_file
 
         return result
 

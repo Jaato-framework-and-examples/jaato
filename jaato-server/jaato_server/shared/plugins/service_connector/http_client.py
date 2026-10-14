@@ -90,6 +90,25 @@ def _build_curl_command(
     return " \\\n  ".join(parts)
 
 
+def _httpx_verify(verify_ssl: bool, ca_file: Optional[str]) -> Any:
+    """The ``verify=`` an ``httpx.Client`` gets.
+
+    A per-service bundle becomes an SSL context that trusts that bundle
+    alone (#1671); httpx deprecates a bare path string there.
+    """
+    if verify_ssl and ca_file:
+        from pathlib import Path
+        from .ca_bundle import ssl_context_for
+        return ssl_context_for(Path(ca_file))
+    return verify_ssl
+
+
+def _requests_verify(verify_ssl: bool, ca_file: Optional[str]) -> Any:
+    """The ``verify=`` the requests fallback gets: the bundle's path,
+    which requests uses alone, else the plain switch."""
+    return ca_file if (verify_ssl and ca_file) else verify_ssl
+
+
 class ServiceHttpClient:
     """HTTP client for making service requests.
 
@@ -296,6 +315,7 @@ class ServiceHttpClient:
         verify_ssl: bool = True,
         use_proxy: bool = True,
         raw_bytes: bool = False,
+        ca_file: Optional[str] = None,
     ) -> HttpResponse:
         """Execute an HTTP request.
 
@@ -319,6 +339,9 @@ class ServiceHttpClient:
             use_proxy: Whether to use the configured proxy. Defaults to True.
                 Set to False for services that should connect directly,
                 bypassing any configured HTTP/HTTPS proxy.
+            ca_file: Absolute path of a PEM bundle to verify TLS against,
+                ALONE (#1671).  Only consulted when ``verify_ssl`` is True;
+                the caller resolves and checks it (``ca_bundle``).
 
         Returns:
             HttpResponse with status, headers, body, etc.
@@ -408,7 +431,7 @@ class ServiceHttpClient:
                     headers=request_headers,
                     data=body_str,
                     timeout=timeout_sec,
-                    verify=verify_ssl,
+                    verify=_requests_verify(verify_ssl, ca_file),
                     allow_redirects=True,
                     **proxy_kwargs
                 )
@@ -449,7 +472,8 @@ class ServiceHttpClient:
                 # change per RFC 9110.  GitHub's tarball endpoint redirects
                 # to codeload.github.com which rejects api.github.com tokens.
                 with httpx.Client(
-                    timeout=timeout_sec, verify=verify_ssl,
+                    timeout=timeout_sec,
+                    verify=_httpx_verify(verify_ssl, ca_file),
                     follow_redirects=False, **proxy_kwargs
                 ) as client:
                     response = client.request(

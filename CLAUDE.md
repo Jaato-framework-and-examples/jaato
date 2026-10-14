@@ -13332,6 +13332,50 @@ property reaches the page as `undefined`. See
 
 Requires Chrome/Edge 149+ (origin trial), or `chrome://flags/#enable-webmcp-testing`.
 
+### A Private Root Trusted for One Service (#1671)
+
+`call_service` could reach a host whose certificate chains to a private
+root only by turning verification off (`ssl_trusted`, `insecure=true`) or
+by trusting the root for the whole daemon (`SSL_CERT_FILE` /
+`REQUESTS_CA_BUNDLE`, host-scoped by design, or the system store, which
+every process on the host reads). A service definition now names its own
+bundle:
+
+```yaml
+# .jaato/services/lda-wiki/_service.yaml
+name: lda-wiki
+base_url: https://wiki.lda
+ca_file: lda-root.pem        # beside this file
+```
+
+| Piece | Where |
+|---|---|
+| the rules: resolution (`~` expanded, a relative path against the definition's directory, `${VAR}` not expanded), the context (`ssl.create_default_context(cafile=)`, which loads no system store), the confinement check | `service_connector/ca_bundle.py` (`CA_FILE_RULES`, rendered by `explain services`) |
+| `ServiceConfig.ca_file` (serialized as written) and `source_dir` (set by the schema store on load, not serialized); a relative bundle is pinned absolute when a definition is saved into another tier | `types.py`, `schema_store.py` |
+| `call_service` verifies against the bundle alone: httpx gets the context, the requests fallback the path | `ServiceConnectorPlugin._service_ca_file`, `http_client._httpx_verify` |
+| `services show <name>`, `explain services` (the rules, and each known service's resolved bundle) | `plugin.py`, `scaffold/explain.py` |
+| `validate`: `service_ca_file_invalid` (**error**), `service_ca_file_unconfined` (warn: outside the workspace and `~/.jaato/services/`, which a confined runner cannot read), `service_ca_file_with_ssl_trusted` (warn), over both service tiers | `scaffold/validate.py::validate_services` |
+
+Rules:
+
+- **Never silently unverified.** A missing, unreadable or empty bundle
+  refuses the call naming the file, never falling back to the system store
+  or to no verification. With `ca_file` set, `insecure=true` is refused
+  (and nothing is persisted), `ssl_trusted` is ignored, and an `ssl_error`
+  names the bundle instead of suggesting `insecure=true`.
+- **Read in the runner, under its confinement.** No AppArmor rule is added:
+  the user tier's `~/.jaato/services/**` (this plugin's grant) and the
+  workspace (the template's) already cover a bundle kept beside
+  `_service.yaml`.
+- **Strict on Python 3.13+**, as for public hosts (`VERIFY_X509_STRICT`):
+  a private root needs `keyUsage keyCertSign` and the leaf an Authority Key
+  Identifier.
+
+`discover_service` (fetching a spec over TLS) does not read `ca_file`: a
+discovered service has no definition yet. Guard:
+`jaato_server/shared/tests/test_a_service_trusts_its_own_ca_1671.py`, four
+reversions, against a real HTTPS server signed by a CA minted in the test.
+
 ### Webhook Plugin (`jaato_server/shared/plugins/webhook/`)
 
 The webhook plugin provides an inbound HTTP listener for receiving external webhooks (GitHub, Slack, Jira, etc.) and delivering them to agent sessions via subscribe/poll tools. Enables long-running daemon sessions that react to external events.
