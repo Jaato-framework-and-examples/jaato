@@ -2535,6 +2535,49 @@ def agents(workspace: str = ".") -> Rendered:
 
 # ---------------------------------------------------------------- services
 
+def _service_ca_file_of(cfg: Path, discovered_dir: str) -> Optional[str]:
+    """The resolved ``ca_file`` a service definition names, or None (#1671)."""
+    import yaml
+    from jaato_server.shared.plugins.service_connector.ca_bundle import (
+        CABundleError, resolve_ca_file)
+    try:
+        doc = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    if cfg.parent.name == discovered_dir and isinstance(doc, dict):
+        doc = doc.get("config") or {}
+    raw = doc.get("ca_file") if isinstance(doc, dict) else None
+    if not raw:
+        return None
+    try:
+        return str(resolve_ca_file(str(raw), str(cfg.parent)))
+    except CABundleError as exc:
+        return f"{raw} ({exc})"
+
+
+def _known_services(tiers, discovered_dir: str, config_file: str) -> List[Dict[str, Any]]:
+    """Every service in the given tiers, discovered and defined, with its bundle."""
+    known: List[Dict[str, Any]] = []
+    for label, root in tiers:
+        if not root.is_dir():
+            continue
+        disc = root / discovered_dir
+        if disc.is_dir():
+            for f in sorted(disc.glob("*.y*ml")):
+                known.append({"tier": label, "service": f.stem,
+                              "kind": "discovered", "path": str(f),
+                              "ca_file": _service_ca_file_of(f, discovered_dir)})
+        for d in sorted(x for x in root.iterdir() if x.is_dir()):
+            if d.name == discovered_dir:
+                continue
+            cfg = d / config_file
+            known.append({"tier": label, "service": d.name,
+                          "kind": "defined", "path": str(d),
+                          "ca_file": (_service_ca_file_of(cfg, discovered_dir)
+                                      if cfg.is_file() else None)})
+    return known
+
+
 def services(workspace: str = ".") -> Rendered:
     """The ``service_connector`` managed-service flow, and where it stores things.
 
@@ -2546,30 +2589,20 @@ def services(workspace: str = ".") -> Rendered:
     """
     from jaato_server.shared.plugins.service_connector.schema_store import (
         DEFAULT_SERVICES_DIR, DISCOVERED_DIR, SERVICE_CONFIG_FILE)
+    from jaato_server.shared.plugins.service_connector.ca_bundle import (
+        CA_FILE_RULES)
 
     ws = Path(workspace).expanduser().resolve()
     tiers = [("workspace", ws / DEFAULT_SERVICES_DIR),
              ("user", Path.home() / DEFAULT_SERVICES_DIR)]
-    known: List[Dict[str, Any]] = []
-    for label, root in tiers:
-        if not root.is_dir():
-            continue
-        disc = root / DISCOVERED_DIR
-        if disc.is_dir():
-            for f in sorted(disc.glob("*.y*ml")):
-                known.append({"tier": label, "service": f.stem,
-                              "kind": "discovered", "path": str(f)})
-        for d in sorted(x for x in root.iterdir() if x.is_dir()):
-            if d.name == DISCOVERED_DIR:
-                continue
-            known.append({"tier": label, "service": d.name,
-                          "kind": "defined", "path": str(d)})
+    known = _known_services(tiers, DISCOVERED_DIR, SERVICE_CONFIG_FILE)
 
     data = {"tiers": [{"tier": t, "path": str(p), "exists": p.is_dir()}
                       for t, p in tiers],
             "writable_tier": "workspace",
             "discovered_dir": DISCOVERED_DIR,
             "service_config_file": SERVICE_CONFIG_FILE,
+            "ca_file_rules": list(CA_FILE_RULES),
             "known": known}
 
     lines = [
@@ -2620,11 +2653,20 @@ def services(workspace: str = ".") -> Rendered:
         "  Under confinement the user tier is granted READ only",
         "  (~/.jaato/services/**), so a service the workspace must WRITE belongs",
         "  in the workspace tier.  See `explain paths`.",
+        "",
+        "  A PRIVATE CA — trust a root for ONE service (#1671):",
+    ]
+    lines += [f"    {r}" for r in CA_FILE_RULES]
+    lines += [
+        "    Not SSL_CERT_FILE / REQUESTS_CA_BUNDLE: those are host-scoped, so",
+        "    every session of every tenant on the daemon would trust the root.",
     ]
     if known:
         lines += ["", f"  KNOWN HERE — {len(known)}:"]
-        lines += [f"    [{k['tier']:9}] {k['service']:24} {k['kind']}"
-                  for k in known]
+        for k in known:
+            lines.append(f"    [{k['tier']:9}] {k['service']:24} {k['kind']}")
+            if k.get("ca_file"):
+                lines.append(f"      {'':24}  ca_file {k['ca_file']}")
     else:
         lines += ["", "  KNOWN HERE: none — nothing has been discovered yet.",
                   f"    (looked in {tiers[0][1]} and {tiers[1][1]})"]

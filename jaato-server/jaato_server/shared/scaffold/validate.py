@@ -2685,6 +2685,117 @@ def validate_env(workspace: str) -> List[Diagnostic]:
     return out
 
 
+def _service_tiers(ws: Path):
+    """``(tier, root)`` for the workspace and user service directories."""
+    from jaato_server.shared.plugins.service_connector.schema_store import (
+        DEFAULT_SERVICES_DIR)
+    tiers = [("workspace", ws / DEFAULT_SERVICES_DIR)]
+    try:
+        tiers.append(("user", Path.home() / DEFAULT_SERVICES_DIR))
+    except (RuntimeError, OSError):
+        pass
+    return [(t, r) for t, r in tiers if r.is_dir()]
+
+
+def _service_files(root: Path):
+    """``(service, file)`` for every definition under one tier root."""
+    from jaato_server.shared.plugins.service_connector.schema_store import (
+        DISCOVERED_DIR, SERVICE_CONFIG_FILE)
+    files = [(d.name, d / SERVICE_CONFIG_FILE) for d in sorted(root.iterdir())
+             if d.is_dir() and d.name != DISCOVERED_DIR]
+    disc = root / DISCOVERED_DIR
+    if disc.is_dir():
+        files += [(f.stem, f) for f in sorted(disc.glob("*.y*ml"))]
+    return [(n, f) for n, f in files if f.is_file()]
+
+
+def _service_config_doc(f: Path) -> Optional[Dict[str, Any]]:
+    """The config mapping a definition file holds, or None when unreadable."""
+    import yaml
+    from jaato_server.shared.plugins.service_connector.schema_store import (
+        DISCOVERED_DIR)
+    try:
+        doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    if f.parent.name == DISCOVERED_DIR and isinstance(doc, dict):
+        doc = doc.get("config") or {}
+    return doc if isinstance(doc, dict) else None
+
+
+def _service_definitions(ws: Path):
+    """Yield ``(tier, service, file, config_dict)`` for every service config
+    in the workspace and user tiers (``<service>/_service.yaml`` and
+    ``_discovered/<service>.yaml``).  Unparseable files are skipped: this
+    check is about ``ca_file``, not YAML syntax."""
+    for tier, root in _service_tiers(ws):
+        for name, f in _service_files(root):
+            doc = _service_config_doc(f)
+            if doc is not None:
+                yield tier, name, f, doc
+
+
+def validate_services(workspace: str) -> List[Diagnostic]:
+    """Validate the ``ca_file`` of every service definition (#1671).
+
+    Codes:
+
+    - ``service_ca_file_invalid`` (**error**) — the bundle does not resolve,
+      does not exist, or holds no certificate.  ``call_service`` refuses
+      every call to that service, naming the file.
+    - ``service_ca_file_unconfined`` (warn) — the bundle is outside the
+      workspace and outside ``~/.jaato/services/``, so a confined runner
+      cannot read it.
+    - ``service_ca_file_with_ssl_trusted`` (warn) — both are set; ``ca_file``
+      wins and ``ssl_trusted`` is ignored, so one of them misstates the
+      service's posture.
+    """
+    from jaato_server.shared.plugins.service_connector.ca_bundle import (
+        CABundleError, ca_file_problems, readable_under_confinement,
+        resolve_ca_file)
+    from jaato_server.shared.plugins.service_connector.schema_store import (
+        DEFAULT_SERVICES_DIR)
+
+    out: List[Diagnostic] = []
+    try:
+        user_dir: Optional[str] = str(Path.home() / DEFAULT_SERVICES_DIR)
+    except (RuntimeError, OSError):
+        user_dir = None
+    for tier, name, f, doc in _service_definitions(ws=Path(workspace).resolve()):
+        raw = doc.get("ca_file")
+        if raw is None:
+            continue
+        where = f"{f}: ca_file"
+        problems = ca_file_problems(raw, str(f.parent))
+        for problem in problems:
+            out.append(Diagnostic(
+                "error", "service_ca_file_invalid",
+                f"service '{name}': {problem} — call_service refuses every "
+                f"call to it until the bundle is fixed",
+                profile=f"service:{name}", where=where, tier=tier))
+        if not problems:
+            try:
+                path = resolve_ca_file(raw, str(f.parent))
+            except CABundleError:
+                path = None
+            if path is not None and not readable_under_confinement(
+                    path, workspace, user_dir):
+                out.append(Diagnostic(
+                    "warn", "service_ca_file_unconfined",
+                    f"service '{name}': ca_file {path} is outside the "
+                    f"workspace and ~/.jaato/services/, so a confined runner "
+                    f"cannot read it; keep it beside _service.yaml",
+                    profile=f"service:{name}", where=where, tier=tier))
+        if doc.get("ssl_trusted"):
+            out.append(Diagnostic(
+                "warn", "service_ca_file_with_ssl_trusted",
+                f"service '{name}' sets both ca_file and ssl_trusted; ca_file "
+                f"wins and TLS is verified against it, so ssl_trusted is "
+                f"ignored — remove it",
+                profile=f"service:{name}", where=where, tier=tier))
+    return out
+
+
 def validate_gitignore(workspace: str) -> List[Diagnostic]:
     """Validate what the workspace ``.gitignore`` does to ``.jaato/``.
 
@@ -3420,6 +3531,8 @@ def validate_workspace(
     for d in validate_env(str(ws)) + validate_gitignore(str(ws)):
         d.tier = "workspace"
         out.append(d)
+    # service definitions' ca_file (#1671); each finding carries its own tier
+    out.extend(validate_services(str(ws)))
 
     providers = introspect.providers()
     plugins = introspect.plugins()

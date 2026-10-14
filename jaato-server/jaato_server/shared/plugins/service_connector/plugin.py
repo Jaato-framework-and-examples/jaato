@@ -27,6 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 
 from .auth import AuthError, AuthManager, resolution_failure_hint
+from .ca_bundle import CABundleError, resolve_ca_file, ssl_context_for
 from .bruno_import import BrunoParseError, parse_bruno_collection
 from .http_client import HttpClientError, ServiceHttpClient
 from .openapi_parser import (
@@ -432,7 +433,8 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                                 "Skip SSL certificate verification for this request. "
                                 "Only use after the user explicitly confirms they trust "
                                 "the service. When used with a named service, marks "
-                                "the service as trusted for future requests."
+                                "the service as trusted for future requests. Refused "
+                                "for a service whose definition names a ca_file."
                             )
                         },
                         "no_proxy": {
@@ -749,6 +751,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
 - For `call_service` with a named service: the service will be marked as trusted permanently
 - Once trusted, all future requests to that service skip SSL verification automatically
 - Never set `insecure=true` without explicit user confirmation
+- A service whose definition names a `ca_file` is verified against that bundle alone; `insecure=true` is refused for it and an `ssl_error` there means the bundle is wrong, not that the user should be asked to trust the host
 
 **Proxy issues:**
 - If a request fails with `proxy_error: true`, ask the user if the service should be reached directly
@@ -1008,9 +1011,8 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                 desc = desc[:117] + "..."
             lines.append((f"  Description: {desc}", "dim"))
 
-        # SSL trust
-        if config.ssl_trusted:
-            lines.append((f"  SSL verify:  DISABLED (trusted by user)", "bold"))
+        # SSL trust: a per-service CA bundle, or verification switched off
+        lines += self._tls_show_lines(config)
 
         # Proxy bypass
         if config.proxy_bypass:
@@ -1491,6 +1493,105 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             return None
 
     @staticmethod
+    def _service_ca_file(
+        service_config: Optional[ServiceConfig], insecure: bool,
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """Resolve a service's ``ca_file`` for one call (#1671).
+
+        Returns:
+            ``(path, None)`` with the absolute bundle path when the service
+            names one and it loads; ``(None, None)`` when it names none;
+            ``(None, refusal)`` when the call must not proceed — the bundle
+            is unusable, or ``insecure=true`` was asked of a service that
+            names its own trust root.
+        """
+        raw = service_config.ca_file if service_config else None
+        if not raw:
+            return None, None
+        if insecure:
+            return None, {
+                "error": (
+                    f"insecure=true is refused for service "
+                    f"'{service_config.name}': it names its own CA bundle "
+                    f"(ca_file: {raw}) and is verified against it alone. "
+                    f"Fix the bundle rather than turning verification off."
+                ),
+                "ca_file": raw,
+            }
+        try:
+            path = resolve_ca_file(raw, service_config.source_dir)
+            ssl_context_for(path)
+        except CABundleError as exc:
+            return None, {
+                "error": f"CA bundle for service '{service_config.name}' "
+                         f"cannot be used: {exc}",
+                "ca_file": raw,
+            }
+        return str(path), None
+
+    @staticmethod
+    def _verify_ssl_for(
+        service_config: Optional[ServiceConfig], insecure: bool,
+        ca_file: Optional[str],
+    ) -> bool:
+        """Whether this call verifies TLS.
+
+        A per-service bundle always verifies (#1671); otherwise
+        ``insecure=true`` or a persisted ``ssl_trusted`` turns it off.
+        """
+        if ca_file:
+            return True
+        if insecure:
+            return False
+        return not (service_config and service_config.ssl_trusted)
+
+    @staticmethod
+    def _tls_show_lines(config: ServiceConfig) -> List[tuple]:
+        """The ``services show`` lines describing how TLS is verified."""
+        if not config.ca_file:
+            if config.ssl_trusted:
+                return [("  SSL verify:  DISABLED (trusted by user)", "bold")]
+            return []
+        try:
+            where = str(resolve_ca_file(config.ca_file, config.source_dir))
+        except CABundleError as exc:
+            where = f"{config.ca_file} ({exc})"
+        lines = [(f"  CA bundle:   {where} (verified against it alone)", "bold")]
+        if config.ssl_trusted:
+            lines.append(("  SSL verify:  ssl_trusted IGNORED (ca_file wins)", "dim"))
+        return lines
+
+    @staticmethod
+    def _ssl_error_result(exc: Exception, ca_file: Optional[str]) -> Dict[str, Any]:
+        """The result for a TLS verification failure.
+
+        With a per-service bundle the remedy is the bundle, never
+        ``insecure=true`` (which is refused for such a service).
+        """
+        if ca_file:
+            return {
+                "error": f"SSL certificate verification failed: {exc}",
+                "ssl_error": True,
+                "ca_file": ca_file,
+                "hint": (
+                    f"The certificate did not verify against this service's "
+                    f"CA bundle ({ca_file}), which is the only trust root "
+                    f"used for it. The bundle may be missing an intermediate "
+                    f"or the wrong root; tell the user. insecure=true is "
+                    f"not available for this service."
+                ),
+            }
+        return {
+            "error": f"SSL certificate verification failed: {exc}",
+            "ssl_error": True,
+            "hint": (
+                "The SSL certificate for this service could not be verified. "
+                "Ask the user whether they trust this service. If they confirm, "
+                "retry with insecure=true to skip SSL verification."
+            ),
+        }
+
+    @staticmethod
     def _is_ssl_error(exc: Exception) -> bool:
         """Check whether an exception is caused by an SSL certificate failure.
 
@@ -1949,12 +2050,14 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     )
                 }
 
-        # Determine SSL verification: skip if insecure or service is trusted
-        verify_ssl = True
-        if insecure:
-            verify_ssl = False
-        elif service_config and service_config.ssl_trusted:
-            verify_ssl = False
+        # A service that names its own trust root (#1671) is verified
+        # against it alone: insecure is refused, ssl_trusted is ignored,
+        # and an unusable bundle refuses the call rather than falling back.
+        ca_file, ca_refusal = self._service_ca_file(service_config, insecure)
+        if ca_refusal:
+            return ca_refusal
+
+        verify_ssl = self._verify_ssl_for(service_config, insecure, ca_file)
 
         # If caller explicitly passed insecure and we have a named service,
         # persist the trust flag for future calls.
@@ -2019,6 +2122,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                 verify_ssl=verify_ssl,
                 use_proxy=use_proxy,
                 raw_bytes=bool(save_to),
+                ca_file=ca_file,
             )
 
         try:
@@ -2059,15 +2163,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             return result
         except HttpClientError as e:
             if self._is_ssl_error(e):
-                return {
-                    "error": f"SSL certificate verification failed: {e}",
-                    "ssl_error": True,
-                    "hint": (
-                        "The SSL certificate for this service could not be verified. "
-                        "Ask the user whether they trust this service. If they confirm, "
-                        "retry with insecure=true to skip SSL verification."
-                    ),
-                }
+                return self._ssl_error_result(e, ca_file)
             if self._is_proxy_error(e):
                 return {
                     "error": f"Proxy error: {e}",
@@ -2081,15 +2177,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             return {"error": str(e)}
         except Exception as e:
             if self._is_ssl_error(e):
-                return {
-                    "error": f"SSL certificate verification failed: {e}",
-                    "ssl_error": True,
-                    "hint": (
-                        "The SSL certificate for this service could not be verified. "
-                        "Ask the user whether they trust this service. If they confirm, "
-                        "retry with insecure=true to skip SSL verification."
-                    ),
-                }
+                return self._ssl_error_result(e, ca_file)
             if self._is_proxy_error(e):
                 return {
                     "error": f"Proxy error: {e}",

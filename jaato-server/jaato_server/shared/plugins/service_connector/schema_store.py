@@ -263,7 +263,19 @@ class SchemaStore:
         service_dir = self._get_service_dir(config.name)
         config_path = service_dir / SERVICE_CONFIG_FILE
 
-        _save_yaml(config_path, config.to_dict())
+        data = config.to_dict()
+        # A relative ca_file resolves beside the definition it was read
+        # from (#1671).  Saving a user-tier service into the workspace tier
+        # (a persisted no_proxy, say) moves the definition, so pin the
+        # bundle to where it actually is rather than to a file the
+        # workspace copy would not find.
+        ca = data.get("ca_file")
+        if (isinstance(ca, str) and config.source_dir
+                and not Path(os.path.expanduser(ca)).is_absolute()
+                and Path(config.source_dir).resolve() != service_dir.resolve()):
+            data["ca_file"] = str(Path(config.source_dir) / ca)
+
+        _save_yaml(config_path, data)
         return config_path
 
     def load_service_config(self, service_name: str) -> Optional[ServiceConfig]:
@@ -286,7 +298,9 @@ class SchemaStore:
                 data = _load_yaml(config_path)
                 if data:
                     data["name"] = service_name  # Ensure name is set
-                    return ServiceConfig.from_dict(data)
+                    config = ServiceConfig.from_dict(data)
+                    config.source_dir = str(config_path.parent)
+                    return config
 
             # Check discovered service at this tier
             discovered_path = base / DISCOVERED_DIR / f"{service_name}.yaml"
@@ -295,7 +309,9 @@ class SchemaStore:
                 if data and data.get("config"):
                     config_data = data["config"]
                     config_data["name"] = service_name
-                    return ServiceConfig.from_dict(config_data)
+                    config = ServiceConfig.from_dict(config_data)
+                    config.source_dir = str(discovered_path.parent)
+                    return config
 
         return None
 
@@ -514,6 +530,7 @@ class SchemaStore:
         config_data = data["config"]
         config_data["name"] = service_name
         config = ServiceConfig.from_dict(config_data)
+        config.source_dir = str(service_path.parent)
 
         endpoints = []
         for e_data in data.get("endpoints", []):
