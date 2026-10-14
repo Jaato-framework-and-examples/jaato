@@ -946,6 +946,15 @@ class JaatoServer:
         # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
+        # The id -> name entries the RUNNER reported on its last off-loop
+        # ``session_get_tool_schemas`` read (#1681).  That read cannot run on
+        # the event loop, so every on-loop build (``session.info``,
+        # ``emit_current_state`` on re-attach, ``initialize``) folds this in
+        # rather than sending a daemon-tier-only map that clients replace
+        # the full one with.  Ids are a pure function of the name, so a kept
+        # entry is never wrong; it is only refreshed, never emptied by a
+        # failed read.
+        self._runner_tool_id_mappings: Dict[str, str] = {}
         # Signals the runner has finished ``session.bootstrap`` and can service
         # this session's RPCs.  CLEARED when the rpc handle is wired
         # (set_runner_rpc) and SET by ``mark_runner_ready`` after
@@ -3142,6 +3151,11 @@ class JaatoServer:
         and deferred tools. Calls ``name_to_id`` eagerly so the reverse map
         is populated as a side effect.
 
+        Runner-tier names (``cli``, ``prompt.*``, client tools) are read from
+        the runner OFF the loop only, and cached; every build, on the loop
+        or off it, includes the cache (#1681), because clients replace their
+        map with each one.
+
         Phase 3 §7c step 3b: replaced the private ``session._tools``
         read with the public :meth:`JaatoClient.get_tool_schemas`
         accessor (which forwards to
@@ -3172,10 +3186,23 @@ class JaatoServer:
                 schemas = self._runner_rpc.session_get_tool_schemas_threadsafe()
             except Exception:  # noqa: BLE001 — best-effort registry build
                 schemas = []
+            runner_mappings: Dict[str, str] = {}
             for schema in schemas:
-                mappings[name_to_id(schema.name)] = schema.name
+                runner_mappings[name_to_id(schema.name)] = schema.name
                 if schema.category:
-                    mappings[name_to_id(schema.category, prefix="c")] = schema.category
+                    runner_mappings[name_to_id(schema.category, prefix="c")] = schema.category
+            # Cache what the runner answered (#1681) so the ON-loop builds
+            # can send the full map.  A failed or empty read keeps the
+            # previous answer: an empty map would be a claim that the
+            # runner exposes nothing, which nobody measured.
+            if runner_mappings:
+                self._runner_tool_id_mappings = runner_mappings
+        # Every build carries the runner-tier names last read (#1681):
+        # clients REPLACE their map with each registry event and each
+        # ``session.info`` snapshot, so a daemon-tier-only map sent from
+        # the loop dropped ``cli`` / ``prompt.*``, and a re-attached client
+        # (no new bootstrap, so no off-loop re-emit) never got them.
+        mappings.update(getattr(self, "_runner_tool_id_mappings", {}))
         if self.registry:
             # ALWAYS exclude runner-tier: the daemon-side registry walk must
             # NEVER invoke a runner-tier plugin's get_tool_schemas
@@ -3183,9 +3210,9 @@ class JaatoServer:
             # on the event-loop thread, blocked the loop ~15s on re-attach and
             # self-blocked the register-RPC send.  Runner-tier names come from
             # the runner (session_get_tool_schemas, above), reachable only via
-            # the OFF-loop re-emits (post-bootstrap runner-ready re-emit in
-            # runner_spawn + the client-tool _push re-emit).  On-loop emits map
-            # daemon-tier names immediately; off-loop re-emits add runner-tier.
+            # the OFF-loop reads (post-bootstrap runner-ready re-emit in
+            # runner_spawn + the client-tool _push re-emit), and from the
+            # ``_runner_tool_id_mappings`` cache those reads fill (#1681).
             for schema in self.registry.get_exposed_tool_schemas(
                 exclude_runner_tier=True,
             ):
@@ -3211,8 +3238,12 @@ class JaatoServer:
         (``session_get_tool_schemas``), which only runs off-loop, so they are
         supplied by the OFF-loop callers: the post-bootstrap runner-ready
         re-emit (``runner_spawn.dispatch_bootstrap_envelope``) and the
-        client-tool ``_push`` re-emit.  On-loop callers map daemon-tier names
-        immediately; the off-loop re-emits add runner-tier.
+        client-tool ``_push`` re-emit.  Each such read is cached on
+        ``_runner_tool_id_mappings``, and on-loop callers send the daemon-tier
+        names plus that cache (#1681), so every registry event is the full
+        set the protocol promises.  Before the first off-loop read (a
+        session whose runner has not bootstrapped) the cache is empty and an
+        on-loop emit is daemon-tier only; the runner-ready re-emit follows.
         """
         from jaato_sdk.events import ToolIdRegistryEvent
         mappings = self._build_tool_id_mappings()

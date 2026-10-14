@@ -17,11 +17,14 @@ The agreement is that anything user-facing shows the human name.  This
 module is that rule, once, so every client does not write its own copy
 (the TUI and the web coder each had one).  The rules:
 
-- **The mapping is replaced wholesale** on each ``ToolIdRegistryEvent``,
-  and seeded from ``session.info``'s ``tool_id_mappings`` when that is
-  non-empty (an empty one from a daemon that has not configured tools yet
-  says nothing, and ids are a pure function of the name, so a kept entry
-  is never wrong).
+- **Each mapping the daemon sends is MERGED into the one held** -- every
+  ``ToolIdRegistryEvent`` and every non-empty ``session.info``
+  ``tool_id_mappings`` adds its entries and drops none.  Ids are a pure
+  function of the name, so a kept entry is never wrong, while a dropped
+  one leaves a call unreadable: a daemon before #1681 sent maps without
+  its runner-tier names (``cli``, ``prompt.*``) from the event loop, and
+  replacing with those lost names the full map had carried.
+  :meth:`ToolIdNames.replace` is still there for a caller that means it.
 - **Resolution walks dicts and lists and replaces only a string that IS an
   id in the map.**  An id the map does not name is left as it is --
   showing the id is honest, inventing a name is not -- and a string that
@@ -96,9 +99,10 @@ class ToolIdNames:
     """The latest id -> name mapping, kept current from the event stream.
 
     Lifecycle: start empty (or from ``mappings``); every
-    :meth:`observe` of a ``ToolIdRegistryEvent`` REPLACES the map, every
-    observe of a ``SessionInfoEvent`` with non-empty ``tool_id_mappings``
-    replaces it too; anything else is ignored.  :meth:`track` does the
+    :meth:`observe` of a ``ToolIdRegistryEvent`` MERGES its entries into
+    the map, every observe of a ``SessionInfoEvent`` with non-empty
+    ``tool_id_mappings`` merges too; anything else is ignored.  Nothing
+    observed removes an entry (#1681).  :meth:`track` does the
     observing for you by subscribing to an ``IPCClient`` (or anything with
     the same ``subscribe(event_type, handler)`` shape).
 
@@ -119,30 +123,27 @@ class ToolIdNames:
         return len(self._names)
 
     def replace(self, mappings: Mapping[str, str]) -> None:
-        """Replace the map wholesale (the daemon always sends the full set)."""
+        """Replace the map wholesale (``observe`` merges; this does not)."""
         self._names = dict(tool_id_mappings(mappings) or {})
 
     def observe(self, event: Any) -> bool:
-        """Update from one event; return whether the map changed source.
+        """Update from one event; return whether it carried a mapping.
 
         Accepts a pydantic event or a raw wire dict.  ``tools.id_registry``
-        replaces the map whatever it holds; ``session.info`` replaces it
-        only when its ``tool_id_mappings`` is non-empty.
+        and a non-empty ``session.info`` ``tool_id_mappings`` are merged
+        into the map; no entry is ever removed (#1681).
         """
         kind = _type_of(event)
         if kind == _REGISTRY_TYPE:
             names = tool_id_mappings(_field(event, "mappings"))
-            if names is None:
-                return False
-            self._names = names
-            return True
-        if kind == _SESSION_INFO_TYPE:
+        elif kind == _SESSION_INFO_TYPE:
             names = tool_id_mappings(_field(event, "tool_id_mappings"))
-            if not names:
-                return False
-            self._names = names
-            return True
-        return False
+        else:
+            return False
+        if not names:
+            return False
+        self._names.update(names)
+        return True
 
     def name(self, value: str) -> str:
         """The name for ``value`` when it is a known id, else ``value``."""

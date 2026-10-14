@@ -1264,7 +1264,8 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       };
       {
         const names = toolIdMappings(ev.tool_id_mappings);
-        if (names && Object.keys(names).length) s.toolIdNames = names;
+        // Merged, never replaced (#1681): see jaato-sdk-ts toolIds.ts.
+        if (names && Object.keys(names).length) s.toolIdNames = { ...s.toolIdNames, ...names };
       }
       break;
     }
@@ -1297,7 +1298,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     }
     case EventTypeValue.TOOL_ID_REGISTRY: {
       const names = toolIdMappings(ev.mappings);
-      if (names) s.toolIdNames = names;
+      if (names && Object.keys(names).length) s.toolIdNames = { ...s.toolIdNames, ...names };
       break;
     }
     case EventTypeValue.SESSION_PROFILES:
