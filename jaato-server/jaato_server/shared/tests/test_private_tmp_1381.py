@@ -90,10 +90,12 @@ REVERSIONS = [
         find=(
             "                plugin_rules=plugin_rules,\n"
             "                private_tmp_dir=private_tmp_dir,\n"
+            "                child_fragments=child_fragments,\n"
             "            )\n"
         ),
         replace=(
             "                plugin_rules=plugin_rules,\n"
+            "                child_fragments=child_fragments,\n"
             "            )\n"
         ),
         test="test_a_private_tmp_boundary_has_its_own_confinement_id",

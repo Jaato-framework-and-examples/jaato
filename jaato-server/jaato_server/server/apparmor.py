@@ -1652,6 +1652,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         plugin_rules: Optional[List[str]] = None,
         confinement_id: Optional[str] = None,
         private_tmp_dir: Optional[str] = None,
+        child_fragments: Optional[List[str]] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -1674,12 +1675,15 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
                 binds it over ``/tmp`` (#1381); renders the ``/tmp``
                 grants.  Must be the value ``confinement_id`` was derived
                 with.
+            child_fragments: Fragment names composed into ``//child``
+                only (#1675); see :meth:`_compose_child_fragments`.  Must
+                be the value ``confinement_id`` was derived with.
         """
         return self._run_unconfined(
             self._provision_profile_impl,
             session_id, workspace_path, config_root, env_file,
             requested_fragments, plugin_rules, confinement_id,
-            private_tmp_dir,
+            private_tmp_dir, child_fragments,
         )
 
     def _provision_profile_impl(
@@ -1692,6 +1696,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         plugin_rules: Optional[List[str]] = None,
         confinement_id: Optional[str] = None,
         private_tmp_dir: Optional[str] = None,
+        child_fragments: Optional[List[str]] = None,
     ) -> bool:
         """Inner body of :meth:`provision_profile`.
 
@@ -1770,6 +1775,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             plugin_rules=plugin_rules,
             composition_out=composition,
             private_tmp_dir=private_tmp_dir,
+            child_fragments=child_fragments,
         )
         t_render = _time.monotonic()
 
@@ -2011,6 +2017,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             "fragments": composition.get("fragments", []),
             "missing_fragments": composition.get("missing_fragments", []),
             "unreadable_fragments": composition.get("unreadable_fragments", []),
+            # #1675: composed into //child only, never base or tool_hat.
+            "child_fragments": composition.get("child_fragments", []),
+            "missing_child_fragments": composition.get("missing_child_fragments", []),
             "plugin_rules": [
                 {"plugin": name, "rules": list(rules)}
                 for name, rules in sorted(by_plugin.items()) if rules
@@ -3301,6 +3310,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
         private_tmp_dir: Optional[str] = None,
+        child_fragments: Optional[List[str]] = None,
     ) -> str:
         """Compute the confinement id for a boundary, without loading it.
 
@@ -3334,6 +3344,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                 requested_fragments=requested_fragments,
                 plugin_rules=plugin_rules,
                 private_tmp_dir=private_tmp_dir,
+                child_fragments=child_fragments,
             )
         except Exception as exc:  # noqa: BLE001 — diagnostic, not a gate
             logger.warning(
@@ -3463,6 +3474,74 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             )
         return chunks, composed, unreadable
 
+    @staticmethod
+    def _discover_fragments(
+        workspace_path: str,
+    ) -> Tuple[Dict[str, Tuple[str, Path]], Dict[str, List[str]]]:
+        """Every ``*.rules`` fragment on the search path, by basename.
+
+        Phase 1 of composition, shared by :meth:`_compose_extension_fragments`
+        and :meth:`_compose_child_fragments` (#1675) so the two name the
+        same files.  Later tiers overwrite earlier ones (cache wins over
+        workspace wins over user); the tier label is kept for the inlined
+        comment.  Returns ``(discovered, found_in)``: name to
+        ``(tier, path)``, and name to every tier it was found in.
+        """
+        from jaato_server.shared.apparmor_fragments import discover_fragments
+
+        return discover_fragments(workspace_path)
+
+    def _compose_child_fragments(
+        self,
+        session_id: str,
+        workspace_path: str,
+        child_fragments: Optional[List[str]],
+        composition_out: Optional[Dict[str, Any]],
+    ) -> str:
+        """Fragment text composed into ``//child`` ONLY (#1675).
+
+        The runner process wears the base profile and runs the model loop,
+        so a rule in an ordinary fragment (``deny network inet,``) binds the
+        provider connection too.  These names are looked up on the same
+        search path as ``apparmor_fragments`` and inlined into the
+        ``//child`` body alone, where ``cli``, ``interactive_shell`` and the
+        notebook kernel run.  Exec scoping is unaffected: it is decided by
+        ``apparmor_fragments`` alone.
+
+        Returns ``""`` when nothing is named, so a profile that declares no
+        child fragments renders byte-identically to before.  An unknown
+        name logs a WARNING and is recorded in ``composition_out``
+        (``missing_child_fragments``), as for ``apparmor_fragments``.
+        """
+        if not child_fragments:
+            if composition_out is not None:
+                composition_out.update(
+                    {"child_fragments": [], "missing_child_fragments": []})
+            return ""
+        discovered, found_in = self._discover_fragments(workspace_path)
+        unknown = sorted(set(child_fragments) - set(discovered))
+        if unknown:
+            logger.warning(
+                "AppArmor profile %s requests child-only fragments %s that "
+                "are not in the search path; continuing without them.",
+                session_id, unknown,
+            )
+        selected: List[str] = []
+        for name in child_fragments:
+            if name in discovered and name not in selected:
+                selected.append(name)
+        chunks, composed, unreadable = self._inline_fragments(
+            selected, discovered, found_in)
+        if composition_out is not None:
+            composition_out.update({
+                "child_fragments": composed,
+                "missing_child_fragments": unknown + unreadable,
+            })
+        if not chunks:
+            return ""
+        return "  # ---- child-only fragments (apparmor_child_fragments, #1675) ----\n" + (
+            "\n\n".join(chunks))
+
     def _compose_extension_fragments(
         self,
         session_id: str,
@@ -3514,24 +3593,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         #   Unknown names log WARNING but don't abort.
         # Order does not affect AppArmor semantics (allow rules
         # union, deny rules union, deny wins at equal specificity).
-        SEARCH_TIERS = [
-            ("user", Path("~/.jaato/apparmor-fragments").expanduser().resolve()),
-            ("workspace", (Path(workspace_path) / ".jaato" / "apparmor-fragments").resolve()),
-            ("cache", (Path(workspace_path) / ".jaato" / ".cache" / "apparmor-fragments").resolve()),
-        ]
-
-        # Phase 1: discover every available fragment, keyed by
-        # basename (without ``.rules``).  Later tiers overwrite
-        # earlier ones — cache wins over workspace wins over user.
-        # The tier label is retained for the inlined comment.
-        discovered: Dict[str, Tuple[str, Path]] = {}
-        found_in: Dict[str, List[str]] = {}
-        for tier_label, fragments_dir in SEARCH_TIERS:
-            if not fragments_dir.is_dir():
-                continue
-            for path in sorted(fragments_dir.glob("*.rules")):
-                discovered[path.stem] = (tier_label, path)
-                found_in.setdefault(path.stem, []).append(tier_label)
+        discovered, found_in = self._discover_fragments(workspace_path)
 
         # Phase 2: decide which fragments to include.  ``None`` =
         # all discovered, in tier-iteration insertion order
@@ -3592,8 +3654,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         plugin_rules: Optional[List[str]] = None,
         composition_out: Optional[Dict[str, Any]] = None,
         private_tmp_dir: Optional[str] = None,
+        child_fragments: Optional[List[str]] = None,
     ) -> str:
         """Render the profile template with session-specific values.
+
+        ``child_fragments`` (#1675): fragment names composed into the
+        ``//child`` body only (:meth:`_compose_child_fragments`).  Part of
+        the body, so part of the confinement id.
 
         ``private_tmp_dir`` (#1381, template v39): the ``<ws>/.tmp`` this
         boundary's runner binds over ``/tmp`` and ``/var/tmp`` in its own
@@ -3645,6 +3712,11 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
 
         extension_fragments_inline = self._compose_extension_fragments(
             session_id, workspace_path, requested_fragments, composition_out)
+        child_only_inline = self._compose_child_fragments(
+            session_id, workspace_path, child_fragments, composition_out)
+        child_fragments_inline = (
+            f"{extension_fragments_inline}\n\n{child_only_inline}"
+            if child_only_inline else extension_fragments_inline)
 
         # Phase 0 (template v20, 2026-05-16): plugin-contribution hook.
         # Splice plugin-contributed rules into base + sub-profiles.  When
@@ -3710,7 +3782,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             config_root_rules=config_root_rules,
             env_file_rule=env_file_rule,
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
-            extension_fragments_inline=extension_fragments_inline,
+            extension_fragments_inline=child_fragments_inline,
             plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
             subprofile_flag_clause=subprofile_flag_clause,

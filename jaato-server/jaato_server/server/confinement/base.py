@@ -32,6 +32,10 @@ class Boundary:
             composes every fragment on disk (an unscoped ``//child``),
             ``()`` composes none (the most locked-down stage).  Collapsing
             one into the other widens or narrows a session silently.
+        child_fragments: AppArmor fragment names composed into the tool
+            child (``//child``) only, never the runner's own body (#1675).
+            ``None`` and ``()`` both compose nothing extra.  SELinux has no
+            per-session rule text and ignores it.
         plugin_rules: AppArmor rule lines plugins contributed, or ``None``.
         plugin_rule_owners: Which plugin contributed which of
             ``plugin_rules`` (#1326), as ``((plugin, (rule, ...)), ...)``.
@@ -44,6 +48,7 @@ class Boundary:
     managed: bool = False
     private_tmp_dir: Optional[str] = None
     requested_fragments: Optional[Tuple[str, ...]] = None
+    child_fragments: Optional[Tuple[str, ...]] = None
     plugin_rules: Optional[Tuple[str, ...]] = None
     plugin_rule_owners: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
 

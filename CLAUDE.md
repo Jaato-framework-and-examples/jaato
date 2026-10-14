@@ -3675,6 +3675,41 @@ Guard: `jaato_server/shared/tests/test_cache_fragment_tier_is_write_denied_1385.
 two reversions (base, `//child`). Found by reading the template; not
 reproduced or verified on an enforcing kernel.
 
+### Rules for the Tool Child Only (#1675)
+
+`apparmor_fragments` compose into the base profile, `tool_hat` and
+`//child` alike, and the runner (base profile) runs the model loop. So a
+`deny network inet,` in a fragment cut a session off from its provider,
+and an application that wanted its sessions' commands off the network
+(kbwiki, whose pipelines run generated code) had to leave it open.
+
+```yaml
+apparmor_fragments: [tools]             # base + tool_hat + //child
+apparmor_child_fragments: [no_network]  # //child only
+```
+
+| Piece | Where |
+|---|---|
+| the key: same name space and search tiers as `apparmor_fragments`, child-replaces-parent through `inherits:`, kept in the #787 snapshot; a non-list is refused at load | `SubagentProfile.apparmor_child_fragments`, `_merge_apparmor_child_fragments` |
+| one search path for the renderer and `validate` | `shared/apparmor_fragments.py` (`discover_fragments`, `denies_network`) |
+| composed after the ordinary fragments into `//child` alone; part of the body, so of the confinement id; unset or `[]` renders byte-identically to before | `AppArmorManager._compose_child_fragments`, `_render_profile` |
+| the path to the renderer | `Boundary.child_fragments` → `AppArmorBackend` (passed only when named) ← `SessionManager` from the profile |
+| the grant record (`child_fragments`, `missing_child_fragments`) | `_record_grants` |
+| `explain profile` (the key and which rules reach which scope), `explain oversight <profile>` (an `APPARMOR` row per scope) | `explain.py` |
+| `validate`: `apparmor_fragment_denies_model_loop` (warn: a fragment composed into the runner of a model-binding profile denies IP networking), `apparmor_child_fragment_missing` (warn) | `_check_apparmor_fragment_scopes` |
+
+Exec scoping is unchanged: `apparmor_fragments` alone decides whether
+`//child` gets the broad in-PATH execs (#1251). Not applied, and why:
+the isolated sub-runner (one flat profile runs its model loop and its
+tools, so there is no body that holds only the commands); SELinux (no
+per-session rule text, design §8); and the WS pre-init hook, which has
+never composed `apparmor_fragments` either. Only processes that
+transition into `//child` are bound (`cli`, `interactive_shell`, the
+notebook kernel); in-process tools (`web_fetch`, `call_service`) and MCP
+stdio servers run under the runner's profile and keep the network. Not verified on an enforcing kernel. Guard:
+`jaato_server/shared/tests/test_apparmor_child_fragments_1675.py`, five
+reversions.
+
 ### A Refusal That Named Its Cause (#1348)
 
 A command the `//child` profile refused printed `Permission denied`, the

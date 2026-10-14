@@ -2550,6 +2550,23 @@ class SubagentProfile:
         "description": "The profile that declared apparmor_fragments, "
         "resolved through inherits:. Derived, not settable."})
 
+    # #1675: fragments composed into the ``//child`` sub-profile ONLY,
+    # never into the base body or ``tool_hat``.  The runner process
+    # (base profile) runs the model loop, so a ``deny network`` in an
+    # ordinary fragment cuts the session off from its provider; a
+    # fragment named here reaches only the model-driven subprocesses
+    # (``cli``, ``interactive_shell``, the notebook kernel).  Same name
+    # space and search tiers as ``apparmor_fragments``; child-replaces-
+    # parent through ``inherits:``.  ``None`` and ``[]`` both compose
+    # nothing extra, and neither changes exec scoping (which
+    # ``apparmor_fragments`` alone decides).
+    apparmor_child_fragments: Optional[List[str]] = field(default=None, metadata={
+        "description": "AppArmor .rules fragments (by basename, same search "
+        "path as apparmor_fragments) composed into the tool child (//child) "
+        "ONLY, never into the runner that runs the model loop. Use for "
+        "rules such as `deny network inet,` that must bind the session's "
+        "commands without cutting its provider connection."})
+
     def __post_init__(self) -> None:
         """Normalize ``suppress_base_instructions`` to its canonical form.
 
@@ -2584,7 +2601,9 @@ def _normalize_inherits(value: Any) -> Optional[List[str]]:
     return None
 
 
-def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
+def _normalize_apparmor_fragments(
+    value: Any, key: str = "apparmor_fragments",
+) -> Optional[List[str]]:
     """Coerce ``apparmor_fragments`` field value into the canonical shape.
 
     Distinguishes three input states (Piece 1, 2026-05-14):
@@ -2607,6 +2626,8 @@ def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
 
     Args:
         value: Raw value pulled from ``data.get('apparmor_fragments')``.
+        key: The field name the error message names
+            (``apparmor_child_fragments`` shares this shape, #1675).
 
     Returns:
         ``None``, ``[]``, or ``List[str]`` per the rules above.
@@ -2619,14 +2640,14 @@ def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
         return None
     if not isinstance(value, list):
         raise ValueError(
-            f"apparmor_fragments must be a list of strings, "
+            f"{key} must be a list of strings, "
             f"got {type(value).__name__}: {value!r}"
         )
     normalised: List[str] = []
     for i, entry in enumerate(value):
         if not isinstance(entry, str) or not entry.strip():
             raise ValueError(
-                f"apparmor_fragments[{i}] must be a non-empty string, "
+                f"{key}[{i}] must be a non-empty string, "
                 f"got {type(entry).__name__}: {entry!r}"
             )
         normalised.append(entry.strip())
@@ -3665,6 +3686,8 @@ def build_inline_profile(
         # semantically distinct from explicit ``[]`` (compose no
         # fragments).  See :func:`_normalize_apparmor_fragments`.
         apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+        apparmor_child_fragments=_normalize_apparmor_fragments(
+            data.get('apparmor_child_fragments'), 'apparmor_child_fragments'),
         quirks=quirks,
         scrub_secret_env=data.get('scrub_secret_env'),
         regulatory=regulatory,
@@ -3761,6 +3784,11 @@ def _runtime_limits_to_dict(
     return data
 
 
+def _list_or_none(value: Optional[List[str]]) -> Optional[List[str]]:
+    """A copy of *value*, ``None`` kept ``None`` (``[]`` is a value)."""
+    return None if value is None else list(value)
+
+
 def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
     """Freeze a RESOLVED profile into a JSON-serializable snapshot.
 
@@ -3846,6 +3874,8 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
         ),
         "apparmor_fragments_source": getattr(
             profile, "apparmor_fragments_source", None),
+        "apparmor_child_fragments": _list_or_none(
+            getattr(profile, "apparmor_child_fragments", None)),
         "quirks": dict(getattr(profile, "quirks", None) or {}),
         # Raw, as authored (str or list) -- the plugin normalises it.
         "scrub_secret_env": getattr(profile, "scrub_secret_env", None),
@@ -3986,6 +4016,8 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         # An older snapshot carries the list and not its source: "" says
         # "unknown" rather than letting __post_init__ claim this profile.
         apparmor_fragments_source=data.get("apparmor_fragments_source", ""),
+        apparmor_child_fragments=_normalize_apparmor_fragments(
+            data.get("apparmor_child_fragments"), "apparmor_child_fragments"),
         quirks=dict(data.get("quirks") or {}),
         scrub_secret_env=data.get("scrub_secret_env"),
     )
@@ -4586,6 +4618,21 @@ def _merge_apparmor_fragments(
     return None, None
 
 
+def _merge_apparmor_child_fragments(
+    child: 'SubagentProfile', parents: List['SubagentProfile'],
+) -> Optional[List[str]]:
+    """``apparmor_child_fragments`` through ``inherits:`` (#1675).
+
+    Child-replaces-parent, as :func:`_merge_apparmor_fragments`: the
+    child's list wins when it declares one, else the nearest parent's.
+    """
+    for p in [child, *parents]:
+        value = getattr(p, 'apparmor_child_fragments', None)
+        if value is not None:
+            return list(value)
+    return None
+
+
 def _merge_profiles(
     child_name: str,
     parents: List['SubagentProfile'],
@@ -4923,6 +4970,7 @@ def _merge_profiles(
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
         apparmor_fragments_source=merged_apparmor_fragments_source,
+        apparmor_child_fragments=_merge_apparmor_child_fragments(child, parents),
         quirks=merged_quirks,
         scrub_secret_env=merged_scrub_secret_env,
         regulatory=merged_regulatory,
@@ -5171,6 +5219,7 @@ PROFILE_FILE_KEYS = frozenset({
     'decision_models',
     'apparmor',
     'apparmor_fragments',
+    'apparmor_child_fragments',
     'quirks',
     'scrub_secret_env',
 })
@@ -5394,6 +5443,8 @@ def _scan_profiles_dir(
             decision_models=decision_models,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+            apparmor_child_fragments=_normalize_apparmor_fragments(
+                data.get('apparmor_child_fragments'), 'apparmor_child_fragments'),
             quirks=quirks,
             scrub_secret_env=data.get('scrub_secret_env'),
             regulatory=regulatory,
@@ -5919,6 +5970,8 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             decision_models=decision_models,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+            apparmor_child_fragments=_normalize_apparmor_fragments(
+                data.get('apparmor_child_fragments'), 'apparmor_child_fragments'),
             quirks=quirks,
             scrub_secret_env=data.get('scrub_secret_env'),
             regulatory=regulatory,
@@ -6263,6 +6316,8 @@ class SubagentConfig:
                 decision_models=decision_models,
                 apparmor=bool(profile_data.get('apparmor', False)),
                 apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
+                apparmor_child_fragments=_normalize_apparmor_fragments(
+                    profile_data.get('apparmor_child_fragments'), 'apparmor_child_fragments'),
                 scrub_secret_env=profile_data.get('scrub_secret_env'),
                 regulatory=regulatory,
                 record_keeping=record_keeping,

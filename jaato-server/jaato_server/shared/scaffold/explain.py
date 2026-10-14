@@ -2793,7 +2793,19 @@ def profile() -> Rendered:
         "    apparmor_fragments:         compose only these .rules fragments (by basename), from the\n"
         "      - my_extra_rules          search path ~/.jaato/apparmor-fragments/ and\n"
         "                                <workspace>/.jaato/apparmor-fragments/ (+ the .cache/ layer).\n"
-        "    drop <name>.rules in that dir, then list <name>.  null = ALL fragments; [] = none.")
+        "    drop <name>.rules in that dir, then list <name>.  null = ALL fragments; [] = none.\n"
+        "    apparmor_child_fragments:   compose these fragments into the TOOL CHILD (//child)\n"
+        "      - no_network              ONLY: the commands cli / interactive_shell / the notebook\n"
+        "                                kernel run (not in-process tools, not MCP servers).\n"
+        "                                The runner (base profile) runs the MODEL\n"
+        "                                LOOP, so a `deny network inet,` in apparmor_fragments\n"
+        "                                cuts the session off from its provider; here it binds\n"
+        "                                only the commands.  Same search path; exec scoping is\n"
+        "                                unaffected; not applied to an isolated sub-runner\n"
+        "                                (one flat profile runs its loop and its tools) nor\n"
+        "                                under SELinux (no per-session rule text).\n"
+        "    which rules reach which scope:  apparmor_fragments → base + tool_hat + //child;\n"
+        "                                    apparmor_child_fragments → //child only.")
     lines.append(
         "\n  inheritance (`inherits: [_base_<stage>]`) — how a child profile merges with its\n"
         "  parent(s), resolved at discover_profiles() (config.py:_merge_profiles):\n"
@@ -2840,6 +2852,7 @@ def profile() -> Rendered:
         "    model_tiers, runtime_limits, (this is how a child scopes DOWN, unlike plugins).\n"
         "    scrub_secret_env, default_agent,\n"
         "    apparmor_fragments,          For the two payload schemas an empty dict `{}` IS a\n"
+        "    apparmor_child_fragments,\n"
         "    completion_payload_schema,   value and overrides; `null`/absent reads as unset and\n"
         "    spawn_payload_schema         inherits.\n"
         "    budget_control.limits,       MOST RESTRICTIVE wins — a child may only TIGHTEN a\n"
@@ -4458,7 +4471,36 @@ def _profile_oversight(prof: Any) -> Dict[str, Any]:
         "irreversible_surfaces": sorted(
             p for p in (getattr(prof, "plugins", None) or [])
             if p in _IRREVERSIBLE_SURFACES),
+        "apparmor_scopes": _apparmor_scopes(prof),
     }
+
+
+def _apparmor_scopes(prof: Any) -> Dict[str, Any]:
+    """Which AppArmor fragments reach which body of the profile (#1675).
+
+    ``apparmor_fragments`` compose into the runner (base + ``tool_hat``),
+    which runs the model loop, AND the tool child; ``apparmor_child_fragments``
+    into the tool child (``//child``) only.  ``None`` on the first means
+    every fragment on the search path.
+    """
+    both = getattr(prof, "apparmor_fragments", None)
+    child = getattr(prof, "apparmor_child_fragments", None)
+    return {
+        "runner_and_child": None if both is None else list(both),
+        "child_only": list(child or []),
+    }
+
+
+def _apparmor_scope_lines(scopes: Dict[str, Any]) -> List[str]:
+    """The ``APPARMOR`` rows of ``explain oversight <profile>`` (#1675)."""
+    both = scopes["runner_and_child"]
+    shown = ("every fragment on the search path" if both is None
+             else (", ".join(both) or "none"))
+    return [
+        f"  APPARMOR           runner + child (model loop AND commands): {shown}",
+        "                     child only (commands, never the model loop): "
+        + (", ".join(scopes["child_only"]) or "none"),
+    ]
 
 
 def _permission_line(perm: Dict[str, Any]) -> str:
@@ -4541,6 +4583,8 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
         _watchdog_line(P["wall_clock"]),
         _gate_line(P["completion_gate"]),
         f"  IRREVERSIBLE       {surfaces}",
+        *_apparmor_scope_lines(P.get("apparmor_scopes")
+                               or {"runner_and_child": None, "child_only": []}),
         "",
         "  the two stop verbs apply to every profile alike -- "
         "`explain oversight` (bare) names them.",

@@ -2606,6 +2606,10 @@ class SessionManager:
         else:
             profile_fragments = getattr(profile, "apparmor_fragments", None) if profile else None
             requested_fragments = list(profile_fragments) if profile_fragments is not None else None
+        # #1675: fragments for the tool child alone, so a session's commands
+        # can be denied what its model loop needs (the network).
+        # (``getattr`` on a ``None`` profile answers the default.)
+        child_fragments = getattr(profile, "apparmor_child_fragments", None)
 
         # Phase 0 (template v20, 2026-05-16): plugin-contribution hook.
         # Walk ``profile.plugins`` to resolve each plugin's class via the
@@ -2677,6 +2681,7 @@ class SessionManager:
                 config_root=config_root,
                 env_file=env_file,
                 requested_fragments=requested_fragments,
+                child_fragments=child_fragments,
                 plugin_rules=plugin_rules,
                 # #1381: decided (and stashed on the server) before the
                 # render, since it is part of the boundary.  Off for a
@@ -3010,6 +3015,7 @@ class SessionManager:
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
         private_tmp_dir: Optional[str] = None,
+        child_fragments: Optional[List[str]] = None,
     ) -> "Tuple[str, Optional[str]]":
         """Provision the AppArmor profile for a session
         (Phase 3 §7a — opt-in only).
@@ -3088,6 +3094,7 @@ class SessionManager:
             env_file=env_file,
             private_tmp_dir=private_tmp_dir,
             requested_fragments=fragment_field(requested_fragments),
+            child_fragments=fragment_field(child_fragments),
             **plugin_rule_fields(plugin_rules),
         ))
         if handle is None:

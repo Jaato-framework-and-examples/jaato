@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -136,6 +137,10 @@ def test_the_bodies_are_really_separated(manager):
 def test_the_search_tiers_still_include_the_cache_tier():
     """The deny is only meaningful while discovery reads that directory;
     if the tier moves, the deny must move with it."""
-    src = open(_apparmor_mod.__file__, encoding="utf-8").read()
-    assert '("cache", (Path(workspace_path) / ".jaato" / ".cache" / ' \
-           '"apparmor-fragments")' in src
+    # The search path lives in one module the renderer and ``validate``
+    # share since #1675; asked rather than grepped.
+    from jaato_server.shared.apparmor_fragments import search_tiers
+
+    tiers = dict(search_tiers("/workspace"))
+    assert tiers["cache"] == (
+        Path("/workspace") / ".jaato" / ".cache" / "apparmor-fragments").resolve()
