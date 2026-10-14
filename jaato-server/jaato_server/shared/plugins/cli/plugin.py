@@ -37,7 +37,8 @@ from jaato_server.shared.script_imports import (
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from jaato_server.shared.subprocess_runner import (
-    run_command, requires_shell, resolve_executable, RunResult,
+    EXEC_DEADLINE_SECONDS, popen_bounded, run_command, requires_shell,
+    resolve_executable, RunResult,
 )
 from jaato_server.shared.secret_scrub import (
     DEFAULT_SECRET_ENV_PATTERNS, granted_env_names, resolve_scrub_patterns,
@@ -189,6 +190,10 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         # contract as _cgroup_attach.  See
         # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
         self._apparmor_child_transition: Optional[Callable[[], None]] = None
+        # Seconds a spawned child may take between fork() and exec() before
+        # it is killed and the call reported as failed (#1673).  Both Popen
+        # sites go through popen_bounded with this value.
+        self._exec_deadline: Optional[float] = EXEC_DEADLINE_SECONDS
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Note: tool output callback is managed by BackgroundCapableMixin
@@ -1054,8 +1059,13 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 command[:80] + ("..." if len(command) > 80 else ""),
             )
 
-            proc = subprocess.Popen(
+            # Bounded (#1673): a child stuck between fork and exec would
+            # otherwise block Popen itself, before the tool_timeout wait
+            # below starts.  ChildNeverExecd lands in the broad except at
+            # the end of this method and is reported as a failed call.
+            proc = popen_bounded(
                 cmd,
+                exec_deadline=self._exec_deadline,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
@@ -1727,6 +1737,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 # session.reload_env that binds or unbinds an account takes
                 # effect on the next one.  mcp does not do this.
                 scrub_keep=granted_env_names(),
+                exec_deadline=self._exec_deadline,
             )
 
             # Executable-not-found is surfaced as an error dict so the

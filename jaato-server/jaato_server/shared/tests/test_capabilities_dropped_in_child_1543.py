@@ -43,7 +43,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_CD,
-        find="        self._libc.capset(ctypes.byref(self._hdr), self._data)\n",
+        find="        self._capset(self._hdr_ptr, self._data)\n",
         replace="",
         test="test_the_process_sets_are_cleared_after_the_transition",
         because="permitted / effective survive into the payload when the "
@@ -51,9 +51,9 @@ REVERSIONS = [
     ),
     Reversion(
         target=_CD,
-        find="        self._libc.capset(ctypes.byref(self._hdr), self._data)\n"
+        find="        self._capset(self._hdr_ptr, self._data)\n"
              "        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)\n",
-        replace="        self._libc.capset(ctypes.byref(self._hdr), self._data)\n",
+        replace="        self._capset(self._hdr_ptr, self._data)\n",
         test="test_the_process_sets_are_cleared_after_the_transition",
         because="under seccomp: off nothing sets NO_NEW_PRIVS, and a root "
                 "exec recomputes permitted as the whole bounding set",

@@ -383,7 +383,8 @@ class CgroupsManager:
 
         Returns a no-op callable when cgroups are unavailable or no
         cgroup exists for the session — saves the caller from a
-        per-launch availability check.
+        per-launch availability check.  The write itself is
+        :func:`procs_attach_callback` (no Python I/O in the child, #1673).
         """
         if not self.is_available():
             return _noop
@@ -394,13 +395,7 @@ class CgroupsManager:
         # Capture the path now so the closure doesn't hit the manager
         # state from the forked child (which may have inconsistent
         # locks etc. — preexec_fn is signal-handler-style territory).
-        procs_str = str(procs)
-
-        def _attach() -> None:
-            with open(procs_str, "w") as f:
-                f.write(str(os.getpid()))
-
-        return _attach
+        return procs_attach_callback(str(procs))
 
     # ------------------------------------------------------------------
     # Telemetry primitives
@@ -535,6 +530,36 @@ class CgroupsManager:
         except OSError as exc:
             logger.error("Failed to rmdir cgroup %s: %s", cg_path, exc)
             return False
+
+
+def procs_attach_callback(procs_path: str) -> Callable[[], None]:
+    """The ``preexec_fn`` step that moves the forked child into a cgroup.
+
+    Writes ``0`` (the calling process) to *procs_path*, a ``cgroup.procs``
+    file, with ``os.open`` / ``os.write`` on a path and payload built here,
+    in the runner.  It runs in the child of a multi-threaded runner between
+    ``fork`` and ``exec`` (#1673), where Python-level I/O is not safe: the
+    builtin ``open`` builds a buffered text stream (encoding lookup, codec
+    machinery) where only two syscalls are needed, and ``os.getpid()``
+    formatting is replaced by the kernel's ``0`` = "this process".
+
+    A failed write raises ``OSError`` in the child, so ``Popen`` fails:
+    the same fail-closed posture the previous implementation had.
+    """
+    path = procs_path
+    payload = b"0"
+    # The flags the builtin ``open(path, "w")`` used, so a kernel that took
+    # that open takes this one.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+
+    def _attach() -> None:
+        fd = os.open(path, flags, 0o644)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+
+    return _attach
 
 
 def _noop() -> None:

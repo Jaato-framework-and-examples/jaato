@@ -64,8 +64,8 @@ REVERSIONS = [
     Reversion(
         target=_CLI,
         find="""                scrub_keep=granted_env_names(),
-            )""",
-        replace="""            )""",
+                exec_deadline=self._exec_deadline,""",
+        replace="""                exec_deadline=self._exec_deadline,""",
         test="test_cli_command_keeps_a_granted_name",
         because="cli's run_command path ignores the grant",
     ),
