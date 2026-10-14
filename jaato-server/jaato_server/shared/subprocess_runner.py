@@ -19,11 +19,13 @@ callbacks, background execution, timeout choices) stay in the calling
 plugin — this module is deliberately minimal.
 """
 
+import functools
 import logging
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -150,6 +152,171 @@ def _resolve_argv(
 
 
 # ---------------------------------------------------------------------------
+# Bounded spawn (#1673)
+# ---------------------------------------------------------------------------
+
+#: Seconds a forked child may take to reach ``exec`` (#1673).  A healthy
+#: ``preexec_fn`` chain (capability drop, LSM ``//child`` transition,
+#: seccomp, cgroup attach) is a handful of syscalls and takes microseconds;
+#: the deadline only has to be long enough that a loaded host never trips
+#: it.  It is NOT the tool's run-time bound (``tool_timeout_seconds`` is):
+#: it bounds the window in which ``subprocess.Popen`` itself blocks.
+EXEC_DEADLINE_SECONDS = 30.0
+
+
+#: What a model-driven subprocess's child runs between ``fork`` and
+#: ``exec``, in order (#1673): ``(step, where it is built)``.  ``cli``,
+#: ``interactive_shell`` and the notebook kernel receive the first five as
+#: one callable (``server.runner.session._child_preexec``); each plugin
+#: appends its own last step.  ``jaato-scaffold explain runtime`` renders
+#: this table, and the #1673 guard checks every ``where`` still resolves.
+#: Rule for every step: no Python-level lock, no logging, no import, no
+#: symbol lookup, no builtin ``open`` -- only syscalls on arguments built
+#: in the runner, because another runner thread may hold any lock at fork.
+CHILD_PREEXEC_STEPS = (
+    ("CPython post-fork hooks (os.register_at_fork after_in_child, every "
+     "library's)", "subprocess.Popen(preexec_fn=...)"),
+    ("drop the capability bounding set (PR_CAPBSET_DROP), while still in "
+     "the runner's profile", "capability_drop.CapabilityDrop.before_transition"),
+    ("enter the LSM child: AppArmor 'changeprofile <profile>//child' to "
+     "/proc/self/attr/current, or SELinux setexeccon",
+     "server.runner.lsm_confine.child_transition_callback"),
+    ("clear ambient / permitted / effective / inheritable capabilities, "
+     "PR_SET_NO_NEW_PRIVS", "capability_drop.CapabilityDrop.after_transition"),
+    ("PR_SET_NO_NEW_PRIVS + the seccomp filter",
+     "seccomp_filter.CompiledFilter.install"),
+    ("cli: cgroup attach ('0' to cgroup.procs); notebook: PR_SET_PDEATHSIG",
+     "server.cgroups.procs_attach_callback"),
+    ("exec the command; a child not there within the exec deadline is "
+     "killed and the call fails", "subprocess_runner.popen_bounded"),
+)
+
+
+class ChildNeverExecd(OSError):
+    """A forked child did not reach ``exec`` within the deadline (#1673).
+
+    ``subprocess.Popen`` returns only once the child has exec'd or failed:
+    the parent reads the child's exec-status pipe until it closes.  A child
+    stuck between ``fork`` and ``exec`` (a lock inherited from another
+    thread of a multi-threaded runner, taken by Python code that runs in
+    the child before the target program starts) therefore blocks
+    ``Popen`` itself, before any ``communicate(timeout=)`` or watchdog has
+    started.  :func:`popen_bounded` kills such a child and raises this.
+
+    Attributes:
+        pid: The killed child's pid.
+        deadline: The deadline it missed, in seconds.
+    """
+
+    def __init__(self, pid: int, deadline: float) -> None:
+        self.pid = pid
+        self.deadline = deadline
+        super().__init__(
+            f"the child process (pid {pid}) did not reach exec within "
+            f"{deadline:g}s after fork and was killed; nothing ran.  It "
+            "stopped in the runner's post-fork window (the //child "
+            "transition, capability drop and seccomp filter run there), "
+            "which is a runner-side fault, not the command's (#1673)")
+
+
+@functools.lru_cache(maxsize=None)
+def _watched_class(popen_cls: type) -> type:
+    """A subclass of *popen_cls* that publishes itself before it forks.
+
+    ``Popen._execute_child`` sets ``self.pid`` right after ``fork`` and
+    only then blocks reading the exec-status pipe, so the object appended
+    to ``box`` here is how :func:`popen_bounded`'s timer learns the pid of
+    a child that ``Popen`` has not returned yet.  Built from the
+    ``subprocess.Popen`` current at call time, so a test that replaced it
+    with a subclass still gets its own class.
+    """
+
+    def __init__(self, box, *args, **kwargs):
+        box.append(self)
+        popen_cls.__init__(self, *args, **kwargs)
+
+    return type("_WatchedPopen", (popen_cls,), {"__init__": __init__})
+
+
+def popen_bounded(
+    args,
+    *,
+    exec_deadline: Optional[float] = EXEC_DEADLINE_SECONDS,
+    **kwargs,
+) -> "subprocess.Popen":
+    """``subprocess.Popen(args, **kwargs)``, killing a child that never execs.
+
+    A timer armed before the spawn SIGKILLs the child if ``Popen`` has not
+    returned when it fires.  The kill closes the child's end of the
+    exec-status pipe, ``Popen`` returns, the child is reaped and
+    :class:`ChildNeverExecd` is raised, so the caller reports a failed
+    call instead of blocking forever.  Only ``preexec_fn`` spawns can stop
+    there in Python code, but every spawn is bounded the same way.
+
+    Stated limit: a kill landing between the child's ``exec`` and
+    ``Popen`` returning (a few bytecodes) would be reported as a child
+    that never exec'd.  The deadline makes that window irrelevant in
+    practice, and the alternative is no bound.
+
+    Args:
+        args: Passed to ``Popen``.
+        exec_deadline: Seconds the child may take to exec.  ``None`` or a
+            non-positive value disables the bound (a plain ``Popen``).
+        **kwargs: Passed to ``Popen``.
+
+    Raises:
+        ChildNeverExecd: The child was killed before it exec'd.
+    """
+    popen_cls = subprocess.Popen
+    if not exec_deadline or exec_deadline <= 0 or not isinstance(popen_cls, type):
+        # No bound asked for, or Popen is a test's stand-in function.
+        return popen_cls(args, **kwargs)
+    box: List[subprocess.Popen] = []
+    guard = threading.Lock()
+    state = {"returned": False, "killed": None}
+
+    def _kill_if_still_spawning() -> None:
+        with guard:
+            if state["returned"] or not box:
+                return
+            pid = box[0].pid
+            if pid is None:
+                return  # still before fork(): nothing to kill
+            state["killed"] = pid
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    timer = threading.Timer(exec_deadline, _kill_if_still_spawning)
+    timer.daemon = True
+    timer.start()
+    try:
+        proc = _watched_class(popen_cls)(box, args, **kwargs)
+    finally:
+        with guard:
+            state["returned"] = True
+        timer.cancel()
+    if state["killed"] is not None:
+        _discard(proc)
+        logger.error("SPAWN_NEVER_EXECD pid=%s deadline=%ss args=%r",
+                     state["killed"], exec_deadline, args)
+        raise ChildNeverExecd(state["killed"], exec_deadline)
+    return proc
+
+
+def _discard(proc: "subprocess.Popen") -> None:
+    """Reap a killed child and close the pipes ``Popen`` opened for it."""
+    proc.wait()
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Core runner
 # ---------------------------------------------------------------------------
 
@@ -165,6 +332,7 @@ def run_command(
     preexec_fn: Optional[Callable[[], None]] = None,
     scrub_env: Optional[Sequence[str]] = None,
     scrub_keep: Optional[Iterable[str]] = None,
+    exec_deadline: Optional[float] = EXEC_DEADLINE_SECONDS,
 ) -> RunResult:
     """Execute *command* and return a :class:`RunResult`.
 
@@ -199,6 +367,9 @@ def run_command(
         scrub_keep: Exact, case-sensitive names that survive *scrub_env*
                     (the daemon's ``app://`` grants).  ``None`` = keep
                     nothing; the caller decides, not this runner.
+        exec_deadline: Seconds the child may take between ``fork`` and
+                       ``exec`` before it is killed (:func:`popen_bounded`,
+                       #1673).  ``None`` disables the bound.
 
     Returns:
         A :class:`RunResult` with captured output and status flags.
@@ -206,6 +377,8 @@ def run_command(
     Raises:
         CancelledException: If *check_cancel* is ``True`` and the
                             cancel token fires during execution.
+        ChildNeverExecd: The child did not reach ``exec`` within
+                         *exec_deadline* and was killed (#1673).
     """
 
     # ---- environment ----
@@ -257,8 +430,9 @@ def run_command(
         len(env.get("PATH", "")), len(env),
         command[:80] + ("..." if len(command) > 80 else ""),
     )
-    proc = subprocess.Popen(
+    proc = popen_bounded(
         cmd,
+        exec_deadline=exec_deadline,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

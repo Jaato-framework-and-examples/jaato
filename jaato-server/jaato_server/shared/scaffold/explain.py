@@ -866,6 +866,7 @@ def runtime() -> Rendered:
     ``jaato-doctor --session <id>``, which applies this map to a live session.
     """
     limits = _runtime_limits_report()
+    child_spawn = _child_spawn_report()
     data = {
         "entities": {
             "daemon": "long-lived singleton on the IPC socket; daemon-tier plugins, "
@@ -895,6 +896,7 @@ def runtime() -> Rendered:
         },
         "debug": "jaato-doctor --session <id|latest> --workspace DIR",
         "runtime_limits": limits,
+        "child_spawn": child_spawn,
     }
     text = (
         "jaato runtime — entities, workspace flow, logs, how to debug\n"
@@ -926,9 +928,41 @@ def runtime() -> Rendered:
         "  jaato-doctor --session <id|latest> --workspace DIR\n"
         "  -> reports whether the runner-tier path plugins resolved the workspace\n"
         "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n\n"
-        + "\n".join(_runtime_limits_lines(limits)) + "\n"
+        + "\n".join(_runtime_limits_lines(limits)) + "\n\n"
+        + "\n".join(_child_spawn_lines(child_spawn)) + "\n"
     )
     return data, text
+
+
+def _child_spawn_report() -> Dict[str, Any]:
+    """How a model-driven subprocess reaches ``//child`` (#1673).
+
+    Read from :data:`shared.subprocess_runner.CHILD_PREEXEC_STEPS` and
+    ``EXEC_DEADLINE_SECONDS``, so the order shown is the one declared beside
+    the code that spawns.
+    """
+    from jaato_server.shared import subprocess_runner as sr
+    return {
+        "steps": [{"step": step, "where": where}
+                  for step, where in sr.CHILD_PREEXEC_STEPS],
+        "exec_deadline_seconds": sr.EXEC_DEADLINE_SECONDS,
+        "rule": "between fork and exec the child takes no Python-level lock: "
+                "no logging, no import, no symbol lookup, no builtin open; "
+                "only syscalls on arguments built in the runner",
+    }
+
+
+def _child_spawn_lines(report: Dict[str, Any]) -> List[str]:
+    """Text form of :func:`_child_spawn_report`."""
+    lines = ["CHILD SPAWN  (cli / interactive_shell / notebook: fork -> //child -> exec)"]
+    for i, row in enumerate(report["steps"], 1):
+        lines.append(f"  {i}. {row['step']}")
+        lines.append(f"     [{row['where']}]")
+    lines.append(f"  a child that has not exec'd {report['exec_deadline_seconds']:g}s "
+                 "after fork is SIGKILLed and the tool call fails (#1673);")
+    lines.append("  'did not reach exec' in a tool error points here, not at the command.")
+    lines.append("  rule: " + report["rule"])
+    return lines
 
 
 # ------------------------------------------------------------------- tiers

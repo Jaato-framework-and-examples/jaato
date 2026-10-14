@@ -37,8 +37,10 @@ Why the order:
   too, not only by the seccomp filter, so ``seccomp: off`` does not undo
   this.
 
-Nothing in the child allocates or logs: every structure is built in the
-runner before the fork, and every call's failure is ignored there.  The
+Nothing in the child allocates, logs, imports or looks up a symbol (#1673):
+every structure and both libc functions are prepared in the runner before
+the fork, and every call's failure is ignored there.  The child of a
+multi-threaded runner may hold no lock another thread held at fork time.  The
 runner learns what the calls achieve by running them once, at plan time,
 in a probe child (:func:`probe`), and records that as the posture.
 
@@ -197,12 +199,29 @@ class CapabilityDrop:
     _libc: Any = field(repr=False)
     _hdr: Any = field(repr=False)
     _data: Any = field(repr=False)
+    #: ``prctl`` and ``capset`` resolved in the runner (#1673).  A first
+    #: attribute access on a ``CDLL`` runs ``dlsym`` and creates and caches
+    #: a Python function object; neither belongs in a forked child.
+    _prctl: Any = field(default=None, repr=False)
+    _capset: Any = field(default=None, repr=False)
+    _hdr_ptr: Any = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self._prctl is None:
+            self._prctl = self._libc.prctl
+        if self._capset is None:
+            self._capset = self._libc.capset
+        if self._hdr_ptr is None:
+            self._hdr_ptr = ctypes.pointer(self._hdr)
 
     def before_transition(self) -> None:
         """Reduce the bounding set.  Runs in the forked child, while it
         still wears the runner's profile (``CAP_SETPCAP``).  Stops at the
-        first refusal: one refused drop means every drop is refused."""
-        prctl = self._libc.prctl
+        first refusal: one refused drop means every drop is refused.
+
+        Post-fork code (#1673): only the function pointers resolved in
+        :meth:`__post_init__`, no symbol lookup, no logging, no import."""
+        prctl = self._prctl
         for cap in self.drop:
             if prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) != 0:
                 return
@@ -210,10 +229,13 @@ class CapabilityDrop:
     def after_transition(self) -> None:
         """Clear ambient, set permitted / effective to the kept set and
         inheritable to empty, then NO_NEW_PRIVS.  Runs in the forked child
-        after the LSM transition; failures are left to the probe to find."""
-        prctl = self._libc.prctl
+        after the LSM transition; failures are left to the probe to find.
+
+        Post-fork code (#1673): every argument was built in :func:`prepare`
+        and both functions resolved in :meth:`__post_init__`."""
+        prctl = self._prctl
         prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
-        self._libc.capset(ctypes.byref(self._hdr), self._data)
+        self._capset(self._hdr_ptr, self._data)
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 
 
@@ -251,7 +273,7 @@ _PROCESS_KEPT = 2
 def _verify(drop: CapabilityDrop) -> int:
     """Exit-code bits for what did NOT take effect (in the probe child)."""
     bits = 0
-    prctl = drop._libc.prctl
+    prctl = drop._prctl
     for cap in drop.drop:
         if prctl(PR_CAPBSET_READ, cap, 0, 0, 0) != 0:
             bits |= _BOUNDING_KEPT

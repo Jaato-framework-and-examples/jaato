@@ -12271,6 +12271,54 @@ Guard: `jaato_server/shared/tests/test_a_tool_runs_once_1338.py`, three
 reversions. Every test passes a real `CancelToken`, and one drives the real
 cli plugin and counts the lines its command appends to a file.
 
+### A Child That Never Reached Exec (#1673)
+
+A `cli_based_tool` call hung for good. The runner, a multi-threaded,
+uid-dropped, confined pool slot, forked its child, and the child sat in
+`futex_wait` with the runner's own cmdline and the base profile's label:
+it stopped after `fork()` and before the `//child` transition, the
+seccomp filter and `exec`. `subprocess.Popen` returns only once the child
+has exec'd or failed (the parent reads the exec-status pipe until it
+closes), so the runner's `Popen` blocked too, before `tool_timeout_seconds`
+or any watchdog had started, and the turn never ended.
+
+The likely class is a lock another runner thread held at fork time and the
+child then took. Reproduced here with the incident's exact signature (a
+single-threaded child in `futex_do_wait`, the parent in `anon_pipe_read`):
+a thread blocked writing a log line into a full pipe holds the stream's
+buffer lock, which CPython does not reset after `fork`, and any child-side
+write to that stream waits forever. Which lock the incident's child took is
+not known; with a `preexec_fn`, CPython runs every library's
+`os.register_at_fork(after_in_child=...)` hook in the child before ours (the
+OpenTelemetry batch processor's starts a thread there).
+
+| Change | Where |
+|---|---|
+| a child not at `exec` within `EXEC_DEADLINE_SECONDS` (30) is SIGKILLed, reaped, and `ChildNeverExecd` raised; the timer learns the pid from a `Popen` subclass that publishes itself before `_execute_child` forks | `shared/subprocess_runner.py::popen_bounded` |
+| both `cli` spawn paths use it (`CLIToolPlugin._exec_deadline`), so the call fails with "did not reach exec ... runner-side fault" instead of hanging; the notebook kernel spawn too | `run_command`, `_execute_streaming_run`, `notebook/backends/subprocess_kernel._popen_or_close` |
+| our own steps take no lock: `prctl`, `capset` and every argument resolved in the runner (`capset` was looked up, a `dlsym`, in each child), seccomp's call arguments prebuilt, the cgroup attach is `os.open`/`os.write` of `b"0"` instead of the builtin `open` | `capability_drop.CapabilityDrop.__post_init__`, `seccomp_filter.CompiledFilter.__post_init__`, `server/cgroups.procs_attach_callback` |
+| the steps a child runs between fork and exec, in order, declared beside the spawn and rendered by `explain runtime` (CHILD SPAWN) | `subprocess_runner.CHILD_PREEXEC_STEPS` |
+
+**The rule for post-fork code:** only syscalls on arguments built in the
+runner. No logging, no `import`, no symbol lookup on a `CDLL`, no builtin
+`open`, no `print`.
+
+Stated limits: the bound does not remove the hazard, it reports it; the
+library at-fork hooks still run in every `preexec_fn` child, and closing
+that needs no Python in the child at all (an exec helper doing the
+transition, the drop and the filter). `interactive_shell` spawns through
+`pexpect`, whose own exec-error read is not bounded here. A kill landing in
+the few bytecodes between a successful `exec` and `Popen` returning would be
+misreported as a child that never exec'd. Not verified on an enforcing
+kernel.
+
+Guard: `jaato_server/shared/tests/test_a_child_that_never_execs_1673.py`,
+four reversions. Its first case runs the real chain (capability drop, an
+LSM-shaped transition, an allow-all seccomp filter, the cgroup attach)
+through the real `cli` plugin, with a logging handler, a stream buffer lock
+and a module import lock held by other threads at fork, and an audit hook
+that records any symbol lookup, import or Python file open the child makes.
+
 ### A Backup Name Longer Than the Path Component Limit (#1485)
 
 `file_edit` backs a file up before every edit, into

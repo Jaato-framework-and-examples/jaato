@@ -123,11 +123,16 @@ def _popen_or_close(argv, close_on_failure=(), **popen_kwargs) -> subprocess.Pop
     """``subprocess.Popen``, closing ``close_on_failure`` if the spawn fails.
 
     A kernel spawn can fail on purpose: a refused ``//child`` transition
-    raises in the forked child and fails ``Popen`` (#1323).  The pipes
+    raises in the forked child and fails ``Popen`` (#1323), and a child that
+    never reaches exec is killed and raises ``ChildNeverExecd`` (#1673,
+    :func:`shared.subprocess_runner.popen_bounded`).  The pipes
     opened for that kernel would otherwise leak.
     """
+    # Bounded (#1673): a kernel stuck between fork and exec (in the
+    # preexec chain) would otherwise block Popen, and the cell, forever.
+    from jaato_server.shared.subprocess_runner import popen_bounded
     try:
-        return subprocess.Popen(argv, **popen_kwargs)
+        return popen_bounded(argv, **popen_kwargs)
     except BaseException:
         for fd in close_on_failure:
             try:

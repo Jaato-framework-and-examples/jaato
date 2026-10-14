@@ -471,12 +471,14 @@ class TestMakeAttachCallback:
         cb()  # silent no-op
 
     def test_callback_writes_current_pid(self, manager):
+        # ``0`` is the kernel's "the writing process": the callback runs
+        # between fork and exec and builds no string there (#1673).
         manager._available = True
         manager.provision_cgroup("s1", RuntimeLimits(pids_max=16))
         cb = manager.make_attach_callback("s1")
         cb()
         procs = manager.get_cgroup_path("s1") / "cgroup.procs"
-        assert procs.read_text() == str(os.getpid())
+        assert procs.read_text() == "0"
 
 
 # ---------------------------------------------------------------------------

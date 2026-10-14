@@ -437,6 +437,8 @@ class CompiledFilter:
     _prog: Any = field(default=None, repr=False)
     _prctl: Any = field(default=None, repr=False)
     _syscall: Any = field(default=None, repr=False)
+    _prog_ptr: Any = field(default=None, repr=False)
+    _call_args: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         count = len(self.program) // ctypes.sizeof(_SockFilter)
@@ -452,6 +454,15 @@ class CompiledFilter:
         self._prctl = libc.prctl
         self._syscall = libc.syscall
         self._syscall.restype = ctypes.c_long
+        # Every argument the child passes is built here (#1673): the
+        # child of a multi-threaded runner makes the two calls and nothing
+        # else.
+        self._prog_ptr = ctypes.pointer(self._prog)
+        self._call_args = None
+        if self.seccomp_nr is not None:
+            self._call_args = (ctypes.c_long(self.seccomp_nr),
+                               ctypes.c_uint(SECCOMP_SET_MODE_FILTER),
+                               ctypes.c_uint(0), self._prog_ptr)
 
     @property
     def instructions(self) -> int:
@@ -465,7 +476,9 @@ class CompiledFilter:
         Never call it in the runner: the filter cannot be removed.  The
         filter goes in through the raw ``seccomp(2)`` syscall when the
         daemon shipped its number, else through ``prctl(PR_SET_SECCOMP)``;
-        both take the same program.
+        both take the same program.  Post-fork code (#1673): the arguments
+        and both functions were built in ``__post_init__``; only the
+        error path (which ends the spawn) formats a message.
 
         Raises:
             OSError: either call failed; the spawn fails with it.
@@ -473,14 +486,12 @@ class CompiledFilter:
         if self._prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
             err = ctypes.get_errno()
             raise OSError(err, f"PR_SET_NO_NEW_PRIVS: {os.strerror(err)}")
-        if self.seccomp_nr is not None:
-            rc = self._syscall(ctypes.c_long(self.seccomp_nr),
-                               ctypes.c_uint(SECCOMP_SET_MODE_FILTER),
-                               ctypes.c_uint(0), ctypes.byref(self._prog))
+        if self._call_args is not None:
+            rc = self._syscall(*self._call_args)
             what = "seccomp(SECCOMP_SET_MODE_FILTER)"
         else:
             rc = self._prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
-                             ctypes.byref(self._prog), 0, 0)
+                             self._prog_ptr, 0, 0)
             what = "PR_SET_SECCOMP"
         if rc != 0:
             err = ctypes.get_errno()
