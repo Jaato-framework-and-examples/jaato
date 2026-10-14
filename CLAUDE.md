@@ -11542,11 +11542,25 @@ argument grid.
 own copy: `jaato_sdk.tool_ids` (`ToolIdNames`, `resolve_tool_ids`,
 `tool_id_mappings`) and its mirror `jaato-sdk-ts/src/toolIds.ts`
 (`ToolIdNames`, `resolveToolIds`, `resolveToolArgs`, `toolIdMappings`).
-`ToolIdNames.observe(event)` replaces the map on `tools.id_registry` and on
-a non-empty `session.info.tool_id_mappings`; `track(client)` subscribes to
+`ToolIdNames.observe(event)` MERGES `tools.id_registry` and a non-empty
+`session.info.tool_id_mappings` into the map and drops nothing (#1681);
+`track(client)` subscribes to
 both and returns one unsubscribe; `resolve` / `name` are for render time.
 The TUI's `ui_utils` and the web client's `protocol/toolIds.ts` delegate to
 them. Guards: `jaato_sdk/tests/test_tool_ids.py`, `src/toolIds.test.ts`.
+
+**Runner-tier names are in every map (#1681).** `_build_tool_id_mappings`
+may read the runner's schemas only off the event loop, so the on-loop
+builds (`session.info`, `emit_current_state` on re-attach, `initialize`)
+sent daemon-tier names only, and a client replacing its map with one of
+those lost `prompt.*`, `cli`, client tools; a client re-attaching to a
+running session never got them. The off-loop read is now cached on
+`JaatoServer._runner_tool_id_mappings` (a failed or empty read keeps the
+previous answer) and folded into every build; the SDKs and the web store
+also merge rather than replace, so an older daemon's partial map drops
+nothing either. Guard:
+`jaato_server/server/tests/test_runner_tool_ids_reach_every_map_1681.py`,
+two reversions.
 
 ### A Call to a Tool That Does Not Exist, Shown Quietly
 
@@ -12324,6 +12338,22 @@ child (OTel restarts its worker thread there), and nothing bounds a child
 that never execs; #1680 adds that bound. Guard:
 `jaato_server/shared/tests/test_a_forked_child_writes_nothing_1673.py`,
 four reversions.
+
+### A Sub-Project's `.jaato` Is a Workspace Path (#1679)
+
+`sandbox_utils.is_jaato_path` flagged any `.jaato` component in a
+workspace-relative path, so `<ws>/pipeline/.jaato/profiles/x.yaml` (a
+sub-project's config, which a Builder session writes) was treated as the
+workspace's own `.jaato`, and `file_edit` refused it whatever `sandbox add`
+granted, while `cli` wrote there freely. Now only the workspace's OWN
+`.jaato` counts: a path that, walked lexically from the workspace root,
+stands at or under `<ws>/.jaato` at any step (`.jaato/../x`,
+`sub/../.jaato/x`), or that resolves there through a symlink (newly closed:
+a link elsewhere in the tree into `<ws>/.jaato` used to pass the workspace
+check). A nested `.jaato` is governed by the workspace check and the kernel
+profile like any other path. Guard:
+`jaato_server/shared/tests/test_a_nested_jaato_is_a_workspace_path_1679.py`,
+three reversions.
 
 ### Coreutils a Confined Session Could Not Run (#1342)
 
