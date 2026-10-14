@@ -102,6 +102,11 @@ class DaemonInfo:
     password_store_dir: Optional[str] = None
     env: Optional[dict] = None           # the daemon's full /proc/<pid>/environ
     executable: Optional[str] = None     # /proc/<pid>/exe — which interpreter
+    #: The daemon's Python ENVIRONMENT (a venv directory, or the base
+    #: interpreter's prefix), derived from the interpreter as INVOKED — see
+    #: :func:`_daemon_prefix`.  ``None`` when it could not be established.
+    #: Not ``executable``: two venvs over one system Python share that (#1610).
+    prefix: Optional[str] = None
 
 
 # --------------------------------------------------------------------------
@@ -185,12 +190,119 @@ def _proc_exe(pid: int) -> Optional[str]:
         return None
 
 
+def _proc_argv0(pid: int) -> Optional[str]:
+    """``argv[0]`` of ``pid`` from ``/proc/<pid>/cmdline``; ``None`` if unreadable.
+
+    The interpreter AS INVOKED — ``…/venv/bin/python``, or the shebang path of
+    a console script — which is what CPython itself reads to find a venv's
+    ``pyvenv.cfg``.  ``/proc/<pid>/exe`` cannot stand in for it: a venv's
+    ``bin/python`` is a symlink to the base binary, so every venv over one
+    system Python reports the same ``exe`` (#1610).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return None
+    first = raw.split(b"\x00", 1)[0]
+    return first.decode("utf-8", "replace") if first else None
+
+
+def _locate_invoked(argv0: str, env: Optional[dict]) -> Optional[str]:
+    """Make ``argv0`` absolute WITHOUT resolving symlinks, or ``None``.
+
+    Absolute: as is.  A bare name: searched along the daemon's own ``PATH``
+    (the environ block is the one the exec saw).  Relative with a separator:
+    ``None`` — it was relative to a working directory the daemon may since
+    have left (a daemonized process chdirs), so any answer would be a guess.
+    """
+    if os.path.isabs(argv0):
+        return argv0
+    if os.sep in argv0:
+        return None
+    for d in ((env or {}).get("PATH") or "").split(os.pathsep):
+        if d and os.path.isabs(d):
+            cand = os.path.join(d, argv0)
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+    return None
+
+
+def _venv_of(interpreter: str) -> Optional[str]:
+    """The venv directory ``interpreter`` belongs to, or ``None`` if not a venv.
+
+    CPython's own rule: ``pyvenv.cfg`` beside the executable or one directory
+    up, looked up on the path as invoked — never after resolving symlinks,
+    which is exactly what would land on the base interpreter.
+    """
+    here = os.path.dirname(interpreter)
+    for d in (here, os.path.dirname(here)):
+        if os.path.isfile(os.path.join(d, "pyvenv.cfg")):
+            return d
+    return None
+
+
+def _daemon_prefix(pid: int, env: Optional[dict],
+                   executable: Optional[str]) -> Optional[str]:
+    """Which Python environment the daemon runs in, or ``None`` if unknowable.
+
+    Derived the way CPython derives ``sys.prefix`` (#1610): the interpreter as
+    invoked (:func:`_proc_argv0`), its ``pyvenv.cfg`` if it has one, else the
+    base installation (``PYTHONHOME`` when the daemon's environ sets it, else
+    the parent of the binary's ``bin/``).  ``VIRTUAL_ENV`` is deliberately not
+    consulted: the interpreter ignores it, so it says what a shell activated,
+    not what the daemon imports from.
+
+    Positive evidence only.  ``argv[0]`` is writable by the process (a
+    ``setproctitle`` rewrite), so it is believed only when it resolves to the
+    binary ``/proc/<pid>/exe`` names; anything else answers ``None``, which
+    the check reports as "cannot tell" rather than comparing.
+    """
+    argv0 = _proc_argv0(pid)
+    invoked = _locate_invoked(argv0, env) if argv0 else None
+    if invoked is None or not executable:
+        return None
+    try:
+        if os.path.realpath(invoked) != os.path.realpath(executable):
+            return None
+    except (OSError, ValueError):
+        return None
+    venv = _venv_of(invoked)
+    if venv is not None:
+        return venv
+    home = ((env or {}).get("PYTHONHOME") or "").split(os.pathsep)[0]
+    if home:
+        return home
+    return os.path.dirname(os.path.dirname(os.path.realpath(executable)))
+
+
+def _same_environment(info: DaemonInfo) -> Optional[bool]:
+    """Does the daemon import from THIS process's environment?
+
+    ``True`` / ``False`` when established, ``None`` when it could not be —
+    and ``None`` must never be read as ``True``: the installed-package
+    fallback answers with the caller's own site-packages, which is a
+    comparison only when the environments are one (#1610).  Compared as
+    directories (``sys.prefix`` against the daemon's), so two venvs over one
+    system Python stay two.
+    """
+    if not info.prefix:
+        return None
+    if info.executable and \
+            os.path.realpath(info.executable) != os.path.realpath(sys.executable):
+        return False
+    try:
+        return os.path.realpath(info.prefix) == os.path.realpath(sys.prefix)
+    except (OSError, ValueError):
+        return None
+
+
 def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
     """Observe the daemon behind ``socket_path`` without mutating anything.
 
     Reads listen-state, then (best-effort) the pidfile → liveness →
     ``/proc/<pid>/environ`` for HOME/USER/PASSWORD_STORE_DIR, and
-    ``/proc/<pid>/exe`` for the interpreter running it.
+    ``/proc/<pid>/exe`` for the interpreter running it, and
+    ``/proc/<pid>/cmdline`` for the environment it runs in (#1610).
     """
     info = DaemonInfo(
         socket_path=socket_path,
@@ -208,6 +320,7 @@ def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
                 info.home = env.get("HOME")
                 info.user = env.get("USER")
                 info.password_store_dir = env.get("PASSWORD_STORE_DIR")
+            info.prefix = _daemon_prefix(info.pid, env, info.executable)
     return info
 
 
@@ -1202,6 +1315,27 @@ def _skew_verdict(pkg: str, client: Path, daemon: Path, source: str) -> Check:
                  f"the cause of missing event fields if they are not.")
 
 
+def _unresolvable_daemon_copy(pkg: str, info: DaemonInfo,
+                              same_env: Optional[bool]) -> Check:
+    """The WARN for a daemon whose installed copy this process cannot see.
+
+    Two wordings, because they are two facts: the daemon demonstrably runs in
+    ANOTHER environment, or which environment it runs in could not be
+    established.  Neither may become a PASS (#1610).
+    """
+    if same_env is False:
+        where = (f"installed in ITS environment ({info.prefix or info.executable}), "
+                 f"which is not yours ({sys.prefix})")
+    else:
+        where = ("installed in an environment that could not be identified "
+                 "(the daemon's /proc/<pid>/cmdline is unreadable, or names "
+                 "no interpreter matching /proc/<pid>/exe)")
+    return Check(f"{pkg} checkout", WARN,
+                 f"the daemon's PYTHONPATH names no {pkg}, so it uses the copy "
+                 f"{where} — cannot resolve it from here, so client/daemon "
+                 f"checkout skew is unchecked.")
+
+
 def check_checkout_skew(info: DaemonInfo) -> List[Check]:
     """Do the client and the daemon resolve the framework from the same tree?
 
@@ -1215,9 +1349,12 @@ def check_checkout_skew(info: DaemonInfo) -> List[Check]:
 
     The daemon's resolution is derived the way CPython would — see
     :func:`_daemon_package_dir`.  The installed-package fallback is only
-    trustworthy while both processes share an interpreter, so when they
-    demonstrably do not, this reports that it cannot tell rather than
-    comparing against the caller's own site-packages and answering PASS.
+    trustworthy while both processes share an ENVIRONMENT, so unless they
+    demonstrably do (:func:`_same_environment`), this reports that it cannot
+    tell rather than comparing against the caller's own site-packages and
+    answering PASS.  Environment, not interpreter binary: two venvs over one
+    system Python share ``/proc/<pid>/exe``, which is how this once compared
+    the client against itself and printed it as the daemon's (#1610).
 
     Returns:
         Empty when there is no daemon to compare against — nothing observed is
@@ -1233,18 +1370,12 @@ def check_checkout_skew(info: DaemonInfo) -> List[Check]:
                       "no pidfile) — cannot tell whether it resolves jaato from "
                       "your checkout or another one.")]
     entries = [x for x in (info.env.get("PYTHONPATH") or "").split(os.pathsep) if x]
-    other_interpreter = bool(
-        info.executable
-        and os.path.realpath(info.executable) != os.path.realpath(sys.executable))
+    same_env = _same_environment(info)
     out: List[Check] = []
     for pkg in _SKEW_PACKAGES:
         client = _client_package_dir(pkg)
-        if other_interpreter and _resolve_package_on(entries, pkg) is None:
-            out.append(Check(f"{pkg} checkout", WARN,
-                             f"the daemon's PYTHONPATH names no {pkg}, so it uses "
-                             f"the copy installed for ITS interpreter "
-                             f"({info.executable}), which is not yours "
-                             f"({sys.executable}) — cannot resolve it from here."))
+        if same_env is not True and _resolve_package_on(entries, pkg) is None:
+            out.append(_unresolvable_daemon_copy(pkg, info, same_env))
             continue
         daemon, source = _daemon_package_dir(pkg, entries, client)
         if client is None or daemon is None:

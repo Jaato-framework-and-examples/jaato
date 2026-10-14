@@ -8093,6 +8093,24 @@ best-effort and returns rather than raises: `_proc_exe` uses `readlink` (not
 reporting an interpreter that does not exist), and a `PYTHONPATH` entry that
 cannot be walked is skipped.
 
+**The discriminator is the environment, not the binary (#1610).** The first
+version compared `realpath(/proc/<pid>/exe)` with `realpath(sys.executable)`.
+A venv's `bin/python` is a symlink to the base binary, so a client venv and a
+daemon venv over one system Python (the recommended client shape) compared
+equal, the fallback answered with the client's own site-packages, and the
+check printed it as the daemon's and graded PASS. `probe_daemon` now records
+`DaemonInfo.prefix`, derived the way CPython derives `sys.prefix`: `argv[0]`
+from `/proc/<pid>/cmdline` (a bare name looked up on the daemon's own `PATH`;
+a relative path declined), believed only when it resolves to the binary
+`/proc/<pid>/exe` names, then `pyvenv.cfg` beside it or one up, looked up
+WITHOUT resolving symlinks, else `PYTHONHOME`, else the base installation.
+`VIRTUAL_ENV` is not read, because the interpreter ignores it.
+`_same_environment` compares that directory with `sys.prefix`, and the
+installed-package comparison runs only on `True`: a different environment,
+or one that could not be identified, is a WARN that says which. Guard:
+`jaato_server/shared/tests/test_doctor_skew_tells_two_venvs_apart_1610.py`,
+five reversions, over two real venvs and a real process per case.
+
 ### Five Ways a Session Came Up Wrong and Said Nothing
 
 The findings above are about surfaces that would not TELL you something. These
