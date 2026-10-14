@@ -464,9 +464,11 @@ def _print_validation(answer: RemoteValidation, profile: Optional[str],
         print(json.dumps(answer.findings, indent=2))
     else:
         if not answer.findings:
+            # The daemon names the set it applied, which may be the one the
+            # caller's .env selects when none was requested (#1595).
             print(_findings.clean_line(answer.scope or
                                        _findings.scope_label(profile),
-                                       profile_set))
+                                       answer.profile_set or profile_set))
         for d in answer.findings:
             print(_findings.format_finding(d))
         print()

@@ -129,7 +129,8 @@ def fake_validate(monkeypatch):
     calls = []
     result = []
 
-    def fake(workspace, *, profile_set=None, only=None, config_root=None):
+    def fake(workspace, *, profile_set=None, only=None, config_root=None,
+             session_env=None):
         calls.append((workspace, profile_set, only))
         return list(result)
 
