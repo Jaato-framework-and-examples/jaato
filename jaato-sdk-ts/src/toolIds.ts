@@ -11,8 +11,11 @@
 // `tool_id_mappings`.
 //
 // Rules:
-// - the mapping is replaced wholesale on each `tools.id_registry`, and
-//   seeded from a non-empty `session.info.tool_id_mappings`;
+// - each mapping sent (`tools.id_registry`, a non-empty
+//   `session.info.tool_id_mappings`) is MERGED into the one held; nothing
+//   observed removes an entry.  Ids are a pure function of the name, so a
+//   kept entry is never wrong, and a daemon before #1681 sent maps without
+//   its runner-tier names (`cli`, `prompt.*`) that replacing would lose;
 // - resolution walks arrays and plain objects and replaces only a string
 //   that IS an id in the map; an unknown id is left as it is (showing the id
 //   is honest, inventing a name is not), and a string merely containing one
@@ -59,9 +62,9 @@ export interface ToolIdEventSource {
 /**
  * The latest id -> name mapping, kept current from the event stream.
  *
- * `observe(ev)` with a `tools.id_registry` event REPLACES the map; with a
- * `session.info` whose `tool_id_mappings` is non-empty, replaces it too;
- * anything else is ignored.  `track(client)` subscribes for you.  Read with
+ * `observe(ev)` with a `tools.id_registry` event MERGES its entries into the
+ * map; with a `session.info` whose `tool_id_mappings` is non-empty, merges
+ * too; anything else is ignored.  Nothing observed removes an entry (#1681).  `track(client)` subscribes for you.  Read with
  * `resolve(value)` / `name(id)` when rendering.
  */
 export class ToolIdNames {
@@ -80,28 +83,22 @@ export class ToolIdNames {
     return Object.keys(this.#names).length;
   }
 
-  /** Replace the map wholesale. */
+  /** Replace the map wholesale (`observe` merges; this does not). */
   replace(mappings: Readonly<Record<string, string>>): void {
     this.#names = toolIdMappings(mappings) ?? {};
   }
 
-  /** Update from one wire event; returns whether the map was replaced. */
+  /** Update from one wire event; returns whether it carried a mapping. */
   observe(ev: unknown): boolean {
     if (!ev || typeof ev !== "object") return false;
     const e = ev as Record<string, unknown>;
-    if (e.type === EventTypeValue.TOOL_ID_REGISTRY) {
-      const names = toolIdMappings(e.mappings);
-      if (!names) return false;
-      this.#names = names;
-      return true;
-    }
-    if (e.type === EventTypeValue.SESSION_INFO) {
-      const names = toolIdMappings(e.tool_id_mappings);
-      if (!names || !Object.keys(names).length) return false;
-      this.#names = names;
-      return true;
-    }
-    return false;
+    let names: Record<string, string> | null;
+    if (e.type === EventTypeValue.TOOL_ID_REGISTRY) names = toolIdMappings(e.mappings);
+    else if (e.type === EventTypeValue.SESSION_INFO) names = toolIdMappings(e.tool_id_mappings);
+    else return false;
+    if (!names || !Object.keys(names).length) return false;
+    this.#names = { ...this.#names, ...names };
+    return true;
   }
 
   /** The name for `value` when it is a known id, else `value`. */

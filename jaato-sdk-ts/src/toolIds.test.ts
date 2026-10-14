@@ -30,13 +30,18 @@ test("toolIdMappings keeps string -> string entries only", () => {
   assert.equal(toolIdMappings([]), null);
 });
 
-test("tools.id_registry replaces the map wholesale", () => {
-  const n = new ToolIdNames({ t_old: "old" });
+test("tools.id_registry merges and never drops a name (#1681)", () => {
+  const n = new ToolIdNames({ c_cf07194e: "cli" });
   assert.equal(n.observe({ type: "tools.id_registry", mappings: NAMES }), true);
+  assert.deepEqual(n.mappings, { ...NAMES, c_cf07194e: "cli" });
+  assert.equal(n.observe({ type: "tools.id_registry", mappings: {} }), false);
+  assert.equal(n.name("c_cf07194e"), "cli");
+});
+
+test("replace() is still wholesale", () => {
+  const n = new ToolIdNames({ t_old: "old" });
+  n.replace(NAMES);
   assert.deepEqual(n.mappings, NAMES);
-  assert.equal(n.name("t_old"), "t_old");
-  assert.equal(n.observe({ type: "tools.id_registry", mappings: {} }), true);
-  assert.equal(n.size, 0);
 });
 
 test("session.info seeds the map only when it carries mappings", () => {

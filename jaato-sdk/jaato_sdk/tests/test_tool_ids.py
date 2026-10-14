@@ -33,13 +33,22 @@ def test_tool_id_mappings_keeps_str_to_str_only():
     assert tool_id_mappings([]) is None
 
 
-def test_registry_event_replaces_wholesale():
-    n = ToolIdNames({"t_old": "old"})
+def test_registry_event_merges_and_never_drops_a_name_1681():
+    """A daemon before #1681 sent maps missing its runner-tier names from
+    the event loop; replacing with one lost ``cli`` / ``prompt.*``."""
+    n = ToolIdNames({"c_cf07194e": "cli"})
     assert n.observe(ToolIdRegistryEvent(mappings=NAMES)) is True
+    assert n.mappings == {**NAMES, "c_cf07194e": "cli"}
+    assert n.observe(SessionInfoEvent(tool_id_mappings={"t_x": "x"})) is True
+    assert n.name("c_cf07194e") == "cli"
+    assert n.observe(ToolIdRegistryEvent(mappings={})) is False
+    assert n.name("c_cf07194e") == "cli"
+
+
+def test_replace_is_still_wholesale():
+    n = ToolIdNames({"t_old": "old"})
+    n.replace(NAMES)
     assert n.mappings == NAMES
-    assert n.name("t_old") == "t_old"
-    assert n.observe(ToolIdRegistryEvent(mappings={})) is True
-    assert len(n) == 0
 
 
 def test_session_info_seeds_only_when_non_empty():
@@ -71,8 +80,8 @@ def test_track_follows_a_real_client_dispatch_and_unsubscribes():
     client._dispatch(SessionInfoEvent(tool_id_mappings={"t_a": "a"}))
     assert n.name("t_a") == "a"
     client._dispatch(ToolIdRegistryEvent(mappings=NAMES))
-    assert n.mappings == NAMES
+    assert n.mappings == {**NAMES, "t_a": "a"}
     off()
-    client._dispatch(ToolIdRegistryEvent(mappings={}))
-    assert n.mappings == NAMES
+    client._dispatch(ToolIdRegistryEvent(mappings={"t_z": "z"}))
+    assert n.name("t_z") == "t_z"
     assert EventType.TOOL_ID_REGISTRY.value == "tools.id_registry"
