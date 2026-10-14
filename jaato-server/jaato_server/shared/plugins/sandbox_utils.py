@@ -53,7 +53,7 @@ import os
 import re
 import tempfile
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from jaato_server.shared.path_utils import msys2_to_windows_path, normalize_for_comparison
 
@@ -227,17 +227,27 @@ def is_pseudo_device_path(path: str) -> bool:
 
 
 def is_jaato_path(path: str, workspace_root: str) -> bool:
-    """Check if a path references the workspace's .jaato config directory.
+    """Check if a path references the workspace's own .jaato config directory.
 
-    This checks if the path goes through ``<workspace>/.jaato/``, even if
-    it later escapes via ``..`` traversal.  Detects traversal attacks like:
+    True when the path, walked component by component from the workspace
+    root, at any point stands at or under ``<workspace>/.jaato``, even if
+    it later escapes via ``..``.  Detects traversal attacks like:
     - ``.jaato/../secret.txt``
     - ``/workspace/.jaato/../../etc/passwd``
+    - ``sub/../.jaato/x``
 
-    The check is **workspace-relative**: a ``.jaato`` component appearing
-    in the workspace path itself (e.g. WS-provisioned workspaces under
-    ``~/.jaato/workspaces/sessions/<id>/``) is NOT treated as accessing
-    the workspace's ``.jaato`` config.
+    Also True when the path RESOLVES (symlinks followed) to somewhere under
+    the resolved ``<workspace>/.jaato``, so a link elsewhere in the tree
+    cannot reach the config dir under another name.
+
+    Only the workspace's OWN ``.jaato`` counts (#1679).  A ``.jaato``
+    nested in a sub-project (``<workspace>/pipeline/.jaato/profiles/x``)
+    is an ordinary workspace path: the workspace check and the kernel
+    profile govern it like any other.  A ``.jaato`` component in the
+    workspace path itself (e.g. WS-provisioned workspaces under
+    ``~/.jaato/workspaces/sessions/<id>/``) does not count either.
+
+    A relative path is read as workspace-relative.
 
     Args:
         path: Path to check (may contain .. traversal).
@@ -246,39 +256,40 @@ def is_jaato_path(path: str, workspace_root: str) -> bool:
     Returns:
         True if path references the workspace's ``.jaato`` config dir.
     """
-    # Check the workspace-relative .jaato path
-    jaato_dir = os.path.join(workspace_root, JAATO_CONFIG_DIR)
-    # Use normalized comparison to handle mixed separators (e.g., MSYS2 on Windows
-    # where os.path.join uses backslashes but paths may have forward slashes)
+    norm_workspace = normalize_for_comparison(workspace_root).rstrip('/')
     norm_path = normalize_for_comparison(path)
-    norm_jaato_dir = normalize_for_comparison(jaato_dir)
-    norm_jaato_prefix = norm_jaato_dir + '/'
-
-    # Direct check for absolute paths
-    if norm_path == norm_jaato_dir or norm_path.startswith(norm_jaato_prefix):
-        return True
-
-    # Check for traversal attempts: compute the workspace-relative form
-    # (without abspath normalization, so .. components are preserved)
-    # and look for .jaato as a component there.  This catches
-    # ``.jaato/../secret`` and ``/workspace/.jaato/../../etc/passwd``
-    # without false-positiving on workspace paths that happen to contain
-    # ``.jaato`` as part of their location prefix (WS-provisioned
-    # workspaces under ``~/.jaato/workspaces/sessions/<id>/``).
-    norm_workspace = normalize_for_comparison(workspace_root)
-    if norm_path.startswith(norm_workspace + '/'):
-        relative = norm_path[len(norm_workspace) + 1:]
-    elif not os.path.isabs(path):
-        relative = norm_path
+    if os.path.isabs(path):
+        parts = norm_path.split('/')
     else:
-        # Absolute path outside the workspace — it's not accessing the
-        # workspace's .jaato config dir.  Other checks (sandbox bounds)
-        # will handle whether it's allowed at all.
-        return False
+        parts = norm_workspace.split('/') + norm_path.split('/')
+    jaato_parts = [
+        c for c in norm_workspace.split('/') if c not in ('', '.')
+    ] + [JAATO_CONFIG_DIR]
+    n = len(jaato_parts)
 
-    rel_parts = relative.split('/')
-    if JAATO_CONFIG_DIR in rel_parts:
-        return True
+    # Lexical walk: '..' pops, '.' and empty components are skipped.  The
+    # path passes through the config dir when the stack ever has the
+    # config dir as its prefix.
+    stack: List[str] = []
+    for part in parts:
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if stack:
+                stack.pop()
+            continue
+        stack.append(part)
+        if stack[:n] == jaato_parts:
+            return True
+
+    # Resolved check: a symlink elsewhere that lands in the config dir.
+    jaato_dir = os.path.join(workspace_root, JAATO_CONFIG_DIR)
+    if os.path.lexists(jaato_dir):
+        abs_path = path if os.path.isabs(path) else os.path.join(workspace_root, path)
+        real = normalize_for_comparison(os.path.realpath(abs_path))
+        real_jaato = normalize_for_comparison(os.path.realpath(jaato_dir)).rstrip('/')
+        if real == real_jaato or real.startswith(real_jaato + '/'):
+            return True
 
     return False
 
