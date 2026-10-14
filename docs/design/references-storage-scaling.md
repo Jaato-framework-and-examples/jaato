@@ -1,8 +1,9 @@
 # Scaling the References Store (the wikiLLM's base)
 
-**Status: proposed. Nothing here is built, and nothing here has been measured
-yet.** Phase 0 is the measurement; every later phase starts only when a number
-it produces crosses an agreed limit.
+**Status: proposed. Nothing here is built. Phase 0 is partly done: the
+in-process measurements are in §4 ("Phase 0 results"); the daemon-level ones
+(vector search, promotion, confinement) are not.** Every later phase starts
+only when a number crosses an agreed limit.
 
 The references catalog that the wikiLLM rests on is a set of JSON files under
 `<workspace>/.jaato/references/` (the root plus one directory per bundle
@@ -81,6 +82,65 @@ Run on a real host (enforcing AppArmor, real disk), not only in CI, because
 the stat-per-file cost depends on the filesystem and the page cache. The
 results go into this document as a table, and they set the limits that gate
 phases 2 to 4.
+
+#### Phase 0 results (in-process, measured)
+
+`scripts/bench_references_scale.py`, run 2026-10-14 on a developer host
+(Linux 6.8, 8 cores, ext4, Python 3.12, AppArmor enabled but the plugin
+driven in-process, so unconfined). It drives the real references plugin
+(`create_plugin` + `initialize`, the tool executors, the refresh check), one
+fresh process per size. Catalog shape: bundles of 1,000, local markdown
+bodies of 3 KB, 3 id mentions and 1-3 declared links per reference, no
+embedding index.
+
+| Measurement | 1k | 10k | 100k |
+|---|---|---|---|
+| `initialize()` | 0.21 s | 2.2 s | 67 s |
+| refresh check, nothing changed (median of 20) | 3.9 ms | 47 ms | 478 ms |
+| refresh after one file edited in place (= full reload) | 0.21 s | 2.2 s | 23.6 s |
+| `listReferences`, no arguments | 0.18 s | 2.1 s | 19.9 s |
+| `listReferences` result, est. tokens (bytes / 4) | **147k** | 1.48M | 14.9M |
+| `LinkIndex` build over the catalog | 1.5 ms | 25 ms | 615 ms |
+| `selectReferences` one id, unbounded | 0.92 s (918 refs) | 23 s (8,328) | **842 s** (27,663, depth 10 binding) |
+| same, `max_transitive_references: 25` | 23 ms | 0.26 s | 2.8 s |
+| `enrich_prompt`, prompt naming 3 ids | 11 ms | 61 ms | 598 ms |
+| process RSS after one session's `initialize()` | 53 MB | 71 MB | 263 MB |
+| peak RSS (two more sessions, unbounded select) | 63 MB | 159 MB | 1,044 MB |
+
+Where the time goes, profiled with `cProfile` at 10k:
+
+1. **The listing outgrows the context first.** An unfiltered
+   `listReferences` is ~147k tokens at 1,000 references, so it fills a
+   typical context window at roughly 1,000-1,500 references. No storage
+   change affects this; only paging and filtering do (§3 item 1 confirmed).
+2. **Unbounded transitive selection is quadratic.** 10x the catalog cost 25x
+   the time from 1k to 10k (the 100k run is cut short by the depth bound).
+   97% of it is `_find_referenced_ids` -> `_partition_ids_by_boundary`,
+   which iterates every catalog id for every node the walk visits: 6,690
+   calls and ~67M dictionary lookups at 10k. Its own docstring notes the
+   partition "is recomputed for every node of every traversal"; the
+   per-id memo removes the regex test, not the iteration. With the cap at 25
+   it stays cheap, and the cap is off by default.
+3. **`listReferences` time is path resolution.** ~90% is
+   `_resolve_path_for_access`, two `Path.resolve()` plus stats per reference
+   on every call.
+4. **The refresh check is O(files) per read path.** 478 ms at 100k on every
+   `listReferences`, `selectReferences`, `proposeReference` and turn
+   boundary, and any change reloads the whole catalog (23.6 s at 100k).
+5. **`initialize()` grows faster than linearly** (2.2 s -> 67 s for 10x);
+   not yet profiled.
+6. **Memory is not the first limit.** Peak 1 GB at 100k comes from three
+   sessions plus one unbounded selection of 27k references.
+
+Not measured yet: vector search and reconcile (no embedding provider was
+loaded), promotion through a live daemon, and anything under AppArmor
+confinement. Those need a private daemon (never the shared one on the
+default socket) and are the next harness.
+
+What this changes in the plan: items 1, 2 and 3 are algorithmic and fixed in
+phase 2 without touching storage. Phase 3 (a derived index) is not yet
+justified by these numbers; item 5 and the reload cost in item 4 are where it
+would first be.
 
 ### Phase 1: one store interface
 
