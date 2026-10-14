@@ -426,6 +426,12 @@ class OTelPlugin:
 
         _ensure_imports()
 
+        # Each BatchSpanProcessor registers an at-fork hook that, once the
+        # processor is collected, raises in every forked child (OTel <=1.40);
+        # the default report of it can deadlock that child (#1673).
+        from jaato_server.shared import fork_quiet
+        fork_quiet.install()
+
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
         from opentelemetry.sdk.resources import Resource, SERVICE_NAME

@@ -12306,6 +12306,39 @@ The digest, not the tail, identifies the file. Guard:
 `jaato_server/shared/tests/test_a_backup_name_fits_any_path_1485.py`, five
 reversions.
 
+### A Report Written Between Fork and Exec (#1673)
+
+A `cli_based_tool` child hung for good in `futex_wait`, after `fork()` and
+before `//child` or `exec`, and the turn never ended. The runner logged
+`Exception ignored in atfork callback ... TypeError: 'NoneType' object is
+not callable` on every fork. OpenTelemetry SDK up to 1.40 registers
+`lambda: weak_reinit()()` per `BatchSpanProcessor`; the telemetry plugin
+builds one per session and shuts it down at `session.end`, so once it is
+collected that hook raises in every later child. A `preexec_fn` child runs
+CPython's after-fork hooks, and the default `sys.unraisablehook` writes the
+report to `sys.stderr` in the child. That takes the stream's buffer lock,
+which is not reset after fork: if another runner thread was mid-write at
+fork time (the OTLP exporter logging its 401 every few seconds), the
+single-threaded child waits forever. Reproduced with a stale hook and a
+writer blocked on a full stderr pipe; without the stale hook the same fork
+returns.
+
+`shared/fork_quiet.py`: a forked child that has not called `adopt_child()`
+discards unraisable reports instead of writing them. A `before` at-fork hook
+records the forking pid; the hook compares it with `os.getpid()`, so it
+reads one global and makes one syscall. Installed by `apply_process_posture`
+(daemon and standalone WS, so cold runner spawns too), first thing in the
+runner's `main()` (template, slots, cold runners) and by
+`OTelPlugin.initialize` (embedded). A pool slot, which keeps running Python
+after its fork, calls `adopt_child()` in `_handle_fork_slot` and reports as
+usual.
+
+Not done here: the hooks of live processors still run in every `preexec_fn`
+child (OTel restarts its worker thread there), and nothing bounds a child
+that never execs; #1680 adds that bound. Guard:
+`jaato_server/shared/tests/test_a_forked_child_writes_nothing_1673.py`,
+four reversions.
+
 ### A Sub-Project's `.jaato` Is a Workspace Path (#1679)
 
 `sandbox_utils.is_jaato_path` flagged any `.jaato` component in a
