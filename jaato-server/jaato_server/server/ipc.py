@@ -869,8 +869,10 @@ class JaatoIPCServer:
         # the shared registration helper) — register the proxy schema/executor so
         # the agent can call it, the executor proxying back to this IPC client.
         if isinstance(event, ToolsRegisterClientRequest):
-            self._register_client_tools_ipc(
+            buffered = self._register_client_tools_ipc(
                 client_id, event.tools, getattr(event, "categories", None))
+            await self._answer_client_tool_registration(
+                client_id, event, buffered)
             return
         # Client-side tool execution result — wake the proxy executor's waiter.
         if isinstance(event, ToolExecuteResultEvent):
@@ -1017,8 +1019,26 @@ class JaatoIPCServer:
             return sent
         return _send
 
-    def _register_client_tools_ipc(self, client_id, tools, categories=None) -> None:
+    async def _answer_client_tool_registration(
+        self, client_id: str, event: Any, buffered: bool,
+    ) -> None:
+        """Tell the client the deadline each host tool is held to (#1625).
+
+        Only when the request carried a ``request_id`` (protocol 1.39): an
+        older client sends none and is sent nothing it does not know.
+        """
+        request_id = getattr(event, "request_id", "") or ""
+        if not request_id:
+            return
+        from jaato_server.server.client_tools import registration_answer
+        await self._send_to_client(client_id, registration_answer(
+            event.tools, request_id, buffered=bool(buffered)))
+
+    def _register_client_tools_ipc(self, client_id, tools, categories=None) -> bool:
         """Register client-provided ("host") tools for an IPC client.
+
+        Returns ``True`` when the tools were BUFFERED (no session yet), so
+        the registration answer can say so; ``False`` otherwise.
 
         Before the session exists (registered before session.new): buffer the
         SCHEMAS via the ``SessionManager`` so the session.new flow seeds the
@@ -1030,7 +1050,7 @@ class JaatoIPCServer:
         sm = self._session_manager
         if sm is None:
             logger.warning("IPC client tools: no session_manager wired — ignoring")
-            return
+            return False
         client = self._clients.get(client_id)
         session_id = client.session_id if client else None
         session = sm.get_session(session_id) if session_id else None
@@ -1043,7 +1063,7 @@ class JaatoIPCServer:
             self._pending_client_tools_ipc[client_id] = tools
             logger.info("Buffered %d IPC client tools for %s (session pending)",
                         len(tools or []), client_id)
-            return
+            return True
         from jaato_server.server.client_tools import register_client_tools
         registered = register_client_tools(
             session.server.registry, session.server, tools,
@@ -1085,6 +1105,7 @@ class JaatoIPCServer:
             threading.Thread(target=_push, daemon=True).start()
         logger.info("Registered %d IPC client tools for %s: %s",
                     len(registered), client_id, registered)
+        return False
 
     def send_event(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client (``EventSink`` protocol).

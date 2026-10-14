@@ -25,6 +25,8 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from jaato_sdk.client_tool_timeout import DEFAULT_CLIENT_TOOL_TIMEOUT_MS
+
 
 # =============================================================================
 # Protocol version
@@ -643,7 +645,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # with ``permission_default_error`` (#1637).  Additive and optional: an
 # older client ignores them, an older daemon sends none, and absent reads
 # as "not said", never as "no schema" or "ask".
-PROTOCOL_VERSION = "1.38"
+# 1.39 -- host-tool deadlines are reported (#1625).
+# ``ToolsRegisterClientRequest`` gains ``request_id``; when it is set the
+# daemon answers ``ToolsRegisterClientResultEvent`` with the deadline each
+# registered tool is held to (``timeout`` ms from the spec, else 30 s).  An
+# older client sends no ``request_id`` and gets no answer; an older daemon
+# ignores the field, so the SDK waits for the answer only at 1.39+
+# (``MIN_CLIENT_TOOL_BUDGET_PROTOCOL``) and otherwise computes the same
+# budgets locally.
+PROTOCOL_VERSION = "1.39"
 
 
 # =============================================================================
@@ -803,6 +813,7 @@ class EventType(str, Enum):
 
     # Client-side tool execution (Client <-> Server)
     TOOLS_REGISTER_CLIENT = "tools.register_client"   # Client -> Server
+    TOOLS_REGISTER_CLIENT_RESULT = "tools.register_client.result"  # Server -> Client: the answer when the request carried a request_id (1.39)
     TOOL_EXECUTE_REQUEST = "tool.execute_request"      # Server -> Client
     TOOL_EXECUTE_RESULT = "tool.execute_result"        # Client -> Server
 
@@ -3910,6 +3921,34 @@ class ToolsRegisterClientRequest(Event):
     # ^ Optional mapping of category name → description for categories
     # introduced by client-side tools.  Registered via
     # registry.register_category() so list_tools shows descriptions.
+    # Correlation id (1.39, #1625).  When set, the daemon answers with one
+    # ``ToolsRegisterClientResultEvent`` echoing it, carrying the deadline it
+    # will hold each tool to.  Empty (an older client) means no answer, so
+    # an older client is never sent an event it does not know.
+    request_id: str = ""
+
+
+class ToolsRegisterClientResultEvent(Event):
+    """The daemon's answer to a ``ToolsRegisterClientRequest`` (1.39, #1625).
+
+    Sent only when the request carried a ``request_id``.  ``tools`` holds one
+    ``{name, timeout_ms, timeout_s, source[, problem]}`` row per registered
+    tool: the deadline the daemon waits for that tool's
+    ``ToolExecuteResultEvent`` before handing the model
+    ``{"error": "Client tool <name> timed out after <N>s"}``.  ``source`` is
+    ``"client"`` when the spec's ``timeout`` (ms) was honoured, ``"default"``
+    otherwise; ``problem`` says why a declared value was not.  Computed by
+    ``jaato_sdk.client_tool_timeout.resolve_client_tool_timeout``, the same
+    function the daemon enforces with.
+
+    ``buffered`` is ``True`` when no session existed yet: the tools are
+    registered when the session is created, under these same budgets.
+    """
+    type: EventType = Field(default=EventType.TOOLS_REGISTER_CLIENT_RESULT)
+    request_id: str = ""
+    tools: List[Dict[str, Any]] = Field(default_factory=list)
+    default_timeout_ms: float = DEFAULT_CLIENT_TOOL_TIMEOUT_MS
+    buffered: bool = False
 
 
 class ToolExecuteRequestEvent(Event):
@@ -5813,6 +5852,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TOOL_ID_REGISTRY.value: ToolIdRegistryEvent,
     EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
     EventType.TOOLS_REGISTER_CLIENT.value: ToolsRegisterClientRequest,
+    EventType.TOOLS_REGISTER_CLIENT_RESULT.value: ToolsRegisterClientResultEvent,
     EventType.TOOL_EXECUTE_REQUEST.value: ToolExecuteRequestEvent,
     EventType.TOOL_EXECUTE_RESULT.value: ToolExecuteResultEvent,
     EventType.HISTORY_REQUEST.value: HistoryRequest,

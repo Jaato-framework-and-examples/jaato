@@ -1019,7 +1019,12 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     and programmatic (inline-dict) styles work.  ``client_tools`` (a list of
     host-tool specs, same shape as :meth:`register_client_tools`) is registered
     after connect but before create_session, so host-tool clients can use the
-    facade instead of the low-level connect/register/create dance.
+    facade instead of the low-level connect/register/create dance.  Each
+    spec's optional ``"timeout"`` (MILLISECONDS, default 30000) is how long
+    the daemon waits for that tool's result before the model is handed
+    ``{"error": "Client tool <name> timed out after <N>s"}``; the deadline
+    each tool is actually held to is on ``session.client.client_tool_timeouts``
+    once the session is open (#1625).  Size a handler's own deadline under it.
 
     Two clocks, and they bound different things:
 

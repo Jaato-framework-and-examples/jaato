@@ -194,7 +194,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/tests/test_transport_timeout_does_not_kill_the_session.py::test_the_terminal_assignment_is_unreachable_for_transport_timeouts": 16,
     "jaato-server/jaato_server/server/wake_ingress.py::process_wake": 19,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._handle_message": 16,
-    "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._handle_message_daemon": 35,
+    "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._handle_message_daemon": 33,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._register_client_tools": 25,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer.set_command_router._apparmor_session_hook": 16,
     "jaato-server/jaato_server/server/workspace_monitor.py::WorkspaceMonitor._on_fs_event": 18,

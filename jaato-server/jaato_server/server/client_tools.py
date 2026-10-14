@@ -25,7 +25,12 @@ import uuid
 from typing import Any, Callable, Dict, List
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
-from jaato_sdk.events import ToolExecuteRequestEvent
+from jaato_sdk.client_tool_timeout import (
+    DEFAULT_CLIENT_TOOL_TIMEOUT_MS,
+    resolve_client_tool_timeout,
+    resolve_client_tool_timeouts,
+)
+from jaato_sdk.events import ToolExecuteRequestEvent, ToolsRegisterClientResultEvent
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,41 @@ def decode_client_tool_result(raw: Any) -> Any:
         )
         return raw
 
+def client_tool_timeout_seconds(tool_def: Dict[str, Any]) -> float:
+    """The deadline, in seconds, the daemon holds *tool_def*'s tool to.
+
+    Both transports read the budget here, through
+    :func:`jaato_sdk.client_tool_timeout.resolve_client_tool_timeout` — the
+    function the SDK reports to the client — so what a client is told and
+    what the daemon enforces are one answer (#1625).  A declared ``timeout``
+    the resolver does not honour is logged, because the client asked for a
+    deadline it is not getting.
+    """
+    budget = resolve_client_tool_timeout(tool_def)
+    if budget.problem:
+        logger.warning(
+            "client tool %r: %s; using the default %gs",
+            budget.name, budget.problem, budget.timeout_s)
+    return budget.timeout_s
+
+
+def registration_answer(
+    tools: List[Dict[str, Any]], request_id: str, *, buffered: bool,
+) -> ToolsRegisterClientResultEvent:
+    """The ``ToolsRegisterClientResultEvent`` for one registration (1.39).
+
+    Built from the same resolver the executors use, so the budgets it
+    reports are the ones enforced, whether the tools are registered now or
+    buffered until the session exists (*buffered*).
+    """
+    return ToolsRegisterClientResultEvent(
+        request_id=request_id,
+        tools=[b.as_dict() for b in resolve_client_tool_timeouts(tools)],
+        default_timeout_ms=DEFAULT_CLIENT_TOOL_TIMEOUT_MS,
+        buffered=buffered,
+    )
+
+
 # (threading.Event, {"result": ..., "error": ...}) keyed by call_id.
 WaiterEntry = "tuple[threading.Event, Dict[str, Any]]"
 
@@ -78,7 +118,10 @@ def make_client_tool_executor(
 
     Args:
         tool_name: The model-facing tool name.
-        timeout_s: Seconds to wait for the client's result.
+        timeout_s: Seconds to wait for the client's result, from
+            :func:`client_tool_timeout_seconds` (the spec's ``timeout`` ms,
+            else 30 s).  On expiry the model receives
+            ``{"error": "Client tool <name> timed out after <N>s"}``.
         send_request: Transport send — dispatches the event to the session's
             attached client(s); returns True iff at least one received it.  May
             be retried while no client is connected (mirrors permission requests
@@ -140,7 +183,7 @@ def register_client_tools(
         description = tool_def.get("description", "")
         parameters = tool_def.get("parameters", {})
         category = tool_def.get("category", "")
-        timeout_s = tool_def.get("timeout", 30000) / 1000.0  # ms -> s
+        timeout_s = client_tool_timeout_seconds(tool_def)
         auto_approve = tool_def.get("auto_approve", True)
 
         schema = ToolSchema(
