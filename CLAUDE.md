@@ -3710,6 +3710,23 @@ stdio servers run under the runner's profile and keep the network. Not verified 
 `jaato_server/shared/tests/test_apparmor_child_fragments_1675.py`, five
 reversions.
 
+**Every rendered profile pins an ABI (#1686, template v49).** With no
+`abi` line, kernel 7.0 / parser 5.0.2 enforced a `//child`-only
+`deny network inet,` on the BASE profile too: the runner was refused
+`inet dgram` and lost DNS and its model. Reproduced on that host with
+throwaway profiles holding nothing jaato-specific; with
+`abi <abi/4.0>,` or `abi <abi/5.0>,` the deny stayed in the child. The
+compiled base policy was byte-identical with and without the child's
+deny (checked with parser 5.0.0~beta1 against a pinned ABI), so pinning
+is what changes the outcome. `pinned_abi_rule` picks the newest of
+`PINNED_ABIS` (`5.0`, `4.0`) present in `/etc/apparmor.d/abi`, read once
+per `AppArmorManager`; the base and isolated sub-runner bodies start
+with it, so it is part of the confinement id. A host with neither file
+(AppArmor 3.x) renders no line, as before, with a WARNING. Not verified
+on an enforcing kernel here. Guard:
+`jaato_server/shared/tests/test_profiles_pin_an_abi_1686.py`, three
+reversions.
+
 ### A Refusal That Named Its Cause (#1348)
 
 A command the `//child` profile refused printed `Permission denied`, the
