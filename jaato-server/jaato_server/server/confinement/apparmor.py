@@ -51,6 +51,9 @@ class AppArmorBackend:
         # (``private_tmp_kwargs``), so a manager predating #1381 still works.
         if boundary.private_tmp_dir:
             kwargs["private_tmp_dir"] = boundary.private_tmp_dir
+        # Likewise only when named (#1675).
+        if boundary.child_fragments:
+            kwargs["child_fragments"] = list(boundary.child_fragments)
         return kwargs
 
     def confinement_id_for_boundary(self, boundary: Boundary) -> str:

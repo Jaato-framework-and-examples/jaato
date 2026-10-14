@@ -696,6 +696,7 @@
   },
   "field_types": {
    "apparmor": "bool",
+   "apparmor_child_fragments": "Optional[List[str]]",
    "apparmor_fragments": "Optional[List[str]]",
    "budget_control": "Optional[BudgetControlConfig]",
    "cache": "Optional[CacheProfileConfig]",
@@ -727,6 +728,7 @@
   },
   "file_keys": [
    "apparmor",
+   "apparmor_child_fragments",
    "apparmor_fragments",
    "budget_control",
    "cache",

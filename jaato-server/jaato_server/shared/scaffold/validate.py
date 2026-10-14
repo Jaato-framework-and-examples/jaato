@@ -3466,6 +3466,68 @@ def _check_default_agent_exists(profiles, ws: Path, config_root: str, out) -> No
             profile=pname, where="default_agent"))
 
 
+def _binds_a_model(profile: Any) -> bool:
+    """The profile runs a model loop: it names a model or a tier ladder."""
+    return bool(getattr(profile, "model", None)
+                or getattr(profile, "model_tiers", None))
+
+
+def _check_apparmor_fragment_scopes(profiles, ws: Path, out) -> None:
+    """Fragments that reach the wrong AppArmor body (#1675).
+
+    ``apparmor_fragments`` compose into the runner's base profile (and
+    ``tool_hat`` and ``//child``); the runner runs the MODEL LOOP, so a
+    ``deny network inet`` there cuts the session off from its provider.
+    Reported (warn) for a profile that binds a model, naming
+    ``apparmor_child_fragments``, which composes into ``//child`` only.
+    A name in ``apparmor_child_fragments`` that is on no tier of the
+    search path is reported too: the renderer skips it with a WARNING
+    in the daemon log, so the deny it was meant to carry is absent.
+    """
+    from jaato_server.shared.apparmor_fragments import (
+        denies_network, discover_fragments,
+    )
+
+    discovered, _found_in = discover_fragments(str(ws))
+    for pname, profile in sorted((profiles or {}).items()):
+        child = getattr(profile, "apparmor_child_fragments", None) or []
+        for name in child:
+            if name not in discovered:
+                out.append(Diagnostic(
+                    "warn", "apparmor_child_fragment_missing",
+                    f"apparmor_child_fragments names '{name}', which is on "
+                    f"no tier of the fragment search path "
+                    f"(~/.jaato/apparmor-fragments/, "
+                    f"<workspace>/.jaato/apparmor-fragments/, + .cache/) — "
+                    f"the session's commands run without its rules",
+                    profile=pname, where="apparmor_child_fragments"))
+        if not _binds_a_model(profile):
+            continue
+        requested = getattr(profile, "apparmor_fragments", None)
+        names = list(discovered) if requested is None else [
+            n for n in requested if n in discovered]
+        for name in names:
+            try:
+                body = discovered[name][1].read_text(encoding="utf-8")
+            except OSError:
+                continue
+            hits = denies_network(body)
+            if not hits:
+                continue
+            out.append(Diagnostic(
+                "warn", "apparmor_fragment_denies_model_loop",
+                f"fragment '{name}' ({discovered[name][1]}) carries "
+                f"`{hits[0]}`, and it composes into the runner's own profile, "
+                f"which runs the model loop: this cuts the session off from "
+                f"its provider.  To deny the network to the session's "
+                f"commands only, list it under apparmor_child_fragments "
+                f"(composed into //child alone)"
+                + ("" if requested is not None else
+                   " and declare apparmor_fragments without it (unset "
+                   "composes every fragment on the search path)"),
+                profile=pname, where="apparmor_fragments"))
+
+
 def validate_workspace(
     workspace: str,
     *,
@@ -3572,6 +3634,7 @@ def validate_workspace(
     _check_sibling_tools_moved(result.profiles, ws, config_root, out)
     _check_memory_curation(result.profiles, out)
     _check_regulatory_declared(result.profiles, out)
+    _check_apparmor_fragment_scopes(result.profiles, ws, out)
     _check_reference_links(config_root, out)
     _check_permission_files(ws, config_root, out)
     for d in out[_before:]:
