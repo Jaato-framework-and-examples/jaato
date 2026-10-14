@@ -504,6 +504,94 @@ def workspace_file_owner(workspace_path: Optional[str]) -> Optional[Tuple[int, i
         return None
 
 
+def _inside(path: str, workspace: str) -> bool:
+    """Whether *path* lies under *workspace*, judged by its PARENT.
+
+    The parent is resolved (links followed); the final component is not, so
+    a symlink planted at the path itself still counts as inside and is then
+    refused by the ``O_NOFOLLOW`` open, rather than escaping to the plain
+    append that would write through it.
+    """
+    root = os.path.realpath(workspace)
+    absolute = os.path.abspath(path)
+    parent = os.path.realpath(os.path.dirname(absolute))
+    return parent == root or parent.startswith(root + os.sep)
+
+
+def workspace_append_owner(path: str) -> Optional[Tuple[int, int]]:
+    """The owner the daemon appends *path* as, or ``None`` (#1674).
+
+    The resolver :func:`install_append_owner_resolver` installs for
+    :mod:`jaato_sdk.owned_append`, which the application trace and the
+    token ledger append through.  Both files are written by the daemon AND
+    by the session's runner; created root-owned, the runner (dropped to the
+    workspace owner) could never append to them again.
+
+    The workspace is the one the daemon is acting in -- the per-task
+    workspace root (``JaatoServer._in_workspace``), else
+    ``JAATO_WORKSPACE_ROOT`` from the session env overlay -- never inferred
+    from *path*, and *path* must lie inside it.  The owner is then
+    :func:`workspace_file_owner`'s, the #1528 rule, so it is ``None`` under
+    the ``daemon`` policy, for a non-root daemon and for a root-owned
+    workspace.  A trace path outside the workspace (one absolute file
+    shared by every session) is never handed to anyone.
+    """
+    if current_policy() == POLICY_DAEMON:
+        return None
+    from jaato_server.shared.session_context import get_workspace_root
+    candidates = (get_workspace_root(), os.environ.get("JAATO_WORKSPACE_ROOT"))
+    for workspace in candidates:
+        if workspace and _inside(path, workspace):
+            return workspace_file_owner(workspace)
+    return None
+
+
+def install_append_owner_resolver(policy: str) -> None:
+    """Install :func:`workspace_append_owner` when *policy* drops (#1674).
+
+    Called beside :func:`set_policy` at daemon start.  Under ``daemon``
+    nothing is installed, so every append is the plain ``open(path, "a")``.
+    """
+    from jaato_sdk.owned_append import set_owner_resolver
+    set_owner_resolver(None if policy == POLICY_DAEMON else workspace_append_owner)
+
+
+#: Session-env names whose files a runner appends to beside the daemon.
+AUDIT_FILE_ENV_VARS = ("JAATO_TRACE_LOG", "LEDGER_PATH")
+
+
+def hand_over_audit_files(
+    workspace_path: Optional[str], session_env: Optional[dict],
+) -> List[str]:
+    """Hand back the trace and ledger files an earlier daemon left root-owned.
+
+    At spawn, before the runner needs them: the daemon may not append to a
+    session's ledger again (it writes only the announcement row), so the
+    repair :mod:`jaato_sdk.owned_append` makes on the daemon's own appends
+    is not enough on its own.  For each of :data:`AUDIT_FILE_ENV_VARS` the
+    session names (relative = against the workspace), plus a chained
+    ledger's ``.lock`` sibling, an EXISTING daemon-owned regular file with
+    one link, inside the workspace, is handed to :func:`workspace_file_owner`.
+    Nothing is created.  Returns the paths handed over.  Never raises.
+    """
+    owner = workspace_file_owner(workspace_path)
+    if owner is None or not session_env:
+        return []
+    from jaato_sdk.owned_append import hand_over_existing
+    handed: List[str] = []
+    for name in AUDIT_FILE_ENV_VARS:
+        raw = session_env.get(name)
+        if not raw or not isinstance(raw, str):
+            continue
+        path = raw if os.path.isabs(raw) else os.path.join(workspace_path, raw)
+        for candidate in (path, path + ".lock"):
+            if not _inside(candidate, workspace_path):
+                continue
+            if hand_over_existing(candidate, owner=owner):
+                handed.append(candidate)
+    return handed
+
+
 def runner_uid_of(user: Optional[RunnerUser]) -> Optional[int]:
     """The uid for the pool's ``SlotKey``: ``None`` = the daemon's uid."""
     return user.uid if user is not None else None

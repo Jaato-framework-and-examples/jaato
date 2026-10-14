@@ -294,10 +294,16 @@ def lock_path_for(credential_path: PathLike) -> Path:
 
 
 def _open_lock_file(path: Path) -> int:
-    """Open (creating) the lock file and return its descriptor."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    return fd
+    """Open (creating) the lock file and return its descriptor.
+
+    Through :mod:`jaato_sdk.owned_append`: a chained ledger's ``.lock``
+    sibling in a workspace whose runner drops to the workspace owner is
+    created (or handed back) as that owner's, or the runner could never
+    take the lock (#1674).  Anywhere else it is the plain ``os.open``.
+    """
+    from jaato_sdk.owned_append import ensure_parent_dirs, open_owned_fd
+    ensure_parent_dirs(str(path))
+    return open_owned_fd(str(path), os.O_RDWR, 0o600)
 
 
 def _try_flock(fd: int) -> bool:

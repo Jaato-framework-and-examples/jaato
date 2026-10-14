@@ -273,6 +273,7 @@ def apply_process_posture(
     apply_umask(resolve_umask(umask))
     policy = runner_user.resolve_policy(runner_uid_policy)
     runner_user.set_policy(policy)
+    runner_user.install_append_owner_resolver(policy)
     if policy != runner_user.POLICY_DAEMON:
         logger.info("runner uid policy: %s", policy)
     runner_user.announce_if_unprivileged(policy)
