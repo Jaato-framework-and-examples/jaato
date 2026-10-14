@@ -12292,6 +12292,22 @@ The digest, not the tail, identifies the file. Guard:
 `jaato_server/shared/tests/test_a_backup_name_fits_any_path_1485.py`, five
 reversions.
 
+### A Sub-Project's `.jaato` Is a Workspace Path (#1679)
+
+`sandbox_utils.is_jaato_path` flagged any `.jaato` component in a
+workspace-relative path, so `<ws>/pipeline/.jaato/profiles/x.yaml` (a
+sub-project's config, which a Builder session writes) was treated as the
+workspace's own `.jaato`, and `file_edit` refused it whatever `sandbox add`
+granted, while `cli` wrote there freely. Now only the workspace's OWN
+`.jaato` counts: a path that, walked lexically from the workspace root,
+stands at or under `<ws>/.jaato` at any step (`.jaato/../x`,
+`sub/../.jaato/x`), or that resolves there through a symlink (newly closed:
+a link elsewhere in the tree into `<ws>/.jaato` used to pass the workspace
+check). A nested `.jaato` is governed by the workspace check and the kernel
+profile like any other path. Guard:
+`jaato_server/shared/tests/test_a_nested_jaato_is_a_workspace_path_1679.py`,
+three reversions.
+
 ### Coreutils a Confined Session Could Not Run (#1342)
 
 On an Ubuntu 26.04 host, every confined session's `cli` failed `ls`, `head`,
