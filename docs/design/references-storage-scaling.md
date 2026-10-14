@@ -1,8 +1,8 @@
 # Scaling the References Store (the wikiLLM's base)
 
 **Status: proposed. Nothing here is built. Phase 0 is partly done: the
-in-process measurements are in §4 ("Phase 0 results"); the daemon-level ones
-(vector search, promotion, confinement) are not.** Every later phase starts
+in-process and daemon-level measurements are in §4 ("Phase 0 results");
+confinement is not measured.** Every later phase starts
 only when a number crosses an agreed limit.
 
 The references catalog that the wikiLLM rests on is a set of JSON files under
@@ -132,10 +132,60 @@ Where the time goes, profiled with `cProfile` at 10k:
 6. **Memory is not the first limit.** Peak 1 GB at 100k comes from three
    sessions plus one unbounded selection of 27k references.
 
-Not measured yet: vector search and reconcile (no embedding provider was
-loaded), promotion through a live daemon, and anything under AppArmor
-confinement. Those need a private daemon (never the shared one on the
-default socket) and are the next harness.
+#### Phase 0 results (through a daemon, measured)
+
+`scripts/bench_references_daemon.py` gives every bundle a vector index
+(jaato-premium's `all-MiniLM-L6-v2`), starts a private daemon
+(`ConformanceDaemon`: its own socket, pid file and HOME; pool size 1), and
+drives it with `IPCClient`. Same catalog shape as above.
+
+| | 1k | 10k |
+|---|---|---|
+| index every bundle (in-process, one-off, first run) | 18.6 s | 90 s (10 bundles) |
+| `listReferences`, tags only, one `invoke_plugin_tool` | 0.49 s, 590 KB | 3.6 s, 5.9 MB |
+| `selectReferences`, cap 25, tags only | 0.42 s | 2.6 s |
+| `selectReferences`, cap 25, hybrid (ranked by similarity) | 8.3 s | 10.6 s |
+| `session.new`, profile enabling `references` (hybrid) | 10.1 s | 15.0 s |
+| `reference.promote` into an indexed bundle, reconcile `updated` | 2.3 s | 6.0 s |
+| runner RSS, no model / model loaded | 128 / 766-809 MB | 128 / 800-843 MB |
+
+Findings:
+
+7. **The embedding model costs about 650 MB per runner that loads it**, and
+   each runner loads its own copy. The hybrid calls and `session.new` are
+   dominated by that load (~8 s), not by the catalog. This is a memory limit
+   that arrives before any catalog size: five concurrent hybrid sessions are
+   ~4 GB.
+8. **`listReferences` through the daemon at 10k is a 5.9 MB answer.** The
+   frame fits the 10 MB IPC cap, so 20k references would not, and the model
+   could not read it anyway (~1.5M tokens). Paging (phase 2) is required
+   before 10k, independently of storage.
+9. **Promotion and reconcile scale with the bundle, not the catalog**
+   (2.3 s -> 6.0 s for 1k -> 10k with 1k-reference bundles). Acceptable.
+
+**A defect outside the references plugin, found by this harness.** On a
+host where one plugin is skipped for a missing optional dependency (here
+`interactive_shell` without `pexpect`) and many distributions are installed
+(jaato-premium brings torch: 28k installed files), every plugin discovery
+took 47 s: `registry._install_advice` -> `dependencies._metadata_index` calls
+`_provided_import_names` once per required package (55 times), and each call
+runs a full `importlib.metadata.packages_distributions()`, which stats every
+installed file (cProfile: 1.1M `stat` calls, 96 s for two discoveries). The
+`lru_cache` is per package name, so it never saves the scan. Consequences,
+all from the captured daemon log: the daemon's event loop is stalled ~45 s
+at startup, the template misses its 30 s READY deadline, a cold-spawned
+runner misses the 35 s `session.bootstrap` deadline, so **the first
+`invoke_plugin_tool` after a daemon start fails** (`DaemonLoopTimeout`). A
+second defect follows: the late `READY` is then read as the first
+`FORK_SLOT` reply, every later reply is off by one, and `recv(64)` with no
+line framing concatenates several replies (`malformed FORKED reply
+'FORKED:47930\nFORKED:47931...'`), orphaning the slots it forked. With
+`pexpect` installed, discovery takes 0.6 s and every call above succeeds;
+the numbers in the table were taken that way. Neither defect is fixed by
+this plan.
+
+Not measured yet: anything under AppArmor confinement (loading a profile
+needs root on the benchmark host).
 
 What this changes in the plan: items 1, 2 and 3 are algorithmic and fixed in
 phase 2 without touching storage. Phase 3 (a derived index) is not yet
