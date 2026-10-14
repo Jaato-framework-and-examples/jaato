@@ -49,7 +49,7 @@ def _bodies(profile):
     """The base body (outside the hats) and each ``profile <name> {`` sub-body, as text."""
     bodies, stack, base = {}, [], []
     for line in profile.splitlines():
-        m = re.match(r"^\s+profile\s+(\w+)\s*\{", line)
+        m = re.match(r"^\s+profile\s+(\w+)(?:\s+flags=\([^)]*\))?\s*\{", line)
         if m:
             stack.append(m.group(1)); bodies[m.group(1)] = []
             continue

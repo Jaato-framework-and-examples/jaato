@@ -51,8 +51,8 @@ def _bodies(root: Path, requested_fragments: Optional[List[str]]) -> Dict[str, s
     text = manager._render_profile(
         "sid", str(workspace), requested_fragments=requested_fragments,
     )
-    hat = text.index("profile tool_hat {")
-    child = text.index("profile child {")
+    hat = text.index("profile tool_hat flags=(attach_disconnected) {")
+    child = text.index("profile child flags=(attach_disconnected) {")
     return {
         "base": text[:hat],
         "tool_hat": text[hat:child],

@@ -98,12 +98,12 @@ def _bodies(profile: str):
     """Split a rendered profile into (base, tool_hat, child) bodies.
 
     ``_render_profile`` returns one string: the base body's own rules come
-    first, then ``profile tool_hat {``, then ``profile child {``.  An anchor
+    first, then ``profile tool_hat flags=(attach_disconnected) {``, then ``profile child flags=(attach_disconnected) {``.  An anchor
     that is missing fails here, saying the guard is stale rather than
     letting a later assertion pass on an empty body.
     """
-    hat = profile.find("profile tool_hat {")
-    child = profile.find("profile child {")
+    hat = profile.find("profile tool_hat flags=(attach_disconnected) {")
+    child = profile.find("profile child flags=(attach_disconnected) {")
     assert 0 < hat < child, (
         "could not find the tool_hat / child sub-profiles in the rendered "
         "profile -- this guard is stale, not satisfied"

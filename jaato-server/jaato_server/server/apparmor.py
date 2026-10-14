@@ -812,7 +812,26 @@ class AppArmorManager:
     #       other capability stays denied by the LSM, so raising an
     #       inheritable bit from the bounding set gains nothing a
     #       confined runner could use.  See ``shared.capability_drop``.
-    _TEMPLATE_VERSION = 47
+    #   v48 (#1662): ``flags=(attach_disconnected)`` on ``tool_hat`` and
+    #       ``//child``, as the base profile has had since v19.  Flags are
+    #       per profile and a child profile does not inherit them.  Under
+    #       a private ``/tmp`` (#1381) the runner unshares a mount
+    #       namespace, and a file reached through a mount of the OLD
+    #       namespace (stdio the runner inherited, such as its
+    #       ``/dev/null``, or the bound path of a unix socket a process
+    #       outside the namespace listens on) has no name from the new
+    #       root.  Without the flag the kernel refuses every access to it
+    #       ("Failed name lookup - disconnected path", name without its
+    #       leading ``/``) whatever the rules say: a ``//child`` command
+    #       was denied ``getattr`` on its own ``/dev/null``, and
+    #       ``connect()`` to a path socket in the workspace, granted by a
+    #       fragment, failed with ``EACCES``.  With the flag the name is
+    #       resolved from ``/`` and the ordinary rules decide.  Stated
+    #       cost: an fd reaching the host's ``/tmp`` is named ``/tmp/...``
+    #       and so judged by the private ``/tmp`` grant; only a process
+    #       already holding such an fd can use it, since the host ``/tmp``
+    #       is not reachable by path from the namespace.
+    _TEMPLATE_VERSION = 48
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -3655,10 +3674,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # sub-profiles do NOT inherit the parent's flag set, so
         # JAATO_APPARMOR_COMPLAIN=1 has to be emitted on each sub-profile
         # header explicitly.  When the env is unset, the clause is empty
-        # — preserving the v21 ``profile tool_hat {`` shape byte-for-byte
-        # (no ``attach_disconnected`` on sub-profiles per AppArmor doc:
-        # the flag is base-profile-only).
-        subprofile_flag_clause = " flags=(complain)" if complain else ""
+        # v48 (#1662): ``attach_disconnected`` on both sub-profiles too.
+        # Flags are per profile, so the base profile's never reached
+        # ``tool_hat`` or ``//child``; the old comment here read the
+        # AppArmor docs as making the flag base-only, which they do not.
+        subprofile_flag_clause = (
+            " flags=(attach_disconnected, complain)" if complain
+            else " flags=(attach_disconnected)"
+        )
 
         # user-authored config.  Indentation is 4 spaces (vs 2 for
         # base body) so the rendered profile is visually nested.

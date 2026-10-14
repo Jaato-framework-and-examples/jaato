@@ -270,8 +270,8 @@ def test_only_the_runner_bodies_grant_setpcap(tmp_path):
     workspace.mkdir()
     text = AppArmorManager(workspace_root=str(tmp_path))._render_profile(
         "sid", str(workspace))
-    hat = text.index("profile tool_hat {")
-    child = text.index("profile child {")
+    hat = text.index("profile tool_hat flags=(attach_disconnected) {")
+    child = text.index("profile child flags=(attach_disconnected) {")
 
     def grants(body: str) -> bool:
         return any(" ".join(line.split()) == "capability setpcap,"

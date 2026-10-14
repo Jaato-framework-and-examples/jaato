@@ -4002,6 +4002,24 @@ Stated costs:
   fail-closed path refuses; a pool slot keeps its namespace across sessions
   of the same boundary, and the 1b2-before-1c ordering holds on a slot.
 
+**`tool_hat` and `//child` carry `attach_disconnected` (#1662, template
+v48).** The namespace leaves a file reached through a mount of the OLD
+namespace with no name from the new root: the runner's inherited stdio
+(`/dev/null`), or the bound path of a unix socket whose listener is
+outside the namespace. Without the flag the kernel refuses every access to
+such a file ("Failed name lookup - disconnected path", name `dev/null`)
+whatever the rules grant, so a `//child` python was denied `getattr` on its
+own `/dev/null` and `connect()` to a fragment-granted `<ws>/relay.sock`
+answered `EACCES`. The base profile has had the flag since v19; flags are
+per profile and were never on the sub-profiles. With it, the name is
+resolved from `/` and the ordinary rules decide. Stated cost: an fd that
+reaches the host's `/tmp` is named `/tmp/...` and judged by the private
+`/tmp` grant; only a process already holding such an fd can use it. The
+#1348 grant record's `profile_body_rules` now accepts a flags clause on the
+header (it read no `//child` rules in complain mode before). Guard:
+`jaato_server/shared/tests/test_child_names_disconnected_paths_1662.py`,
+two reversions. Not verified on an enforcing kernel.
+
 Step 2 (a spawner process owning the model's view of `/etc`, the home and
 `/var`, so the runner keeps the host view and the credentials) is a
 separate design in the issue.
