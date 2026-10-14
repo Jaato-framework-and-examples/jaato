@@ -165,6 +165,8 @@ _NON_FILE_KINDS = frozenset({
     "network", "capability", "ptrace", "signal", "unix", "dbus", "mount",
     "umount", "remount", "pivot_root", "change_profile", "rlimit", "set",
     "userns", "io_uring", "mqueue", "link",
+    # The file-level ``abi <abi/X>,`` line (#1686) grants nothing.
+    "abi",
 })
 
 _FILE_RULE = re.compile(

@@ -167,6 +167,47 @@ def _is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+#: The ABIs a rendered profile may pin, newest first (#1686).  Only ABIs
+#: an enforcing kernel was seen to compile a nested ``deny network`` with
+#: correctly are listed: on kernel 7.0 with ``apparmor_parser`` 5.0.2 a
+#: profile with NO ``abi`` line had its ``//child``'s ``deny network
+#: inet,`` enforced on the BASE profile too, and pinning ``abi/4.0`` or
+#: ``abi/5.0`` kept it in the child.
+PINNED_ABIS = ("5.0", "4.0")
+
+#: Where ``apparmor_parser`` resolves ``abi <abi/X>``: its default
+#: ``--base``.  jaato never passes ``--base``.
+DEFAULT_ABI_DIR = "/etc/apparmor.d/abi"
+
+
+def pinned_abi_rule(abi_dir: str = DEFAULT_ABI_DIR) -> str:
+    """The ``abi <abi/X>,`` line a rendered profile starts with (#1686).
+
+    Answers the newest ABI in :data:`PINNED_ABIS` whose file exists in
+    ``abi_dir``, as a line ending in a newline, or ``""`` when none does
+    (an AppArmor 3.x host, whose parser ships only ``abi/3.0``).  An
+    empty answer leaves the profile as it was before #1686, so a host
+    that could load it then still can; the manager announces it once.
+
+    Why pin at all: a profile with no ``abi`` line is compiled against
+    whatever feature set the parser defaults to, and on kernel 7.0 /
+    parser 5.0.2 that compilation let a nested profile's ``deny network
+    inet,`` refuse the parent's sockets.  The runner (base profile) then
+    lost DNS and its model.  The line is part of the rendered body, so
+    it is part of the confinement id: a host whose ABI files change
+    renders a new boundary rather than reusing a profile compiled under
+    the old one.
+    """
+    base = Path(abi_dir)
+    for version in PINNED_ABIS:
+        try:
+            if (base / version).is_file():
+                return f"abi <abi/{version}>,\n"
+        except OSError:
+            continue
+    return ""
+
+
 def interpreter_install_roots(
     venv_path: Path,
     workspace_root: Optional[Path] = None,
@@ -831,13 +872,23 @@ class AppArmorManager:
     #       and so judged by the private ``/tmp`` grant; only a process
     #       already holding such an fd can use it, since the host ``/tmp``
     #       is not reachable by path from the namespace.
-    _TEMPLATE_VERSION = 48
+    #   v49 (#1686): every rendered profile (base, and the isolated
+    #       sub-runner's) starts with ``abi <abi/5.0>,`` (else
+    #       ``abi/4.0``), the newest the host's parser ships; see
+    #       ``pinned_abi_rule``.  With no abi line, kernel 7.0 / parser
+    #       5.0.2 enforced a ``//child``-only ``deny network inet,`` on
+    #       the base profile as well: the runner was refused
+    #       ``inet dgram`` and lost DNS and its model.  Measured on that
+    #       host: the same nested deny with either abi line pinned stays
+    #       in the child.  A host with neither file (AppArmor 3.x) gets
+    #       no line, as before, and a WARNING.
+    _TEMPLATE_VERSION = 49
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
     PROFILE_TEMPLATE = '''\
 # jaato-apparmor-template-version: {template_version}
-#include <tunables/global>
+{abi_rule}#include <tunables/global>
 
 profile jaato-ws-{session_id} flags=({profile_flags}) {{
   #include <abstractions/base>
@@ -1330,6 +1381,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         venv_path: Optional[str] = None,
         profile_dir: str = "/etc/apparmor.d/jaato",
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        abi_dir: str = DEFAULT_ABI_DIR,
     ):
         """Initialize the AppArmor manager.
 
@@ -1347,6 +1399,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
                 always-unconfined main loop.  When ``None``, mutations
                 run in the calling thread (suitable for tests or
                 non-confined deployments).
+            abi_dir: Where the parser's ABI files are (#1686).  Read
+                once here by :func:`pinned_abi_rule`; every profile this
+                manager renders starts with the answer.
         """
         import sys
 
@@ -1358,6 +1413,15 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         self._interpreter_roots = interpreter_install_roots(
             self._venv_path, self._workspace_root)
         self._profile_dir = Path(profile_dir)
+        # #1686: read once, so every body this manager renders (and so
+        # every confinement id) agrees about the ABI it pins.
+        self._abi_rule = pinned_abi_rule(abi_dir)
+        if not self._abi_rule:
+            logger.warning(
+                "AppArmor: none of %s found under %s; profiles are rendered "
+                "with no abi line, and on some kernels a //child-only "
+                "'deny network' then also applies to the runner (#1686)",
+                ", ".join(f"abi/{v}" for v in PINNED_ABIS), abi_dir)
 
         # session_id -> was this session's profile GENERATED in complain
         # mode?  Recorded at render time rather than re-read from the env
@@ -2404,7 +2468,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 # the profile never loads.  The main PROFILE_TEMPLATE has carried
 # this line from the beginning; this body did not, and was the one
 # renderer no test had ever run through the parser.
-#include <tunables/global>
+#
+# The ``abi`` line above it (template v49, #1686) pins the feature set
+# the body is compiled against; see ``pinned_abi_rule``.
+{self._abi_rule}#include <tunables/global>
 
 profile "{sub_profile_name}" flags=(attach_disconnected) {{
   #include <abstractions/base>
@@ -3799,6 +3866,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
 
         return self.PROFILE_TEMPLATE.format(
             template_version=self._TEMPLATE_VERSION,
+            abi_rule=self._abi_rule,
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
