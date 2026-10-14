@@ -287,7 +287,7 @@ def manager(tmp_path):
 
 
 def _child(profile: str) -> str:
-    i = profile.find("profile child {")
+    i = profile.find("profile child flags=(attach_disconnected) {")
     assert i > 0, "no //child sub-profile in the rendered profile"
     return profile[i:]
 

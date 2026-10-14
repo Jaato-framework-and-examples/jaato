@@ -53,17 +53,21 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Pattern, Tuple
 def profile_body_rules(profile_text: str, body: str = "child") -> List[str]:
     """The rule lines of the ``profile <body> {`` block in *profile_text*.
 
-    The block ends at a line holding only ``}``.  Braces are not counted,
-    because a rule may contain an alternation (``/usr/{bin,sbin}/** ix,``).
-    Comments and blank lines are dropped.  An absent block gives ``[]``.
+    The header may carry a flags clause (``profile child
+    flags=(attach_disconnected) {``, #1662; complain mode adds
+    ``complain``).  The block ends at a line holding only ``}``.  Braces
+    are not counted, because a rule may contain an alternation
+    (``/usr/{bin,sbin}/** ix,``).  Comments and blank lines are dropped.
+    An absent block gives ``[]``.
     """
-    header = f"profile {body} {{"
+    header = re.compile(
+        rf"profile {re.escape(body)}(?: flags=\([^)]*\))? \{{")
     rules: List[str] = []
     inside = False
     for raw in profile_text.splitlines():
         line = raw.strip()
         if not inside:
-            inside = line == header
+            inside = header.fullmatch(line) is not None
             continue
         if line == "}":
             break

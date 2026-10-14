@@ -987,7 +987,7 @@ class TestRenderProfile:
             )
 
     def test_tool_hat_subprofile_present(self, manager):
-        """v13 introduces the ``profile tool_hat { ... }`` sub-profile.
+        """v13 introduces the ``profile tool_hat flags=(attach_disconnected) { ... }`` sub-profile.
         Tool execution enters it via ``change_profile -> jaato-ws-X//tool_hat``;
         prefetch / reactor dispatch / session-init stay in BASE.
         """
@@ -1047,7 +1047,7 @@ class TestRenderProfile:
         assert hasattr(ctx, "__exit__")
 
     def test_child_subprofile_present(self, manager):
-        """Phase 5 §5.10a: v14 introduces the ``profile child {...}``
+        """Phase 5 §5.10a: v14 introduces the ``profile child flags=(attach_disconnected) {...}``
         sub-profile.  Subprocesses transition into it via
         ``change_profile -> jaato-ws-X//child`` between fork() and
         exec() so the dangerous escape rules (writable
@@ -2748,17 +2748,14 @@ class TestPromptLibraryPluginApparmorRules:
 class TestSubprofileComplainFlag:
     """Template v22 — JAATO_APPARMOR_COMPLAIN propagates to sub-profiles."""
 
-    def test_default_subprofiles_have_no_flags_declaration(self, manager, monkeypatch):
-        """When the env knob is unset, sub-profile headers stay byte-equivalent
-        to v21 (no ``flags=`` clause).  AppArmor doesn't permit
-        ``attach_disconnected`` on sub-profiles, so the only legal flag here
-        is ``complain``; absent the knob, no clause is emitted at all."""
+    def test_default_subprofiles_carry_only_attach_disconnected(self, manager, monkeypatch):
+        """When the env knob is unset, sub-profile headers carry
+        ``attach_disconnected`` alone (v48, #1662) and no ``complain``."""
         monkeypatch.delenv("JAATO_APPARMOR_COMPLAIN", raising=False)
         rendered = manager._render_profile("s1", "/workspace")
-        assert "profile tool_hat {" in rendered
-        assert "profile child {" in rendered
-        assert "profile tool_hat flags=" not in rendered
-        assert "profile child flags=" not in rendered
+        assert "profile tool_hat flags=(attach_disconnected) {" in rendered
+        assert "profile child flags=(attach_disconnected) {" in rendered
+        assert "complain" not in rendered.split("profile tool_hat", 1)[1]
 
     def test_complain_env_propagates_to_both_subprofiles(self, manager, monkeypatch):
         """v22 acceptance: with the knob set, both sub-profile headers
@@ -2766,8 +2763,8 @@ class TestSubprofileComplainFlag:
         transitioning into ``//child`` also run complain-mode."""
         monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", "1")
         rendered = manager._render_profile("s1", "/workspace")
-        assert "profile tool_hat flags=(complain) {" in rendered
-        assert "profile child flags=(complain) {" in rendered
+        assert "profile tool_hat flags=(attach_disconnected, complain) {" in rendered
+        assert "profile child flags=(attach_disconnected, complain) {" in rendered
         # Base profile keeps the existing combined flag set
         assert "flags=(attach_disconnected, complain)" in rendered
 
@@ -2777,7 +2774,7 @@ class TestSubprofileComplainFlag:
         for value in ("1", "true", "True", "YES"):
             monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", value)
             rendered = manager._render_profile("s1", "/workspace")
-            assert "profile tool_hat flags=(complain) {" in rendered, (
+            assert "profile tool_hat flags=(attach_disconnected, complain) {" in rendered, (
                 f"JAATO_APPARMOR_COMPLAIN={value!r} did not enable complain on tool_hat"
             )
 
@@ -2786,7 +2783,7 @@ class TestSubprofileComplainFlag:
         for value in ("", "0", "false", "no"):
             monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", value)
             rendered = manager._render_profile("s1", "/workspace")
-            assert "profile tool_hat flags=" not in rendered, (
+            assert "profile tool_hat flags=(attach_disconnected) {" in rendered, (
                 f"JAATO_APPARMOR_COMPLAIN={value!r} incorrectly enabled complain on tool_hat"
             )
 

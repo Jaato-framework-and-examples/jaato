@@ -600,7 +600,7 @@ def test_child_has_no_exec_rule_nnp_would_refuse(tmp_path):
         text = AppArmorManager(workspace_root=str(tmp_path))._render_profile(
             "sid", str(workspace), requested_fragments=fragments,
             plugin_rules=['"/usr/bin/python3" ix,'])
-        child = text[text.index("profile child {"):]
+        child = text[text.index("profile child flags=(attach_disconnected) {"):]
         for line in child.splitlines():
             rule = line.split("#", 1)[0].strip().rstrip(",")
             mode = rule.rsplit(None, 1)[-1] if " " in rule else ""

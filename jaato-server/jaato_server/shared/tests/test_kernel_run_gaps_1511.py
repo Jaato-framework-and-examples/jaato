@@ -128,8 +128,8 @@ def _bodies(root: Path, fragments: Optional[List[str]],
     manager = _manager(root, list(interpreter_roots))
     text = manager._render_profile("sid", str(workspace),
                                    requested_fragments=fragments)
-    hat = text.index("profile tool_hat {")
-    child = text.index("profile child {")
+    hat = text.index("profile tool_hat flags=(attach_disconnected) {")
+    child = text.index("profile child flags=(attach_disconnected) {")
     isolated = manager._render_sub_profile("sid", "sub_1", str(workspace))
     return {
         "base": text[:hat],
