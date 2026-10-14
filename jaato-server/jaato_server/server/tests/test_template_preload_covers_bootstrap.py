@@ -127,6 +127,13 @@ _PROBE = textwrap.dedent(
     from jaato_server.shared.session_envelope import SessionInitEnvelope
     ws = tempfile.mkdtemp()
     os.makedirs(os.path.join(ws, ".jaato"))
+    # A configured MCP server, so the mcp plugin starts its thread and
+    # imports what it imports lazily (#1691: with none it starts nothing).
+    # The command does not exist, so the connect fails at once.
+    with open(os.path.join(ws, ".mcp.json"), "w") as f:
+        json.dump({"mcpServers": {"probe": {
+            "type": "stdio",
+            "command": os.path.join(ws, "no-such-server")}}}, f)
     host = bootstrap_session(SessionInitEnvelope(
         session_id="preload_probe", workspace_path=ws, profile_name="",
         provider_name="echo", model_name="echo",

@@ -5904,6 +5904,63 @@ constructs every plugin.
 Guard: `jaato_server/shared/tests/test_daemon_registry_is_a_mirror_1566.py`,
 ten reversions.
 
+### Three Startup Costs Paid for Nothing (#1690, #1691, #1689)
+
+Found by the WASM spike (#1688); each is also a cost on a native install.
+
+**A skip message that walked the metadata 49 times (#1690).** When
+discovery skips a plugin for a missing dependency (`interactive_shell`
+without `pexpect`; `[interactive]` is not a default extra), the message
+names the extra to install, through `scaffold.dependencies._extras_index()`.
+That index asked `_provided_import_names(pkg)` once per requirement name,
+and each call ran `importlib.metadata.packages_distributions()`, a walk of
+every installed distribution; the per-name `lru_cache` did not help because
+every name was different. `_import_names_by_dist()` now takes the walk once
+per process and inverts it into `{distribution: import names}`, cleared by
+`reset_metadata_caches` with the rest of the module's metadata reads. The
+hint text is unchanged. Measured cold, Python 3.13, `pexpect` blocked:
+`_install_advice("pexpect")` 15.7-17.9 s and 49 walks before, 0.36-0.44 s
+and 1 walk after. Every cold process pays it: the daemon, each runner, each
+embedded client, `jaato-scaffold`.
+
+**A loop thread for no server (#1691).** `MCPToolPlugin.initialize` started
+its thread (an event loop, then a wait of up to 10 s for discovery) with no
+`.mcp.json`, and `LSPToolPlugin` started its loop thread with no language
+server. Both now start nothing until a server is configured:
+
+| Plugin | Starts the thread later on |
+|---|---|
+| `mcp` | `mcp reload` / `mcp connect` (`_start_for_command`; a reload of a thread it just started reports that thread's connections instead of reconnecting them), and `set_workspace_path` to a workspace naming a server |
+| `lsp` | `set_workspace_path`, a `.lsp.json` written mid-session (`_has_configured_servers`, asked every turn by `is_tool_visible`, #1345), `lsp connect` / `lsp reload` (`_connect_configured_servers` / `_start_thread_if_configured`) |
+
+The #1566 mirror never starts either (`_runner_hosted_mirror`), and the
+daemon process still never hosts lsp (#284). Measured, no config, Python
+3.13: mcp `initialize` 494 ms for the first session (the `mcp` import, on
+the thread) and ~2 ms after, one thread each, before; ~1 ms and no thread
+after. lsp: one thread per session before, none after. Where threads
+cannot start (Pyodide) every session waited the full 10 s. The skip path
+logs `No MCP servers configured; background thread not started` at INFO,
+where the thread used to log `No MCP servers configured` at WARNING.
+
+Three guards that relied on the old start in an empty workspace now
+configure a server first, or they would no longer see their defect: the
+#1566 mirror cases, `test_validate_releases_what_it_starts` (a server under
+`HOME`) and `test_template_preload_covers_bootstrap` (an `.mcp.json` in the
+probe workspace). Their servers' commands do not exist, so the connect
+fails at once.
+
+**`readline` on a host without one (#1689).** `permission/channels.py`
+imported `readline` unconditionally, so `jaato_embedded` could not be
+imported where it does not exist (Pyodide). It is guarded now
+(`readline = None`), and `ConsoleChannel._read_input` skips the history
+cleanup without it. Where `readline` exists it is still imported at module
+level, so `input()` keeps the line editing that importing it switches on.
+`pyreadline3` stays a Windows dependency.
+
+Guard: `jaato_server/shared/tests/test_startup_costs_1690_1691_1689.py`,
+nine reversions. Not done: building the install hint lazily (the one walk
+is still on the skip path of every cold process).
+
 ### Pages Only From Catalog Templates
 
 A profile gates tools (`plugins:`, `tools:[...]` scopes), and that is the

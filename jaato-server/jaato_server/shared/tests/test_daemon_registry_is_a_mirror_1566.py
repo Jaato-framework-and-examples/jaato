@@ -221,6 +221,22 @@ def _mirror(ws: Path) -> Dict[str, Any]:
             RUNNER_HOSTED_SESSION_KEY: True}
 
 
+def _with_servers(ws: Path, monkeypatch) -> Path:
+    """A workspace whose `.mcp.json` / `.lsp.json` each name a server.
+
+    Since #1691 neither plugin starts its thread with nothing configured,
+    so without a server the mirror stamp would decide nothing these cases
+    could see.  HOME points into the workspace so a `~/.mcp.json` on the
+    host cannot answer for it.
+    """
+    monkeypatch.setenv("HOME", str(ws))
+    (ws / ".mcp.json").write_text(
+        '{"mcpServers": {"s": {"type": "stdio", "command": "true"}}}')
+    (ws / ".lsp.json").write_text(
+        '{"languageServers": {"s": {"command": "true", "extensions": [".x"]}}}')
+    return ws
+
+
 class TestPluginsHonourTheStamp:
     """Each case has a control: the same call without the stamp starts it."""
 
@@ -229,14 +245,14 @@ class TestPluginsHonourTheStamp:
         started: List[bool] = []
         monkeypatch.setattr(cls, "_ensure_thread", lambda self: started.append(True))
         plugin = cls()
-        plugin.initialize({"workspace_path": str(tmp_path)})
+        plugin.initialize({"workspace_path": str(_with_servers(tmp_path, monkeypatch))})
         assert started == [True]
 
     def test_mcp_starts_no_thread(self, tmp_path, monkeypatch):
         started: List[bool] = []
         monkeypatch.setattr(MCPToolPlugin, "_ensure_thread", lambda self: started.append(True))
         plugin = MCPToolPlugin()
-        plugin.initialize(_mirror(tmp_path))
+        plugin.initialize(_mirror(_with_servers(tmp_path, monkeypatch)))
         assert started == [] and plugin._initialized
         assert plugin.get_command_completions("mcp", [])  # completions still answer
 
@@ -244,7 +260,7 @@ class TestPluginsHonourTheStamp:
         started: List[bool] = []
         monkeypatch.setattr(LSPToolPlugin, "_ensure_thread", lambda self: started.append(True))
         plugin = LSPToolPlugin()
-        plugin.initialize(_mirror(tmp_path))
+        plugin.initialize(_mirror(_with_servers(tmp_path, monkeypatch)))
         assert started == [] and plugin._initialized
 
     def test_interactive_shell_starts_no_reaper(self, tmp_path, monkeypatch):
