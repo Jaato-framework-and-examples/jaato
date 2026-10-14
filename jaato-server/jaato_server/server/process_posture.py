@@ -269,7 +269,11 @@ def apply_process_posture(
     the posture that is actually in force.
     """
     from jaato_server.server import runner_user
+    from jaato_server.shared import fork_quiet
 
+    # Before anything forks: a child must not write to stderr between
+    # fork and exec (#1673).
+    fork_quiet.install()
     apply_umask(resolve_umask(umask))
     policy = runner_user.resolve_policy(runner_uid_policy)
     runner_user.set_policy(policy)

@@ -408,6 +408,7 @@ def _handle_fork_slot(
     # could wait on an import lock another template thread held.
     from jaato_server.server.runner_spawner import enter_slot_boundary_in_child
     from jaato_server.server.runner.slot_reaper import reset_sigchld_in_child
+    from jaato_server.shared.fork_quiet import adopt_child
 
     try:
         child_pid = os.fork()
@@ -428,6 +429,9 @@ def _handle_fork_slot(
         # or it would reap the slot's own subprocesses out from under
         # subprocess.run / pexpect.
         reset_sigchld_in_child()
+        # A slot is a process of its own, not a child on its way to
+        # exec: report its unraisable exceptions again (#1673).
+        adopt_child()
         # Become a pool slot.  Drop the template's control
         # socket (child doesn't talk to the daemon over that pipe;
         # it has its own slot socket) and enter slot-mode.
@@ -644,6 +648,12 @@ def _cold_spawn_confine(profile_name: str, disable_confine: bool, log: Any) -> N
 def main() -> None:
     """Run bootstrap + serve.  Never returns under normal operation —
     serve exits cleanly on peer EOF, after which we ``sys.exit(0)``."""
+    # A child this runner forks writes nothing to stderr before exec,
+    # whatever at-fork hook raises in it (#1673).  First, so the template,
+    # every slot forked from it and every cold runner carry it.
+    from jaato_server.shared import fork_quiet
+    fork_quiet.install()
+
     # ----- 0. Mode dispatch -----
     # ``--template-mode`` selects the pre-warm template subprocess
     # entry point (pool PR 2).  Daemon spawns one template at startup
