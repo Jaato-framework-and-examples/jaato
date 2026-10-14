@@ -8897,6 +8897,25 @@ one the daemon did not seal (see
 `jaato_server/server/tests/test_daemon_workspace_files_owned_1528.py`, six
 reversions, real `chown` to `nobody` as root and an inode ledger otherwise.
 
+**The trace and the ledger have two writers (#1674).** The application
+trace (`JAATO_TRACE_LOG` / `trace.session_log`) and the token ledger
+(`LEDGER_PATH` / `trace.ledger`) are appended to by the daemon (its own
+trace lines, the Art. 50(1) announcement row) and by the runner. Created
+first by a root daemon they were `root:root 0644`, and the dropped runner's
+rows were refused (`ledger: cannot append ... [Errno 13]`). Their writers
+live in the SDK and `shared`, which cannot ask the daemon's policy, so:
+
+| Piece | Where |
+|---|---|
+| the one append both writers use (and the chained ledger's `.lock`): with no owner it is `open(path, "a")`; with one, a file the daemon creates is `fchown`-ed before its first byte and an existing daemon-owned one is handed back as it is opened. Final component `O_NOFOLLOW`; only a regular file with one link is written or handed over | `jaato_sdk/owned_append.py` |
+| the resolver: the workspace the daemon is acting in (the per-task root, else `JAATO_WORKSPACE_ROOT`), the path's PARENT inside it, owner `workspace_file_owner` | `runner_user.workspace_append_owner`, installed by `apply_process_posture` when the policy drops |
+| at spawn, an existing root-owned trace, ledger or `.lock` the session names inside its workspace is handed back (the daemon may not append to a ledger again) | `runner_user.hand_over_audit_files`, from `_prepare_runner_user` |
+
+A trace path outside the workspace (one absolute file shared by sessions)
+is never handed to anyone. The per-agent provider trace is not covered.
+Guard: `jaato_server/server/tests/test_audit_files_are_the_workspace_owners_1674.py`,
+five reversions.
+
 Guard: `jaato_server/server/tests/test_a_root_daemon_says_so_1168.py`, six reversions. The
 uid is substituted in **both** directions — patched to 0 for the warning
 cases and to an ordinary uid for the control — because patching only one side

@@ -66,6 +66,7 @@ from jaato_server.shared.peer_identity import PeerCredentials
 from jaato_server.shared.privilege_drop import RunnerUser
 from jaato_server.server.runner_user import (
     current_policy as current_runner_uid_policy,
+    hand_over_audit_files,
     prepare_runner_owned_paths,
     resolve_runner_user,
     runner_owned_paths,
@@ -808,6 +809,12 @@ def _prepare_runner_user(
         log_path=log_path,
     )
     prepare_runner_owned_paths(user, dirs, files)
+    # The trace and ledger the runner appends to beside the daemon: one an
+    # earlier daemon left root-owned is handed back now, or the runner's
+    # own rows are refused with EACCES (#1674).
+    if user is not None:
+        hand_over_audit_files(
+            workspace_path, getattr(server, "_session_env", None) or None)
     return user
 
 

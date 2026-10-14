@@ -53,6 +53,8 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Dict, Optional, Set
 
+from jaato_sdk.owned_append import ensure_parent_dirs, open_append
+
 
 # Cache of directories we've already ensured exist, to avoid
 # repeated os.makedirs calls on every trace write.
@@ -316,10 +318,15 @@ def _resolve_trace_file(file_path: str) -> str:
 
 
 def _ensure_parent_dirs(file_path: str) -> None:
-    """Create parent directories for a file path if they don't exist."""
+    """Create parent directories for a file path if they don't exist.
+
+    Through :func:`jaato_sdk.owned_append.ensure_parent_dirs`, so a root
+    daemon whose runners drop to the workspace owner creates them as that
+    owner's (#1674); with no owner it is the plain ``makedirs``.
+    """
     parent = os.path.dirname(file_path)
     if parent not in _ensured_dirs:
-        os.makedirs(parent, exist_ok=True)
+        ensure_parent_dirs(file_path)
         _ensured_dirs.add(parent)
 
 
@@ -380,7 +387,7 @@ def trace_write(
     try:
         resolved = _resolve_trace_file(trace_path)
         _ensure_parent_dirs(resolved)
-        with open(resolved, "a") as f:
+        with open_append(resolved) as f:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] [{component}] {msg}\n")
             if include_traceback:

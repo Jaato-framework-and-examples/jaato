@@ -8,6 +8,8 @@ import time
 import traceback
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
+from jaato_sdk.owned_append import ensure_parent_dirs, open_append
+
 from .ssl_helper import log_ssl_guidance, is_ssl_cert_failure
 
 logger = logging.getLogger(__name__)
@@ -268,9 +270,11 @@ class TokenLedger:
           had moved.  A duplicated record in an audit log is the thing
           the log exists to make impossible.
         """
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        # Directories (and below, the file and its lock) are created as the
+        # workspace owner's when the daemon's runners drop to that owner,
+        # and a file an earlier daemon left root-owned is handed back:
+        # otherwise the runner's own appends fail with EACCES (#1674).
+        ensure_parent_dirs(path)
         if not self.chains():
             self._flush_lines(path, fsync=fsync)
             return
@@ -281,7 +285,7 @@ class TokenLedger:
 
     def _flush_lines(self, path: str, *, fsync: bool) -> None:
         """Render and write each pending event, advancing as each lands."""
-        with open(path, "a", encoding="utf-8") as f:
+        with open_append(path, encoding="utf-8") as f:
             for idx in range(self._flushed, len(self._events)):
                 f.write(self._line(idx) + "\n")
                 f.flush()
