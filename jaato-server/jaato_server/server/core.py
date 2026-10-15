@@ -1940,11 +1940,12 @@ class JaatoServer:
     ) -> None:
         """Inject the ``app://`` resolver (#1226), or clear it.
 
-        The daemon wiring calls this on every session it constructs, on the WS
-        path where a bind channel exists.  ``None`` leaves ``app://``
-        references unresolvable — the IPC / embedded / standalone posture,
-        where they are dropped (or, strict, refuse the bootstrap) exactly as an
-        unreachable application would be.
+        The daemon wiring calls this on every session it constructs: the WS
+        resolver (bind channel, #1226), the IPC resolver (registered
+        connections of the workspace owner's account, #1609), or both
+        chained.  ``None`` leaves ``app://`` references unresolvable — the
+        embedded / standalone posture, where they are dropped (or, strict,
+        refuse the bootstrap) exactly as an unreachable application would be.
         """
         self._app_secret_resolver = resolver
 
@@ -2014,9 +2015,10 @@ class JaatoServer:
         if resolver is None:
             self._drop_app_secret(
                 key, reference, ref.required,
-                "no app:// resolver is wired on this transport (only a "
-                "WebSocket deployment with the #1074 bind channel can resolve "
-                "app:// references)",
+                "no app:// resolver is wired on this transport (a WebSocket "
+                "application answers on its #1074 bind channel; an IPC client "
+                "of the workspace owner's account answers after "
+                "secret.resolver.register, #1609)",
             )
             return
         answer = resolver.resolve_reference(ref, context)

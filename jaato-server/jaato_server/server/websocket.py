@@ -106,7 +106,7 @@ from jaato_sdk.events import (
     WorkspaceAppWriteRequest,
     WorkspaceAppWriteResultEvent,
 )
-from .app_secret import AppSecretAnswer, AppSecretResolver
+from .app_secret import AppSecretAnswer, AppSecretResolver, answer_from_result
 from .workspace_manager import WorkspaceManager, client_path_refusal
 from .event_sink import EventSink
 
@@ -803,22 +803,8 @@ def _peek_request_id(message: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _answer_from_result(result: "SecretResolveResultEvent") -> AppSecretAnswer:
-    """Translate an application's ``secret.resolve.result`` into an :class:`AppSecretAnswer`.
-
-    An ``ok`` status with no ``value`` is downgraded to ``error`` — the
-    application claimed success and delivered nothing, which must not read as a
-    resolved empty secret (dropping is the honest outcome).
-    """
-    if result.status == "ok":
-        if result.value is None:
-            return AppSecretAnswer(
-                status="error", detail="application answered ok with no value",
-            )
-        return AppSecretAnswer(
-            status="ok", value=result.value, expires_at=result.expires_at,
-        )
-    return AppSecretAnswer(status=result.status or "error", detail=result.detail)
+#: One translation for both transports (#1609), kept under the old name.
+_answer_from_result = answer_from_result
 
 
 #: Connection kinds a WS client can be accepted as.  ``AUTH_KIND_APP`` is the

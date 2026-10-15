@@ -63,6 +63,7 @@ from jaato_server.shared.instruction_token_cache import InstructionTokenCache
 from jaato_server.shared.runtime_limits import RuntimeLimits, apply_isolated_defaults
 from jaato_server.shared.session_envelope import BootstrapEnvelope
 from jaato_server.shared.instruction_suppression import normalize_suppression
+from .app_secret import chain_app_secret_resolvers
 from .awaiting import awaiting_of
 from .session_scope import effective_config_root
 from .lock_profile import ProfiledRLock
@@ -2145,6 +2146,11 @@ class SessionManager:
         # every session this manager constructs.  ``None`` on IPC / embedded,
         # where ``app://`` references are dropped.
         self._app_secret_resolver: Optional['AppSecretResolver'] = None
+        # #1609: the IPC resolver (registered IPC connections answer for the
+        # workspaces their OS account owns).  Chained AFTER the WS resolver
+        # for session-env resolution only; owner checks keep reading the WS
+        # resolver alone.
+        self._ipc_app_secret_resolver: Optional[Any] = None
 
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
@@ -5368,7 +5374,10 @@ class SessionManager:
         # env, so a session spawned from ANY path (WS create, cascade stage,
         # wake, revive) resolves app:// references against the owning
         # application.  ``None`` on IPC / embedded leaves them dropped.
-        server.set_app_secret_resolver(self._app_secret_resolver)
+        server.set_app_secret_resolver(chain_app_secret_resolvers(
+            self._app_secret_resolver,
+            getattr(self, "_ipc_app_secret_resolver", None),
+        ))
         server._resolve_session_env()
 
         # Phase 3 §3.13: IPC apparmor provisioning + runner spawn
@@ -5572,6 +5581,15 @@ class SessionManager:
         stage, wake, revive — can resolve ``app://`` references the same way.
         """
         self._app_secret_resolver = resolver
+
+    def set_ipc_app_secret_resolver(self, resolver: Optional[Any]) -> None:
+        """Inject the IPC ``app://`` resolver (#1609).
+
+        Called once by the daemon wiring when the IPC transport is up.  It
+        answers only for workspaces the WS resolver says are unowned (see
+        :func:`server.app_secret.chain_app_secret_resolvers`).
+        """
+        self._ipc_app_secret_resolver = resolver
 
     def reload_owner_sessions(self, qualified_owner: str) -> int:
         """Re-resolve the env of every LOADED session owned by ``qualified_owner``.

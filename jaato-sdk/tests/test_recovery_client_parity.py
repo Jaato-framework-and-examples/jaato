@@ -116,6 +116,10 @@ INTENTIONALLY_ABSENT = {
         "invoke_plugin_tool (#1606); the recovery wrapper forwards the "
         "METHODS and lets the inner client refuse a daemon too old to serve "
         "them -- same reasoning as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SECRET_RESOLVER_PROTOCOL":
+        "class constant on IPCClient gating register_secret_resolver (#1609); "
+        "the recovery wrapper forwards the method and lets the inner client "
+        "refuse",
     "MIN_MEMORY_VERBS_PROTOCOL":
         "class constant on IPCClient gating the memory verbs (#1232); the "
         "recovery wrapper forwards every METHOD and lets the inner client "

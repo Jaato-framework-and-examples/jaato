@@ -140,7 +140,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize._run_load_plugins": 16,
     "jaato-server/jaato_server/server/core.py::JaatoServer.shutdown": 25,
     "jaato-server/jaato_server/server/egress_proxy/config.py::validate_allowlist": 22,
-    "jaato-server/jaato_server/server/ipc.py::JaatoIPCServer._handle_message": 30,
+    "jaato-server/jaato_server/server/ipc.py::JaatoIPCServer._handle_message": 28,
     # +1 for ``session.get_rendered_system_instruction`` (#787).  This is a
     # flat ``if env.method == "..."`` dispatch table, so every verb the
     # runner serves costs exactly one point and no amount of splitting the

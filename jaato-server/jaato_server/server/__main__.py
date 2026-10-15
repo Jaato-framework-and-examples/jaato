@@ -731,14 +731,21 @@ class JaatoDaemon:
             # the WS transport's _command_router access).
             self._ipc_server._session_manager = self._session_manager
             self._ipc_server._on_client_disconnect = self._command_router.handle_client_disconnect
+            # #1609: IPC connections that send secret.resolver.register
+            # answer app:// references for the workspaces their OS account
+            # owns, so a session the daemon starts on its own (reactor
+            # stage, wake, revive) resolves them as WS sessions do.
+            self._session_manager.set_ipc_app_secret_resolver(
+                self._ipc_server.app_secret_resolver
+            )
         if self._ws_server:
             self._ws_server.set_command_router(self._command_router)
             # #1226: hand the WS server's app:// resolver to the session
             # manager, so every session it constructs resolves app:// secret
             # references (e.g. GH_TOKEN=app://github) against the application
             # that owns the workspace, over that server's #1074 bind channel.
-            # Only the WS transport has bind channels; the IPC / embedded
-            # paths leave the resolver unset and app:// references are dropped.
+            # Only the WS transport has bind channels; IPC registers its own
+            # resolver above (#1609), and the embedded path has none.
             self._session_manager.set_app_secret_resolver(
                 self._ws_server.app_secret_resolver
             )
