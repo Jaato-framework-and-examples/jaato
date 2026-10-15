@@ -1,6 +1,8 @@
 # jaato in a Web Page (WASM): Spike Findings
 
-**Status: spike, nothing in the framework changed.** The harness is
+**Status: spike.** The three startup costs it found were fixed in the
+framework by #1693 (#1689, #1690, #1691); the harness now runs on `main`
+with no stubs. The harness is
 [`examples/wasm_spike/`](../../examples/wasm_spike/README.md); every number
 below comes from running it in headless Chromium (Playwright's build 1194).
 
@@ -19,49 +21,54 @@ under Pyodide, in a Web Worker, and what it costs.
 It runs. Two real sessions through `InProcessClient.session(...)` with
 `plugins=[]`, from the unmodified source tree:
 
-| Session | Result | Time (stalls stubbed) | Time (stalls kept) |
-|---|---|---|---|
-| `echo` provider | reply `'hello'` | 6.8 s | 17.1 s |
-| `openai` provider, mock at the page's origin | reply `'Hello from the mock.'`, a streamed `POST /v1/chat/completions` reached the server | 3.8 s | 13.9 s |
+| Session | Result | Before #1693, stalls stubbed | Before #1693, unstubbed | `main`, no stubs |
+|---|---|---|---|---|
+| `echo` provider | reply `'hello'` | 6.8 s | 17.1 s | 4.2 s |
+| `openai` provider, mock at the page's origin | reply `'Hello from the mock.'`, a streamed `POST /v1/chat/completions` reached the server | 3.8 s | 13.9 s | 2.2 s |
 
-Fixed costs before the first session: Pyodide boot ~2.5 s, Pyodide packages
-~1.7 s, `micropip` install of the pure wheels plus unpacking the source zip
-~8 s. Page open to the second reply: ~23 s stubbed, ~43 s kept.
+Fixed costs before the first session: Pyodide boot ~2.5-3 s, Pyodide
+packages ~1.7-2 s, `micropip` install of the pure wheels plus unpacking the
+source zip ~3-8 s. Page open to the second reply: ~15 s on `main` (was ~23 s
+stubbed, ~43 s unstubbed). No thread start is attempted at all any more.
 
 ## What it took
 
 Every dependency the embedded path imports exists in Pyodide 0.28 or as a
 pure wheel. `psutil`, `watchdog`, `websockets` and `pexpect` are not needed
-on this path; `mcp` was left out on purpose and nothing broke. Four shims,
-all in `examples/wasm_spike/shims/`:
+on this path; `mcp` was left out on purpose and nothing broke. Four
+workarounds were needed; one is gone on `main`, three remain (in
+`examples/wasm_spike/shims/` and `fetch_deps.py`):
 
 | Shim | Why | Where in jaato |
 |---|---|---|
-| `readline` stub | imported unconditionally, and Pyodide has no terminal | `plugins/permission/channels.py:11` |
+| ~~`readline` stub~~ | imported unconditionally, and Pyodide has no terminal. **Gone:** the import is guarded since #1693 (#1689) | `plugins/permission/channels.py` |
 | `googleapis-common-protos<1.71` | newer protos are generated for a protobuf runtime newer than Pyodide's 6.31; `google-api-core` is imported by `token_accounting` for error classification | `shared/token_accounting.py` |
-| `ThreadPoolExecutor` runs inline; `Thread.start` is recorded and skipped | Pyodide cannot start threads. `expose_all` initializes plugins on a pool; MCP and LSP each start a loop thread | `plugins/registry.py` (`expose_all`), `mcp/plugin.py:2423`, `lsp/plugin.py:3160` |
+| `ThreadPoolExecutor` runs inline; `Thread.start` is recorded and skipped | Pyodide cannot start threads. `asyncio.to_thread` (`InProcessClient` builds the registry with it) and `expose_all` both submit to a pool. MCP and LSP no longer start loop threads with no server configured (#1691), so on `main` the `Thread.start` half records nothing | `jaato_embedded/client.py` (`_build_registry`), `plugins/registry.py` (`expose_all`) |
 | httpx response chunks converted to `bytes` | Pyodide's httpx XHR transport yields `memoryview`, which the openai SDK's SSE decoder cannot split | outside jaato |
 
-`asyncio.to_thread` needed no shim: Pyodide's event loop runs executor work
-inline, so the turn blocks the worker until it ends. That is acceptable in a
-Web Worker and impossible on the page's main thread.
+With the pool shimmed, executor work runs inline, so the turn blocks the
+worker until it ends. That is acceptable in a Web Worker and impossible on
+the page's main thread. (An earlier version of this note said
+`asyncio.to_thread` needed no shim; removing the shim on `main` showed it
+fails with `can't start new thread` in `_build_registry`.)
 
-## Two stalls, and where the time goes
+## Two stalls, and where the time went (fixed by #1693)
 
-Profiled under Pyodide in Node, almost all of `connect()` is spent in two
-places, neither of which runs a session:
+Profiled under Pyodide in Node, almost all of `connect()` was spent in two
+places, neither of which runs a session. Both are fixed natively too:
 
 1. **`registry._install_advice`** (~80% of `connect()`): the directory scan
    finds `interactive_shell` missing `pexpect` and, to word one "install
    this extra" hint, builds an index over every installed distribution's
    metadata (`scaffold/dependencies._metadata_index`). It is a diagnostic
-   that dominates startup.
+   that dominated startup. Fixed in #1690: the metadata walk runs once per
+   process.
 2. **`MCPToolPlugin._ensure_thread`**: waits up to 10 s for a loop thread,
    once per session, even with no `.mcp.json`. The second session's 10 s gap
-   between the two columns above is this wait.
+   between the first two columns above is this wait. Fixed in #1691: no
+   loop thread without a configured server.
 
-With both stubbed, what remains is ~2 s of imports and the registry
-initializing every plugin.
+What remains is ~2 s of imports and the registry initializing every plugin.
 
 ## What the spike also showed
 
@@ -107,12 +114,11 @@ was not tested.
 
 In order, each a separate change:
 
-1. Make the two stalls cheap natively too: compute the install hint lazily
-   (or cache the metadata index), and start the MCP thread only when a
-   server is configured.
+1. ~~Make the two stalls cheap natively too~~ and guard the `readline`
+   import: done in #1693.
 2. A `wasm` mode for `jaato_embedded`: a registry with only the profile's
-   plugins, plugin initialization without a thread pool, no MCP/LSP threads,
-   and a lazy `readline` import.
+   plugins, and registry build and plugin initialization without a thread
+   pool (so the remaining threads shim goes away).
 3. A bundle builder: record the import trace for a profile (as
    `template_preload.py` already does for the pool) and pack exactly those
    modules.

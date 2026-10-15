@@ -1,8 +1,5 @@
 """Runs inside Pyodide in a Web Worker: install wheels, then drive two real
-jaato sessions through jaato_embedded.InProcessClient, unmodified source.
-
-STUB_STALLS (from ?stalls=keep in the page URL) controls the two measured
-startup stalls; see docs/design/wasm-embedding.md for what each is."""
+jaato sessions through jaato_embedded.InProcessClient, unmodified source."""
 import os, sys, time, traceback
 
 import js
@@ -15,15 +12,6 @@ os.chdir("/ws")
 
 import wasm_http  # noqa: E402,F401 - patches httpx on import
 import wasm_threads  # noqa: E402 - patches threading on import
-
-if "stalls=keep" not in str(js.location.search):
-    # Stall 1: the registry builds a metadata-wide extras index to word one
-    # "missing dependency" hint (pexpect); in Pyodide that walk is ~80% of
-    # connect().  Stall 2: MCP waits 10 s for a loop thread that cannot start.
-    import jaato_server.shared.plugins.registry as _registry
-    from jaato_server.shared.plugins.mcp.plugin import MCPToolPlugin
-    _registry._install_advice = lambda *a, **k: ""
-    MCPToolPlugin._ensure_thread = lambda self: None
 
 from jaato_embedded.client import InProcessClient  # noqa: E402
 
