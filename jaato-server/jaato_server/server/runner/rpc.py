@@ -6397,7 +6397,61 @@ class RunnerRPC:
                 # FrozenSet → list for wire safety (JSON has no set type).
                 "traits": list(getattr(s, "traits", frozenset()) or []),
             })
-        return True, {"schemas": serialized}
+        return True, {
+            "schemas": serialized,
+            "catalog": self._tool_id_catalog(session),
+        }
+
+    @staticmethod
+    def _tool_id_catalog(session: Any) -> List[Dict[str, Any]]:
+        """Every tool name and category ``list_tools`` can hand the model
+        for ``session``, for the daemon's tool-id map (#1698).
+
+        ``schemas`` above is the session's ACTIVATED subset, so a runner-tier
+        deferred tool (``prompt.*`` from ``prompt_library``) and its
+        category were in no map the daemon sent: the first id a reader saw
+        unresolved was ``list_tools(category_id=...)``, the very call that
+        activates them.  This lists what the introspection plugin itself
+        lists: the registry's exposed schemas, filtered by the session's
+        scopes and visibility predicates (``filter_visible_tool_schemas``,
+        the same call ``list_tools`` makes), plus the registry's category
+        descriptions, which name the categories ``list_tools`` may list
+        with no tool in them.
+
+        Best effort: a registry that cannot answer yields ``[]``, so the
+        resolved ``schemas`` still reach the map.  Entries carry only
+        ``name`` and ``category``; a category-only entry has ``name: None``.
+        """
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        if registry is None:
+            return []
+        catalog: List[Dict[str, Any]] = []
+        try:
+            from jaato_server.shared.tool_visibility import (
+                filter_visible_tool_schemas,
+            )
+            visible = filter_visible_tool_schemas(
+                registry, registry.get_exposed_tool_schemas(), session=session,
+            )
+            for s in visible or []:
+                name = getattr(s, "name", None)
+                if not name:
+                    continue
+                category = getattr(s, "category", None)
+                catalog.append({
+                    "name": str(name),
+                    "category": str(category) if category else None,
+                })
+        except Exception:  # noqa: BLE001 — best-effort id catalog
+            logger.debug("session.get_tool_schemas: catalog walk failed",
+                         exc_info=True)
+        try:
+            for category in (registry.get_category_descriptions() or {}):
+                catalog.append({"name": None, "category": str(category)})
+        except Exception:  # noqa: BLE001 — best-effort id catalog
+            pass
+        return catalog
 
     @property
     def session_host(self):

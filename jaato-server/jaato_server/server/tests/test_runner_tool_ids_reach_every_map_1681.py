@@ -60,10 +60,10 @@ class _RPC:
     def __init__(self, schemas):
         self.schemas = schemas
 
-    def session_get_tool_schemas_threadsafe(self):
+    def session_get_tool_id_entries_threadsafe(self):
         if isinstance(self.schemas, Exception):
             raise self.schemas
-        return list(self.schemas)
+        return [(s.name, s.category) for s in self.schemas]
 
 
 def _server(schemas):

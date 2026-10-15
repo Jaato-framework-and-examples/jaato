@@ -3182,15 +3182,21 @@ class JaatoServer:
         except RuntimeError:
             on_loop_thread = False
         if self._runner_rpc is not None and not on_loop_thread:
+            # Both the session's activated schemas AND the catalog of every
+            # name / category ``list_tools`` can hand the model (#1698): a
+            # deferred runner-tier category (``prompt``) is in the second
+            # only, and ``list_tools(category_id=...)`` is the call that
+            # activates it.
             try:
-                schemas = self._runner_rpc.session_get_tool_schemas_threadsafe()
+                entries = self._runner_rpc.session_get_tool_id_entries_threadsafe()
             except Exception:  # noqa: BLE001 — best-effort registry build
-                schemas = []
+                entries = []
             runner_mappings: Dict[str, str] = {}
-            for schema in schemas:
-                runner_mappings[name_to_id(schema.name)] = schema.name
-                if schema.category:
-                    runner_mappings[name_to_id(schema.category, prefix="c")] = schema.category
+            for name, category in entries:
+                if name:
+                    runner_mappings[name_to_id(name)] = name
+                if category:
+                    runner_mappings[name_to_id(category, prefix="c")] = category
             # Cache what the runner answered (#1681) so the ON-loop builds
             # can send the full map.  A failed or empty read keeps the
             # previous answer: an empty map would be a claim that the

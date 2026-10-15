@@ -123,7 +123,7 @@ def test_get_tool_schemas_empty_list() -> None:
 
     ok, result = rpc._handle_session_get_tool_schemas()
     assert ok is True
-    assert result == {"schemas": []}
+    assert result == {"schemas": [], "catalog": []}
 
 
 def test_get_tool_schemas_single_minimal_tool() -> None:

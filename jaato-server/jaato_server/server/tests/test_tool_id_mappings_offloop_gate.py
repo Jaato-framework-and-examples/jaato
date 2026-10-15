@@ -1,4 +1,4 @@
-"""_build_tool_id_mappings gates the session_get_tool_schemas_threadsafe RPC off-loop.
+"""_build_tool_id_mappings gates the session_get_tool_id_entries_threadsafe RPC off-loop.
 
 Re-attach re-entrancy regression: that RPC is a run_coroutine_threadsafe +
 future.result(); invoked on the event-loop thread it self-deadlocks (the loop
@@ -17,7 +17,7 @@ def _server_with_rpc():
     calls = {"rpc": 0}
 
     class _RPC:
-        def session_get_tool_schemas_threadsafe(self):
+        def session_get_tool_id_entries_threadsafe(self):
             calls["rpc"] += 1
             return []
 
