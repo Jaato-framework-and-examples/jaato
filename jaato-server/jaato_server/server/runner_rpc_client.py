@@ -2943,6 +2943,49 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_tool_id_entries(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> "List[Tuple[Optional[str], Optional[str]]]":
+        """The ``(name, category)`` pairs the daemon's tool-id map needs (#1698).
+
+        Reads the same ``session.get_tool_schemas`` answer as
+        :meth:`session_get_tool_schemas`, from both of its keys: the
+        session's activated ``schemas`` and the ``catalog`` of every tool
+        name and category ``list_tools`` can hand the model (deferred
+        runner-tier tools included, which ``schemas`` leaves out).  Either
+        element of a pair may be ``None``: a catalog entry naming only a
+        category has no tool name, and a tool may have no category.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side exception.
+        """
+        result = await self._call_named(
+            "session.get_tool_schemas", {}, timeout=timeout,
+        )
+        entries: "List[Tuple[Optional[str], Optional[str]]]" = []
+        for key in ("schemas", "catalog"):
+            raw = result.get(key, [])
+            if not isinstance(raw, list):
+                continue
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                category = entry.get("category")
+                entries.append((
+                    str(name) if name else None,
+                    str(category) if category else None,
+                ))
+        return entries
+
+    def session_get_tool_id_entries_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> "List[Tuple[Optional[str], Optional[str]]]":
+        return self._run_threadsafe(
+            self.session_get_tool_id_entries(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,
