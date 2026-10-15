@@ -127,8 +127,15 @@ Where the time goes, profiled with `cProfile` at 10k:
 4. **The refresh check is O(files) per read path.** 478 ms at 100k on every
    `listReferences`, `selectReferences`, `proposeReference` and turn
    boundary, and any change reloads the whole catalog (23.6 s at 100k).
-5. **`initialize()` grows faster than linearly** (2.2 s -> 67 s for 10x);
-   not yet profiled.
+5. **`initialize()` is linear; the 2.2 s -> 67 s jump is the page cache.**
+   Profiled with `cProfile` at 10k and 100k (2026-10-15): every call count
+   is exactly 10x (100,100 file reads, 901k `lstat`, 100k `Path.resolve()`),
+   and the cost per read is the same (0.33 ms at 10k, 0.32 ms at 100k, both
+   runs cold). The benchmark's 10k run read warm files, its 100k run (~600 MB
+   of JSON and bodies on a host with ~2 GB free) cold ones. Of the 77 s
+   profiled at 100k, 42% is reading one small JSON file per reference
+   (`config_loader.discover_references`) and 28% is `Path.resolve()` of each
+   body path at load, about 9 `lstat` per reference.
 6. **Memory is not the first limit.** Peak 1 GB at 100k comes from three
    sessions plus one unbounded selection of 27k references.
 
@@ -189,8 +196,155 @@ needs root on the benchmark host).
 
 What this changes in the plan: items 1, 2 and 3 are algorithmic and fixed in
 phase 2 without touching storage. Phase 3 (a derived index) is not yet
-justified by these numbers; item 5 and the reload cost in item 4 are where it
-would first be.
+justified by these numbers; item 5 (one file read per reference, cold) and
+the reload cost in item 4 are where it would first be.
+
+#### Fix options per finding (to be decided, nothing implemented)
+
+For each finding, the alternatives considered and the two best, with the
+code path the cost was measured in. Nothing here is built; one option per
+finding is chosen before any of it is.
+
+**A. Unbounded transitive selection is quadratic (item 2).**
+`_resolve_transitive_references` passes the whole `catalog_ids` set to
+`_mentions_of` for every node it visits, and `_find_referenced_ids` starts
+with `_partition_ids_by_boundary(catalog_ids)`, which iterates every id to
+split plain ids from ids containing a boundary character. Visiting V nodes of
+an N-id catalog costs V x N before any content is read.
+
+Considered: (1) partition once per traversal and pass the result down;
+(2) look the content's tokens up in the catalog instead of building `plain`
+(`{t for t in tokens if t in catalog_ids}` minus the exotic ids), with the
+exotic ids computed once per catalog load; (3) a mention graph built at load
+(every body read at `initialize()`); (4) cap `max_transitive_references` by
+default; (5) an FTS index (phase 3); (6) parallel content reads.
+
+| | Option 2: iterate the tokens, exotic ids once per load | Option 1: partition once per traversal |
+|---|---|---|
+| Cost per node | O(content), independent of N | O(content) + one O(N) pass per traversal |
+| Change | `_find_referenced_ids` and the reload path that computes the exotic set | one argument threaded through `_mentions_of` |
+| Pros | removes N from the hot path entirely; the exotic set is almost always empty, so the regex fallback runs on nothing | smallest diff; no new catalog-scoped state to invalidate |
+| Cons | a new piece of state that must be recomputed on every reload (stale if a writer is missed) | a 100k catalog still pays 100k dictionary operations per selection |
+
+Rejected: (4) treats the symptom and changes what an unconfigured workspace
+gets; (3) moves the cost to every session start; (5) and (6) are larger than
+the defect.
+
+**B. `listReferences` spends ~90% in path resolution (item 3).** The loader
+already resolves each body path once (`config_loader.py:128-148`,
+`Path.resolve()`) and stores it project-relative. `_execute_list` then calls
+`_resolve_path_for_access` for every LOCAL source on every call, which joins,
+resolves and `exists()` up to four candidates, and `is_dir()` once more.
+
+Considered: (1) store the absolute resolved path and `is_dir` on the source
+at load, and have the listing read them; (2) memoise `_resolve_path_for_access`
+per source, cleared on reload; (3) drop `resolved_path` / `is_directory` from
+the listing (the path is returned on selection); (4) resolve only the page
+being returned (needs C); (5) resolve in a thread pool.
+
+| | Option 1: resolve at load, read at list | Option 2: memo per source, cleared on reload |
+|---|---|---|
+| Pros | one resolution per reference per load, where the loader already does one; every other caller (authorization, content read) can use the same fields | no extra work at `initialize()`; only references ever listed or read pay |
+| Cons | the stored answer is as old as the last load: a body deleted afterwards still lists as present (the refresh watches catalog JSON, not bodies) | a second cache with its own invalidation rule beside the catalog's |
+
+Both keep the listing's contract. (3) changes it, (4) depends on C, (5) adds
+threads for a cost that should not be paid at all.
+
+**C. The listing is unpaged (items 1 and 8).** 147k tokens at 1k
+references; a 5.9 MB frame at 10k; 20k would exceed the 10 MB IPC cap.
+
+Considered: (1) `offset` / `limit` with a default limit, returning `total`
+and `next_offset`; (2) without a filter, return an overview (counts per tag
+and per bundle) above a size threshold, entries only once filtered;
+(3) compact entries (drop description and links); (4) a `query` argument
+(substring over id, name, description, tags) plus paging; (5) cursor paging
+by id; (6) cut to a token budget with a note.
+
+| | Option 1 + 4: paging with a query filter | Option 2: an overview until filtered |
+|---|---|---|
+| Pros | one shape at every catalog size; a cut listing always says `total` and how to get the next page; `query` lets the model find a reference without walking pages | a model asking "what is there?" gets an answer it can read at any size and is led to filter |
+| Cons | a model can still walk every page; the default limit is a number someone has to choose | two answer shapes; a small catalog switches shape when it crosses the threshold |
+
+(3) shrinks the answer about 5x, not 100x; (5) adds nothing over offsets for
+a catalog that is reread per call; (6) hides how much was dropped.
+
+**D. The refresh check stats every catalog file (item 4, the check).**
+`_catalog_watch_paths` watches every directory and, since #1437, every
+`*.json` in them; `_refresh_catalog_if_changed` stats them all on every
+`listReferences`, `selectReferences`, `proposeReference` and prompt
+enrichment (478 ms at 100k).
+
+Considered: (1) a generation file every framework writer bumps, with the
+per-file stamps checked once per turn for hand edits; (2) inotify; (3) check
+at most once per turn or per N seconds; (4) watch directories only (drops
+#1437's in-place edits); (5) move the check to the daemon and push a
+generation on the envelope.
+
+| | Option 1: generation file + per-turn file sweep | Option 3: check at most once per turn |
+|---|---|---|
+| Pros | the per-call check is one `stat`; framework writes are seen at once | no writer changes; one place to edit |
+| Cons | every writer must bump it (promotion, revision, link edit, merge, unpack, reconcile), and a missed one means a stale catalog until the sweep; hand edits wait for the sweep | still O(files), once per turn (478 ms per turn at 100k); a promotion made mid-turn is seen next turn |
+
+(2) is Linux-only, costs watches per runner and is not readable under every
+confinement; (4) reverts #1437; (5) needs a new daemon->runner notification.
+
+**E. Any change reloads the whole catalog (item 4, the reload).** One edited
+file at 100k is a 23.6 s `_reload_from_disk`, run inside the read that
+noticed it.
+
+Considered: (1) incremental reload: diff the stamp maps and re-parse only
+files whose stamp moved, and only the directories whose listing changed;
+(2) reload in the background and swap the catalog atomically, answering from
+the old one meanwhile; (3) cache the parsed catalog per directory, keyed by
+the directory stamp; (4) phase 3's index; (5) accept it.
+
+| | Option 1: incremental reload | Option 2: background reload and swap |
+|---|---|---|
+| Pros | cost proportional to what changed; same thread, same answer as today | the read never waits; no change to how files are parsed |
+| Cons | `_reload_from_disk` also re-authorizes selections and re-runs the transitive walk; those have to become per-change too, or still run whole | the read that noticed the change answers from the old catalog, which is the #1145 staleness the refresh exists to remove; a background thread per runner |
+
+(3) is option 1 at a coarser grain; (4) is the phase 3 decision, not this
+one.
+
+**F. `initialize()` reads one file per reference (item 5).** Linear, as
+above; the constant is a cold read of a ~400-byte JSON file plus a
+`Path.resolve()` of the body path.
+
+Considered: (1) store the body path normalised at load and resolve it only
+when the body is read (removes ~9 `lstat` per reference); (2) a derived
+per-bundle manifest (one JSON-lines file of every entry, rebuilt by the
+framework writers, ignored when older than the directory); (3) read files in
+a thread pool; (4) load the catalog once per workspace in the daemon and ship
+it to runners; (5) phase 3's SQLite index; (6) leave it.
+
+| | Option 1: no eager `resolve()` at load | Option 2: per-bundle manifest |
+|---|---|---|
+| Pros | ~28% of `initialize()` at 100k, one function, no new files | one read per bundle instead of one per reference: removes the dominant cost |
+| Cons | leaves the 42% of reading the files; a symlinked body is resolved later, so the path a containment check sees must be resolved there | a derived file that can disagree with the directory, so it needs a validity rule (stamps) and a fallback to the files; every writer must rebuild it; it is phase 3 in miniature |
+
+(3) helps cold I/O but adds threads to `initialize()`; (4) changes the
+runner's trust model (the runner would read a catalog it did not load);
+(5) and (6) belong to the phase 3 decision.
+
+**G. The embedding model costs ~650 MB per runner (item 7).** Each runner
+that uses `hybrid` loads its own copy.
+
+Considered: (1) embed in the daemon, one copy, runners asking over the runner
+RPC (the reverse of today's `RunnerEmbeddingProvider`); (2) a separate
+embedding process per host shared by daemons; (3) load the model in the pool
+template so slots share its pages copy-on-write; (4) a smaller or quantised
+model in jaato-premium; (5) lexical matching (BM25 / FTS) instead of vectors;
+(6) a cap on concurrent hybrid sessions.
+
+| | Option 1: the daemon embeds | Option 3: model in the template, shared copy-on-write |
+|---|---|---|
+| Pros | one copy per daemon, whatever the number of sessions; the confined runner loads no torch at all | no new RPC; slots fork with the weights already mapped |
+| Cons | the daemon process grows by the model and its threads; every embedding is a round trip; the daemon does work a runner did | not measured: whether the weight pages stay shared (Python reference counts write to object headers, torch may copy); torch in the template breaks the one-thread rule the template forks under; and #1565 retires a slot that loaded the model, which would have to change |
+
+I don't have evidence for option 3's sharing yet; it would have to be
+measured (PSS per slot) before it could be chosen. (2) is option 1 with a
+new process; (4) is jaato-premium's decision; (5) changes what hybrid lookup
+means; (6) limits users instead of the cost.
 
 ### Phase 1: one store interface
 
