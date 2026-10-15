@@ -8,7 +8,6 @@ approval for tool execution.
 import json
 import logging
 import os
-import readline
 import sys
 import time
 import traceback
@@ -21,6 +20,19 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
+
+# ``readline`` is optional (#1689).  Only ConsoleChannel._read_input uses it,
+# to keep typed answers out of the line-editing history, and that code
+# already falls back when the module lacks the history calls.  Pyodide has
+# no ``readline`` at all, and a bare import made every importer of this
+# module fail there, the embedded client and the runner's permission plugin
+# included, though neither reads a terminal.  Where it exists the import is
+# kept at module level, so ``input()`` keeps the line editing that importing
+# it switches on.
+try:
+    import readline
+except ImportError:
+    readline = None
 
 if TYPE_CHECKING:
     from jaato_sdk.plugins.base import PermissionDisplayInfo, OutputCallback
@@ -444,6 +456,7 @@ class ConsoleChannel(Channel):
 
         # Check if readline supports history manipulation (not available on all platforms)
         has_history_support = (
+            readline is not None and
             hasattr(readline, 'get_current_history_length') and
             hasattr(readline, 'remove_history_item')
         )

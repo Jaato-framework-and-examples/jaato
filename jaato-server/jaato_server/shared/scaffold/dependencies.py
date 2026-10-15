@@ -502,24 +502,53 @@ def _extra_marker(req: str) -> Optional[str]:
     return req.split("extra ==")[1].strip().strip('"\';')
 
 
+def _dist_key(dist_name: str) -> str:
+    """The one spelling two distribution names are compared under."""
+    return dist_name.lower().replace("_", "-")
+
+
+@lru_cache(maxsize=None)
+def _import_names_by_dist() -> Dict[str, Tuple[str, ...]]:
+    """``{distribution key: (import name, ...)}``, measured ONCE per process (#1690).
+
+    `packages_distributions()` walks the metadata of every installed
+    distribution (~0.3 s on a plain venv) and answers import name →
+    distributions.  :func:`_metadata_index` asks one question per
+    requirement name, and each used to run that walk again — 46 walks,
+    ~12 s, on the skip path of plugin discovery (``interactive_shell``
+    without ``pexpect``), in every cold process.  Inverting the answer
+    once makes every later question a dict lookup.
+
+    Cleared by :func:`reset_metadata_caches` like the rest of this
+    module's metadata reads.  A failing walk is an empty map: metadata is
+    best-effort here, and the name-match tier still answers.
+    """
+    try:
+        mapping = packages_distributions()
+    except Exception:      # noqa: BLE001 — metadata is best-effort here
+        mapping = {}
+    out: Dict[str, Set[str]] = {}
+    for mod, dists in mapping.items():
+        for dist in dists:
+            out.setdefault(_dist_key(dist), set()).add(mod)
+    return {k: tuple(sorted(v)) for k, v in out.items()}
+
+
 @lru_cache(maxsize=None)
 def _provided_import_names(dist_name: str) -> Tuple[str, ...]:
     """Import names ``dist_name`` provides — measured if installed, else guessed.
 
     The measured tier is `packages_distributions()`, which is a fact about
-    what is on disk (``beautifulsoup4`` → ``bs4`` is only knowable this way).
+    what is on disk (``beautifulsoup4`` → ``bs4`` is only knowable this way),
+    read through :func:`_import_names_by_dist` so the walk runs once per
+    process rather than once per name (#1690).
     The fallback is the PyPI-name convention plus the first hyphen segment,
     which is what makes ``azure-identity`` → ``azure`` and ``google-genai`` →
     ``google`` land while a package nobody installed is still being asked
     about.
     """
-    key = dist_name.lower().replace("_", "-")
-    try:
-        mapping = packages_distributions()
-    except Exception:      # noqa: BLE001 — metadata is best-effort here
-        mapping = {}
-    measured = tuple(sorted(mod for mod, dists in mapping.items()
-                            if any(d.lower().replace("_", "-") == key for d in dists)))
+    key = _dist_key(dist_name)
+    measured = _import_names_by_dist().get(key, ())
     if measured:
         return measured
     guesses = {key.replace("-", "_"), key.replace("-", ""), key.split("-")[0]}
@@ -585,7 +614,7 @@ def reset_metadata_caches() -> None:
     """
     for fn in (installed_jaato_dists, framework_dists, _extras_by_label,
                _metadata_index, _extras_index, _core_index, _extra_sizes,
-               _provided_import_names):
+               _provided_import_names, _import_names_by_dist):
         fn.cache_clear()
 
 

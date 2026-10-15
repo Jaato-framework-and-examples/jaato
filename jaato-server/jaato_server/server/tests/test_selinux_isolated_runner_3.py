@@ -174,6 +174,7 @@ def _apparmor_read_denied():
     mgr._premium_root = None
     mgr._venv_path = "/venv"
     mgr._source_root = "/src"
+    mgr._abi_rule = ""
     body = mgr._render_sub_profile("p", "a", "/ws")
     return {m.group(1) for m in re.finditer(
         r'audit deny "/ws/\.jaato/([^/"*]+)[^"]*"\s+r,', body)}

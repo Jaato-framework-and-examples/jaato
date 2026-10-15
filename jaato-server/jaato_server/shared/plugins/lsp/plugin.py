@@ -522,6 +522,10 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._config_signature: Any = _UNLOADED
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
+        # True when initialize() received the #1566 mirror stamp: nothing in
+        # this process runs language servers, so no lazy start may start a
+        # thread (#1691).
+        self._runner_hosted_mirror = False
         # atexit backstop: reap jdtls when THIS (slot/runner) process exits.
         # Registered lazily in _ensure_thread.  See _atexit_reap_jdtls / #284.
         self._atexit_registered: bool = False
@@ -581,7 +585,15 @@ class LSPToolPlugin(RunnerForwardingMixin):
         _trace_write("LSP", msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the LSP plugin by starting the background thread.
+        """Initialize the LSP plugin; start the background thread only if needed.
+
+        The thread is started only when the resolved table names a server
+        (#1691).  With none, nothing starts; a ``.lsp.json`` that appears
+        later starts it through :meth:`_connect_configured_servers`, reached
+        from :meth:`set_workspace_path` and :meth:`_has_configured_servers`
+        (asked every turn by :meth:`is_tool_visible`, #1345), and
+        ``lsp connect`` / ``lsp reload`` start it too.  The daemon's mirror
+        of a runner session (#1566) never starts it.
 
         Args:
             config: Optional configuration dict. Supports:
@@ -693,12 +705,17 @@ class LSPToolPlugin(RunnerForwardingMixin):
             debug_log_raw = ''
         self._debug_log_path_raw = str(debug_log_raw)
 
+        self._runner_hosted_mirror = is_runner_hosted_mirror(config)
         if is_runner_hosted_mirror(config):
             # The daemon's copy of a runner-served session (#1566): the
             # runner's copy starts the language servers; this one keeps
             # its configuration for completions and the AppArmor walk.
             self._trace("initialize: daemon mirror of a runner session; "
                         "no background thread, no language servers")
+        elif not self._has_configured_servers():
+            # Nothing to connect (#1691): no thread, no loop.
+            self._trace("initialize: no language server configured; "
+                        "background thread not started")
         else:
             self._trace("initialize: starting background thread")
             self._ensure_thread()
@@ -1491,15 +1508,40 @@ class LSPToolPlugin(RunnerForwardingMixin):
             if self._initialized:
                 self._load_config_cache(force=True)
                 # PR-157: trigger connect-retry for any not-yet-connected
-                # server.  Fire-and-forget — the request loop handles
-                # MSG_RETRY_AUTOCONNECT without pushing to response_queue
-                # (see _thread_main's request loop).
-                if self._request_queue is not None:
-                    self._trace(
-                        "set_workspace_path: dispatching MSG_RETRY_AUTOCONNECT "
-                        "to retry any not-yet-connected server"
-                    )
-                    self._request_queue.put((MSG_RETRY_AUTOCONNECT, {}))
+                # server -- or, when no thread runs because nothing was
+                # configured before (#1691), start one.
+                self._connect_configured_servers()
+
+    def _connect_configured_servers(self) -> None:
+        """Connect every configured server not connected yet.
+
+        With no thread running (nothing was configured when the session
+        started, #1691) one is started, and a new thread connects every
+        configured server.  With one running, ``MSG_RETRY_AUTOCONNECT`` is
+        sent: fire-and-forget, the request loop answers it on no queue.
+        """
+        if self._start_thread_if_configured():
+            return
+        if self._request_queue is not None:
+            self._trace("dispatching MSG_RETRY_AUTOCONNECT to retry any "
+                        "not-yet-connected server")
+            self._request_queue.put((MSG_RETRY_AUTOCONNECT, {}))
+
+    def _start_thread_if_configured(self) -> bool:
+        """Start the background thread when servers are configured and none runs.
+
+        Returns ``True`` only when a thread was started here.  Never on the
+        #1566 mirror, and never in the daemon process (``_ensure_thread``
+        refuses there, #284).
+        """
+        if self._runner_hosted_mirror or self._request_queue is not None:
+            return False
+        table = (self._profile_config if self._profile_config is not None
+                 else self._config_cache)
+        if not self._table_has_servers(table):
+            return False
+        self._ensure_thread()
+        return self._request_queue is not None
 
     def _resolve_path(self, path: Optional[str]) -> Optional[str]:
         """Resolve a path to an absolute path.
@@ -2814,6 +2856,9 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if server_name not in servers:
             return f"Server '{server_name}' not found. Use 'lsp list' to see configured servers."
 
+        if self._start_thread_if_configured():
+            return (f"Started the language-server thread; it connects "
+                    f"'{server_name}' and every other configured server.")
         if server_name in self._connected_servers:
             return f"Server '{server_name}' is already connected."
 
@@ -2889,19 +2934,11 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         old_servers = set(self._config_cache.get('languageServers', {}).keys()) if self._config_cache else set()
         self._load_config_cache(force=True)
         servers = self._config_cache.get('languageServers', {})
-        new_servers = set(servers.keys())
+        lines = self._describe_server_set_change(old_servers, set(servers.keys()))
 
-        lines = []
-        if old_servers != new_servers:
-            added = new_servers - old_servers
-            removed = old_servers - new_servers
-            if added:
-                lines.append(f"Added servers: {', '.join(added)}")
-            if removed:
-                lines.append(f"Removed servers: {', '.join(removed)}")
-        else:
-            lines.append(f"Config unchanged ({len(servers)} server(s))")
-
+        answered = self._reload_without_a_running_thread(lines)
+        if answered is not None:
+            return answered
         try:
             self._request_queue.put((MSG_RELOAD_CONFIG, {'servers': servers}))
             status, result = self._response_queue.get(timeout=60)
@@ -2926,6 +2963,37 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             return "Reload timed out - async loop may not be running"
         except Exception as e:
             return f"Error reloading: {e}"
+
+    @staticmethod
+    def _describe_server_set_change(old_servers: set, new_servers: set) -> List[str]:
+        """The first lines of the ``lsp reload`` answer: which servers changed."""
+        if old_servers == new_servers:
+            return [f"Config unchanged ({len(new_servers)} server(s))"]
+        lines = []
+        added = new_servers - old_servers
+        removed = old_servers - new_servers
+        if added:
+            lines.append(f"Added servers: {', '.join(added)}")
+        if removed:
+            lines.append(f"Removed servers: {', '.join(removed)}")
+        return lines
+
+    def _reload_without_a_running_thread(self, lines: List[str]) -> Optional[str]:
+        """The ``lsp reload`` answer when no thread was running (#1691), else ``None``.
+
+        A session that configured nothing started no thread.  If the table
+        now names a server, one is started, and a new thread connects every
+        configured server itself, so no reload is sent.  If it names none,
+        there is nothing to reload.
+        """
+        if self._start_thread_if_configured():
+            lines.append("Started the language-server thread; it connects "
+                         "every configured server")
+        elif self._request_queue is None:
+            lines.append("No servers to connect")
+        else:
+            return None
+        return '\n'.join(lines)
 
     def _cmd_logs(self, args: str) -> str:
         if args.lower() == 'clear':
@@ -3051,11 +3119,9 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if signature != self._config_signature:
             self._load_config_cache(force=True)
             has_servers = self._table_has_servers(self._config_cache)
-            if has_servers and self._initialized and self._request_queue is not None:
-                self._trace(
-                    "config files changed: dispatching MSG_RETRY_AUTOCONNECT"
-                )
-                self._request_queue.put((MSG_RETRY_AUTOCONNECT, {}))
+            if has_servers and self._initialized:
+                self._trace("config files changed: connecting configured servers")
+                self._connect_configured_servers()
             return has_servers
         return self._table_has_servers(self._config_cache)
 
