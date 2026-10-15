@@ -374,6 +374,12 @@ class MCPToolPlugin(RunnerForwardingMixin):
         # queue, so a late answer to an abandoned call reaches nobody.
         self._call_tasks: Dict[int, asyncio.Task] = {}
         self._call_ids = itertools.count(1)
+        # True when initialize() received the #1566 mirror stamp: nothing in
+        # this process runs MCP tools, so no lazy start may start a thread.
+        self._runner_hosted_mirror = False
+        # The registry initialize() read to decide whether to start the
+        # thread (#1691), handed to that thread so the file is read once.
+        self._startup_registry: Optional[Dict[str, Any]] = None
 
     def _log_event(
         self,
@@ -455,7 +461,15 @@ class MCPToolPlugin(RunnerForwardingMixin):
             logger.debug(msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the MCP plugin by starting the background thread.
+        """Initialize the MCP plugin; start the background thread only if needed.
+
+        The thread (its own event loop, plus a wait of up to 10 s for tool
+        discovery) is started only when a configuration names at least one
+        server (#1691).  With no ``.mcp.json`` nothing is started and the
+        plugin reports no tools; :meth:`_start_for_command` (``mcp reload``,
+        ``mcp connect``) and :meth:`set_workspace_path` start it later when
+        a server appears.  The daemon's mirror of a runner session (#1566)
+        never starts it.
 
         Args:
             config: Optional configuration dict. Supports:
@@ -487,12 +501,17 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._scrub_secret_env = list(resolve_scrub_patterns(
             config.get("scrub_secret_env"), surface=self.name,
         ))
+        self._runner_hosted_mirror = is_runner_hosted_mirror(config)
         if is_runner_hosted_mirror(config):
             # The daemon's copy of a runner-served session (#1566): the
             # runner's copy connects the servers; a second connection here
             # would only duplicate every server subprocess.
             self._trace("initialize: daemon mirror of a runner session; "
                         "no background thread, no server connections")
+        elif not self._read_startup_servers():
+            # Nothing to discover (#1691): no thread, no loop, no wait.
+            self._log_event(LOG_INFO, "No MCP servers configured; "
+                            "background thread not started")
         else:
             self._trace("initialize: starting background thread")
             self._ensure_thread()
@@ -564,6 +583,69 @@ class MCPToolPlugin(RunnerForwardingMixin):
             self._trace(f"workspace_path changed to: {path}")
             # Note: Unlike LSP, we don't force reload here since MCP servers
             # may already be connected. Use 'mcp reload' to apply changes.
+            # A session that started NO thread (nothing was configured,
+            # #1691) has nothing to keep, so it starts one when the new
+            # workspace names a server.
+            if (self._initialized and not self._runner_hosted_mirror
+                    and not self._thread_alive()
+                    and self._read_startup_servers()):
+                self._ensure_thread()
+
+    def _thread_alive(self) -> bool:
+        """Whether the background thread is running."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def _read_startup_servers(self) -> Dict[str, Any]:
+        """The configured servers, read once for the thread that would serve them.
+
+        The registry is kept in ``_startup_registry`` so the thread started
+        right after uses it instead of reading the file again
+        (:meth:`_take_startup_registry`).
+        """
+        registry = self._load_mcp_registry(self._custom_config_path)
+        servers = registry.get('mcpServers')
+        servers = servers if isinstance(servers, dict) else {}
+        # Kept only for a thread about to start; a stale empty read must
+        # not be handed to one a later command starts.
+        self._startup_registry = registry if servers else None
+        return servers
+
+    def _take_startup_registry(self) -> Dict[str, Any]:
+        """The registry :meth:`_read_startup_servers` read, else a fresh read."""
+        registry, self._startup_registry = self._startup_registry, None
+        if registry is None:
+            registry = self._load_mcp_registry(self._custom_config_path)
+        return registry
+
+    def _start_for_command(self) -> bool:
+        """Initialize, and start the thread a command needs (#1691).
+
+        A command that talks to the thread (``mcp reload``, ``mcp connect``)
+        may arrive in a session that started none because nothing was
+        configured.  Returns ``True`` when the thread was started HERE: it
+        has just connected every configured server, which the caller need
+        not ask for again.  The #1566 mirror never starts one.
+        """
+        if not self._initialized:
+            self.initialize()
+        if self._runner_hosted_mirror or self._thread_alive():
+            return False
+        self._ensure_thread()
+        return True
+
+    def _request_reload(self, servers: Dict[str, Any], just_started: bool):
+        """``(status, result)`` of a reload: the thread's answer, or its startup state.
+
+        A thread :meth:`_start_for_command` just started has connected
+        ``servers`` already; asking it to reload would disconnect and
+        reconnect every one of them.
+        """
+        if just_started:
+            return 'ok', {'connected': sorted(self._connected_servers),
+                          'failed': dict(self._failed_servers),
+                          'tools': dict(self._tool_cache)}
+        self._request_queue.put((MSG_RELOAD_CONFIG, {'servers': servers}))
+        return self._response_queue.get(timeout=60)
 
     def set_plugin_registry(self, registry) -> None:
         """Called during expose_tool(). Registers the MCP category."""
@@ -1352,6 +1434,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
         if server_name not in servers:
             return f"Server '{server_name}' not found in configuration. Use 'mcp add' first."
 
+        self._start_for_command()
         if server_name in self._connected_servers:
             return f"Server '{server_name}' is already connected."
 
@@ -1423,10 +1506,8 @@ class MCPToolPlugin(RunnerForwardingMixin):
         Returns a detailed message including any new or removed tools,
         which helps inform the model about changed capabilities.
         """
-        if not self._initialized:
-            self.initialize()
-
-        # Capture tools before reload for comparison
+        # Capture tools before reload for comparison -- before a thread is
+        # started, so the servers it connects are reported as new.
         old_tools_by_server = {
             server: {t.name for t in tools}
             for server, tools in self._tool_cache.items()
@@ -1434,6 +1515,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
         old_all_tools = set()
         for tools in old_tools_by_server.values():
             old_all_tools.update(tools)
+        just_started = self._start_for_command()
 
         # Force reload from file
         self._config_cache = {}
@@ -1442,9 +1524,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
         # Send reload request to background thread
         try:
             servers = self._config_cache.get('mcpServers', {})
-            self._request_queue.put((MSG_RELOAD_CONFIG, {'servers': servers}))
-
-            status, result = self._response_queue.get(timeout=60)
+            status, result = self._request_reload(servers, just_started)
 
             if status == 'error':
                 return f"Reload failed: {result}"
@@ -2107,7 +2187,7 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
             self._log_event(LOG_INFO, "MCP plugin initializing")
 
-            registry = self._load_mcp_registry(self._custom_config_path)
+            registry = self._take_startup_registry()
             servers = registry.get('mcpServers', {})
 
             if servers:

@@ -53,7 +53,25 @@ def _open_fds() -> int:
     return len(os.listdir("/proc/self/fd"))
 
 
-def test_repeated_validate_runs_do_not_accumulate_descriptors(tmp_path: Path):
+def _configure_servers(home: Path) -> None:
+    """``~/.mcp.json`` and ``~/.lsp.json`` naming a server each.
+
+    Since #1691 neither plugin starts its thread with nothing configured,
+    so the walk would start nothing to leak.  A server whose command does
+    not exist makes each start its thread and fail the connect at once.
+    """
+    missing = str(home / "no-such-server")
+    (home / ".mcp.json").write_text(
+        '{"mcpServers": {"s": {"type": "stdio", "command": "%s"}}}' % missing)
+    (home / ".lsp.json").write_text(
+        '{"languageServers": {"s": {"command": "%s", "extensions": [".x"]}}}'
+        % missing)
+
+
+def test_repeated_validate_runs_do_not_accumulate_descriptors(
+        tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _configure_servers(tmp_path)
     prof = tmp_path / ".jaato" / "profiles"
     prof.mkdir(parents=True)
     (prof / "w.yaml").write_text(
