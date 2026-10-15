@@ -95,6 +95,44 @@ def inherit_owner_tree(top: str, tree: str) -> None:
             _hand(os.path.join(dirpath, name), owner)
 
 
+def inherit_owner_down(target: str, tree: str) -> None:
+    """Hand *target*, its subtree and every directory between *tree* and it.
+
+    For a writer that creates a path several levels below the tree in one
+    call, ``mkdir -p`` style, and does not say which of the intermediate
+    directories it created: ``scaffold.integration`` copies the
+    ``jaato-sdk`` skill to ``<ws>/.claude/skills/jaato-sdk`` and may have
+    created ``.claude/`` and ``.claude/skills/`` on the way (#1703).  An
+    intermediate directory left root-owned is the one that stops the
+    owner removing the tree.
+
+    The usual rule applies to every path visited: only a daemon-owned path
+    is handed over, a link is changed itself and never descended.  A
+    *target* that is not beneath *tree* hands nothing: the intermediate
+    directories would then be somebody else's.
+    """
+    owner = tree_owner(tree)
+    if owner is None:
+        return
+    root = os.path.abspath(tree)
+    path = os.path.abspath(target)
+    rel = os.path.relpath(path, root)
+    if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return
+    cursor = root
+    parts = rel.split(os.sep)
+    for part in parts[:-1]:
+        cursor = os.path.join(cursor, part)
+        if not os.path.lexists(cursor):
+            return
+        _hand(cursor, owner)
+        if os.path.islink(cursor):
+            # Do not walk through a link to reach what lies beyond it.
+            return
+    if os.path.lexists(path):
+        inherit_owner_tree(path, tree)
+
+
 def inherit_owner_files(directory: str, tree: str) -> None:
     """Hand the daemon-owned regular FILES directly in *directory* to *tree*'s owner.
 

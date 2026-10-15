@@ -9068,6 +9068,19 @@ one the daemon did not seal (see
 `jaato_server/server/tests/test_daemon_workspace_files_owned_1528.py`, six
 reversions, real `chown` to `nobody` as root and an inode ledger otherwise.
 
+**`scaffold.integration` and the TODO mirror (#1703).** The integration
+copy (`<ws>/.claude/skills/jaato-sdk`) and every directory created between
+the workspace and it are handed to the workspace tree's owner after each
+refresh, changed or not, so a copy an older daemon left root-owned is
+handed over too (`workspace_ownership.inherit_owner_down`, the #1496 rule).
+The daemon's TODO storage on `.jaato/sessions/<id>/plans/` is created, and
+its plan files written, as `workspace_file_owner` (the #1528 rule; the
+internal `storage_owner` config key, never a profile knob). Not covered:
+the inbox (#1530) and the plugin-host and `.jaato` entries the issue's
+comment counts without naming a writer. Guard:
+`jaato_server/server/tests/test_what_the_daemon_writes_for_a_workspace_is_its_owners_1703.py`,
+four reversions.
+
 **The trace and the ledger have two writers (#1674).** The application
 trace (`JAATO_TRACE_LOG` / `trace.session_log`) and the token ledger
 (`LEDGER_PATH` / `trace.ledger`) are appended to by the daemon (its own

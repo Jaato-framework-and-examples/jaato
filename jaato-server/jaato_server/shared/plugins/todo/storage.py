@@ -14,7 +14,7 @@ import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -118,22 +118,49 @@ class FileStorage(TodoStorage):
     when the format was JSON.
     """
 
-    def __init__(self, path: str, use_directory: bool = False):
+    def __init__(self, path: str, use_directory: bool = False,
+                 owner: Optional[Tuple[int, int]] = None):
         """Initialize file storage.
 
         Args:
             path: Path to storage file or directory
             use_directory: If True, store each plan in separate file
+            owner: ``(uid, gid)`` every directory this storage creates and
+                every file it writes is created as (#1703).  The daemon
+                configures its TODO mirror on
+                ``<ws>/.jaato/sessions/<id>/plans/``, inside a workspace whose
+                owner must be able to remove it; ``None`` (the default)
+                writes as the calling process, as before.
         """
         self._path = Path(path)
         self._use_directory = use_directory
+        self._owner = owner
         self._lock = Lock()
 
         # Ensure parent directory exists
-        if use_directory:
-            self._path.mkdir(parents=True, exist_ok=True)
-        else:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_dir(self._path if use_directory else self._path.parent)
+
+    def _ensure_dir(self, directory: Path) -> None:
+        """``mkdir -p`` *directory*, each directory created owned by ``_owner``."""
+        from jaato_server.shared.workspace_ownership import make_dirs_owned
+        make_dirs_owned(str(directory), self._owner)
+
+    def _open_for_write(self, path: Path):
+        """Open *path* for writing, handed to ``_owner`` before a byte is written.
+
+        A file the calling process owns (a new one, or one an earlier
+        process left behind) is ``fchown``-ed; one another account owns is
+        left with it.
+        """
+        f = open(path, 'w', encoding='utf-8')
+        if self._owner is not None:
+            try:
+                if os.fstat(f.fileno()).st_uid == os.geteuid():
+                    os.fchown(f.fileno(), self._owner[0], self._owner[1])
+            except OSError:
+                f.close()
+                raise
+        return f
 
     def save_plan(self, plan: TodoPlan) -> None:
         """Save or update a plan."""
@@ -146,18 +173,18 @@ class FileStorage(TodoStorage):
     def _save_plan_to_file(self, plan: TodoPlan) -> None:
         """Save plan to individual file in directory."""
         # Ensure directory exists before writing (handles CWD changes, deletions, etc.)
-        self._path.mkdir(parents=True, exist_ok=True)
+        self._ensure_dir(self._path)
         plan_file = self._path / f"{plan.plan_id}{PLAN_FILE_SUFFIX}"
-        with open(plan_file, 'w', encoding='utf-8') as f:
+        with self._open_for_write(plan_file) as f:
             _dump(plan.to_dict(), f)
 
     def _save_plan_to_single_file(self, plan: TodoPlan) -> None:
         """Save plan to the single YAML file."""
         # Ensure parent directory exists before writing
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_dir(self._path.parent)
         plans = self._load_all_plans_from_file()
         plans[plan.plan_id] = plan.to_dict()
-        with open(self._path, 'w', encoding='utf-8') as f:
+        with self._open_for_write(self._path) as f:
             _dump(plans, f)
 
     def _load_all_plans_from_file(self) -> Dict[str, dict]:
@@ -249,8 +276,8 @@ class FileStorage(TodoStorage):
             return False
         del plans[plan_id]
         # Ensure parent directory exists before writing
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, 'w', encoding='utf-8') as f:
+        self._ensure_dir(self._path.parent)
+        with self._open_for_write(self._path) as f:
             _dump(plans, f)
         return True
 
@@ -263,8 +290,8 @@ class FileStorage(TodoStorage):
                         plan_file.unlink()
             else:
                 # Ensure parent directory exists before writing
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._path, 'w', encoding='utf-8') as f:
+                self._ensure_dir(self._path.parent)
+                with self._open_for_write(self._path) as f:
                     _dump({}, f)
 
 
@@ -274,15 +301,17 @@ class HybridStorage(TodoStorage):
     Provides fast in-memory access with automatic file backup.
     """
 
-    def __init__(self, file_path: str, use_directory: bool = False):
+    def __init__(self, file_path: str, use_directory: bool = False,
+                 owner: Optional[Tuple[int, int]] = None):
         """Initialize hybrid storage.
 
         Args:
             file_path: Path to storage file or directory
             use_directory: If True, store each plan in separate file
+            owner: passed to :class:`FileStorage` (#1703)
         """
         self._memory = InMemoryStorage()
-        self._file = FileStorage(file_path, use_directory)
+        self._file = FileStorage(file_path, use_directory, owner=owner)
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
@@ -324,7 +353,8 @@ class HybridStorage(TodoStorage):
 def create_storage(
     storage_type: str = "memory",
     path: Optional[str] = None,
-    use_directory: bool = False
+    use_directory: bool = False,
+    owner: Optional[Tuple[int, int]] = None,
 ) -> TodoStorage:
     """Factory function to create a storage backend.
 
@@ -332,6 +362,8 @@ def create_storage(
         storage_type: One of "memory", "file", "hybrid"
         path: Path for file-based storage (required for file/hybrid)
         use_directory: Use directory structure for file storage
+        owner: ``(uid, gid)`` file storage writes as (#1703); ignored
+            for memory storage
 
     Returns:
         TodoStorage instance
@@ -345,13 +377,13 @@ def create_storage(
     elif storage_type == "file":
         if not path:
             raise ValueError("File storage requires 'path' parameter")
-        return FileStorage(path, use_directory)
+        return FileStorage(path, use_directory, owner=owner)
 
     elif storage_type == "hybrid":
         if not path:
             # Default path
             path = os.environ.get("TODO_STORAGE_PATH", DEFAULT_STORAGE_PATH)  # env: where the todo plugin persists plans (default ./todo_plans.yaml)
-        return HybridStorage(path, use_directory)
+        return HybridStorage(path, use_directory, owner=owner)
 
     else:
         raise ValueError(f"Unknown storage type: {storage_type}. "
