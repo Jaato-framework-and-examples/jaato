@@ -15,7 +15,7 @@ import re
 import tempfile
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_sdk.plugins.todo.models import (
     PlanStatus, StepStatus, TodoPlan, TodoStep,
@@ -102,6 +102,20 @@ PLAN_REQUIRED_TOOLS: frozenset[str] = frozenset({
     "plan",  # user-command alias for getPlanStatus
 })
 
+
+
+def _storage_owner(value: Any) -> Optional[Tuple[int, int]]:
+    """``(uid, gid)`` from the internal ``storage_owner`` key, else ``None``.
+
+    Anything that is not a pair of non-negative ints is ignored: the key is
+    set by the daemon (#1703), never by a profile, and a malformed value
+    must not make the storage write as an account nobody named.
+    """
+    if (isinstance(value, (tuple, list)) and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                    for v in value)):
+        return int(value[0]), int(value[1])
+    return None
 
 class TodoPlugin(RunnerForwardingMixin):
     """Plugin that provides plan registration and progress tracking.
@@ -362,6 +376,10 @@ class TodoPlugin(RunnerForwardingMixin):
                     storage_type=storage_type,
                     path=storage_path,
                     use_directory=use_directory,
+                    # Framework wiring, not a profile knob: the daemon sets
+                    # it when the storage lives in a workspace another
+                    # account owns (#1703).
+                    owner=_storage_owner(config.get("storage_owner")),
                 )
             except (ValueError, OSError) as e:
                 print(f"Warning: Failed to initialize storage: {e}")

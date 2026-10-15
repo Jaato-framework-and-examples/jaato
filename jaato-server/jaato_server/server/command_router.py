@@ -1412,6 +1412,12 @@ class CommandRouter:
         refresh the contract DECLINED to apply (an edited copy) is ``ok=True``
         with a ``skipped_reason``: leaving a local edit alone is correct, not
         a failure.
+
+        **Whose files (#1703).**  The copy lands in the caller's workspace, so
+        it is handed to the workspace's owner afterwards
+        (:func:`workspace_ownership.inherit_owner_down`): the skill directory,
+        its files and the ``.claude/`` directories created on the way.  A
+        non-root daemon or a root-owned workspace hands nothing.
         """
         from jaato_sdk.events import ScaffoldIntegrationEvent
 
@@ -1485,6 +1491,22 @@ class CommandRouter:
                            client_id, name, exc)
             answer(ok=False, error=f"scaffold.integration {name!r}: {exc}")
             return
+
+        # #1703: what this wrote is in the caller's workspace and belongs to
+        # the workspace's owner, the rule every other daemon writer into a
+        # workspace follows (#1496).  A root daemon would otherwise leave
+        # `.claude/skills/jaato-sdk` (and the `.claude/` it created) root-
+        # owned, which the owner cannot remove.  Run on every refresh, not
+        # only a changed one, so a copy an older daemon left root-owned is
+        # handed over too.  A failure is logged, never turned into a
+        # failed refresh: the files are written either way.
+        try:
+            from jaato_server.shared.workspace_ownership import inherit_owner_down
+            inherit_owner_down(str(dest), workspace)
+        except OSError as exc:
+            logger.warning("scaffold.integration: client=%s name=%r could not "
+                           "hand %s to the workspace owner: %s", client_id,
+                           name, dest, exc)
 
         fields = _integration_refresh_fields(result)
         logger.info("scaffold.integration: client=%s name=%r %s->%s changed=%s",

@@ -11078,7 +11078,7 @@ class SessionManager:
         # Configure TODO plugin with session-scoped storage
         if workspace_path:
             session_dir = self._session_storage_dir(workspace_path) / session_id
-            self._configure_todo_storage(server, session_dir)
+            self._configure_todo_storage(server, session_dir, workspace_path)
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
@@ -13444,7 +13444,7 @@ class SessionManager:
             session_dir = self._session_storage_dir(effective_workspace) / session_id
         else:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
-        self._configure_todo_storage(server, session_dir)
+        self._configure_todo_storage(server, session_dir, effective_workspace)
 
         # Restore history to the runner-side session.
         # Phase 3 §7c step 6.6.4.5b: route through the
@@ -14814,12 +14814,20 @@ class SessionManager:
             return None
         return server.registry.get_plugin("todo")
 
-    def _configure_todo_storage(self, server: JaatoServer, session_dir: pathlib.Path) -> None:
+    def _configure_todo_storage(
+        self,
+        server: JaatoServer,
+        session_dir: pathlib.Path,
+        workspace_path: Optional[str] = None,
+    ) -> None:
         """Configure TODO plugin with session-scoped file storage.
 
         Args:
             server: The JaatoServer instance.
             session_dir: The session's storage directory.
+            workspace_path: The session's workspace, from which the owner
+                the storage writes as is decided (#1703).  ``None`` (no
+                workspace) writes as the daemon.
         """
         todo_plugin = self._get_todo_plugin(server)
         if not todo_plugin:
@@ -14828,10 +14836,16 @@ class SessionManager:
         # Resolve to absolute path to avoid issues with CWD changes
         # (e.g., when subagents call os.chdir() in background threads)
         plans_dir = (session_dir / "plans").resolve()
+        # #1703: the storage directory is inside the workspace; under a
+        # runner-uid policy that drops, it is created (and its plan files
+        # written) as the workspace owner, the #1528 rule the record beside
+        # it already follows.  ``None`` writes as the daemon, as before.
+        owner = workspace_file_owner(workspace_path) if workspace_path else None
         todo_plugin.initialize({
             "storage_type": "file",
             "storage_path": str(plans_dir),
             "storage_use_directory": True,  # One file per plan
+            "storage_owner": owner,
         })
         logger.debug(f"Configured TODO storage at: {plans_dir}")
 
