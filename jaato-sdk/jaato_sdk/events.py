@@ -653,7 +653,18 @@ from jaato_sdk.client_tool_timeout import DEFAULT_CLIENT_TOOL_TIMEOUT_MS
 # ignores the field, so the SDK waits for the answer only at 1.39+
 # (``MIN_CLIENT_TOOL_BUDGET_PROTOCOL``) and otherwise computes the same
 # budgets locally.
-PROTOCOL_VERSION = "1.39"
+# 1.40 -- ``SecretResolverRegisterRequest`` ->
+# ``SecretResolverRegisterResultEvent`` (#1609): an IPC client offers to
+# answer ``secret.resolve`` for the workspaces its OS account owns (the
+# workspace directory's owner uid equals the connection's ``SO_PEERCRED``
+# uid).  A session the daemon starts on its own (reactor stage, wake,
+# revive) then resolves ``app://`` references over IPC as WS sessions do
+# over the bind channel.  ``SecretReloadRequest`` is answered over IPC too:
+# it re-resolves the loaded sessions in workspaces the caller's account
+# owns.  NEW verbs (the 1.7 rule): an older daemon ignores them and every
+# reference would still be dropped, so the SDK refuses below
+# ``MIN_SECRET_RESOLVER_PROTOCOL``.
+PROTOCOL_VERSION = "1.40"
 
 
 # =============================================================================
@@ -955,6 +966,11 @@ class EventType(str, Enum):
     # session.reload_env the owner's loaded sessions, scoped by ownership.
     SECRET_RELOAD_REQUEST = "secret.reload"            # Application -> Server
     SECRET_RELOAD_RESULT = "secret.reload.result"      # Server -> Application
+    # An IPC client offers to answer ``secret.resolve`` for the workspaces its
+    # OS account owns (1.40, #1609).  IPC has no bind channel and no app
+    # credential, so the kernel-reported peer uid is the identity.
+    SECRET_RESOLVER_REGISTER_REQUEST = "secret.resolver.register"          # Client -> Server (1.40)
+    SECRET_RESOLVER_REGISTER_RESULT = "secret.resolver.register.result"    # Server -> Client (1.40)
     # The application asks the daemon to write the files a binding needs into
     # a workspace the application cannot reach itself (1.30): the ``app://``
     # reference line in ``.env`` and a small allow-list of home/instruction
@@ -4670,6 +4686,10 @@ class SecretReloadRequest(Event):
     the daemon qualifies ``user`` with the ``app_id`` the bind connection
     authenticated as, so one application can never reload another's ``alice``.
 
+    Over IPC (1.40, #1609) the same request reloads every loaded session in a
+    workspace the connection's OS account owns (its ``SO_PEERCRED`` uid);
+    ``user`` is not read there.
+
     Attributes:
         request_id: Correlates with :class:`SecretReloadResultEvent`.
         user: The **unqualified** identity whose sessions to reload.  The
@@ -4690,7 +4710,8 @@ class SecretReloadResultEvent(Event):
       says how many.  ``0`` is the ordinary answer when the user has no session
       loaded, and is not a failure.
     * ``"denied"``  — this connection may not ask (not an app-credential
-      connection, or no app credentials configured on this daemon).
+      connection, or no app credentials configured on this daemon; over IPC,
+      a transport that reports no peer credential).
 
     Attributes:
         reloaded: How many loaded sessions were re-resolved.  ``0`` whenever
@@ -4702,6 +4723,55 @@ class SecretReloadResultEvent(Event):
     request_id: str = ""
     status: str = ""
     reloaded: int = 0
+    detail: Optional[str] = None
+
+
+class SecretResolverRegisterRequest(Event):
+    """An IPC client offers to resolve ``app://`` references (1.40, #1609).
+
+    On WebSocket the daemon asks the application that OWNS a workspace over
+    its bind channel (#1226).  IPC has neither an application credential nor
+    a bind channel, so a session the daemon starts on its own (a reactor
+    stage, a ``session.wake`` from elsewhere, a revive) had no one to ask and
+    dropped every ``app://`` reference.  This request makes the sending IPC
+    connection the resolver for the workspaces **its OS account owns**: the
+    owner is the uid owning the workspace directory, the identity is the
+    connection's ``SO_PEERCRED`` uid, and the two must be equal.  Nothing in
+    the request names a uid, so a client cannot claim another account.
+
+    The registration lasts as long as the connection.  While it is live the
+    daemon sends that connection :class:`SecretResolveRequest` frames and
+    awaits a correlated :class:`SecretResolveResultEvent`, exactly as on the
+    bind channel; ``user`` is then the owning account's login name (or
+    ``uid:<n>``), and ``workspace`` is what an application keys on.
+
+    Attributes:
+        request_id: Correlates with :class:`SecretResolverRegisterResultEvent`.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVER_REGISTER_REQUEST)
+    request_id: str = ""
+
+
+class SecretResolverRegisterResultEvent(Event):
+    """The daemon's answer to :class:`SecretResolverRegisterRequest` (1.40).
+
+    ``status`` is one of:
+
+    * ``"ok"``     — this connection now answers ``secret.resolve`` for the
+      workspaces owned by ``uid`` (named ``user``).
+    * ``"denied"`` — the transport reported no peer credential (a Windows
+      pipe, a non-Linux socket), or this daemon has no IPC resolver wired.
+
+    Attributes:
+        uid: The peer uid the registration is bound to, when ``ok``.
+        user: That account's login name, or ``uid:<n>``.
+        detail: Human-readable elaboration, omitted when there is nothing to say.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVER_REGISTER_RESULT)
+    request_id: str = ""
+    status: str = ""
+    uid: Optional[int] = None
+    user: Optional[str] = None
     detail: Optional[str] = None
 
 
@@ -5950,6 +6020,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SECRET_RESOLVE_RESULT.value: SecretResolveResultEvent,
     EventType.SECRET_RELOAD_REQUEST.value: SecretReloadRequest,
     EventType.SECRET_RELOAD_RESULT.value: SecretReloadResultEvent,
+    EventType.SECRET_RESOLVER_REGISTER_REQUEST.value: SecretResolverRegisterRequest,
+    EventType.SECRET_RESOLVER_REGISTER_RESULT.value: SecretResolverRegisterResultEvent,
     EventType.WORKSPACE_APP_WRITE_REQUEST.value: WorkspaceAppWriteRequest,
     EventType.WORKSPACE_APP_WRITE_RESULT.value: WorkspaceAppWriteResultEvent,
     # The runner pool (1.35).

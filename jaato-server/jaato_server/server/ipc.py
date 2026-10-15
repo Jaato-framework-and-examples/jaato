@@ -104,12 +104,20 @@ from jaato_sdk.events import (
     ToolExecuteResultEvent,
     ToolOutputEvent,
     PoolStatusRequest,
+    SecretReloadRequest,
+    SecretReloadResultEvent,
+    SecretResolveRequest,
+    SecretResolveResultEvent,
+    SecretResolverRegisterRequest,
+    SecretResolverRegisterResultEvent,
 )
 from jaato_sdk.events import (
     PLUGIN_TOOL_REQUEST_TYPES,
     REFERENCE_CURATION_REQUEST_TYPES,
     PermissionResponseRequest,
 )
+from .app_secret import AppSecretAnswer, answer_from_result
+from .ipc_app_secret import IPCAppSecretResolver, PendingSecretResolves
 from .memory_verbs import MEMORY_REQUEST_TYPES
 from . import session_new_timing
 
@@ -443,6 +451,12 @@ class JaatoIPCServer:
         # silently receiving a gap.
         self._dropped_chunks: Dict[str, int] = {}
 
+        # #1609: app:// resolution over IPC.  Registered connections answer
+        # ``secret.resolve`` for the workspaces their OS account owns.
+        self._pending_secret_resolves = PendingSecretResolves()
+        self._app_secret_resolver = IPCAppSecretResolver(
+            transport=self._resolve_app_secret_over_ipc)
+
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
@@ -719,6 +733,8 @@ class JaatoIPCServer:
                 if client_id in self._event_queues:
                     del self._event_queues[client_id]
                 self._dropped_chunks.pop(client_id, None)
+            self._app_secret_resolver.unregister(client_id)
+            self._pending_secret_resolves.drop_client(client_id)
             # Detach from session via the transport-agnostic helper
             # (CommandRouter.handle_client_disconnect → SessionManager.detach_client).
             # Without this, session.attached_clients retains the dead
@@ -865,27 +881,9 @@ class JaatoIPCServer:
             )
             return
 
-        # Client-provided ("host") tool registration (mirrors the WS path; uses
-        # the shared registration helper) — register the proxy schema/executor so
-        # the agent can call it, the executor proxying back to this IPC client.
-        if isinstance(event, ToolsRegisterClientRequest):
-            buffered = self._register_client_tools_ipc(
-                client_id, event.tools, getattr(event, "categories", None))
-            await self._answer_client_tool_registration(
-                client_id, event, buffered)
-            return
-        # Client-side tool execution result — wake the proxy executor's waiter.
-        if isinstance(event, ToolExecuteResultEvent):
-            entry = self._client_tool_waiters.pop(event.call_id, None)
-            if entry is not None:
-                waiter, holder = entry
-                # Decode the JSON-encoded host-tool result to its native value
-                # (symmetric with the SDK's encode) so it records like an
-                # in-process tool result — see decode_client_tool_result.
-                from jaato_server.server.client_tools import decode_client_tool_result
-                holder["result"] = decode_client_tool_result(event.result)
-                holder["error"] = event.error
-                waiter.set()
+        # Host-tool registration / results and the #1609 app:// resolver
+        # frames: answered by the transport, with no session involved.
+        if await self._handle_connection_frame(client_id, event):
             return
 
         # Get client's session
@@ -960,6 +958,158 @@ class JaatoIPCServer:
                                         "failed for %s", _sid)
             else:
                 await self._refuse_without_session(client_id, event)
+
+    async def _handle_connection_frame(self, client_id: str, event: Event) -> bool:
+        """Answer a frame that belongs to the CONNECTION, not to a session.
+
+        Host-tool registration and results (mirrors the WS path), and the
+        ``app://`` frames (#1609): ``secret.resolver.register``,
+        ``secret.reload`` and the ``secret.resolve.result`` answering a
+        request this daemon sent.
+        Returns ``True`` when the frame was handled here.
+        """
+        if isinstance(event, ToolsRegisterClientRequest):
+            # Register the proxy schema/executor so the agent can call it,
+            # the executor proxying back to this IPC client.
+            buffered = self._register_client_tools_ipc(
+                client_id, event.tools, getattr(event, "categories", None))
+            await self._answer_client_tool_registration(
+                client_id, event, buffered)
+            return True
+        if isinstance(event, ToolExecuteResultEvent):
+            # Client-side tool execution result — wake the proxy executor's waiter.
+            entry = self._client_tool_waiters.pop(event.call_id, None)
+            if entry is not None:
+                waiter, holder = entry
+                # Decode the JSON-encoded host-tool result to its native value
+                # (symmetric with the SDK's encode) so it records like an
+                # in-process tool result — see decode_client_tool_result.
+                from jaato_server.server.client_tools import decode_client_tool_result
+                holder["result"] = decode_client_tool_result(event.result)
+                holder["error"] = event.error
+                waiter.set()
+            return True
+        if isinstance(event, SecretResolverRegisterRequest):
+            await self._send_to_client(
+                client_id, self._register_secret_resolver(client_id, event))
+            return True
+        if isinstance(event, SecretReloadRequest):
+            await self._send_to_client(
+                client_id, await self._reload_peer_sessions(client_id, event))
+            return True
+        if isinstance(event, SecretResolveResultEvent):
+            if not self._pending_secret_resolves.deliver(
+                    client_id, event.request_id, event):
+                logger.debug(
+                    "dropping secret.resolve.result %s from %s: not a pending "
+                    "request sent to this connection", event.request_id, client_id)
+            return True
+        return False
+
+    # =========================================================================
+    # app:// resolution over IPC (#1609)
+    # =========================================================================
+
+    @property
+    def app_secret_resolver(self) -> IPCAppSecretResolver:
+        """The IPC ``app://`` resolver, handed to the SessionManager (#1609)."""
+        return self._app_secret_resolver
+
+    def _register_secret_resolver(
+        self, client_id: str, event: "SecretResolverRegisterRequest",
+    ) -> "SecretResolverRegisterResultEvent":
+        """Bind ``client_id`` as the resolver for its OS account's workspaces.
+
+        The uid is the connection's ``SO_PEERCRED`` peer, never a request
+        field.  A transport with no peer credential is refused: there would
+        be no account to match workspace ownership against.
+        """
+        client = self._clients.get(client_id)
+        peer = client.peer if client else None
+        if peer is None:
+            return SecretResolverRegisterResultEvent(
+                request_id=event.request_id, status="denied",
+                detail="this transport reports no peer credential, so the "
+                       "daemon cannot tell which workspaces this connection "
+                       "owns",
+            )
+        self._app_secret_resolver.register(client_id, peer.uid, peer.identity)
+        return SecretResolverRegisterResultEvent(
+            request_id=event.request_id, status="ok",
+            uid=peer.uid, user=peer.identity,
+        )
+
+    async def _reload_peer_sessions(
+        self, client_id: str, event: "SecretReloadRequest",
+    ) -> "SecretReloadResultEvent":
+        """``secret.reload`` over IPC: re-resolve the peer account's sessions.
+
+        Scoped to the workspaces the connection's ``SO_PEERCRED`` uid owns
+        (:meth:`SessionManager.reload_ipc_owner_sessions`); ``event.user``
+        is not read, since the kernel already says whose they are.  The
+        reload makes blocking runner calls, so it runs off the loop (#1355).
+        """
+        client = self._clients.get(client_id)
+        peer = client.peer if client else None
+        sm = self._session_manager
+        if peer is None or sm is None or not hasattr(sm, "reload_ipc_owner_sessions"):
+            return SecretReloadResultEvent(
+                request_id=event.request_id, status="denied",
+                detail=("this transport reports no peer credential" if peer is None
+                        else "no session manager is wired on this transport"),
+            )
+        reloaded = await asyncio.to_thread(sm.reload_ipc_owner_sessions, peer.uid)
+        logger.info(
+            "secret.reload over IPC: client=%s uid=%d reloaded=%d",
+            client_id, peer.uid, reloaded,
+        )
+        return SecretReloadResultEvent(
+            request_id=event.request_id, status="ok", reloaded=reloaded)
+
+    def _resolve_app_secret_over_ipc(
+        self, client_id: str, user: str, workspace: str, name: str,
+        timeout: float,
+    ) -> AppSecretAnswer:
+        """Send ``secret.resolve`` to ``client_id`` and await its answer.
+
+        The :class:`IPCAppSecretResolver`'s transport.  Called from an
+        executor thread (session-env resolution runs off the loop); a call
+        on the loop thread itself would wait for a frame only that thread
+        can read, so it answers ``unreachable`` instead.  Never raises.
+        """
+        import concurrent.futures
+        import uuid
+
+        loop = self._event_loop
+        if loop is None or loop.is_closed():
+            return AppSecretAnswer(status="unreachable", detail="IPC event loop not running")
+        try:
+            if asyncio.get_running_loop() is loop:
+                return AppSecretAnswer(
+                    status="unreachable",
+                    detail="app:// resolution was asked on the IPC loop thread",
+                )
+        except RuntimeError:
+            pass
+        request_id = uuid.uuid4().hex
+        fut = self._pending_secret_resolves.open(request_id, client_id)
+        request = SecretResolveRequest(
+            request_id=request_id, user=user, workspace=workspace, name=name,
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_to_client(client_id, request), loop)
+            result = fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            self._pending_secret_resolves.close(request_id)
+            return AppSecretAnswer(
+                status="unreachable",
+                detail=f"no secret.resolve.result within {timeout:g}s",
+            )
+        except Exception as exc:  # noqa: BLE001 -- any transport error is a drop
+            self._pending_secret_resolves.close(request_id)
+            return AppSecretAnswer(status="unreachable", detail=str(exc))
+        return answer_from_result(result)
 
     async def _send_to_client(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client."""

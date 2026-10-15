@@ -260,6 +260,9 @@ class IPCRecoveryClient:
         # Host ("client") tools remembered so they're re-registered on the
         # fresh inner client after a reconnect (see register_client_tools).
         self._registered_client_tools: List[Dict[str, Any]] = []
+        # The app:// resolver (#1609), re-registered after a reconnect: the
+        # daemon binds a registration to ONE connection.
+        self._secret_resolver: Optional[Callable[..., Any]] = None
 
         # Reconnection state
         self._reconnect_attempt = 0
@@ -787,6 +790,33 @@ class IPCRecoveryClient:
             budgets_by_name, resolve_client_tool_timeouts,
         )
         return budgets_by_name(resolve_client_tool_timeouts(tools))
+
+    async def register_secret_resolver(
+        self, resolver: Callable[..., Any], *, timeout: float = 10.0,
+    ) -> Any:
+        """Answer ``app://`` references for this account's workspaces (#1609).
+
+        Proxied to the inner client (see
+        ``IPCClient.register_secret_resolver``) and REMEMBERED: the daemon
+        ties a registration to one connection, so it is sent again on the
+        fresh inner client after every reconnect.
+        """
+        self._check_can_send()
+        self._secret_resolver = resolver
+        if self._client:
+            return await self._client.register_secret_resolver(
+                resolver, timeout=timeout)
+        return None
+
+    async def reload_secrets(self, *, user: str = "", timeout: float = 30.0) -> Any:
+        """Re-resolve ``app://`` references in live sessions (#1609).
+
+        Proxied to the inner client; see ``IPCClient.reload_secrets``.
+        """
+        self._check_can_send()
+        if not self._client:
+            raise ConnectionError("reload_secrets: not connected")
+        return await self._client.reload_secrets(user=user, timeout=timeout)
 
     @property
     def client_tool_timeouts(self) -> Dict[str, float]:
@@ -1864,6 +1894,12 @@ class IPCRecoveryClient:
                 await self._client.register_client_tools(self._registered_client_tools)
             except Exception as e:
                 logger.warning(f"Failed to re-register client tools on reconnect: {e}")
+
+        if self._secret_resolver is not None:
+            try:
+                await self._client.register_secret_resolver(self._secret_resolver)
+            except Exception as e:
+                logger.warning(f"Failed to re-register the app:// resolver on reconnect: {e}")
 
         # Reattach to session if configured and we have a session ID
         if self._config.reattach_session and self._session_id:

@@ -3361,6 +3361,7 @@ def gh() -> Rendered:
         "  .env / a profile's env:, or `GH_TOKEN=app://github`, which the daemon",
         "  resolves to the real token at every spawn (#1226; cascade, wake and",
         "  revived sessions get it too, and nothing resolved is persisted).",
+        "  Who answers the reference, per transport: `jaato-scaffold explain secrets`.",
         "  Once it is there, three things must line up:",
         "",
         "  1. THE SECRET SCRUB.",
@@ -3396,6 +3397,103 @@ def gh() -> Rendered:
         "",
         "  See the `gh` example in the web examples, and",
         "  docs/design/per-user-github-credentials.md §7.",
+    ]
+    return data, "\n".join(lines)
+
+
+def _bullets(items, indent: str, width: int = 78) -> list:
+    """``- item`` lines wrapped to ``width``, continuations aligned."""
+    import textwrap
+
+    out: list = []
+    for item in items:
+        out.extend(textwrap.wrap(
+            item, width=width, initial_indent=f"{indent}- ",
+            subsequent_indent=f"{indent}  "))
+    return out
+
+
+def secrets() -> Rendered:
+    """How ``NAME=app://<ref>`` is resolved, and who answers (#1226, #1609).
+
+    The statuses and rules are READ from ``server/app_secret.py`` and
+    ``server/ipc_app_secret.py``, the verbs from the event catalog and the
+    SDK floor from ``IPCClient``, so this topic cannot describe resolution
+    differently from the code that does it.
+    """
+    from jaato_sdk.client.ipc import IPCClient
+    from jaato_sdk.events import EventType
+    from jaato_server.server.app_secret import (
+        ANSWER_STATUSES, DEFAULT_RESOLVE_TIMEOUT_SECONDS, RESOLUTION_RULES,
+    )
+    from jaato_server.server.ipc_app_secret import IPC_RULES
+    from jaato_server.shared.plugins.subagent.config import APP_SECRET_SCHEME
+
+    floor = IPCClient.MIN_SECRET_RESOLVER_PROTOCOL
+    verbs = {
+        "resolve": EventType.SECRET_RESOLVE_REQUEST.value,
+        "resolve_result": EventType.SECRET_RESOLVE_RESULT.value,
+        "reload": EventType.SECRET_RELOAD_REQUEST.value,
+        "register": EventType.SECRET_RESOLVER_REGISTER_REQUEST.value,
+    }
+    transports = {
+        "websocket": {
+            "who_answers": "the application owning the workspace (app:user), "
+                           "on its application-credential bind channel",
+            "sdk": "TS SecretResolveResponder / the bind channel",
+        },
+        "ipc": {
+            "who_answers": "a registered IPC connection of the OS account "
+                           "owning the workspace directory",
+            "sdk": "IPCClient.register_secret_resolver(resolver), "
+                   "IPCClient.reload_secrets()",
+            "min_protocol": floor,
+            "rules": list(IPC_RULES),
+        },
+        "embedded / standalone": {"who_answers": "nobody; references are dropped"},
+    }
+    data = {
+        "scheme": f"{APP_SECRET_SCHEME}://<name>[?required]",
+        "deadline_seconds": DEFAULT_RESOLVE_TIMEOUT_SECONDS,
+        "verbs": verbs,
+        "rules": list(RESOLUTION_RULES),
+        "transports": transports,
+        "statuses": {k: v for k, v in ANSWER_STATUSES},
+    }
+    lines = [
+        f"{APP_SECRET_SCHEME}:// secret references (#1226, #1609):",
+        "",
+        f"  GH_TOKEN={APP_SECRET_SCHEME}://github in a workspace .env (or a "
+        "profile's env:)",
+        "  is a REFERENCE.  The daemon holds no value: it asks whoever owns the",
+        f"  workspace ({verbs['resolve']}), waits {DEFAULT_RESOLVE_TIMEOUT_SECONDS:g}s for "
+        f"{verbs['resolve_result']},",
+        "  and puts the answer in that session's environment.",
+        "",
+        "  rules:",
+    ] + _bullets(RESOLUTION_RULES, "    ") + [
+        "",
+        "  who answers:",
+        "    WebSocket  the application owning the workspace, on its bind",
+        "               channel (application credential, --ws-app-credentials).",
+        f"    IPC        a connection that sent {verbs['register']} (protocol {floor}),",
+        "               for the workspaces its OS account owns:",
+    ] + _bullets(IPC_RULES, "               ") + [
+        "    embedded   nobody: references are dropped.",
+        "",
+        "  from Python, over IPC:",
+        "    await client.register_secret_resolver(",
+        "        lambda *, user, workspace, name: token_for(workspace, name))",
+        "    # returns str -> ok, None -> not_found, or",
+        "    # {status, value, expires_at, detail}",
+        f"    await client.reload_secrets()   # after a revoke or rotation ({verbs['reload']})",
+        "",
+        "  statuses (all but ok drop the reference):",
+    ] + [f"    {k:<13} {v}" for k, v in ANSWER_STATUSES] + [
+        "",
+        "  pass:// and vault:// are different: the DAEMON resolves them with its",
+        "  own credential.  Behind app:// the resolver may read any store with",
+        "  its own (Vault, pass as the owning user, a token exchange).",
     ]
     return data, "\n".join(lines)
 

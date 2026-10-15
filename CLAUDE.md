@@ -1791,13 +1791,57 @@ Rules the implementation holds to:
   sanitization and untrusted-content wrapping are unchanged for remote
   servers.
 
-Not covered (#1609 gap 1): a session the daemon starts on its own
-(reactor stage, a `session.wake` from elsewhere, a revive) re-resolves its
-env without asking the application, and over IPC an `app://` reference
-has no resolver, so a per-user token reaches such a session only through
-`pass://` / `vault://`. Guard for the 401 and reload halves:
+A session the daemon starts on its own (reactor stage, a `session.wake`
+from elsewhere, a revive) re-resolves its env without its creator; over
+IPC an `app://` reference is answered by a registered connection of the
+workspace owner's account (#1609 gap 1, next section). Guard for the 401
+and reload halves:
 `jaato_server/shared/tests/test_a_rotated_mcp_credential_reaches_the_server_1609.py`,
 five reversions.
+
+### `app://` Over IPC, Answered by the Workspace Owner (#1609, protocol 1.40)
+
+On WebSocket the daemon resolves `NAME=app://<ref>` by asking the
+application that owns the workspace on its bind channel (#1226). IPC has
+no app credential and no bind channel, so every `app://` reference of an
+IPC deployment was dropped, and a per-user token reached a daemon-started
+session only through `pass://` / `vault://` (a store the daemon can read
+for every user).
+
+```python
+await client.register_secret_resolver(
+    lambda *, user, workspace, name: token_for(workspace, name))
+```
+
+| Piece | Where |
+|---|---|
+| `SecretResolverRegisterRequest` → `SecretResolverRegisterResultEvent` (`status`, `uid`, `user`): the connection answers `secret.resolve` until it closes | `jaato_sdk/events.py`, `JaatoIPCServer._handle_connection_frame` |
+| the resolver: owner = uid of the workspace directory (`os.stat` of the resolved path), matched against the registration's `SO_PEERCRED` uid; no live registration is `unreachable`, naming the uid | `server/ipc_app_secret.py` (`IPCAppSecretResolver`, `workspace_owner_uid`) |
+| the transport: `secret.resolve` sent on the loop, answered by a `secret.resolve.result` taken only from the connection asked (`PendingSecretResolves`); a closed connection fails its pending requests and unregisters | `JaatoIPCServer._resolve_app_secret_over_ipc` |
+| WS first: `chain_app_secret_resolvers(ws, ipc)` resolves with the first resolver that names an owner, so a workspace an application owns is never answered by a local account | `server/app_secret.py`, `SessionManager._construct_and_initialize_server` |
+| the SDK: `IPCClient.register_secret_resolver(resolver)` (a `str` is `ok`, `None` is `not_found`, or a dict with `status` / `value` / `expires_at` / `detail`) and `reload_secrets()`, both refused below `MIN_SECRET_RESOLVER_PROTOCOL`; the resolver is re-registered by the recovery client after a reconnect; `WSClient` refuses registration | `client/ipc.py`, `recovery.py`, `ws.py` |
+
+| Rule | Why |
+|---|---|
+| **the uid is the kernel's, never a field** | a client cannot answer for another account; a transport with no peer credential is `denied` |
+| **only the owning account** | it already controls that tree's `.env`, so supplying a value there grants nothing new |
+| **owner checks are unchanged** | memory curation (#1232) and `secret.reload` read the WS resolver alone; the chain is for session-env resolution only |
+
+`user` in the request is the owning account's login name (or `uid:<n>`);
+an application serving several people from one account keys on
+`workspace`. Everything after resolution is #1226's: drop on failure,
+`?required` refuses the bootstrap, `expires_at` schedules the pre-expiry
+reload, the name is granted past the `cli` scrub (#1228).
+
+`secret.reload` is answered over IPC too: `IPCClient.reload_secrets()`
+re-resolves every loaded session in a workspace the caller's account owns
+(`SessionManager.reload_ipc_owner_sessions(uid)`, the peer uid, never the
+request's `user`), off the loop because it calls runners. `jaato-scaffold
+explain secrets` renders the rules, statuses, verbs and the SDK floor from
+`ANSWER_STATUSES` / `RESOLUTION_RULES` (`app_secret.py`) and `IPC_RULES`
+(`ipc_app_secret.py`). Guard:
+`jaato_server/server/tests/test_app_secret_resolved_over_ipc_1609.py`,
+nine reversions, over a real `JaatoIPCServer` and `IPCClient`.
 
 Found on the way: under mcp 2.x a `Tool` exposes `input_schema` (the
 camelCase name is only the wire alias), so `get_tool_schemas` raised for

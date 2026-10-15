@@ -248,6 +248,8 @@ _SCOPES = {
     "paths": ExplainScope(_explain.paths),
     "gh": ExplainScope(_explain.gh,
                        blurb="driving `gh` / `git` with a per-user token"),
+    "secrets": ExplainScope(_explain.secrets,
+                            blurb="app:// references and who answers them"),
     "runner-user": ExplainScope(_explain.runner_user,
                                 blurb="which OS account a root daemon's runners run as",
                                 live_only="names the import paths of the "

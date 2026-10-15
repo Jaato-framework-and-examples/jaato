@@ -14,10 +14,11 @@ This module is the daemon-side resolver.  It holds NO transport of its own:
 the two things it needs — mapping a workspace path to its qualified owner, and
 sending ``secret.resolve`` to a named application — are injected as callables
 by the daemon wiring (``server/__main__.py``), because both live on
-``JaatoWSServer`` and only the WS transport has bind channels at all.  On the
-IPC / embedded / standalone paths no resolver is injected and an ``app://``
-reference is dropped (or, strict, refuses the bootstrap) exactly as an
-unreachable application would be.
+``JaatoWSServer``.  IPC has its own resolver keyed on the peer uid
+(:mod:`server.ipc_app_secret`, #1609), chained after this one by
+:class:`ChainedAppSecretResolver`.  On the embedded / standalone paths no
+resolver is injected and an ``app://`` reference is dropped (or, strict,
+refuses the bootstrap) exactly as an unreachable application would be.
 
 The rules this holds to (design §6.1):
 
@@ -42,7 +43,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from jaato_server.shared.plugins.subagent.config import (
     APP_SECRET_SCHEME,
@@ -70,6 +71,38 @@ class AppSecretResolutionError(Exception):
 #: dropped.  Held here rather than as an env knob because there is one
 #: transport and one deadline for it.
 DEFAULT_RESOLVE_TIMEOUT_SECONDS = 10.0
+
+
+#: What each non-``ok`` / ``ok`` status means to a session, rendered by
+#: ``jaato-scaffold explain secrets``.  Every status but ``ok`` DROPS the
+#: reference (or, for ``app://<name>?required``, refuses the bootstrap).
+ANSWER_STATUSES = (
+    ("ok", "the value replaces the reference in this session's env only"),
+    ("unowned", "the workspace has no owner any transport can name"),
+    ("not_found", "the resolver has no binding for this (user, workspace, name)"),
+    ("denied", "the resolver refuses to answer"),
+    ("error", "the resolver tried and failed, or answered ok with no value"),
+    ("unreachable", "no live resolver connection, or no answer within the deadline"),
+    ("no_transport", "no resolver is wired on this daemon at all"),
+)
+
+#: The rules every transport's resolution holds to (#1226), rendered by
+#: ``jaato-scaffold explain secrets``.
+RESOLUTION_RULES = (
+    "resolved at EVERY spawn (create, cascade stage, wake, revive) by the "
+    "daemon, for the workspace OWNER, never the session creator",
+    "the value reaches the session's env only; the .env, the record and the "
+    "snapshot keep `app://<name>`, so the next spawn asks again",
+    "an unresolved reference is DROPPED, never forwarded as the literal; "
+    "`app://<name>?required` refuses the bootstrap instead",
+    "an `expires_at` in the answer schedules a re-resolution a margin "
+    "before it (JAATO_OAUTH_REFRESH_MARGIN)",
+    "a resolved name is granted past the `cli` / `interactive_shell` secret "
+    "scrub (#1228); MCP servers never receive it",
+    "a workspace an application owns over WebSocket is resolved by that "
+    "application; an IPC account answers only for workspaces no "
+    "application owns",
+)
 
 
 @dataclass(frozen=True)
@@ -237,3 +270,77 @@ class AppSecretResolver:
             f"{scheme}://{path}",
             answer.detail or f"status={answer.status}",
         )
+
+
+def answer_from_result(result: Any) -> AppSecretAnswer:
+    """Translate an application's ``secret.resolve.result`` into an :class:`AppSecretAnswer`.
+
+    An ``ok`` status with no ``value`` is downgraded to ``error`` — the
+    application claimed success and delivered nothing, which must not read as a
+    resolved empty secret (dropping is the honest outcome).  Shared by the
+    WS bind channel (#1226) and the IPC resolver (#1609).
+    """
+    if result.status == "ok":
+        if result.value is None:
+            return AppSecretAnswer(
+                status="error", detail="application answered ok with no value",
+            )
+        return AppSecretAnswer(
+            status="ok", value=result.value, expires_at=result.expires_at,
+        )
+    return AppSecretAnswer(status=result.status or "error", detail=result.detail)
+
+
+class ChainedAppSecretResolver:
+    """Ask each resolver in turn for the workspace owner; resolve with the first.
+
+    Built by ``SessionManager`` when both the WS resolver (#1226) and the IPC
+    resolver (#1609) are wired.  The first resolver that names an owner for a
+    workspace resolves its references, so a workspace an application owns over
+    WS is never answered by a local account.  Only the two methods
+    ``JaatoServer._apply_app_secret_references`` calls are provided: owner
+    checks elsewhere (memory curation, ``secret.reload``) read the WS
+    resolver alone.
+    """
+
+    def __init__(self, *resolvers: object) -> None:
+        self._resolvers = [r for r in resolvers if r is not None]
+
+    def _for_owner(self, workspace_path: Optional[str]):
+        for resolver in self._resolvers:
+            owner = resolver.owner_for(workspace_path)  # type: ignore[attr-defined]
+            if owner is not None:
+                return resolver, owner
+        return None, None
+
+    def owner_for(self, workspace_path: Optional[str]) -> Optional[str]:
+        """The owner named by the first resolver that names one."""
+        return self._for_owner(workspace_path)[1]
+
+    def resolve_reference(
+        self,
+        ref: AppSecretReference,
+        context: Optional[SecretResolveContext],
+        *,
+        timeout: Optional[float] = None,
+    ) -> AppSecretAnswer:
+        """Resolve with the resolver that named ``context``'s owner."""
+        if context is not None:
+            for resolver in self._resolvers:
+                if resolver.owner_for(context.workspace_path) == context.workspace_owner:  # type: ignore[attr-defined]
+                    return resolver.resolve_reference(ref, context, timeout=timeout)  # type: ignore[attr-defined]
+        if self._resolvers:
+            return self._resolvers[0].resolve_reference(ref, context, timeout=timeout)  # type: ignore[attr-defined]
+        return AppSecretAnswer(status="no_transport", detail="no resolver wired")
+
+
+def chain_app_secret_resolvers(ws: Optional[object], ipc: Optional[object]) -> Optional[object]:
+    """The resolver a new session resolves its ``app://`` references with.
+
+    The WS resolver (#1226), the IPC resolver (#1609), or both chained with
+    WS first, so a workspace an application owns is never answered by a
+    local account.  ``None`` when neither transport wired one.
+    """
+    if ws is None or ipc is None:
+        return ws if ws is not None else ipc
+    return ChainedAppSecretResolver(ws, ipc)

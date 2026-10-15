@@ -202,6 +202,34 @@ def _protocol_compatible(server_version: str, client_min: str) -> bool:
     return server_minor >= client_minor
 
 
+def _secret_outcome(out: Any) -> Dict[str, Any]:
+    """Normalise a ``register_secret_resolver`` resolver's return (#1609).
+
+    ``str`` -> ``ok`` with that value; ``None`` -> ``not_found``; a dict is
+    read for ``status`` / ``value`` / ``expires_at`` / ``detail``, with the
+    status defaulting to ``ok`` when a value is present and ``not_found``
+    otherwise.  Anything else is an ``error``, never forwarded as a value.
+    """
+    if isinstance(out, str):
+        return {"status": "ok", "value": out}
+    if out is None:
+        return {"status": "not_found"}
+    if isinstance(out, dict):
+        value = out.get("value")
+        status = out.get("status") or ("ok" if value is not None else "not_found")
+        result: Dict[str, Any] = {"status": str(status)}
+        if status == "ok" and isinstance(value, str):
+            result["value"] = value
+        elif status == "ok":
+            return {"status": "error", "detail": "resolver answered ok with no value"}
+        for key in ("expires_at", "detail"):
+            if out.get(key) is not None:
+                result[key] = str(out[key])
+        return result
+    return {"status": "error",
+            "detail": f"resolver returned {type(out).__name__}, not str/dict/None"}
+
+
 class IncompatibleServerError(Exception):
     """Raised when the server's protocol version is incompatible.
 
@@ -3554,6 +3582,124 @@ class IPCClient:
             await self._send_event(request)
         self.client_tool_timeouts.update(budgets)
         return dict(budgets)
+
+    #: The daemon serves ``secret.resolver.register`` from here (#1609).
+    MIN_SECRET_RESOLVER_PROTOCOL = "1.40"
+
+    async def register_secret_resolver(
+        self, resolver: Callable[..., Any], *, timeout: float = 10.0,
+    ) -> "SecretResolverRegisterResultEvent":
+        """Answer ``app://`` references for the workspaces this account owns (1.40).
+
+        A session the daemon starts on its own (a reactor stage, a
+        ``session.wake`` from elsewhere, a revive from disk) re-resolves its
+        environment without asking anybody.  Over WebSocket the daemon asks
+        the owning application on its bind channel (#1226); this is the IPC
+        equivalent (#1609).  After it, the daemon sends this connection a
+        ``secret.resolve`` whenever a session in a workspace OWNED BY THIS
+        CONNECTION'S OS ACCOUNT (the directory's owner uid equals the
+        kernel-reported peer uid) meets ``NAME=app://<ref>``.  The resolved
+        value reaches that session's environment and nothing else; the
+        ``.env`` keeps the reference, so the next spawn asks again.
+
+        ``resolver(user=..., workspace=..., name=...)`` (sync or async)
+        returns one of:
+
+        * a ``str`` -- the secret (status ``ok``);
+        * ``None`` -- no binding (``not_found``);
+        * a dict ``{status, value, expires_at, detail}``; ``expires_at``
+          (ISO-8601 UTC) makes the daemon re-resolve a margin before it.
+
+        A resolver that raises answers ``error`` with the exception text.
+        The registration lasts as long as the connection: a recovery
+        client re-registers after a reconnect.  The daemon carries its own
+        deadline (10 s), after which it drops the reference (or refuses
+        the bootstrap for ``app://<ref>?required``).
+
+        Raises:
+            ValueError: The daemon speaks a protocol below
+                :attr:`MIN_SECRET_RESOLVER_PROTOCOL`; an older daemon would
+                ignore the request and keep dropping every reference.
+        """
+        from jaato_sdk.events import (
+            EventType, SecretResolverRegisterRequest,
+        )
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_SECRET_RESOLVER_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"register_secret_resolver: this daemon speaks protocol "
+                f"{spoken} and does not serve secret.resolver.register (needs "
+                f">= {self.MIN_SECRET_RESOLVER_PROTOCOL}).  It would ignore "
+                f"the request and keep dropping app:// references.  Upgrade "
+                f"the daemon.")
+        self._secret_resolver = resolver
+        if not getattr(self, "_secret_resolver_subscribed", False):
+            self._secret_resolver_subscribed = True
+            self.subscribe(
+                EventType.SECRET_RESOLVE_REQUEST, self._on_secret_resolve_request)
+        answer = await self._correlated_request(
+            "register_secret_resolver", SecretResolverRegisterRequest(),
+            timeout, "secres")
+        return answer  # type: ignore[return-value]
+
+    async def reload_secrets(
+        self, *, user: str = "", timeout: float = 30.0,
+    ) -> "SecretReloadResultEvent":
+        """Re-resolve ``app://`` references in live sessions now (1.40 over IPC).
+
+        Call it after revoking or rotating a value the resolver answers
+        with, so loaded sessions drop or replace it instead of keeping it
+        until they end.  Over IPC the daemon reloads every LOADED session in
+        a workspace this connection's OS account owns (``user`` is ignored:
+        the kernel says whose they are); a mid-turn session is picked up by
+        its next spawn.  Over WebSocket this is the bind-channel
+        ``secret.reload`` (#1226), where ``user`` names the application's
+        user and only an application-credential connection is answered.
+
+        Returns the daemon's ``SecretReloadResultEvent`` (``status``,
+        ``reloaded``, ``detail``).
+
+        Raises:
+            ValueError: The daemon speaks a protocol below
+                :attr:`MIN_SECRET_RESOLVER_PROTOCOL`, which does not answer
+                ``secret.reload`` over IPC.
+        """
+        from jaato_sdk.events import SecretReloadRequest
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_SECRET_RESOLVER_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"reload_secrets: this daemon speaks protocol {spoken} and "
+                f"does not answer secret.reload over IPC (needs >= "
+                f"{self.MIN_SECRET_RESOLVER_PROTOCOL}).  Upgrade the daemon, "
+                f"or call reload_session_env() per session.")
+        answer = await self._correlated_request(
+            "reload_secrets", SecretReloadRequest(user=user), timeout, "secrel")
+        return answer  # type: ignore[return-value]
+
+    def _on_secret_resolve_request(self, event: Any) -> None:
+        """Run the registered ``app://`` resolver and send the correlated answer."""
+        fn = getattr(self, "_secret_resolver", None)
+
+        async def _run() -> None:
+            from jaato_sdk.events import SecretResolveResultEvent
+            outcome = _secret_outcome(None)
+            if fn is None:
+                outcome = {"status": "denied", "detail": "no resolver registered"}
+            else:
+                try:
+                    out = fn(user=event.user, workspace=event.workspace,
+                             name=event.name)
+                    if asyncio.iscoroutine(out):
+                        out = await out
+                    outcome = _secret_outcome(out)
+                except Exception as exc:  # noqa: BLE001 -- reported, not raised
+                    outcome = {"status": "error", "detail": str(exc)}
+            await self._send_event(SecretResolveResultEvent(
+                request_id=event.request_id, **outcome))
+
+        asyncio.create_task(_run())
 
     def _on_tool_execute_request(self, event: Any) -> None:
         """Run the registered host-tool handler for an agent tool call and send

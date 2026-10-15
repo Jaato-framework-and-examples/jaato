@@ -372,6 +372,19 @@ class WSClient(IPCClient):
         except Exception as exc:
             raise ConnectionError(f"WebSocket send failed: {exc}") from exc
 
+    async def register_secret_resolver(self, resolver: Any, **_: Any) -> Any:
+        """Refused on WebSocket (#1609): the IPC verb keys on the peer uid.
+
+        A WS application resolves ``app://`` on its bind channel instead,
+        authenticated by an application credential (#1226; the TS SDK's
+        ``SecretResolveResponder``).  A WS connection has no OS principal, so
+        the daemon could not tell which workspaces it may answer for.
+        """
+        raise NotImplementedError(
+            "register_secret_resolver is an IPC verb (it binds to the "
+            "connection's OS account).  Over WebSocket, answer secret.resolve "
+            "on an application-credential bind channel (#1226).")
+
     async def disconnect(self) -> None:
         """Tear down the drain task + state (inherited), then close the WS."""
         await super().disconnect()  # cancels drain (interrupts recv) + clears state
