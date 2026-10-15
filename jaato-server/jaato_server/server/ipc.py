@@ -104,6 +104,8 @@ from jaato_sdk.events import (
     ToolExecuteResultEvent,
     ToolOutputEvent,
     PoolStatusRequest,
+    SecretReloadRequest,
+    SecretReloadResultEvent,
     SecretResolveRequest,
     SecretResolveResultEvent,
     SecretResolverRegisterRequest,
@@ -961,8 +963,9 @@ class JaatoIPCServer:
         """Answer a frame that belongs to the CONNECTION, not to a session.
 
         Host-tool registration and results (mirrors the WS path), and the
-        ``app://`` resolver frames (#1609): ``secret.resolver.register`` and
-        the ``secret.resolve.result`` answering a request this daemon sent.
+        ``app://`` frames (#1609): ``secret.resolver.register``,
+        ``secret.reload`` and the ``secret.resolve.result`` answering a
+        request this daemon sent.
         Returns ``True`` when the frame was handled here.
         """
         if isinstance(event, ToolsRegisterClientRequest):
@@ -989,6 +992,10 @@ class JaatoIPCServer:
         if isinstance(event, SecretResolverRegisterRequest):
             await self._send_to_client(
                 client_id, self._register_secret_resolver(client_id, event))
+            return True
+        if isinstance(event, SecretReloadRequest):
+            await self._send_to_client(
+                client_id, await self._reload_peer_sessions(client_id, event))
             return True
         if isinstance(event, SecretResolveResultEvent):
             if not self._pending_secret_resolves.deliver(
@@ -1031,6 +1038,33 @@ class JaatoIPCServer:
             request_id=event.request_id, status="ok",
             uid=peer.uid, user=peer.identity,
         )
+
+    async def _reload_peer_sessions(
+        self, client_id: str, event: "SecretReloadRequest",
+    ) -> "SecretReloadResultEvent":
+        """``secret.reload`` over IPC: re-resolve the peer account's sessions.
+
+        Scoped to the workspaces the connection's ``SO_PEERCRED`` uid owns
+        (:meth:`SessionManager.reload_ipc_owner_sessions`); ``event.user``
+        is not read, since the kernel already says whose they are.  The
+        reload makes blocking runner calls, so it runs off the loop (#1355).
+        """
+        client = self._clients.get(client_id)
+        peer = client.peer if client else None
+        sm = self._session_manager
+        if peer is None or sm is None or not hasattr(sm, "reload_ipc_owner_sessions"):
+            return SecretReloadResultEvent(
+                request_id=event.request_id, status="denied",
+                detail=("this transport reports no peer credential" if peer is None
+                        else "no session manager is wired on this transport"),
+            )
+        reloaded = await asyncio.to_thread(sm.reload_ipc_owner_sessions, peer.uid)
+        logger.info(
+            "secret.reload over IPC: client=%s uid=%d reloaded=%d",
+            client_id, peer.uid, reloaded,
+        )
+        return SecretReloadResultEvent(
+            request_id=event.request_id, status="ok", reloaded=reloaded)
 
     def _resolve_app_secret_over_ipc(
         self, client_id: str, user: str, workspace: str, name: str,

@@ -3643,6 +3643,41 @@ class IPCClient:
             timeout, "secres")
         return answer  # type: ignore[return-value]
 
+    async def reload_secrets(
+        self, *, user: str = "", timeout: float = 30.0,
+    ) -> "SecretReloadResultEvent":
+        """Re-resolve ``app://`` references in live sessions now (1.40 over IPC).
+
+        Call it after revoking or rotating a value the resolver answers
+        with, so loaded sessions drop or replace it instead of keeping it
+        until they end.  Over IPC the daemon reloads every LOADED session in
+        a workspace this connection's OS account owns (``user`` is ignored:
+        the kernel says whose they are); a mid-turn session is picked up by
+        its next spawn.  Over WebSocket this is the bind-channel
+        ``secret.reload`` (#1226), where ``user`` names the application's
+        user and only an application-credential connection is answered.
+
+        Returns the daemon's ``SecretReloadResultEvent`` (``status``,
+        ``reloaded``, ``detail``).
+
+        Raises:
+            ValueError: The daemon speaks a protocol below
+                :attr:`MIN_SECRET_RESOLVER_PROTOCOL`, which does not answer
+                ``secret.reload`` over IPC.
+        """
+        from jaato_sdk.events import SecretReloadRequest
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_SECRET_RESOLVER_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"reload_secrets: this daemon speaks protocol {spoken} and "
+                f"does not answer secret.reload over IPC (needs >= "
+                f"{self.MIN_SECRET_RESOLVER_PROTOCOL}).  Upgrade the daemon, "
+                f"or call reload_session_env() per session.")
+        answer = await self._correlated_request(
+            "reload_secrets", SecretReloadRequest(user=user), timeout, "secrel")
+        return answer  # type: ignore[return-value]
+
     def _on_secret_resolve_request(self, event: Any) -> None:
         """Run the registered ``app://`` resolver and send the correlated answer."""
         fn = getattr(self, "_secret_resolver", None)

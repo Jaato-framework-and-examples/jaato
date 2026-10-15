@@ -60,6 +60,22 @@ logger = logging.getLogger(__name__)
 #: (memory curation, ``secret.reload``), which read the WS resolver alone.
 IPC_OWNER_PREFIX = "unix-uid:"
 
+#: The IPC rules (#1609), rendered by ``jaato-scaffold explain secrets``.
+IPC_RULES = (
+    "a connection sends secret.resolver.register; it answers secret.resolve "
+    "until it closes",
+    "owner = the uid owning the workspace directory (symlinks resolved); "
+    "the connection must be that uid (SO_PEERCRED), which no request field "
+    "can name",
+    "`user` in the request is the owning account's login name (or "
+    "uid:<n>); an application serving several people from one account "
+    "keys on `workspace`",
+    "an answer is taken only from the connection the request was sent to",
+    "secret.reload re-resolves the loaded sessions in workspaces the "
+    "caller's account owns; its `user` field is not read",
+)
+
+
 #: ``(client_id, user, workspace, name, timeout) -> AppSecretAnswer``.  Sends
 #: ``secret.resolve`` to one IPC connection and awaits its answer; never
 #: raises for a timeout or a closed connection (those are statuses).

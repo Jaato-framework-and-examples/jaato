@@ -5616,6 +5616,42 @@ class SessionManager:
                 sid for sid, session in self._sessions.items()
                 if self._session_owned_by(session, qualified_owner)
             ]
+        return self._reload_sessions(targets, qualified_owner)
+
+    def reload_ipc_owner_sessions(self, uid: int) -> int:
+        """Re-resolve the env of every LOADED session in a workspace ``uid`` owns.
+
+        The IPC half of ``secret.reload`` (#1609): an IPC connection's OS
+        account revoked or rotated a value it answers ``app://`` with, and
+        asks the daemon to re-resolve its live sessions now.  ``uid`` is the
+        connection's ``SO_PEERCRED`` uid, never a request field.  A session
+        matches when the chained resolver names that account as its
+        workspace's owner, i.e. the WS resolver names none (a workspace an
+        application owns is the application's to reload) and the directory
+        belongs to ``uid``.  Returns how many were re-resolved; ``0`` when
+        none is loaded, the ordinary answer.
+        """
+        from .ipc_app_secret import IPC_OWNER_PREFIX
+
+        ipc = getattr(self, "_ipc_app_secret_resolver", None)
+        resolver = chain_app_secret_resolvers(self._app_secret_resolver, ipc)
+        if resolver is None:
+            return 0
+        with self._lock:
+            loaded = [
+                (sid, getattr(session, "workspace_path", None))
+                for sid, session in self._sessions.items()
+            ]
+        # The owner lookups stat the workspace; done outside the lock.
+        owner = f"{IPC_OWNER_PREFIX}{uid}"
+        targets = [
+            sid for sid, path in loaded
+            if path and resolver.owner_for(path) == owner
+        ]
+        return self._reload_sessions(targets, owner)
+
+    def _reload_sessions(self, targets: List[str], owner: str) -> int:
+        """``reload_session_env`` each of ``targets``; count the ones reloaded."""
         reloaded = 0
         for sid in targets:
             try:
@@ -5630,7 +5666,7 @@ class SessionManager:
                 reloaded += 1
         logger.info(
             "secret.reload: owner=%s matched=%d reloaded=%d",
-            qualified_owner, len(targets), reloaded,
+            owner, len(targets), reloaded,
         )
         return reloaded
 

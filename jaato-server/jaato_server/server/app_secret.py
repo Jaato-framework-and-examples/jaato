@@ -73,6 +73,38 @@ class AppSecretResolutionError(Exception):
 DEFAULT_RESOLVE_TIMEOUT_SECONDS = 10.0
 
 
+#: What each non-``ok`` / ``ok`` status means to a session, rendered by
+#: ``jaato-scaffold explain secrets``.  Every status but ``ok`` DROPS the
+#: reference (or, for ``app://<name>?required``, refuses the bootstrap).
+ANSWER_STATUSES = (
+    ("ok", "the value replaces the reference in this session's env only"),
+    ("unowned", "the workspace has no owner any transport can name"),
+    ("not_found", "the resolver has no binding for this (user, workspace, name)"),
+    ("denied", "the resolver refuses to answer"),
+    ("error", "the resolver tried and failed, or answered ok with no value"),
+    ("unreachable", "no live resolver connection, or no answer within the deadline"),
+    ("no_transport", "no resolver is wired on this daemon at all"),
+)
+
+#: The rules every transport's resolution holds to (#1226), rendered by
+#: ``jaato-scaffold explain secrets``.
+RESOLUTION_RULES = (
+    "resolved at EVERY spawn (create, cascade stage, wake, revive) by the "
+    "daemon, for the workspace OWNER, never the session creator",
+    "the value reaches the session's env only; the .env, the record and the "
+    "snapshot keep `app://<name>`, so the next spawn asks again",
+    "an unresolved reference is DROPPED, never forwarded as the literal; "
+    "`app://<name>?required` refuses the bootstrap instead",
+    "an `expires_at` in the answer schedules a re-resolution a margin "
+    "before it (JAATO_OAUTH_REFRESH_MARGIN)",
+    "a resolved name is granted past the `cli` / `interactive_shell` secret "
+    "scrub (#1228); MCP servers never receive it",
+    "a workspace an application owns over WebSocket is resolved by that "
+    "application; an IPC account answers only for workspaces no "
+    "application owns",
+)
+
+
 @dataclass(frozen=True)
 class AppSecretAnswer:
     """The outcome of resolving one ``app://`` reference (#1226).

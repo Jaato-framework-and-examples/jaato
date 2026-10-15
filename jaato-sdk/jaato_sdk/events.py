@@ -659,8 +659,10 @@ from jaato_sdk.client_tool_timeout import DEFAULT_CLIENT_TOOL_TIMEOUT_MS
 # workspace directory's owner uid equals the connection's ``SO_PEERCRED``
 # uid).  A session the daemon starts on its own (reactor stage, wake,
 # revive) then resolves ``app://`` references over IPC as WS sessions do
-# over the bind channel.  A NEW verb (the 1.7 rule): an older daemon ignores
-# it and every reference would still be dropped, so the SDK refuses below
+# over the bind channel.  ``SecretReloadRequest`` is answered over IPC too:
+# it re-resolves the loaded sessions in workspaces the caller's account
+# owns.  NEW verbs (the 1.7 rule): an older daemon ignores them and every
+# reference would still be dropped, so the SDK refuses below
 # ``MIN_SECRET_RESOLVER_PROTOCOL``.
 PROTOCOL_VERSION = "1.40"
 
@@ -4684,6 +4686,10 @@ class SecretReloadRequest(Event):
     the daemon qualifies ``user`` with the ``app_id`` the bind connection
     authenticated as, so one application can never reload another's ``alice``.
 
+    Over IPC (1.40, #1609) the same request reloads every loaded session in a
+    workspace the connection's OS account owns (its ``SO_PEERCRED`` uid);
+    ``user`` is not read there.
+
     Attributes:
         request_id: Correlates with :class:`SecretReloadResultEvent`.
         user: The **unqualified** identity whose sessions to reload.  The
@@ -4704,7 +4710,8 @@ class SecretReloadResultEvent(Event):
       says how many.  ``0`` is the ordinary answer when the user has no session
       loaded, and is not a failure.
     * ``"denied"``  — this connection may not ask (not an app-credential
-      connection, or no app credentials configured on this daemon).
+      connection, or no app credentials configured on this daemon; over IPC,
+      a transport that reports no peer credential).
 
     Attributes:
         reloaded: How many loaded sessions were re-resolved.  ``0`` whenever

@@ -1819,7 +1819,7 @@ await client.register_secret_resolver(
 | the resolver: owner = uid of the workspace directory (`os.stat` of the resolved path), matched against the registration's `SO_PEERCRED` uid; no live registration is `unreachable`, naming the uid | `server/ipc_app_secret.py` (`IPCAppSecretResolver`, `workspace_owner_uid`) |
 | the transport: `secret.resolve` sent on the loop, answered by a `secret.resolve.result` taken only from the connection asked (`PendingSecretResolves`); a closed connection fails its pending requests and unregisters | `JaatoIPCServer._resolve_app_secret_over_ipc` |
 | WS first: `chain_app_secret_resolvers(ws, ipc)` resolves with the first resolver that names an owner, so a workspace an application owns is never answered by a local account | `server/app_secret.py`, `SessionManager._construct_and_initialize_server` |
-| the SDK: `IPCClient.register_secret_resolver(resolver)` (a `str` is `ok`, `None` is `not_found`, or a dict with `status` / `value` / `expires_at` / `detail`), refused below `MIN_SECRET_RESOLVER_PROTOCOL`; re-registered by the recovery client after a reconnect; `WSClient` refuses it | `client/ipc.py`, `recovery.py`, `ws.py` |
+| the SDK: `IPCClient.register_secret_resolver(resolver)` (a `str` is `ok`, `None` is `not_found`, or a dict with `status` / `value` / `expires_at` / `detail`) and `reload_secrets()`, both refused below `MIN_SECRET_RESOLVER_PROTOCOL`; the resolver is re-registered by the recovery client after a reconnect; `WSClient` refuses registration | `client/ipc.py`, `recovery.py`, `ws.py` |
 
 | Rule | Why |
 |---|---|
@@ -1831,10 +1831,17 @@ await client.register_secret_resolver(
 an application serving several people from one account keys on
 `workspace`. Everything after resolution is #1226's: drop on failure,
 `?required` refuses the bootstrap, `expires_at` schedules the pre-expiry
-reload, the name is granted past the `cli` scrub (#1228). Not done: an
-IPC `secret.reload` (a client can call `session.reload_env`). Guard:
+reload, the name is granted past the `cli` scrub (#1228).
+
+`secret.reload` is answered over IPC too: `IPCClient.reload_secrets()`
+re-resolves every loaded session in a workspace the caller's account owns
+(`SessionManager.reload_ipc_owner_sessions(uid)`, the peer uid, never the
+request's `user`), off the loop because it calls runners. `jaato-scaffold
+explain secrets` renders the rules, statuses, verbs and the SDK floor from
+`ANSWER_STATUSES` / `RESOLUTION_RULES` (`app_secret.py`) and `IPC_RULES`
+(`ipc_app_secret.py`). Guard:
 `jaato_server/server/tests/test_app_secret_resolved_over_ipc_1609.py`,
-six reversions, over a real `JaatoIPCServer` and `IPCClient`.
+nine reversions, over a real `JaatoIPCServer` and `IPCClient`.
 
 Found on the way: under mcp 2.x a `Tool` exposes `input_schema` (the
 camelCase name is only the wire alias), so `get_tool_schemas` raised for

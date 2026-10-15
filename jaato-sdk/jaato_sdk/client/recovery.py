@@ -808,6 +808,16 @@ class IPCRecoveryClient:
                 resolver, timeout=timeout)
         return None
 
+    async def reload_secrets(self, *, user: str = "", timeout: float = 30.0) -> Any:
+        """Re-resolve ``app://`` references in live sessions (#1609).
+
+        Proxied to the inner client; see ``IPCClient.reload_secrets``.
+        """
+        self._check_can_send()
+        if not self._client:
+            raise ConnectionError("reload_secrets: not connected")
+        return await self._client.reload_secrets(user=user, timeout=timeout)
+
     @property
     def client_tool_timeouts(self) -> Dict[str, float]:
         """``{tool name: seconds}`` the daemon waits for each host tool (#1625).

@@ -19,7 +19,10 @@ drive a real ``JaatoIPCServer``, a real ``IPCClient`` and a real
 * a disconnect unregisters, so the next spawn drops the reference again;
 * the daemon wiring hands the IPC resolver to the session manager, which
   hands both to every session it constructs;
-* the SDK refuses the verb below protocol 1.40, and on WebSocket.
+* ``secret.reload`` over IPC reloads the loaded sessions in workspaces the
+  caller's account owns, and no others (an application's, another uid's);
+* the SDK refuses the verbs below protocol 1.40, and registration on
+  WebSocket.
 """
 
 from __future__ import annotations
@@ -236,6 +239,70 @@ def test_no_registration_names_the_uid_in_the_reason() -> None:
     assert "uid 4242" in (answer.detail or "")
 
 
+# ---------------------------------------------------- secret.reload over IPC
+
+
+class _ReloadRecorder:
+    """A session manager that records which uid a reload was scoped to."""
+
+    def __init__(self) -> None:
+        self.uids: list = []
+
+    def reload_ipc_owner_sessions(self, uid: int) -> int:
+        self.uids.append(uid)
+        return 2
+
+
+def test_secret_reload_over_ipc_is_scoped_to_the_peer_uid() -> None:
+    got: dict = {}
+    sm = _ReloadRecorder()
+
+    async def body(server: Any, client: Any) -> None:
+        server._session_manager = sm
+        got["answer"] = await client.reload_secrets(user="someone-else", timeout=5)
+
+    _drive(body)
+    assert got["answer"].status == "ok"
+    assert got["answer"].reloaded == 2
+    assert sm.uids == [os.getuid()]
+
+
+def _manager(sessions: dict, ws_owner: Any, owner_uid_of: Any) -> Any:
+    import threading
+
+    from jaato_server.server.session_manager import SessionManager
+
+    sm = SessionManager.__new__(SessionManager)
+    sm._lock = threading.RLock()
+    sm._sessions = {sid: type("S", (), {"workspace_path": p})()
+                    for sid, p in sessions.items()}
+    sm._app_secret_resolver = AppSecretResolver(
+        owner_of=ws_owner, transport=lambda *a: AppSecretAnswer(status="ok", value="x"))
+    sm._ipc_app_secret_resolver = IPCAppSecretResolver(
+        lambda *a: AppSecretAnswer(status="ok", value="x"),
+        owner_uid_of=owner_uid_of)
+    sm.reloaded = []
+
+    def _reload(sid: str) -> dict:
+        sm.reloaded.append(sid)
+        return {"found": True}
+
+    sm.reload_session_env = _reload
+    return sm
+
+
+def test_reload_ipc_owner_sessions_touches_only_the_accounts_workspaces() -> None:
+    me = os.getuid()
+    uids = {"/mine": me, "/theirs": me + 1, "/app-owned": me}
+    sm = _manager(
+        {"a": "/mine", "b": "/theirs", "c": "/app-owned", "d": None},
+        ws_owner=lambda p: "acme:alice" if p == "/app-owned" else None,
+        owner_uid_of=lambda p: uids.get(p),
+    )
+    assert sm.reload_ipc_owner_sessions(me) == 1
+    assert sm.reloaded == ["a"]
+
+
 # ------------------------------------------------------------- wiring
 
 
@@ -259,6 +326,22 @@ def test_every_session_gets_both_resolvers_chained() -> None:
     call = src[i:src.index("_resolve_session_env()", i)]
     assert "chain_app_secret_resolvers" in call
     assert "_ipc_app_secret_resolver" in call
+
+
+# --------------------------------------------------------- jaato-scaffold
+
+
+def test_explain_secrets_renders_the_rules_the_code_holds() -> None:
+    from jaato_server.server.app_secret import ANSWER_STATUSES, RESOLUTION_RULES
+    from jaato_server.server.ipc_app_secret import IPC_RULES
+    from jaato_server.shared.scaffold.introspection_verbs import _SCOPES
+
+    data, text = _SCOPES["secrets"].render()
+    assert data["transports"]["ipc"]["min_protocol"] == "1.40"
+    assert data["transports"]["ipc"]["rules"] == list(IPC_RULES)
+    assert data["rules"] == list(RESOLUTION_RULES)
+    assert set(data["statuses"]) == {k for k, _ in ANSWER_STATUSES}
+    assert "register_secret_resolver" in text and "reload_secrets" in text
 
 
 # ---------------------------------------------------------------- the SDK
@@ -287,6 +370,17 @@ def test_the_sdk_normalises_resolver_returns() -> None:
     assert _secret_outcome(42)["status"] == "error"
 
 
+def test_the_sdk_refuses_reload_below_1_40() -> None:
+    from jaato_sdk.client.ipc import IPCClient
+    from jaato_sdk.events import ClientType
+
+    client = IPCClient("/nonexistent.sock", auto_start=False,
+                       client_type=ClientType.API)
+    client._server_protocol_version = "1.39"
+    with pytest.raises(ValueError, match="1.40"):
+        asyncio.run(client.reload_secrets())
+
+
 def test_the_ws_client_refuses_the_ipc_verb() -> None:
     from jaato_sdk.client.ws import WSClient
 
@@ -296,6 +390,27 @@ def test_the_ws_client_refuses_the_ipc_verb() -> None:
 
 
 REVERSIONS = [
+    Reversion(
+        target="jaato-server/jaato_server/shared/scaffold/introspection_verbs.py",
+        find='    "secrets": ExplainScope(_explain.secrets,\n',
+        replace='    "secrets-gone": ExplainScope(_explain.secrets,\n',
+        test="test_explain_secrets_renders_the_rules_the_code_holds",
+        because="jaato-scaffold has no topic explaining app:// resolution",
+    ),
+    Reversion(
+        target=_IPC,
+        find="        reloaded = await asyncio.to_thread(sm.reload_ipc_owner_sessions, peer.uid)\n",
+        replace="        reloaded = await asyncio.to_thread(sm.reload_ipc_owner_sessions, int(event.user or 0))\n",
+        test="test_secret_reload_over_ipc_is_scoped_to_the_peer_uid",
+        because="the request, not the kernel, names whose sessions are reloaded",
+    ),
+    Reversion(
+        target=_SM,
+        find="            if path and resolver.owner_for(path) == owner\n",
+        replace="            if path\n",
+        test="test_reload_ipc_owner_sessions_touches_only_the_accounts_workspaces",
+        because="an IPC reload reloads every loaded session on the daemon",
+    ),
     Reversion(
         target=_IPC,
         find="        self._app_secret_resolver.register(client_id, peer.uid, peer.identity)\n",

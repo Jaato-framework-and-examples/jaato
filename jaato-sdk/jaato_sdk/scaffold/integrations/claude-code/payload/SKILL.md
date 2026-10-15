@@ -98,6 +98,7 @@ jaato-scaffold explain archetype <name>      # its tree, file by file, and its s
 jaato-scaffold explain integrations         # tools jaato can wire into (this skill is one)
 jaato-scaffold explain releases             # newer builds on PyPI / TestPyPI
 jaato-scaffold explain gh                   # driving `gh` / `git` with a per-user token
+jaato-scaffold explain secrets              # app:// references and who answers them
 ```
 
 **`dependencies` is a word you append to any of them**, not a topic of its own —

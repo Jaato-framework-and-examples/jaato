@@ -35587,6 +35587,10 @@ export interface SecretResolveResultEvent {
  * the daemon qualifies ``user`` with the ``app_id`` the bind connection
  * authenticated as, so one application can never reload another's ``alice``.
  *
+ * Over IPC (1.40, #1609) the same request reloads every loaded session in a
+ * workspace the connection's OS account owns (its ``SO_PEERCRED`` uid);
+ * ``user`` is not read there.
+ *
  * Attributes:
  *     request_id: Correlates with :class:`SecretReloadResultEvent`.
  *     user: The **unqualified** identity whose sessions to reload.  The
@@ -35609,7 +35613,8 @@ export interface SecretReloadRequest {
  *   says how many.  ``0`` is the ordinary answer when the user has no session
  *   loaded, and is not a failure.
  * * ``"denied"``  — this connection may not ask (not an app-credential
- *   connection, or no app credentials configured on this daemon).
+ *   connection, or no app credentials configured on this daemon; over IPC,
+ *   a transport that reports no peer credential).
  *
  * Attributes:
  *     reloaded: How many loaded sessions were re-resolved.  ``0`` whenever
