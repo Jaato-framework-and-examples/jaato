@@ -626,6 +626,57 @@ def test_declared_decisions_are_answered_on_the_wire(provider):
 
 
 @pytest.mark.parametrize("provider", sorted(_provider_dirs()))
+def test_declared_decision_images_reach_the_wire(provider):
+    """``decision_images`` says ``decide(images=...)`` sends the image: the
+    stand-in sees ``assets`` the body refers to and answers ``box``."""
+    if not _read_declaration(provider).get("decision_images"):
+        pytest.skip(f"{provider} does not declare decision_images")
+    from jaato_sdk.plugins.model_provider.decisions import (
+        DecisionBox, DecisionImage, DecisionQuestion,
+    )
+    from jaato_server.shared.tests.decision_standin import DecisionStandIn, png_bytes
+
+    assert _read_declaration(provider).get("decisions"), (
+        f"{provider} declares decision_images without decisions")
+    questions = {
+        "here": DecisionQuestion("noul", "Is there a door in `photo`?"),
+        "where": DecisionQuestion("box", "the door in `photo`"),
+    }
+    image = DecisionImage("image/png", png_bytes(), "door")
+    with DecisionStandIn() as server:
+        result = _DECISION_SETUP[provider](server).decide(
+            {"photo": "{{image:door}}"}, questions, images=[image])
+        posts = server.posts()
+    body = posts[0][2]
+    assert len(body["assets"]) == 1 and next(iter(body["assets"])) == body["state"]["photo"], (
+        f"{provider}: decide(images=...) did not put the image in assets")
+    assert isinstance(result.answers["where"].value, DecisionBox)
+
+
+@pytest.mark.parametrize("provider", sorted(_provider_dirs()))
+def test_undeclared_decision_images_are_refused(provider):
+    """A decision provider that does not declare ``decision_images`` refuses
+    ``images=`` before sending, rather than letting the vendor answer
+    about a reference string."""
+    decl = _read_declaration(provider)
+    if not decl.get("decisions") or decl.get("decision_images"):
+        pytest.skip(f"{provider} does not serve text-only decisions")
+    from jaato_sdk.plugins.model_provider.decisions import (
+        DecisionImage, DecisionImagesUnsupportedError, DecisionQuestion,
+    )
+    from jaato_server.shared.tests.decision_standin import DecisionStandIn, png_bytes
+
+    image = DecisionImage("image/png", png_bytes(), "door")
+    with DecisionStandIn() as server:
+        with pytest.raises(DecisionImagesUnsupportedError):
+            _DECISION_SETUP[provider](server).decide(
+                {"photo": "{{image:door}}"},
+                {"here": DecisionQuestion("noul", "A door in `photo`?")},
+                images=[image])
+        assert server.posts() == []
+
+
+@pytest.mark.parametrize("provider", sorted(_provider_dirs()))
 def test_undeclared_decisions_expose_no_decide(provider):
     if _read_declaration(provider).get("decisions"):
         pytest.skip(f"{provider} declares decisions")

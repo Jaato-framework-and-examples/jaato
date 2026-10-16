@@ -1,10 +1,11 @@
 # Decision Models (System One): `decisions` as an Output Modality
 
-Status: steps 1-7 of §11 are **shipped**: the modality, `decide()` on
+Status: steps 1-8 of §11 are **shipped**: the modality, `decide()` on
 `openrouter`, `decision_models:`, the `decide` tool, the permission gate,
-the `laya` adapter and the text-only `typesafe` adapter (§6.2). §8.3 lists
-the consumers still to come. §12 (images and the `box` question, Jev
-1.14) is **proposed**, nothing built; it is steps 8-10 of §11.
+the `laya` adapter, the `typesafe` adapter (§6.2), and images and the `box`
+question on `typesafe` (§12.2-§12.4). §8.3 lists the consumers still to
+come. Steps 9 (images in the `decide` tool) and 10 (images through
+OpenRouter) are not built.
 
 ## 1. What a decision model is
 
@@ -578,13 +579,20 @@ without a gate (the default decides, as before).
    - The transport is `_decisions_http.py`; `429` / `5xx` are retried, `401` / `404` / `4xx` are not. No images header is sent (§12).
    - `examples/provider_smoke_decisions.py --typesafe` (stand-in) and `--live-typesafe` (the real API, key from the environment or the store).
    - Not run against the live API here (no key). Guard: `jaato_server/shared/tests/test_decide_on_typesafe.py`, six reversions, against the decision stand-in.
-8. **The contract** (§12.2-§12.4): `DecisionImage`, the `images=` parameter, `{{image:NAME}}` substitution, the local image checks (stdlib header parsing, no Pillow), `box` in `QUESTION_TYPES` with `DecisionBox`, the `decision_images` capability column, and the stand-in answering `box`, checking `assets` and the header. `typesafe` declares `decision_images` and sends images; every other adapter refuses `images=` with `DecisionImagesUnsupportedError`. `laya` declares `decision_images=False`. `--live-typesafe --image PATH` sends one image and one `box` question.
+8. **The contract** (§12.2-§12.4). **Shipped**:
+   - `jaato_sdk/plugins/model_provider/decision_images.py` reads a still PNG (`IHDR`, refusing an `acTL` before `IDAT`) or JPEG (the first `SOFn`) header with the standard library and holds the vendor's limits (`image_limit_problem`).
+   - In `decisions.py`: `DecisionImage`, `DecisionBox` (with `to_pixels`), `box` in `QUESTION_TYPES`, `DecisionImagesUnsupportedError`, and `build_decision_request(..., images=)`. It mints `jaato-image-<uuid4>` per image, substitutes `{{image:NAME}}` in the state, instructions and criteria values, and builds `assets`. It refuses, naming the question where one is to blame: a token naming no image, an image no token names, a token in an object key, a duplicate name, more than 64 images, a mime the bytes contradict, a format other than PNG/JPEG, a size limit, a request over 32 MiB, images over 32 MiB counted per use, `box` with criteria or with no image. With no images the body is byte-identical to before. `needs_image_header(body)` says when the vendor header is due (the doc proposed a flag returned by `build_decision_request`; a separate predicate keeps its return type).
+   - `parse_decision_response` reads `box`, refusing an edge outside [0, 1] or `left >= right` / `top >= bottom` with `DecisionResponseError` naming the question.
+   - `ProviderCapabilities.decision_images`, a new column every provider declares. `typesafe` declares it, sends `assets`, adds `TypeSafe-Danger-Zone-Images: true` when `needs_image_header` says so, and reports `image` in `modalities()`. `openrouter` and `laya` declare it `False` and refuse `images=` before sending.
+   - The stand-in answers `box` with TypeSafe's documented example and answers `400`, as TypeSafe does, to a request with images or `box` and no header, or with an asset referenced nowhere. `png_bytes` / `jpeg_bytes` build fixtures.
+   - `examples/provider_smoke_decisions.py --typesafe --image PATH` (stand-in) and `--live-typesafe --image PATH` (one more request, to `jev-1.14.0` unless `--image-model` names another) ask a `noul` and a `box` question and print the box in pixels.
+   - Not run against the live API here. Guards: `jaato_server/shared/tests/test_decision_images_and_box.py`, seven reversions; in `test_provider_capability_conformance.py`, a provider declaring `decision_images` must put the image in `assets` and read the `box`, and a decision provider that does not must refuse `images=` with nothing sent.
 9. **The `decide` tool's `images`** (§12.5): workspace paths and attachment ids, `box` answers with pixel coordinates, the ledger's image digests.
 10. **OpenRouter, optional and last** (§12.6): a live check that `/api/alpha/decisions` carries `assets` and the header (`--live-openrouter --image PATH`). `openrouter` declares `decision_images` only if it does; until then images go through `typesafe` and nothing waits on this step. Needs an OpenRouter key.
 
 ## 12. Images and `box` (Jev 1.14)
 
-Proposed. Nothing in §12 is built.
+Step 8 (the contract, on `typesafe`) is shipped; steps 9 (the `decide` tool) and 10 (OpenRouter) are not built.
 
 ### 12.1 What TypeSafe shipped
 
@@ -681,8 +689,8 @@ in `instructions`, or in a `criteria` value, `description` or `examples`.
 
 The header is added by the adapter, not the contract: it is TypeSafe's, and
 `laya-serve` or a future vendor may want another or none.
-`build_decision_request` returns a flag (`needs_image_header`) set when the
-request carries an image or a `box` question.
+`needs_image_header(body)` answers whether the request carries an image or
+a `box` question.
 
 ### 12.3 Checked before sending
 

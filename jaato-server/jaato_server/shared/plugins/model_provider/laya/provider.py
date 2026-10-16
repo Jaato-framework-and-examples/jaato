@@ -43,9 +43,11 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from jaato_sdk.plugins.model_provider.decisions import (
+    DecisionImage,
+    DecisionImagesUnsupportedError,
     DecisionModelOnlyError,
     DecisionQuestion,
     DecisionQuestionError,
@@ -369,10 +371,12 @@ class LayaProvider(ModalityCapabilityMixin):
         state: Any,
         questions: Mapping[str, DecisionQuestion],
         *,
+        images: Sequence[DecisionImage] = (),
         model: Optional[str] = None,
         cancel_token: Optional[CancelToken] = None,
     ) -> DecisionResult:
-        """Ask Laya typed questions about ``state``.
+        """Ask Laya typed questions about ``state``.  Text only: ``images``
+        is refused with :class:`DecisionImagesUnsupportedError`.
 
         Args:
             state: The text, object or array the questions are about.
@@ -394,6 +398,8 @@ class LayaProvider(ModalityCapabilityMixin):
         if not self._initialized:
             raise RuntimeError("Provider not initialized. Call initialize() first.")
         model = model or self._model_name or DEFAULT_MODEL
+        if images:
+            raise DecisionImagesUnsupportedError(self.name, model)
         body = build_decision_request(state, questions, model)
         self._check_fits(body, model)
         self._trace(f"DECIDE model={model} mode={self._mode} questions={list(questions)}")

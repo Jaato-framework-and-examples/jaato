@@ -26,6 +26,15 @@ Six modes, the same checks in each:
     JAATO_TYPESAFE_API_KEY=... python examples/provider_smoke_decisions.py --live-typesafe
     # (or TYPESAFE_API_KEY, or a key stored with 'typesafe-auth key')
 
+    # (7) an image and a box question, on either typesafe mode: one more
+    #     request, to jev-1.14.0 unless --image-model names another
+    python examples/provider_smoke_decisions.py --live-typesafe --image photo.jpg
+
+``--image PATH`` takes a still PNG or JPEG, 280-1568 px a side (it is
+checked before sending and never resized).  It asks whether the image shows
+a person (``noul``) and where its most prominent object is (``box``, Jev
+1.14 only), and prints the box as fractions and in pixels.
+
 The live run sends ONE request to ``POST /api/alpha/decisions`` with three
 questions (``noul``, ``choice``, ``score``) about a short support ticket.
 At Jev 1.13's price ($0.042 per million input tokens, output free) that
@@ -52,7 +61,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # Runnable straight from a checkout, not only from an installed venv.
 _ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +85,14 @@ from jaato_server.shared.plugins.model_provider.openrouter import (  # noqa: E40
 DEFAULT_MODEL = "typesafe/jev-1.13"
 LAYA_MODEL = "convaiinnovations/laya"
 TYPESAFE_MODEL = "jev-latest"
+#: ``box`` is Jev 1.14 only.
+IMAGE_MODEL = "jev-1.14.0"
+
+IMAGE_STATE = {"photo": "{{image:photo}}"}
+IMAGE_QUESTIONS: Dict[str, DecisionQuestion] = {
+    "person": DecisionQuestion("noul", "Does `photo` show a person?"),
+    "subject": DecisionQuestion("box", "the most prominent object in `photo`"),
+}
 
 STATE = (
     "Subject: payouts failing\n\n"
@@ -180,15 +197,62 @@ def check_decide(provider: Any, model: str, failures: List[str]) -> None:
     _check_answers(result, failures)
 
 
-def run(provider: Any, model: str) -> List[str]:
+def check_image(provider: Any, model: str, path: str, failures: List[str]) -> None:
+    """One request with an image: a ``noul`` and a ``box`` question."""
+    from jaato_sdk.plugins.model_provider.decision_images import read_image_info
+    from jaato_sdk.plugins.model_provider.decisions import (
+        DecisionBox, DecisionImage, DecisionQuestionError,
+    )
+
+    _section(f"image request ({path}, {model})")
+    data = open(path, "rb").read()
+    try:
+        info = read_image_info(data)
+    except ValueError as exc:
+        failures.append(f"image: {exc}")
+        print(exc)
+        return
+    print(f"{info.format}, {info.width}x{info.height}, {len(data)} bytes")
+    image = DecisionImage(f"image/{info.format}", data, "photo")
+    try:
+        result = provider.decide(IMAGE_STATE, IMAGE_QUESTIONS, images=[image], model=model)
+    except DecisionQuestionError as exc:
+        failures.append(f"image refused before sending: {exc}")
+        print(exc)
+        return
+    except DecisionResponseError as exc:
+        _section("raw response (could not be parsed)")
+        _dump(exc.body)
+        failures.append(f"image parse: {exc}")
+        return
+    except Exception as exc:   # noqa: BLE001 - the whole point is to see it
+        print(f"{type(exc).__name__}: {exc}")
+        failures.append(f"image decide() raised {type(exc).__name__}")
+        return
+    _section("raw response")
+    _dump(result.raw)
+    _section("parsed")
+    _describe(result)
+    box = result.answers["subject"].value
+    if isinstance(box, DecisionBox):
+        print(f"box in pixels: {box.to_pixels(info.width, info.height)}")
+    else:
+        failures.append(f"box answer is {box!r}, not a DecisionBox")
+
+
+def run(provider: Any, model: str, image: Optional[str] = None,
+        image_model: str = IMAGE_MODEL) -> List[str]:
     failures: List[str] = []
     check_catalog(provider, model, failures)
     check_complete_refuses(provider, failures)
     check_decide(provider, model, failures)
+    if image:
+        check_image(provider, image_model, image, failures)
     return failures
 
 
-def run_mock(model: str, laya: bool = False, typesafe: bool = False) -> List[str]:
+def run_mock(model: str, laya: bool = False, typesafe: bool = False,
+             image: Optional[str] = None, image_model: str = IMAGE_MODEL) -> List[str]:
     from jaato_server.shared.tests.decision_standin import (
         DecisionStandIn,
         laya_against,
@@ -200,7 +264,7 @@ def run_mock(model: str, laya: bool = False, typesafe: bool = False) -> List[str
                typesafe_against if typesafe else openrouter_against)
     with DecisionStandIn() as server:
         print(f"stand-in at {server.host} (answers anything, proves only our side)")
-        failures = run(against(server, model=model), model)
+        failures = run(against(server, model=model), model, image, image_model)
         _section("requests the stand-in received")
         for method, path, _headers, _body in server.seen:
             print(f"  {method} {path}")
@@ -228,7 +292,8 @@ def run_live_laya(host: str, model: str) -> List[str]:
     return run(provider, model)
 
 
-def run_live_typesafe(model: str) -> List[str]:
+def run_live_typesafe(model: str, image: Optional[str] = None,
+                      image_model: str = IMAGE_MODEL) -> List[str]:
     from jaato_server.shared.plugins.model_provider.typesafe import TypeSafeProvider
 
     provider = TypeSafeProvider()
@@ -241,7 +306,7 @@ def run_live_typesafe(model: str) -> List[str]:
         return ["initialize() failed"]
     provider.connect(model)
     print(f"TypeSafe, {provider.get_auth_info()}")
-    return run(provider, model)
+    return run(provider, model, image, image_model)
 
 
 def main() -> int:
@@ -259,7 +324,14 @@ def main() -> int:
     parser.add_argument("--model", default=None,
                         help=f"decision model (default {DEFAULT_MODEL}; "
                              f"{LAYA_MODEL} for laya, {TYPESAFE_MODEL} for typesafe)")
+    parser.add_argument("--image", metavar="PATH",
+                        help="also ask about this PNG/JPEG (typesafe modes only)")
+    parser.add_argument("--image-model", default=IMAGE_MODEL,
+                        help=f"model for the image request (default {IMAGE_MODEL})")
     args = parser.parse_args()
+    if args.image and not (args.typesafe or args.live_typesafe):
+        parser.error("--image needs --typesafe or --live-typesafe: only the "
+                     "typesafe provider sends images")
 
     laya = bool(args.laya or args.live_laya)
     typesafe = bool(args.typesafe or args.live_typesafe)
@@ -269,11 +341,12 @@ def main() -> int:
     if args.live_laya:
         failures = run_live_laya(args.live_laya, model)
     elif args.live_typesafe:
-        failures = run_live_typesafe(model)
+        failures = run_live_typesafe(model, args.image, args.image_model)
     elif args.live_openrouter:
         failures = run_live(model)
     else:
-        failures = run_mock(model, laya=laya, typesafe=typesafe)
+        failures = run_mock(model, laya=laya, typesafe=typesafe,
+                            image=args.image, image_model=args.image_model)
     _section("result")
     if failures:
         for failure in failures:

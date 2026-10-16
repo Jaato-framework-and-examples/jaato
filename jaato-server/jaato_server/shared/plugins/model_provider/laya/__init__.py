@@ -53,6 +53,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     output_media=False,
     reasoning_replay=False,
     decisions=True,
+    decision_images=False,   # laya answers about text only
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

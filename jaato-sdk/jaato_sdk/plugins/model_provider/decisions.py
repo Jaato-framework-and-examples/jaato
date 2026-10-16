@@ -31,18 +31,55 @@ The wire, as the vendor documents it (Jev 1.13):
   "probabilities", "confidence"}``, ``score`` ``{"type", "score",
   "legend", "probabilities", "confidence"}``;
 * ``usage`` ``{"input_tokens", "output_tokens"}``.
+
+Images and ``box`` (Jev 1.14, design §12): a request may carry still
+images.  The caller names each one (:class:`DecisionImage`) and writes
+``{{image:NAME}}`` where it belongs, in the state, in ``instructions`` or
+in a ``criteria`` value; :func:`build_decision_request` mints one vendor
+reference per image (``jaato-image-<uuid4>``), substitutes it, and adds
+the top-level ``assets`` map.  A ``box`` question answers one
+:class:`DecisionBox`.  The adapter decides the extra header a vendor wants
+(:func:`needs_image_header`); an adapter that cannot send images refuses
+them with :class:`DecisionImagesUnsupportedError`.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import math
+import re
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Protocol, Union, runtime_checkable
+from typing import (
+    Any, Dict, List, Mapping, Optional, Protocol, Sequence, Union, runtime_checkable,
+)
 
+from .decision_images import (
+    MIME_FORMATS,
+    ImageHeaderError,
+    ImageInfo,
+    image_limit_problem,
+    read_image_info,
+)
 from .types import CancelToken, TokenUsage
 
-#: The three question types both known decision models answer.
-QUESTION_TYPES = ("noul", "choice", "score")
+#: The question types.  ``box`` (Jev 1.14) needs an image in the request.
+QUESTION_TYPES = ("noul", "choice", "score", "box")
+
+#: Where a caller puts an image: ``{{image:NAME}}``.
+IMAGE_TOKEN_RE = re.compile(r"\{\{image:([^{}]*)\}\}")
+#: An image name: what may stand between ``{{image:`` and ``}}``.
+IMAGE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+#: The vendor reference jaato mints per image.  Fixed length, so the
+#: vendor's 1,024-byte per-reference limit always holds.
+IMAGE_REFERENCE_PREFIX = "jaato-image-"
+#: Images in one request: the vendor's 65,536-byte budget for every
+#: reference, divided by its 1,024-byte limit for one.
+MAX_IMAGES = 64
+#: The request body, and every image counted once per use ("expanded").
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_EXPANDED_IMAGE_BYTES = 32 * 1024 * 1024
 
 #: ``choice`` takes 1..255 options; ``score`` takes 2..10 ordered levels.
 MAX_CHOICE_OPTIONS = 255
@@ -83,6 +120,24 @@ class DecisionResponseError(DecisionError):
         super().__init__(f"Decision response{where}: {reason}")
 
 
+class DecisionImagesUnsupportedError(DecisionError):
+    """``decide(images=...)`` on an adapter that cannot send images.
+
+    Raised before sending.  The alternative, a vendor answering about the
+    reference string as text with a plausible probability, is the worst
+    outcome a decision can have.
+    """
+
+    def __init__(self, provider: str, model: str = "") -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            f"Provider {provider!r} does not send images to decision models "
+            "(it does not declare decision_images).  Bind the model through "
+            "the 'typesafe' provider to ask about images."
+        )
+
+
 class DecisionModelOnlyError(RuntimeError):
     """``complete()`` was called on a model that only answers decisions.
 
@@ -111,7 +166,8 @@ class DecisionQuestion:
     * ``noul``: ``None``, or ``{"true": ..., "false": ...}`` describing
       each outcome;
     * ``choice``: ``{option: description or None}``, 1..255 options;
-    * ``score``: ``[level, ...]``, 2..10 levels, lowest first.
+    * ``score``: ``[level, ...]``, 2..10 levels, lowest first;
+    * ``box``: ``None``; ``instructions`` names the one target to find.
 
     ``instructions`` and every criteria value may be a string, an object
     or an array, so a question can carry structured reference data.
@@ -135,17 +191,53 @@ class DecisionQuestion:
 
 
 @dataclass(frozen=True)
+class DecisionImage:
+    """One still image for a decision request.
+
+    ``name`` is the caller's: it is what ``{{image:NAME}}`` refers to and
+    never reaches the vendor.  ``mime_type`` must agree with the bytes
+    (``image/png`` or ``image/jpeg``); ``data`` is decoded.
+    """
+
+    mime_type: str
+    data: bytes
+    name: str
+
+
+@dataclass(frozen=True)
+class DecisionBox:
+    """Where a ``box`` question found its target.
+
+    Edges are fractions of the image from its top-left corner: ``left``
+    and ``right`` of the width, ``top`` and ``bottom`` of the height, with
+    ``left < right`` and ``top < bottom``.  There is always a box; whether
+    the target is there at all is a separate ``noul``.
+    """
+
+    top: float
+    bottom: float
+    left: float
+    right: float
+
+    def to_pixels(self, width: int, height: int) -> Dict[str, int]:
+        """The edges in pixels of a ``width`` x ``height`` image."""
+        return {"top": round(self.top * height), "bottom": round(self.bottom * height),
+                "left": round(self.left * width), "right": round(self.right * width)}
+
+
+@dataclass(frozen=True)
 class DecisionAnswer:
     """One answer.
 
-    ``value`` is the noul probability, the chosen option, or the
-    probability-weighted score (which may land between levels).
+    ``value`` is the noul probability, the chosen option, the
+    probability-weighted score (which may land between levels), or a
+    :class:`DecisionBox`.
     ``confidence`` is ``None`` when the wire sent none, which is always
     the case for ``noul``: absent is not zero.
     """
 
     type: str
-    value: Union[float, str]
+    value: Union[float, str, DecisionBox]
     probabilities: Optional[Dict[str, float]] = None
     confidence: Optional[float] = None
     legend: Optional[Dict[str, str]] = None
@@ -176,6 +268,7 @@ class DecisionCapable(Protocol):
         state: State,
         questions: Mapping[str, DecisionQuestion],
         *,
+        images: Sequence[DecisionImage] = (),
         model: Optional[str] = None,
         cancel_token: Optional[CancelToken] = None,
     ) -> DecisionResult: ...
@@ -237,7 +330,15 @@ def _check_score(qid: str, criteria: Any) -> None:
         )
 
 
-_CRITERIA_CHECKS = {"noul": _check_noul, "choice": _check_choice, "score": _check_score}
+def _check_box(qid: str, criteria: Any) -> None:
+    if criteria is not None:
+        raise DecisionQuestionError(
+            qid, "box takes no criteria; name the one target in instructions"
+        )
+
+
+_CRITERIA_CHECKS = {"noul": _check_noul, "choice": _check_choice,
+                    "score": _check_score, "box": _check_box}
 
 
 def validate_question(qid: Any, question: Any) -> None:
@@ -254,13 +355,102 @@ def validate_question(qid: Any, question: Any) -> None:
     _CRITERIA_CHECKS[question.type](qid, question.criteria)
 
 
+def _check_images(images: Sequence[DecisionImage]) -> Dict[str, ImageInfo]:
+    """Each image's header, after every local check.  ``{name: info}``."""
+    if isinstance(images, (str, bytes)) or not isinstance(images, Sequence):
+        raise DecisionQuestionError(None, "images must be a sequence of DecisionImage")
+    if len(images) > MAX_IMAGES:
+        raise DecisionQuestionError(
+            None, f"at most {MAX_IMAGES} images per request, got {len(images)}")
+    infos: Dict[str, ImageInfo] = {}
+    for image in images:
+        if not isinstance(image, DecisionImage):
+            raise DecisionQuestionError(None, "every image must be a DecisionImage")
+        name = image.name
+        if not isinstance(name, str) or not IMAGE_NAME_RE.fullmatch(name):
+            raise DecisionQuestionError(
+                None, f"image name {name!r} must match {IMAGE_NAME_RE.pattern}")
+        if name in infos:
+            raise DecisionQuestionError(None, f"two images are named {name!r}")
+        declared = MIME_FORMATS.get(str(image.mime_type).lower())
+        if declared is None:
+            raise DecisionQuestionError(
+                None, f"image {name!r}: {image.mime_type!r} is not image/png or "
+                "image/jpeg (convert GIF, WebP or HEIC first)")
+        try:
+            info = read_image_info(image.data)
+        except ImageHeaderError as exc:
+            raise DecisionQuestionError(None, f"image {name!r}: {exc}") from exc
+        if info.format != declared:
+            raise DecisionQuestionError(
+                None, f"image {name!r} is declared {image.mime_type} but its bytes "
+                f"are {info.format}; declare what it is")
+        problem = image_limit_problem(info, len(image.data))
+        if problem:
+            raise DecisionQuestionError(None, f"image {name!r}: {problem}")
+        infos[name] = info
+    return infos
+
+
+class _Substitution:
+    """Replaces ``{{image:NAME}}`` with the minted reference, counting uses."""
+
+    def __init__(self, references: Dict[str, str]) -> None:
+        self.references = references
+        self.uses: Dict[str, int] = {name: 0 for name in references}
+
+    def _replace(self, qid: Optional[str], text: str) -> str:
+        def one(match: "re.Match[str]") -> str:
+            name = match.group(1)
+            if name not in self.references:
+                raise DecisionQuestionError(
+                    qid, f"{{{{image:{name}}}}} names no image in this request")
+            self.uses[name] += 1
+            return self.references[name]
+        return IMAGE_TOKEN_RE.sub(one, text)
+
+    def apply(self, qid: Optional[str], value: Any) -> Any:
+        """``value`` with every token substituted.  A token in an object
+        key is refused: the vendor never replaces keys, so it would reach
+        the model as literal text."""
+        if isinstance(value, str):
+            return self._replace(qid, value)
+        if isinstance(value, list):
+            return [self.apply(qid, item) for item in value]
+        if isinstance(value, dict):
+            out = {}
+            for key, item in value.items():
+                if isinstance(key, str) and IMAGE_TOKEN_RE.search(key):
+                    raise DecisionQuestionError(
+                        qid, f"an image token in the object key {key!r} would not be "
+                        "replaced; put it in the value")
+                out[key] = self.apply(qid, item)
+            return out
+        return value
+
+
+def _b64_size(size: int) -> int:
+    return 4 * ((size + 2) // 3)
+
+
 def build_decision_request(
     state: State,
     questions: Mapping[str, DecisionQuestion],
     model: str,
+    images: Sequence[DecisionImage] = (),
 ) -> Dict[str, Any]:
     """Validate and build the request body.  Ids are kept as given: they
-    are the caller's own and come back as the keys of ``answers``."""
+    are the caller's own and come back as the keys of ``answers``.
+
+    With ``images``, every ``{{image:NAME}}`` in the state, the
+    instructions and the criteria is replaced by a minted reference and
+    the body gains ``assets``.  Refused before sending, naming the
+    question where one is to blame: a token naming no image, an image no
+    token names, a token in an object key, a ``box`` question with no
+    image, an image that breaks a limit (:mod:`.decision_images`), and a
+    body over ``MAX_REQUEST_BYTES``.  With no images the body is exactly
+    what it was before images existed.
+    """
     _check_text_or_structure(None, "state", state)
     if not isinstance(questions, Mapping) or not questions:
         raise DecisionQuestionError(None, "at least one question is required")
@@ -268,11 +458,67 @@ def build_decision_request(
         raise DecisionQuestionError(None, "no model named")
     for qid, question in questions.items():
         validate_question(qid, question)
-    return {
-        "state": state,
-        "model": model,
-        "questions": {qid: q.to_wire() for qid, q in questions.items()},
+    infos = _check_images(images)
+    if not infos:
+        for qid, question in questions.items():
+            if question.type == "box":
+                raise DecisionQuestionError(
+                    qid, "a box question needs an image in the request")
+        return {
+            "state": state,
+            "model": model,
+            "questions": {qid: q.to_wire() for qid, q in questions.items()},
+        }
+    references = {name: f"{IMAGE_REFERENCE_PREFIX}{uuid.uuid4()}" for name in infos}
+    sub = _Substitution(references)
+    wire_state = sub.apply(None, state)
+    wire_questions = {}
+    for qid, question in questions.items():
+        wire = {"type": question.type,
+                "instructions": sub.apply(qid, question.instructions)}
+        if question.criteria is not None:
+            wire["criteria"] = sub.apply(qid, question.criteria)
+        wire_questions[qid] = wire
+    unused = [name for name, count in sub.uses.items() if not count]
+    if unused:
+        raise DecisionQuestionError(
+            None, f"image {unused[0]!r} is not referenced; write "
+            f"{{{{image:{unused[0]}}}}} where it belongs")
+    by_name = {image.name: image for image in images}
+    expanded = sum(len(by_name[n].data) * count for n, count in sub.uses.items())
+    if expanded > MAX_EXPANDED_IMAGE_BYTES:
+        raise DecisionQuestionError(
+            None, f"images count {expanded} bytes with every use counted, over "
+            f"{MAX_EXPANDED_IMAGE_BYTES}")
+    body: Dict[str, Any] = {"state": wire_state, "model": model,
+                            "questions": wire_questions}
+    text = len(json.dumps(body, ensure_ascii=False, default=str).encode())
+    estimate = text + sum(_b64_size(len(i.data)) + 200 for i in images)
+    if estimate > MAX_REQUEST_BYTES:
+        raise DecisionQuestionError(
+            None, f"the request is ~{estimate} bytes with its images, over "
+            f"{MAX_REQUEST_BYTES}; send fewer or smaller images")
+    body["assets"] = {
+        references[image.name]: {
+            "type": "image",
+            "format": infos[image.name].format,
+            "data_base64": base64.b64encode(image.data).decode("ascii"),
+        }
+        for image in images
     }
+    return body
+
+
+def needs_image_header(body: Mapping[str, Any]) -> bool:
+    """Whether ``body`` carries an image or a ``box`` question.
+
+    The vendor's opt-in header is the adapter's to add (TypeSafe's is
+    ``TypeSafe-Danger-Zone-Images: true``); this says when one is due.
+    """
+    if body.get("assets"):
+        return True
+    return any(isinstance(q, Mapping) and q.get("type") == "box"
+               for q in (body.get("questions") or {}).values())
 
 
 # ----------------------------------------------------------------- response
@@ -354,7 +600,27 @@ def _parse_score(qid: str, question: DecisionQuestion, answer: Dict[str, Any],
     )
 
 
-_ANSWER_PARSERS = {"noul": _parse_noul, "choice": _parse_choice, "score": _parse_score}
+def _parse_box(qid: str, question: DecisionQuestion, answer: Dict[str, Any],
+               body: Any) -> DecisionAnswer:
+    raw = answer.get("box")
+    if not isinstance(raw, dict):
+        raise DecisionResponseError(f"box must be an object, got {raw!r}", qid, body)
+    edges = {}
+    for edge in ("top", "bottom", "left", "right"):
+        edges[edge] = _number(raw.get(edge))
+        if edges[edge] is None or not 0.0 <= edges[edge] <= 1.0:
+            raise DecisionResponseError(
+                f"box {edge} must be a fraction in [0, 1], got {raw.get(edge)!r}",
+                qid, body)
+    if edges["left"] >= edges["right"] or edges["top"] >= edges["bottom"]:
+        raise DecisionResponseError(
+            f"box edges must have left < right and top < bottom, got {raw!r}", qid, body)
+    return DecisionAnswer(type="box", value=DecisionBox(**edges),
+                          confidence=_optional_confidence(qid, answer, body))
+
+
+_ANSWER_PARSERS = {"noul": _parse_noul, "choice": _parse_choice,
+                   "score": _parse_score, "box": _parse_box}
 
 
 def parse_decision_usage(usage: Any) -> TokenUsage:
@@ -427,12 +693,18 @@ __all__ = [
     "DecisionQuestionError",
     "DecisionResponseError",
     "DecisionModelOnlyError",
+    "DecisionImagesUnsupportedError",
     "DecisionQuestion",
+    "DecisionImage",
+    "DecisionBox",
     "DecisionAnswer",
     "DecisionResult",
     "DecisionCapable",
     "validate_question",
     "build_decision_request",
+    "needs_image_header",
+    "IMAGE_TOKEN_RE",
+    "MAX_IMAGES",
     "parse_decision_response",
     "parse_decision_usage",
 ]

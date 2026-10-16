@@ -5,7 +5,11 @@ Serves, on ``127.0.0.1`` and an ephemeral port:
 * ``POST /api/alpha/decisions`` (OpenRouter) and ``POST /v1/systemone``
   (``laya-serve`` and TypeSafe's own API): answers every question it is asked, in
   the vendor's documented shape (``noul`` 0.95; ``choice`` the first
-  option; ``score`` 1.0), unless a scripted reply is queued;
+  option; ``score`` 1.0; ``box`` TypeSafe's documented example), unless a
+  scripted reply is queued.  A request carrying ``assets`` or a ``box``
+  question is held to TypeSafe's rules first: without
+  ``TypeSafe-Danger-Zone-Images: true`` it is a ``400``, and so is an
+  asset whose reference appears nowhere else in the body;
 * ``GET /api/v1/models``: a listing with ``openai/gpt-4o`` only;
 * ``GET /api/v1/models/typesafe/jev-1.13/endpoints``: the document the
   real API returned for Jev on 2026-10-06 (trimmed);
@@ -55,9 +59,43 @@ LISTING: Dict[str, Any] = {
 }
 
 
+#: TypeSafe's header for a request with an image or a ``box`` question.
+IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
+
+#: The ``box`` answer in TypeSafe's docs (docs.typesafe.ai/go/box).
+BOX_ANSWER: Dict[str, Any] = {
+    "type": "box",
+    "box": {"top": 0.25, "bottom": 0.82, "left": 0.44, "right": 0.84},
+    "confidence": 0.9,
+}
+
+
+def image_rule_problem(headers: Dict[str, str], body: Any) -> Optional[str]:
+    """Why TypeSafe would ``400`` this body's images, or ``None``."""
+    if not isinstance(body, dict):
+        return None
+    assets = body.get("assets") or {}
+    has_box = any(isinstance(q, dict) and q.get("type") == "box"
+                  for q in (body.get("questions") or {}).values())
+    if not assets and not has_box:
+        return None
+    sent = {k.lower(): v for k, v in headers.items()}
+    if sent.get(IMAGES_HEADER.lower()) != "true":
+        return f"{IMAGES_HEADER}: true is required for images and box"
+    rest = json.dumps({k: v for k, v in body.items() if k != "assets"})
+    for reference in assets:
+        if reference not in rest:
+            return f"asset {reference!r} is not referenced"
+    if has_box and not assets:
+        return "box needs an image"
+    return None
+
+
 def default_answer(question: Dict[str, Any]) -> Dict[str, Any]:
     """A valid answer to ``question`` in the vendor's shape."""
     qtype = question.get("type")
+    if qtype == "box":
+        return json.loads(json.dumps(BOX_ANSWER))
     if qtype == "noul":
         return {"type": "noul", "noul": 0.95}
     if qtype == "choice":
@@ -118,6 +156,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.arrived.set()
         if self.path not in DECISION_PATHS:
             self._reply(404, {"error": "not found"})
+            return
+        problem = image_rule_problem(dict(self.headers), body)
+        if problem:
+            self._reply(400, {"error": problem})
             return
         if self.server.hang is not None:
             self.server.hang.wait(HANG_SECONDS)
@@ -222,3 +264,38 @@ def laya_against(server: DecisionStandIn, model: str = "convaiinnovations/laya",
     provider.initialize(ProviderConfig(extra={"host": server.host, **extra}))
     provider.connect(model)
     return provider
+
+
+# ------------------------------------------------------------------ images
+#
+# Byte fixtures for image tests, built with the standard library so no
+# test needs Pillow.
+
+def png_bytes(width: int = 300, height: int = 300, *, animated: bool = False) -> bytes:
+    """A real still (or, with ``animated``, an APNG-marked) greyscale PNG."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data)))
+
+    rows = b"".join(b"\x00" + b"\x80" * width for _ in range(height))
+    out = b"\x89PNG\r\n\x1a\n" + chunk(
+        b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+    if animated:
+        out += chunk(b"acTL", struct.pack(">II", 1, 0))
+    return out + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+def jpeg_bytes(width: int = 400, height: int = 300) -> bytes:
+    """A baseline JPEG header (SOI, APP0, SOF0, EOI): enough for the size
+    check, which reads headers only, and not a decodable picture."""
+    import struct
+
+    app0 = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    sof0 = struct.pack(">BHHB", 8, height, width, 1) + b"\x01\x11\x00"
+    return (b"\xff\xd8"
+            + b"\xff\xe0" + struct.pack(">H", len(app0) + 2) + app0
+            + b"\xff\xc0" + struct.pack(">H", len(sof0) + 2) + sof0
+            + b"\xff\xd9")

@@ -78,6 +78,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     # nothing to replay on either wire.
     reasoning_replay=False,
     decisions=False,
+    decision_images=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

@@ -1,7 +1,8 @@
 """TypeSafe Model Provider Plugin: Jev, a decision model, on TypeSafe's API.
 
-Jev answers typed questions (``noul`` / ``choice`` / ``score``) about a
-state with calibrated probabilities and writes no text.  ``decide()``
+Jev answers typed questions (``noul`` / ``choice`` / ``score``, and
+``box`` on Jev 1.14) about a state, which may include still images, with
+calibrated probabilities and writes no text.  ``decide()``
 posts to ``POST https://api.typesafe.ai/v1/systemone``; ``complete()``
 raises.  Bind it in a profile's ``decision_models:`` block, never as a
 tier (docs/design/decision-models.md §6.2, §7).
@@ -44,6 +45,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     output_media=False,
     reasoning_replay=False,
     decisions=True,
+    decision_images=True,   # assets + TypeSafe-Danger-Zone-Images (§12)
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
@@ -76,6 +78,10 @@ PROVIDER_NOTES = (
     "(https://console.typesafe.ai/keys).",
     "model: jev-latest is TypeSafe's alias for the current release; "
     "jev-1.13.0, jev-1.14.0 and jev-preview pin one. Ids are passed through.",
+    "decide(images=...) sends still PNG/JPEG images (280-1568 px a side, "
+    "checked before sending, never resized) and allows box questions. Images "
+    "and box are 'Dreamer-ready' at TypeSafe; box needs Jev 1.14 "
+    "(jev-1.14.0 / jev-preview).",
 )
 PROVIDER_CONTEXT_RESOLUTION = (
     "profile knob 'context_length' → env JAATO_TYPESAFE_CONTEXT_LENGTH → "
