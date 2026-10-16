@@ -108,6 +108,7 @@ from .claims import (
     rendered_from,
     revision_record,
     revision_staleness,
+    read_only_reason,
     revision_target,
     write_claim,
 )
@@ -3327,9 +3328,13 @@ class ReferencesPlugin(RunnerForwardingMixin):
         instead, machine-readable for a driver (#1437)."""
         refusal: Dict[str, Any] = {"error": "; ".join(errors), "errors": errors}
         ref_id = args.get("id")
+        workspace = self._workspace_path or self._project_root
         if (args.get(REVISES_KEY) is None and isinstance(ref_id, str)
                 and ref_id in {s.id for s in self._sources}):
-            refusal[REVISES_KEY] = ref_id
+            if workspace and read_only_reason(workspace, ref_id):
+                refusal["read_only"] = True  # no revises: it would be refused too (#1722)
+            else:
+                refusal[REVISES_KEY] = ref_id
         return refusal
 
     @staticmethod
@@ -3343,6 +3348,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return None, None
         target, _category, error = revision_target(workspace, entry["id"])
         if target is None:
+            # build_revision has checked the id is in the loaded catalog, so
+            # "in no file here" means read-only here, said in the words the
+            # plain proposal uses (#1722).
+            error = read_only_reason(workspace, entry["id"]) or error
             return None, {"error": f"cannot revise '{entry['id']}': {error}",
                           "errors": [error]}
         return target, None
