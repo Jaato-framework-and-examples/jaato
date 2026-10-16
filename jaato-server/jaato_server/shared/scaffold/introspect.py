@@ -62,9 +62,14 @@ _WANTED_CONSTS = ("PROVIDER_CAPABILITIES", "PROVIDER_KNOBS", "PROVIDER_QUIRKS",
 
 # -------------------------------------------------------------------- models
 
-@dataclass
+@dataclass(frozen=True)
 class ProviderInfo:
-    """Introspected metadata for one model provider."""
+    """Introspected metadata for one model provider.
+
+    Frozen: :func:`providers` hands the same memoised instances to every
+    caller, so a caller must not be able to change what the next one reads
+    (#1712).
+    """
 
     dir_name: str                       # filesystem dir (PROVIDER_KNOBS lives here)
     capabilities: Optional[_pbase.ProviderCapabilities] = None
@@ -334,8 +339,30 @@ def _read_provider_consts(dir_name: str) -> Dict[str, Any]:
     return out
 
 
+#: Memo for :func:`providers`.  ``None`` until the first call; afterwards the
+#: parsed provider metadata, whose (frozen) entries every caller shares.
+_PROVIDERS_CACHE: Optional[Dict[str, ProviderInfo]] = None
+
+
 def providers() -> Dict[str, ProviderInfo]:
-    """All model providers, keyed by directory name (offline, SDK-independent)."""
+    """All model providers, keyed by directory name (offline, SDK-independent).
+
+    **Memoized for the life of the process**, as :func:`env_vars` is.  An
+    uncached call reads and AST-evaluates every provider ``__init__.py``
+    (~30 ms for 25 providers), and one ``validate`` made ~109 such calls
+    through :func:`resolve_provider`: about 1.5 s of every run on a warm
+    daemon (#1712).  The provider packages cannot change under a running
+    process.  Callers get a new dict over the shared :class:`ProviderInfo`
+    instances, which are frozen.
+    """
+    global _PROVIDERS_CACHE
+    if _PROVIDERS_CACHE is None:
+        _PROVIDERS_CACHE = _scan_providers()
+    return dict(_PROVIDERS_CACHE)
+
+
+def _scan_providers() -> Dict[str, ProviderInfo]:
+    """Parse every provider's declared constants.  Call :func:`providers`."""
     out: Dict[str, ProviderInfo] = {}
     for name in _provider_dirs():
         consts = _read_provider_consts(name)
@@ -1464,7 +1491,8 @@ _ENV_VARS_CACHE: Optional[Dict[str, EnvVar]] = None
 def _scan_env_vars() -> Dict[str, EnvVar]:
     """AST-scan the installed tree for env reads.  The expensive half of
     :func:`env_vars` — parses every non-test ``.py`` under ``_SCAN_DIRS``
-    (500+ files, ~3s).  Call ``env_vars()`` instead; it memoizes this.
+    (~1100 files; 5-8 s measured in October 2026, more on a slow host).
+    Call ``env_vars()`` instead; it memoizes this.
     """
     out: Dict[str, EnvVar] = {}
     for d in _SCAN_DIRS:
@@ -1815,7 +1843,7 @@ def env_vars() -> Dict[str, EnvVar]:
 
     **Memoized for the life of the process.**  The underlying scan
     (:func:`_scan_env_vars`) AST-parses the whole installed tree and costs
-    ~3s; the tree cannot change under a running process, so repeat calls —
+    5-8 s (~1100 files); the tree cannot change under a running process, so repeat calls —
     ``build``/``explain``/``validate`` each make one, and the scaffold test
     suite made ~37 — are served from the memo.
 

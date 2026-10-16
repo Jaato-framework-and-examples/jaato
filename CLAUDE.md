@@ -6562,6 +6562,22 @@ the `jaato-sdk` integration skill.
 Guard: `jaato_server/server/tests/test_scaffold_validate_verb_1267.py`, five
 reversions.
 
+### What a `validate` Run Parses (#1712)
+
+`validate` on 37 profiles took ~4.6 s warm and ~13 s first after a daemon
+restart. Two costs, both fixed in `scaffold/introspect.py` and `validate.py`:
+
+| Cost | Was | Now |
+|---|---|---|
+| `introspect.providers()` | re-read and AST-evaluated every provider `__init__.py` per call, ~109 calls per validate (through `resolve_provider`) | memoised per process like `env_vars()`; callers get a new dict over shared `ProviderInfo` entries, which are frozen |
+| `validate_env`'s `unread_env_var` hint | called `env_vars()` for every `.env`, whose first call per process scans ~1100 files (5-8 s) | asks only about a `JAATO_` key `env_scope.CATALOG` does not name; `test_env_scope_catalog` holds the catalog equal to the scan, so a miss is still confirmed against it |
+
+Measured on 20 profiles: 7.1 s → 0.8 s cold, 1.2-1.5 s → 0.04 s warm, same
+findings. Not changed: #1217 (validate also checks profiles the workspace
+does not own). Guard:
+`jaato_server/shared/tests/test_validate_does_not_reparse_the_tree_1712.py`,
+three reversions.
+
 ### `explain` From a Snapshot (#1267)
 
 Tier 1 shipped `authoring_snapshot.json` so an SDK-only `new` could
