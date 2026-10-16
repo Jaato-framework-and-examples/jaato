@@ -897,7 +897,7 @@ Profile values support two-phase expansion:
 |---|---|---|
 | `${workspaceRoot}` | Auto-detected from `.git` or `.jaato` directory | `/home/user/project` |
 | `${cwd}` | Session workspace root, else the resolving process's cwd | `/home/user/project` |
-| `${jdtlsStateRoot}` | Framework-managed jdtls state dir, a sibling of the workspace | `/home/user/.project-jdtls-state` |
+| `${jdtlsStateRoot}` | Framework-managed jdtls state dir, a sibling of the workspace; made only when an LSP server's config names it, removed by `workspace.delete` (#1710) | `/home/user/.project-jdtls-state` |
 | `${HOME}` | Environment variable | `/home/user` |
 | `${USER}` | Environment variable | `user` |
 | `${projectPath}` | Context variable (passed by caller) | `/app/my-project` |

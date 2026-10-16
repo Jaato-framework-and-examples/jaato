@@ -932,7 +932,8 @@ EXPANSION_CONTEXT_VARS: Dict[str, str] = {
     'workspaceRoot': "the workspace root detected from .git / .jaato",
     'jdtlsStateRoot': ("the framework-managed jdtls state directory, a sibling "
                        "of the workspace (Eclipse forbids it inside the "
-                       "project)"),
+                       "project); made only when an LSP server's config "
+                       "names it, removed by workspace.delete"),
     'HOME': "the resolving process's $HOME",
     'USER': "the resolving process's $USER",
 }

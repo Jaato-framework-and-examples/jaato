@@ -1869,6 +1869,27 @@ class JaatoServer:
         if self._env_overrides:
             self._session_env.update(self._env_overrides)
 
+        self._provision_jdtls_state_root()
+
+        # #1226: resolve any ``app://<name>`` references against the
+        # application that owns the workspace.  Runs AFTER every other env
+        # source has been merged, because a later source could set (or, on a
+        # reload, retract) the reference.  A resolved value reaches only this
+        # dict — never the record, the snapshot or the .env, all of which keep
+        # ``app://<name>`` (§6.1), which is what makes a revive resolve afresh.
+        self._apply_app_secret_references()
+
+        self._session_env_resolved = True
+
+    def _provision_jdtls_state_root(self) -> None:
+        """Make ``${jdtlsStateRoot}`` when this session can use it (#1710).
+
+        Part of :meth:`_resolve_session_env`; a method of its own because
+        that one is at its complexity ceiling.  The sibling is made only
+        when the session's LSP configuration names the variable (see
+        ``shared/jdtls_state.py``), and its path is then exported as
+        ``JAATO_JDTLS_STATE_DIR``.
+        """
         # Family IV (PR-217): compute + provision the sibling jdtls state
         # directory, export its path as ``JAATO_JDTLS_STATE_DIR`` so
         # runner-side LSP / .lsp.json can resolve ``-data`` against it.
@@ -1887,53 +1908,59 @@ class JaatoServer:
         #   missing-grant misconfigurations audibly rather than
         #   silently dropping diagnostics like the pre-Family-IV bug
         #   surfaced by 2026-06-04 smoke).
-        if self._workspace_path:
-            from jaato_server.shared.plugins.subagent.config import _compute_jdtls_state_root
-            jdtls_state_root = _compute_jdtls_state_root(self._workspace_path)
-            if jdtls_state_root:
-                try:
-                    os.makedirs(jdtls_state_root, exist_ok=True)
-                    # A sibling of the workspace, used by its runner's
-                    # jdtls: it belongs to the workspace's owner.
-                    from jaato_server.shared.workspace_ownership import inherit_owner
-                    inherit_owner(jdtls_state_root, self._workspace_path)
-                    # Sanity probe: confirm the dir is writable.
-                    # Catches apparmor-grant misconfigurations at
-                    # bootstrap rather than at first diagnostic poll
-                    # (which would silently return zero diagnostics —
-                    # the failure mode that motivated PR-217).
-                    _probe = os.path.join(jdtls_state_root, ".write-probe")
-                    with open(_probe, "w") as _f:
-                        _f.write("")
-                    os.unlink(_probe)
-                    self._session_env["JAATO_JDTLS_STATE_DIR"] = jdtls_state_root
-                except OSError as exc:  # noqa: BLE001
-                    # Fail-loud rather than silently degrade — LSP
-                    # diagnostics depend on this dir being writable.
-                    logger.error(
-                        "Family IV: failed to provision jdtls state root "
-                        "%r for session workspace %r: %s.  LSP "
-                        "diagnostics for tool-written files WILL NOT "
-                        "surface this session; jdtls bootstrap will "
-                        "either fail to write -data or silently drop "
-                        "publishDiagnostics.  Operator action: verify "
-                        "the per-session AppArmor profile grants r/w "
-                        "to ${jdtlsStateRoot} (see "
-                        "_base_codegen.yaml apparmor_extra_rules).",
-                        jdtls_state_root,
-                        self._workspace_path,
-                        exc,
-                    )
-
-        # #1226: resolve any ``app://<name>`` references against the
-        # application that owns the workspace.  Runs AFTER every other env
-        # source has been merged, because a later source could set (or, on a
-        # reload, retract) the reference.  A resolved value reaches only this
-        # dict — never the record, the snapshot or the .env, all of which keep
-        # ``app://<name>`` (§6.1), which is what makes a revive resolve afresh.
-        self._apply_app_secret_references()
-
-        self._session_env_resolved = True
+        #
+        # #1710: only for a session whose LSP configuration names
+        # ``${jdtlsStateRoot}``.  The sibling lives in the workspace's
+        # PARENT, a directory the application owns, so a session that
+        # cannot start such a server must not put an entry there.  The
+        # lsp plugin makes it at server start when it is missing, and
+        # ``workspace.delete`` removes it (shared/jdtls_state.py).
+        if not self._workspace_path:
+            return
+        from jaato_server.shared.jdtls_state import (
+            jdtls_state_root_of,
+            lsp_config_uses_jdtls_state,
+            profile_lsp_config,
+        )
+        if not lsp_config_uses_jdtls_state(
+            self._workspace_path, profile_lsp_config(self._profile)
+        ):
+            return
+        jdtls_state_root = jdtls_state_root_of(self._workspace_path)
+        if jdtls_state_root:
+            try:
+                os.makedirs(jdtls_state_root, exist_ok=True)
+                # A sibling of the workspace, used by its runner's
+                # jdtls: it belongs to the workspace's owner.
+                from jaato_server.shared.workspace_ownership import inherit_owner
+                inherit_owner(jdtls_state_root, self._workspace_path)
+                # Sanity probe: confirm the dir is writable.
+                # Catches apparmor-grant misconfigurations at
+                # bootstrap rather than at first diagnostic poll
+                # (which would silently return zero diagnostics —
+                # the failure mode that motivated PR-217).
+                _probe = os.path.join(jdtls_state_root, ".write-probe")
+                with open(_probe, "w") as _f:
+                    _f.write("")
+                os.unlink(_probe)
+                self._session_env["JAATO_JDTLS_STATE_DIR"] = jdtls_state_root
+            except OSError as exc:  # noqa: BLE001
+                # Fail-loud rather than silently degrade — LSP
+                # diagnostics depend on this dir being writable.
+                logger.error(
+                    "Family IV: failed to provision jdtls state root "
+                    "%r for session workspace %r: %s.  LSP "
+                    "diagnostics for tool-written files WILL NOT "
+                    "surface this session; jdtls bootstrap will "
+                    "either fail to write -data or silently drop "
+                    "publishDiagnostics.  Operator action: verify "
+                    "the per-session AppArmor profile grants r/w "
+                    "to ${jdtlsStateRoot} (see "
+                    "_base_codegen.yaml apparmor_extra_rules).",
+                    jdtls_state_root,
+                    self._workspace_path,
+                    exc,
+                )
 
     def set_app_secret_resolver(
         self, resolver: Optional['AppSecretResolver']
