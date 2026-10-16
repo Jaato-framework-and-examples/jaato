@@ -1505,6 +1505,13 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "  - ``kind == 'operand'`` (Jinja2): used inside an expression such as "
                     "    ``{{ name | join(', ') }}`` or ``{{ name.field }}``; required, any type "
                     "    the expression accepts (a list for ``join``).\n"
+                    "  - ``kind == 'iterable'`` (Jinja2): looped over as "
+                    "    ``{% for item in name %}``; provide a list. When the loop body reads "
+                    "    ``item.field``, each element must be a dict with that key.\n"
+                    "  - ``kind == 'conditional_test'`` (Jinja2): tested by ``{% if name %}``; "
+                    "    optional — omit it and the branch does not render.\n"
+                    "  - ``kind == 'scalar_with_default'`` (Jinja2): used as "
+                    "    ``{{ name | default(...) }}``; optional.\n"
                     "  - ``kind == 'section'``: provide a list of dicts — used as "
                     "    ``{{#name}}...{{/name}}``. Each dict in the list MUST contain the "
                     "    keys listed in ``item_keys`` (these are the field names the "
@@ -6149,6 +6156,31 @@ Template rendering writes files to the workspace."""
             if text:
                 var["description"] = text
 
+    def _jinja2_variable_kinds(
+        self, template_content: str, variables: Any,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Classify a Jinja2 template's body variables for ``listTemplateVariables``.
+
+        Each name in ``variables`` (``jinja2.meta.find_undeclared_variables``)
+        carries the kind the render-time shape check uses (#1705): one
+        classification for the report and the check, so an agent is told
+        ``rules`` is ``iterable`` before its first render rather than
+        ``scalar`` and then refused for passing a string.  A name the
+        structural parse did not classify is reported as ``operand``:
+        required, with no type claimed for it.
+
+        Returns:
+            ``{name: {"name": name, "kind": kind}}``.
+        """
+        merged: Dict[str, Dict[str, Any]] = {
+            v["name"]: v
+            for v in self._parse_jinja2_structure(template_content)
+            if v["name"] in variables
+        }
+        for v in variables:
+            merged.setdefault(v, {"name": v, "kind": "operand"})
+        return merged
+
     def _execute_list_template_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Extract all undeclared variables from a template.
 
@@ -6189,9 +6221,11 @@ Template rendering writes files to the workspace."""
         Returns:
             Dict with 'variables' list and 'syntax' type, or 'error' on failure.
             For Mustache: ``variables`` is ``list[{name, kind, item_keys?}]``.
-            For Jinja2: ``variables`` is ``list[{name, kind: "scalar"}]``
-            (kind detection for Jinja2 is a follow-up — current shape
-            is consistent in API but flat in semantics).
+            For Jinja2: ``variables`` is ``list[{name, kind}]`` with the
+            kinds ``_parse_jinja2_structure`` computes for the render-time
+            shape check (``scalar`` / ``operand`` / ``iterable`` /
+            ``conditional_test`` / ``scalar_with_default``; #1705), and
+            ``operand`` for a body name it did not classify.
         """
         template_id = args.get("template_id", "")
 
@@ -6280,22 +6314,10 @@ Template rendering writes files to the workspace."""
                 env = Environment()
                 ast = env.parse(template_content)
                 variables = meta.find_undeclared_variables(ast)
-                # Wrap in the same structured shape Mustache returns
-                # so consumers don't need to branch on syntax.  Jinja2
-                # AST-based kind detection (for / if blocks) is a
-                # follow-up; for now mark all as "scalar" — agents
-                # using Jinja2 templates today have less determinism
-                # surface anyway.
-                merged: Dict[str, Dict[str, Any]] = {
-                    v: {"name": v, "kind": "scalar"}
-                    for v in sorted(variables)
-                }
+                merged = self._jinja2_variable_kinds(template_content, variables)
                 # Path-only vars: kind=scalar (path interpolation is
                 # always scalar substitution; no sections in paths).
-                # Body-precedence: vars appearing in both keep the
-                # body-parsed kind, which is already scalar in the
-                # Jinja2 path so the precedence is moot here but the
-                # logic mirrors the Mustache branch for symmetry.
+                # Body-precedence: a var used in both keeps its body kind.
                 for v in path_vars:
                     if v not in merged:
                         merged[v] = {"name": v, "kind": "scalar"}
