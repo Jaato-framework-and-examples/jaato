@@ -1,8 +1,10 @@
 # Decision Models (System One): `decisions` as an Output Modality
 
-Status: every step of §11 is **shipped**: the modality, `decide()` on
+Status: steps 1-6 of §11 are **shipped**: the modality, `decide()` on
 `openrouter`, `decision_models:`, the `decide` tool, the permission gate
-and the `laya` adapter. §8.3 lists the consumers still to come.
+and the `laya` adapter. §8.3 lists the consumers still to come. §12
+(images and the `box` question, Jev 1.14) is **proposed**, nothing built;
+it is steps 7-10 of §11.
 
 ## 1. What a decision model is
 
@@ -223,7 +225,7 @@ class DecisionCapable(Protocol):
 | Adapter | Wire | Notes |
 |---|---|---|
 | `openrouter` | `POST /api/alpha/decisions` | Reuses the provider's key resolution, attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`), deadlines and `cost` parsing. **`/api/alpha/` is not a stable route**, so the parser is defensive and the guard fixtures are the vendor's documented examples |
-| `typesafe` (optional) | `POST https://api.typesafe.ai/v1/systemone` | The same body. Only worth adding if a deployment needs the vendor directly (its own rate limits, no gateway) |
+| `typesafe` (optional) | `POST https://api.typesafe.ai/v1/systemone` | The same body. Only worth adding if a deployment needs the vendor directly (its own rate limits, no gateway), or if OpenRouter does not carry images (§12.6) |
 | `laya` | `POST {host}/v1/systemone` on `laya-serve` (`mode: http`, the default), or `laya.load(...).predict()` in the runner (`mode: local`) | `laya-serve` speaks Jev's request and response, so the HTTP transport is shared with `openrouter`. See §9 for the in-process cost |
 
 `decide()` on a chat model with structured outputs (a JSON-schema
@@ -481,6 +483,8 @@ without a gate (the default decides, as before).
 2. `typesafe/jev-router` is chat-shaped and works today. Do we want it documented as a routing option (like `openrouter/auto`), or left alone?
 3. Does the permission gate run before or after the whitelist/blacklist? Proposed: after the blacklist (a deny stays a deny) and before the default policy.
 4. Should the `decide` tool batch: let the model send many states with one question set and get a list back, which is the map-reduce case?
+5. Should jaato prepare images for the vendor (convert GIF/WebP to PNG, apply EXIF orientation, downscale past 1568 px) when Pillow is installed, instead of refusing them (§12.3)? Two outcomes for one image depending on an optional extra is what argues against it.
+6. Should images go multipart instead of base64 (a third smaller, so more fits under the 32 MiB body cap)? v1 sends base64 in JSON because the transport is shared (§12.3).
 
 ## 11. Rollout
 
@@ -517,3 +521,203 @@ without a gate (the default decides, as before).
    - `complete()` and history serialisation raise `DecisionModelOnlyError`; the output set is `{decisions}`.
    - Not run against a live `laya-serve` or the real package (torch and the weights were not installed here); the wire was read from the package source. `examples/provider_smoke_decisions.py --live-laya HOST` is that check.
    - Guard: `jaato_server/shared/tests/test_decide_on_laya.py`, seven reversions, against the decision stand-in (which now also serves `/v1/systemone`) and a stand-in `laya` module.
+7. **A live check through OpenRouter, before any code** (§12.6). One request to `typesafe/jev-1.13` with one `assets` image and the `TypeSafe-Danger-Zone-Images` header, one with a `box` question on `jev-1.14` (whatever id OpenRouter lists, if any), and `GET …/models/typesafe/jev-1.13/endpoints` for `input_modalities`. The three answers decide step 9's adapter and become fixtures. Needs a key; `examples/provider_smoke_decisions.py` gains a `--live-openrouter --image PATH` mode for it.
+8. **The contract** (§12.2-§12.4): `DecisionImage`, the `images=` parameter, `{{image:NAME}}` substitution, the local image checks (stdlib header parsing, no Pillow), `box` in `QUESTION_TYPES` with `DecisionBox`, the `decision_images` capability column, and the stand-in answering `box` and checking `assets`. No adapter sends an image yet; every adapter refuses `images=` with `DecisionImagesUnsupportedError`.
+9. **The adapter** (§12.6): `openrouter` if step 7 says the route carries images, else a new `typesafe` provider for `api.typesafe.ai/v1/systemone` (key `JAATO_TYPESAFE_API_KEY` / `TYPESAFE_API_KEY`, the shared `_decisions_http.py` transport). `laya` declares `decision_images=False`.
+10. **The `decide` tool's `images`** (§12.5): workspace paths and attachment ids, `box` answers with pixel coordinates, the ledger's image digests.
+
+## 12. Images and `box` (Jev 1.14)
+
+Proposed. Nothing in §12 is built.
+
+### 12.1 What TypeSafe shipped
+
+From the Jev 1.14 post (`typesafe.ai/blog/jev-1-14`) and the two docs pages
+it links (`docs.typesafe.ai/go/images`, `docs.typesafe.ai/go/box`), read on
+2026-10-16. Every example is TypeSafe's own endpoint,
+`POST https://api.typesafe.ai/v1/systemone`; neither page mentions
+OpenRouter.
+
+**Images.** A request gains a top-level `assets` map. Each key is a
+reference string the caller chooses; the image is used by writing that
+string wherever the image belongs:
+
+```json
+{
+  "model": "jev-latest",
+  "state": {"door": "6f1c…-uuid"},
+  "assets": {
+    "6f1c…-uuid": {"type": "image", "format": "jpg", "data_base64": "<base64>"}
+  },
+  "questions": {
+    "person_present": {"type": "noul", "instructions": "Is there a person in `door`?"}
+  }
+}
+```
+
+| Rule | Value |
+|---|---|
+| header | `TypeSafe-Danger-Zone-Images: true` on any request carrying an image or a `box` question |
+| asset fields | `type` (optional, `"image"`), `format` (`png` / `jpg` / `jpeg`, lowercase, required with `data_base64`), `data_base64` (standard alphabet, padded, no whitespace, no `data:` prefix), or `part` (a multipart file part; wins over `data_base64`) |
+| where a reference may appear | a value in `state`, mid-sentence in `instructions`, an option's value, `description` or `examples` in `criteria`. Object keys are never replaced |
+| matching | plain text. An asset referenced nowhere is a `400`. UUIDs are recommended so a reference cannot match by accident |
+| reference size | ≤ 1,024 bytes each, ≤ 65,536 bytes for all of them |
+| formats | still PNG or JPEG. Animated PNG is rejected; GIF, WebP, HEIC must be converted. Baseline 8-bit JPEG preferred |
+| dimensions | each side 280-1,568 px; 78,400-2,458,624 pixels total |
+| bytes | 16 MiB per image (decoded); 32 MiB request body; 32 MiB of images after processing; 32 MiB expanded (every use of an image counts) |
+| out of limits | rejected, never resized |
+| orientation | EXIF is stripped and not applied; pixels must already be upright |
+
+Jev 1.13 (`jev-latest` until 1.14 takes the alias, "in about a week")
+accepts images too. The post says multimodal answers are weaker than
+text-only ones on every model and recommends breaking a question into
+simple steps.
+
+**`box`.** A fourth question type, Jev 1.14 only (`jev-preview` /
+`jev-1.14.0`). It takes `instructions` and no `criteria`, needs an image in
+the request, and answers
+
+```json
+{"type": "box",
+ "box": {"top": 0.25, "bottom": 0.82, "left": 0.44, "right": 0.84},
+ "confidence": 0.9}
+```
+
+Edges are fractions of the image from its top-left corner (`left` /
+`right` of the width, `top` / `bottom` of the height), `left < right`,
+`top < bottom`. There is always a box: there is no "not found", so absence
+is a separate `noul`. One question finds one target. `confidence` is 0-1
+and the docs do not call it a probability.
+
+**Stability.** The docs call Images and `box` "Dreamer-ready", not
+production-ready: the request format, the answers and the limits may change
+between releases. Long context beyond the production default needs a
+second header (`TypeSafe-Danger-Zone-Long-Context: true`); out of scope
+here.
+
+### 12.2 The contract
+
+`decide()` gains one keyword:
+
+```python
+@dataclass(frozen=True)
+class DecisionImage:
+    mime_type: str        # image/png | image/jpeg
+    data: bytes           # decoded
+    name: str             # the caller's name for it, used in {{image:NAME}}
+
+def decide(self, state, questions, *, images: Sequence[DecisionImage] = (),
+           model=None, cancel_token=None) -> DecisionResult: ...
+```
+
+The caller never writes a vendor reference. It writes `{{image:NAME}}`
+where an image belongs, in `state` (as a whole value, or inside a string),
+in `instructions`, or in a `criteria` value, `description` or `examples`.
+`build_decision_request` mints one reference per image
+(`jaato-image-<uuid4>`), substitutes it, and builds `assets`.
+
+| Rule | Why |
+|---|---|
+| jaato mints the references, never the caller | the vendor matches references as plain text, so a name like `door` would also replace the word *door* in every instruction. A token with its own syntax cannot collide, and a UUID cannot either |
+| a `{{image:NAME}}` naming no image, an image no token names, and a token in an object key are refused before sending, naming the question | the first two are the vendor's `400`; the third is never replaced and would reach the model as literal text |
+| a request with images is refused with `DecisionImagesUnsupportedError` by an adapter that does not declare `ProviderCapabilities.decision_images` | the alternative is the vendor silently answering about a reference string (§12.6 is exactly that risk for OpenRouter) |
+| text-only requests are byte-identical to today, header included | `images=()` builds no `assets` and sends no danger-zone header |
+
+The header is added by the adapter, not the contract: it is TypeSafe's, and
+`laya-serve` or a future vendor may want another or none.
+`build_decision_request` returns a flag (`needs_image_header`) set when the
+request carries an image or a `box` question.
+
+### 12.3 Checked before sending
+
+Every limit in §12.1 that can be measured from the bytes is checked
+locally, so an oversize image is a `DecisionQuestionError` naming the image
+and the limit rather than a vendor round trip:
+
+- **Format from the bytes**, not the declared mime: PNG and JPEG signatures. A mime that disagrees with the bytes is refused (#829's rule: never relabel). An animated PNG (an `acTL` chunk before `IDAT`) is refused.
+- **Dimensions from the header**: PNG `IHDR`; JPEG the first `SOFn` marker. Stdlib only, no Pillow (an optional extra, `[diagrams]`). An image whose header cannot be read is refused, not sent on trust.
+- **Sizes**: 16 MiB per image, and the base64 request estimate against 32 MiB.
+- **References**: the minted ones are fixed length, so the 1,024 / 65,536-byte limits are checked by counting images (at most 64 per request, 65,536 / 1,024).
+
+What jaato cannot check is refused nowhere and stated: EXIF orientation
+(the caller must send upright pixels), whether the content is what the
+question assumes, and the "after processing" image total. jaato never
+converts, rotates or resizes an image in v1 (§10 question 5).
+
+Images go base64 in the JSON body. Multipart is a third smaller but needs a
+second transport beside `_decisions_http.py` (§10 question 6).
+
+### 12.4 `box`
+
+`QUESTION_TYPES` gains `"box"`. `DecisionQuestion(type="box",
+instructions=..., criteria=None)`; any `criteria` is refused, and a `box`
+question in a request with no image is refused before sending.
+
+```python
+@dataclass(frozen=True)
+class DecisionBox:
+    top: float
+    bottom: float
+    left: float
+    right: float          # fractions, 0..1, from the top-left corner
+```
+
+`DecisionAnswer.value` is a `DecisionBox` for a `box` answer;
+`probabilities` is `None`; `confidence` is the vendor's. The parser refuses
+an edge outside [0, 1], `left >= right` or `top >= bottom`, naming the
+question (`DecisionResponseError`), as it refuses an out-of-range score.
+
+Which models answer `box` is **not** declared in jaato. The catalog does
+not say, and a hardcoded per-model table would be stale the day `jev-latest`
+moves. A `box` question to Jev 1.13 is the vendor's `422`, which is already
+`DecisionRequestRejectedError`, carries the body and is not retried.
+
+### 12.5 The `decide` tool
+
+```
+decide(model="triage",
+       images=[{"name": "door", "path": "captures/door.jpg"},
+               {"name": "shot", "attachment_id": "sha256:…"}],
+       state={"photo": "{{image:door}}"},
+       questions=[{"id": "person", "type": "noul",
+                   "instructions": "Is there a person in `photo`?"},
+                  {"id": "where",  "type": "box",
+                   "instructions": "the person in `photo`"}])
+```
+
+| Rule | Why |
+|---|---|
+| an image is named by a workspace `path` or an `attachment_id`, never by bytes in the arguments | bytes in a tool call would enter history and be replayed on every request (#850). A path or an id costs a few tokens |
+| `path` goes through `check_path_with_jaato_containment`, and `.env` / `.jaato/*_auth.json` are refused | the `readFile` rule; the tool sends the file to a third party |
+| `attachment_id` resolves against the session's own history (the ingest id `media_identity` mints, #850) | the image the user sent, or one a tool produced, without a copy on disk. An evicted image (only its marker left) is refused by name |
+| the `images` parameter exists only when the session has an entry whose provider declares `decision_images` | `narrow_tool_schema`, per session, as the `model` enum already is |
+| a `box` answer also carries pixel coordinates (`box_px`) computed from the dimensions §12.3 read | the model reasons in pixels when it crops |
+| the tool description says `box` always returns a box, and to pair it with a `noul` | the one property of `box` that a model will otherwise get wrong |
+| the ledger's `decision` record carries each image's digest, size and dimensions, never its bytes | it says what was sent without becoming a copy of it |
+
+Not here: the permission gate. Its state is a rendered tool call (§8.2.1),
+which has no image to send.
+
+### 12.6 Which route carries images
+
+Unknown, and the first thing to find out (§11 step 7):
+
+| Question | Why it matters |
+|---|---|
+| does `POST /api/alpha/decisions` accept `assets` and pass them to TypeSafe? | if it strips the field, the model answers about a reference string as text, with a plausible probability: the worst outcome §5 names |
+| does OpenRouter forward `TypeSafe-Danger-Zone-Images`, or does it need its own spelling? | without the header the vendor refuses the request |
+| does the catalog report `image` in `input_modalities` for `typesafe/jev-1.13` (it said `["text"]` on 2026-10-06)? | if it does, `supports_modality("image")` answers per model with no knob; if not, `plugin_configs.openrouter.framework_overrides.modalities` asserts it |
+| is `jev-1.14` listed on OpenRouter? | `box` is reachable only through a listed model |
+
+Until step 7 answers yes to the first two, `openrouter` keeps
+`decision_images=False`, and images reach Jev only through a direct
+`typesafe` adapter (§6.1). `laya` declares `decision_images=False`: Laya is
+text-only.
+
+### 12.7 Costs and limits
+
+- **Weaker answers.** TypeSafe says multimodal decisions are less accurate than text ones; the calibration caveat in §9 applies more strongly. The `decide` tool's description says to ask simple questions, one target per `box`.
+- **Bytes leave the host.** An image is workspace content sent to TypeSafe (and to OpenRouter, if that route works). Same rule as §9; `routing.zdr` applies on OpenRouter.
+- **The format may change.** "Dreamer-ready" means the parser must stay strict and the fixtures dated: an answer in a shape it does not know is an error naming the question, never a guess.
+- **No preprocessing.** A screenshot over 1,568 px, a WebP, a phone photo with EXIF rotation: each is refused or answered wrong. The refusal names the limit so the caller can fix it; the rotation cannot be detected (§12.3).
+
