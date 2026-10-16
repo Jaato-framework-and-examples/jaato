@@ -2672,10 +2672,20 @@ def validate_env(workspace: str) -> List[Diagnostic]:
     # reactors (e.g. kb's JAATO_INPUTS_DIR), so it must never fail a
     # workspace.  Scoped to our namespace (avoids HTTPS_PROXY etc.); safelists
     # vars read via session-context rather than a literal os.getenv.
-    known = set(introspect.env_vars())
-    known.update({"JAATO_PROFILE_SET"})
-    for key in env:
-        if key.startswith("JAATO_") and key not in known:
+    #
+    # The source scan behind ``env_vars()`` costs 5-8 s the first time a
+    # process asks (#1712), so it is asked only about a key the declared
+    # catalog does not name.  ``test_env_scope_catalog`` holds the catalog
+    # equal to the scan, so a catalog hit is an answer; a miss is confirmed
+    # against the scan before it is reported.
+    from jaato_server.shared.env_scope import CATALOG
+
+    candidates = [k for k in env
+                  if k.startswith("JAATO_") and k not in CATALOG
+                  and k != "JAATO_PROFILE_SET"]
+    known = set(introspect.env_vars()) if candidates else set()
+    for key in candidates:
+        if key not in known:
             out.append(Diagnostic(
                 "info", "unread_env_var",
                 f".env {key} is not read by installed framework code — a typo, "
