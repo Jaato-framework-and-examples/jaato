@@ -185,6 +185,10 @@ a tier bound to one is refused at startup. The `decision` plugin's `decide`
 tool (category `decision`, deferred, not auto-approved) names an entry and is
 hidden from a session that binds none; `validate` reports
 `decision_tool_without_models` when a profile enables it with nothing bound.
+When an entry's provider declares `decision_images` (today `typesafe`),
+`decide` also takes `images` (each `{name, path}` or `{name, attachment_id}`,
+referenced as `{{image:NAME}}`; never bytes) and the `box` question type,
+whose answer carries `box_px`; `explain plugin decision` lists the rules.
 `plugin_configs.permission.decision_gate` (`model`, `tools`, `allow_above`,
 `deny_below`) puts a gated call the policy would hand to its default to that
 entry: allow, deny, or ask a person in between or on any failure; `explain

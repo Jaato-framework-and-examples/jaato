@@ -88,6 +88,14 @@ REVERSIONS = [
         because="the ledger cannot say which images a decision was made on",
     ),
     Reversion(
+        target="jaato-server/jaato_server/shared/scaffold/explain.py",
+        find='    if name == "decision":\n        return _decision_image_lines()\n',
+        replace="",
+        test="test_explain_states_how_images_reach_a_session",
+        because="explain shows only the text-only schema, so an author "
+                "never learns that decide takes images",
+    ),
+    Reversion(
         target=_PLUGIN,
         find="        if str(name) not in _image_names(session):\n",
         replace="        if False:\n",
@@ -314,3 +322,18 @@ def test_a_text_only_entry_refuses_images_before_reading(standin, workspace):
                           questions=[Q_HERE], model="triage")
     assert ok is False and "does not take images" in payload["error"]
     assert standin.posts() == []
+
+
+# ============================================================ jaato-scaffold
+
+
+def test_explain_states_how_images_reach_a_session():
+    from jaato_server.shared.plugins.decision.plugin import IMAGE_RULES
+    from jaato_server.shared.scaffold import explain
+
+    data, text = explain.plugin("decision")
+    assert "images and box" in text
+    for rule in IMAGE_RULES:
+        assert rule in text
+    assert data["images"]["providers"] == ["typesafe"]
+    assert data["images"]["parameter"]["items"]["required"] == ["name"]

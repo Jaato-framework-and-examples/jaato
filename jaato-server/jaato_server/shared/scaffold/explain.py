@@ -1689,7 +1689,31 @@ def _plugin_extra_sections(name: str) -> Tuple[List[str], Dict[str, Any]]:
         return _mcp_transport_lines()
     if name == "template":
         return _template_id_lines()
+    if name == "decision":
+        return _decision_image_lines()
     return [], {}
+
+
+def _decision_image_lines() -> Tuple[List[str], Dict[str, Any]]:
+    """How ``decide`` takes images and ``box`` (decision-models.md §12.5).
+
+    The page above renders the base schema, which is text-only: ``images``
+    and ``box`` are added per session.  So the rules are read from the
+    plugin's ``IMAGE_RULES`` and the parameter from its own schema, and the
+    providers that take images from their declared capabilities.
+    """
+    from jaato_server.shared.plugins.decision import plugin as DP
+    takes = sorted(
+        name for name, info in introspect.providers().items()
+        if getattr(info.capabilities, "decision_images", False))
+    lines = ["  images and box (added per session; not in the schema above):"]
+    lines.extend(f"    - {rule}" for rule in DP.IMAGE_RULES)
+    lines.append("    providers that take images: "
+                 + (", ".join(takes) or "none"))
+    data = {"images": {"rules": list(DP.IMAGE_RULES),
+                       "parameter": DP.images_parameter_schema(),
+                       "providers": takes}}
+    return lines, data
 
 
 def _template_id_lines() -> Tuple[List[str], Dict[str, Any]]:

@@ -130,6 +130,37 @@ _IMAGES_SCHEMA: Dict[str, Any] = {
     },
 }
 
+#: How images and ``box`` reach a session, one rule per line.  Rendered by
+#: ``jaato-scaffold explain plugin decision``, which shows only the base
+#: (text-only) schema, so the shaped parts are stated here, once.
+IMAGE_RULES = (
+    "offered only to a session binding a decision_models: entry whose "
+    "provider declares decision_images; otherwise neither `images` nor the "
+    "`box` question type exists for it",
+    "each image is {name, path} or {name, attachment_id}, exactly one; the "
+    "model writes {{image:NAME}} in the state, an instruction or an option "
+    "description; bytes never appear in the call",
+    "a `path` is relative to the workspace root (or absolute) and follows "
+    "readFile's rule; .env at any depth and .jaato/*_auth.json are refused",
+    "an `attachment_id` (att_<16 hex>) names an image already in the "
+    "session's history, a user message's or a tool result's; one evicted "
+    "after its turn is refused as evicted",
+    "PNG or JPEG, read from the bytes; 280-1568 px a side; never resized "
+    "or rotated (EXIF orientation is not applied)",
+    "a box answer is edge fractions plus `image` and `box_px` (pixels of "
+    "that image): the image its instructions name, else the call's only "
+    "one; with neither, no box_px",
+    "a box is always returned, even when the target is absent: pair it "
+    "with a noul",
+    "the ledger's decision record lists each image's sha256, size and "
+    "dimensions, never its bytes",
+)
+
+def images_parameter_schema() -> Dict[str, Any]:
+    """A copy of the ``images`` parameter a shaped schema carries."""
+    return copy.deepcopy(_IMAGES_SCHEMA)
+
+
 _BOX_TYPE_TEXT = (
     "  box: where one target is in an image; the answer is edge fractions "
     "and `box_px`.  A box is ALWAYS returned, even when the target is not "
@@ -387,7 +418,7 @@ class DecisionPlugin:
         description = schema.description
         with_images = _image_names(session)
         if with_images:
-            params["properties"]["images"] = copy.deepcopy(_IMAGES_SCHEMA)
+            params["properties"]["images"] = images_parameter_schema()
             qtype = params["properties"]["questions"]["items"]["properties"]["type"]
             qtype["enum"] = ["noul", "choice", "score", "box"]
             qtype["description"] += _BOX_TYPE_TEXT
