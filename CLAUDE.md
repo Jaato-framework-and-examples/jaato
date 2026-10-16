@@ -6104,6 +6104,25 @@ so this is reachable only past the check. Guard:
 `jaato_server/shared/tests/test_the_renderer_follows_the_shape_check_1633.py`,
 three reversions.
 
+### A For-Loop Source Sent as a String (#1706)
+
+`renderTemplateToFile`'s `variables` is `additionalProperties: true`, so no
+provider or #1358 coercion knows a variable is a list; MiniMax-M3 sent a
+loop's source as JSON text, YAML text, `{"item": {...}}` (a list with its
+XML wrapper kept) or a plain string, and Jinja2 iterated the characters and
+failed naming neither the variable nor the type. For a name a `{% for %}`
+iterates DIRECTLY (`TemplatePlugin._jinja2_iterable_sources`): a string
+that parses as a JSON array is decoded before the shape check
+(`_decode_iterable_json_text`, the #1358 rule with the template as the
+schema); any other string, `None`, a bool or a number is refused as
+`variable 'rules' (kind=iterable) must be a list; got str`; a mapping is
+refused only when the loop body reads fields of each item (iterating a
+mapping yields its keys). A name reached through an expression
+(`m.items()`) is not typed. Not done: per-template typing in the tool
+schema (the schema is per tool, not per template). Guard:
+`jaato_server/shared/tests/test_an_iterable_variable_must_be_a_list_1706.py`,
+three reversions.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.

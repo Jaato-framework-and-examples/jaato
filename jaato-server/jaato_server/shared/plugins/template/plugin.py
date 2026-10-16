@@ -4073,9 +4073,12 @@ Template rendering writes files to the workspace."""
         Only ``scalar`` and ``section`` sources flag missing keys
         as errors.
 
-        Returns ``None`` on success, an error dict on failure.  Only
-        validates Mustache templates; Jinja2 path is skipped (its
-        kind detection is a follow-up).
+        Jinja2 (``_parse_jinja2_structure``): a required ``scalar`` /
+        ``operand`` must be present, a bare ``scalar`` must be a
+        primitive, and a name a ``{% for %}`` iterates directly must be
+        a list (``_iterable_value_errors``, #1706).
+
+        Returns ``None`` on success, an error dict on failure.
         """
         # Dispatch to the engine-specific structural parser (server
         # 0.6.173+).  Pre-0.6.173 only Mustache was validated; the
@@ -4114,6 +4117,9 @@ Template rendering writes files to the workspace."""
             syntax, template_content, structured, variables,
         )
         errors: List[str] = []
+        iter_sources = self._jinja2_iterable_sources(
+            syntax, template_content,
+        )
 
         for var in structured:
             name = var["name"]
@@ -4338,15 +4344,14 @@ Template rendering writes files to the workspace."""
                 # truthiness at render time.  No type check needed.
                 pass
             elif kind == "iterable":
-                # Jinja2 ``{% for x in items %}`` iter position
-                # (server 0.6.173+).  Required-source semantically,
-                # but the missing-variable branch above already fires
-                # when absent (this path runs only when the variable
-                # IS present).  No additional type check — jinja2
-                # accepts strings, lists, dicts, generators, etc. as
-                # iterables; rejecting non-iterable here would be
-                # stricter than jinja2 itself.
-                pass
+                # Jinja2 ``{% for x in items %}`` iter position.  A
+                # value the loop iterates DIRECTLY must be a list
+                # (#1706): a string is iterated character by character
+                # and a scalar raises inside Jinja2, with a message that
+                # names neither the variable nor the type.
+                errors.extend(self._iterable_value_errors(
+                    name, variables[name], iter_sources.get(name),
+                ))
             elif kind == "scalar_with_default":
                 # Jinja2 ``{{ var | default(fallback) }}`` (server
                 # 0.6.173+).  Author explicitly opted into the
@@ -4364,13 +4369,128 @@ Template rendering writes files to the workspace."""
                 "hint": (
                     "Call listTemplateVariables for this template to see "
                     "each variable's expected kind (scalar / operand / "
-                    "section / inverted_section).  Sections expecting iteration "
-                    "must receive list-of-dicts; scalars must receive "
+                    "section / inverted_section / iterable).  Sections "
+                    "expecting iteration must receive list-of-dicts; a "
+                    "Jinja2 iterable must receive a JSON array (not a "
+                    "string holding JSON or YAML); scalars must receive "
                     "str/int/float/bool/None."
                 ),
             }
 
         return None
+
+    @staticmethod
+    def _jinja2_iterable_sources(
+        syntax: str, template_content: str,
+    ) -> Dict[str, bool]:
+        """Names a Jinja2 ``{% for %}`` iterates DIRECTLY, and how (#1706).
+
+        Maps each payload name that is exactly a loop's ``iter``
+        (``{% for r in rules %}``) to whether the loop body reads a
+        field of the loop target (``r.title``, ``r['title']``), i.e.
+        whether each item must be a mapping.  A name reached through an
+        expression (``rules.values()``, ``a + b``, ``rules | sort``) is
+        not listed: the template does not say what type it is.  Empty
+        for a template that is not Jinja2 or does not parse.  Read by
+        ``_validate_render_inputs_against_structure`` and
+        ``_decode_iterable_json_text``.
+        """
+        if syntax != "jinja2":
+            return {}
+        try:
+            from jinja2 import Environment, meta as jmeta, nodes as jnodes
+            ast = Environment().parse(template_content)
+            undeclared = set(jmeta.find_undeclared_variables(ast))
+        except Exception:
+            return {}
+        sources: Dict[str, bool] = {}
+        for loop in ast.find_all(jnodes.For):
+            source = loop.iter
+            if not isinstance(source, jnodes.Name) or source.name not in undeclared:
+                continue
+            target = loop.target.name if isinstance(loop.target, jnodes.Name) else None
+            reads_fields = any(
+                isinstance(acc.node, jnodes.Name) and acc.node.name == target
+                for stmt in loop.body
+                for acc in stmt.find_all((jnodes.Getattr, jnodes.Getitem))
+            )
+            sources[source.name] = sources.get(source.name, False) or reads_fields
+        return sources
+
+    @staticmethod
+    def _iterable_value_errors(
+        name: str, value: Any, reads_fields: Optional[bool],
+    ) -> List[str]:
+        """The refusal for a value a ``{% for %}`` cannot iterate as meant (#1706).
+
+        ``reads_fields`` is ``_jinja2_iterable_sources``' answer for
+        ``name``; ``None`` means the loop does not iterate the name
+        directly, and nothing is checked.  A list or tuple passes.  A
+        string is refused (Jinja2 would iterate its characters), and so
+        are ``None``, booleans and numbers (Jinja2 raises).  A mapping
+        passes unless the loop body reads fields of each item: iterating
+        a mapping yields its KEYS, so ``{"item": {...}}`` (a list with
+        its XML ``<item>`` wrapper kept) renders nothing it was meant to.
+        """
+        if reads_fields is None or isinstance(value, (list, tuple)):
+            return []
+        if isinstance(value, dict) and not reads_fields:
+            return []
+        got = type(value).__name__
+        detail = {
+            "str": (
+                "a string is iterated character by character; if it "
+                "holds JSON or YAML text, send the parsed JSON array "
+                "itself"
+            ),
+            "dict": (
+                "iterating an object yields its keys, and the loop body "
+                "reads fields of each item; send a JSON array of "
+                "objects (unwrap a single 'item' key if the list was "
+                "serialised as XML)"
+            ),
+        }.get(got, "send a JSON array")
+        return [
+            f"variable {name!r} (kind=iterable) must be a list; got "
+            f"{got} -- {detail}"
+        ]
+
+    def _decode_iterable_json_text(
+        self, template_content: str, variables: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Decode JSON-array text for a directly iterated Jinja2 variable (#1706).
+
+        ``variables`` is ``additionalProperties: true`` in the tool
+        schema, so neither the provider nor #1358's argument coercion
+        knows a variable is a list, and some models send one as JSON
+        text.  The #1358 rule applies here, with the template as the
+        schema: a string value of a name a ``{% for %}`` iterates
+        directly is replaced when it parses as a JSON ARRAY, and only
+        then.  YAML text and any other string are left for the shape
+        check to refuse by name.  Returns a new dict when anything
+        changed, ``variables`` itself otherwise.
+        """
+        sources = self._jinja2_iterable_sources(
+            self._detect_template_syntax(template_content), template_content,
+        )
+        decoded: Dict[str, Any] = {}
+        for name in sources:
+            value = variables.get(name)
+            if not isinstance(value, str):
+                continue
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(parsed, list):
+                decoded[name] = parsed
+        if not decoded:
+            return variables
+        self._trace(
+            "renderTemplateToFile: decoded JSON-array text for "
+            f"iterable variable(s) {sorted(decoded)}"
+        )
+        return {**variables, **decoded}
 
     @staticmethod
     def _absent_variable_error(
@@ -4743,6 +4863,7 @@ Template rendering writes files to the workspace."""
         # ``_render_template`` for callers that don't go through this
         # path) is the simplest fix; the strip is idempotent.
         template = self._strip_generated_annotations(template)
+        variables = self._decode_iterable_json_text(template, variables)
 
         # Validate variables shape against template structure
         # (Mustache + Jinja2 since server 0.6.173+).  Catches the
