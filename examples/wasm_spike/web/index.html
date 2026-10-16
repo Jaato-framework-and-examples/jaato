@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>jaato wasm spike</title><pre id=o></pre><script>
+window.__logs=[];window.__done=false;
+const w=new Worker("/web/worker.js" + location.search);
+w.onmessage=e=>{if(e.data.log){__logs.push(e.data.log);o.textContent+=e.data.log+"\n"} if(e.data.done)__done=true};
+w.onerror=e=>{__logs.push("[worker error] "+e.message);__done=true};
+</script>
