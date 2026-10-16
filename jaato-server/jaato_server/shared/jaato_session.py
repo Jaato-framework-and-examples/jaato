@@ -15044,6 +15044,32 @@ NOTES
         """The ``decision_models:`` entry names this session binds, sorted."""
         return sorted(self._decision_bindings)
 
+    def _decision_provider_name(self, binding: Any) -> Optional[str]:
+        """The provider an entry runs on: its own, else the session's."""
+        return (
+            binding.provider
+            or self._provider_name_override
+            or getattr(self._runtime, "provider_name", None)
+        )
+
+    def decision_image_model_names(self) -> List[str]:
+        """The bound entries whose provider declares ``decision_images``, sorted.
+
+        Read from the provider package's ``PROVIDER_CAPABILITIES``, so no
+        provider is built (and no key is needed) to answer.  The ``decide``
+        tool offers its ``images`` parameter and the ``box`` question type
+        only when this is non-empty.  A provider that is not a built-in
+        package (an entry-point provider) answers no.
+        """
+        from .plugins.model_provider._decision_capability import (
+            provider_declares_decision_images)
+        with self._decision_lock:
+            bindings = dict(self._decision_bindings)
+        return sorted(
+            name for name, binding in bindings.items()
+            if provider_declares_decision_images(
+                self._decision_provider_name(binding)))
+
     def decision_provider(self, name: str) -> Any:
         """The provider serving ``decision_models.<name>``, built on first use.
 
@@ -15068,11 +15094,7 @@ NOTES
             if binding is None:
                 raise UnknownDecisionModelError(
                     name, sorted(self._decision_bindings))
-            provider_name = (
-                binding.provider
-                or self._provider_name_override
-                or getattr(self._runtime, "provider_name", None)
-            )
+            provider_name = self._decision_provider_name(binding)
             base = getattr(self, "_tier_provider_base", None) or {}
             prov = self._runtime.create_provider(
                 binding.model,

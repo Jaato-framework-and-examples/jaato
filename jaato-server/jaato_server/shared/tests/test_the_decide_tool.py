@@ -77,8 +77,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_PLUGIN,
-        find="        record(\"decision\", {\n",
-        replace="        return\n        record(\"decision\", {\n",
+        find="        record(\"decision\", entry)\n",
+        replace="        return\n        record(\"decision\", entry)\n",
         test="test_the_spend_is_recorded_in_the_ledger",
         because="the decision call's spend reaches no record",
     ),

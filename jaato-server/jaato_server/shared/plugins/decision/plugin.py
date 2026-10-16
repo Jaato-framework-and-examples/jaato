@@ -14,6 +14,14 @@ current session at call time.
 
 Not auto-approved: a call spends money and sends workspace content to a
 third party.
+
+Images (§12.5): when an entry the session binds runs on a provider that
+declares ``decision_images``, the schema gains an ``images`` parameter
+(each image named by a workspace ``path`` or a history ``attachment_id``,
+never by bytes; see :mod:`.images`) and the ``box`` question type.  A
+``box`` answer carries ``box_px``, pixel edges computed from the image's
+own dimensions, and the ledger record lists each image's digest, size and
+dimensions.
 """
 
 from __future__ import annotations
@@ -23,6 +31,9 @@ import dataclasses
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.decisions import (
+    IMAGE_TOKEN_RE,
+    MAX_IMAGES,
+    DecisionBox,
     DecisionError,
     DecisionQuestion,
 )
@@ -32,6 +43,7 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 
 from ...trace import trace as _trace_write
+from .images import ImageReferenceError, ResolvedImage, image_record, resolve_images
 
 TOOL_NAME = "decide"
 
@@ -90,6 +102,75 @@ _QUESTION_SCHEMA: Dict[str, Any] = {
 }
 
 
+#: The ``images`` parameter, offered only to a session with an entry whose
+#: provider declares ``decision_images`` (see ``narrow_tool_schema``).
+_IMAGES_SCHEMA: Dict[str, Any] = {
+    "type": "array",
+    "description": (
+        f"Images the state or the questions refer to, at most {MAX_IMAGES}.  "
+        "Name each image and write {{image:NAME}} in the state, an "
+        "instruction or an option description where it belongs.  Give a "
+        "workspace `path` or the `attachment_id` (att_...) of an image "
+        "already in this conversation, never the bytes.  PNG or JPEG, "
+        "280 to 1568 px a side, already upright: nothing is resized or "
+        "rotated."),
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string",
+                     "description": "The NAME in {{image:NAME}}."},
+            "path": {"type": "string",
+                     "description": "A workspace file (relative to the "
+                     "workspace root, or absolute)."},
+            "attachment_id": {"type": "string",
+                              "description": "An image already in this "
+                              "conversation (att_...)."},
+        },
+        "required": ["name"],
+    },
+}
+
+#: How images and ``box`` reach a session, one rule per line.  Rendered by
+#: ``jaato-scaffold explain plugin decision``, which shows only the base
+#: (text-only) schema, so the shaped parts are stated here, once.
+IMAGE_RULES = (
+    "offered only to a session binding a decision_models: entry whose "
+    "provider declares decision_images; otherwise neither `images` nor the "
+    "`box` question type exists for it",
+    "each image is {name, path} or {name, attachment_id}, exactly one; the "
+    "model writes {{image:NAME}} in the state, an instruction or an option "
+    "description; bytes never appear in the call",
+    "a `path` is relative to the workspace root (or absolute) and follows "
+    "readFile's rule; .env at any depth and .jaato/*_auth.json are refused",
+    "an `attachment_id` (att_<16 hex>) names an image already in the "
+    "session's history, a user message's or a tool result's; one evicted "
+    "after its turn is refused as evicted",
+    "PNG or JPEG, read from the bytes; 280-1568 px a side; never resized "
+    "or rotated (EXIF orientation is not applied)",
+    "a box answer is edge fractions plus `image` and `box_px` (pixels of "
+    "that image): the image its instructions name, else the call's only "
+    "one; with neither, no box_px",
+    "a box is always returned, even when the target is absent: pair it "
+    "with a noul",
+    "the ledger's decision record lists each image's sha256, size and "
+    "dimensions, never its bytes",
+)
+
+def images_parameter_schema() -> Dict[str, Any]:
+    """A copy of the ``images`` parameter a shaped schema carries."""
+    return copy.deepcopy(_IMAGES_SCHEMA)
+
+
+_BOX_TYPE_TEXT = (
+    "  box: where one target is in an image; the answer is edge fractions "
+    "and `box_px`.  A box is ALWAYS returned, even when the target is not "
+    "there, so pair it with a noul asking whether it is.")
+
+_IMAGES_TOOL_TEXT = (
+    "  With `images`, ask about pictures too (a screenshot, a photo); keep "
+    "each question simple and give a box question one target.")
+
+
 def _trace(msg: str) -> None:
     _trace_write("DECISION", msg)
 
@@ -101,6 +182,17 @@ def _current_session() -> Any:
         return get_current_session()
     except LookupError:
         return None
+
+
+def _image_names(session: Any) -> List[str]:
+    """The session's entries that can carry images; ``[]`` when it cannot say."""
+    names = getattr(session, "decision_image_model_names", None)
+    if not callable(names):
+        return []
+    try:
+        return list(names())
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _bound_names(session: Any) -> Optional[List[str]]:
@@ -135,6 +227,8 @@ def _criteria(qid: str, q: Dict[str, Any]) -> Any:
         if not isinstance(levels, list):
             raise ValueError(f"question {qid!r}: score needs `levels`")
         return list(levels)
+    if qtype == "box":
+        return None
     true_means, false_means = q.get("true_means"), q.get("false_means")
     if true_means is None and false_means is None:
         return None
@@ -163,9 +257,9 @@ def build_questions(raw: Any) -> Dict[str, DecisionQuestion]:
             raise ValueError("every question needs a non-empty `id`")
         if qid in out:
             raise ValueError(f"question id {qid!r} is used twice")
-        if q.get("type") not in ("noul", "choice", "score"):
+        if q.get("type") not in ("noul", "choice", "score", "box"):
             raise ValueError(
-                f"question {qid!r}: type must be noul, choice or score")
+                f"question {qid!r}: type must be noul, choice, score or box")
         out[qid] = DecisionQuestion(
             type=q["type"], instructions=q.get("instructions"),
             criteria=_criteria(qid, q))
@@ -173,7 +267,11 @@ def build_questions(raw: Any) -> Dict[str, DecisionQuestion]:
 
 
 def _answer_dict(answer: Any) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"type": answer.type, "value": answer.value}
+    value = answer.value
+    if isinstance(value, DecisionBox):
+        value = {"top": value.top, "bottom": value.bottom,
+                 "left": value.left, "right": value.right}
+    out: Dict[str, Any] = {"type": answer.type, "value": value}
     if answer.probabilities is not None:
         out["probabilities"] = dict(answer.probabilities)
     if answer.confidence is not None:
@@ -181,6 +279,39 @@ def _answer_dict(answer: Any) -> Dict[str, Any]:
     if answer.legend:
         out["legend"] = dict(answer.legend)
     return out
+
+
+def _box_image(question: DecisionQuestion,
+               images: List[ResolvedImage]) -> Optional[ResolvedImage]:
+    """The image a ``box`` answer is relative to, or ``None`` when unclear.
+
+    The image its instructions name with ``{{image:NAME}}`` when they name
+    exactly one; else the call's only image.  Otherwise no ``box_px`` is
+    given, because converting fractions against the wrong image would give
+    a plausible, wrong rectangle.
+    """
+    named = set(IMAGE_TOKEN_RE.findall(question.instructions or ""))
+    by_name = {r.image.name: r for r in images}
+    if len(named) == 1:
+        return by_name.get(next(iter(named)))
+    if not named and len(images) == 1:
+        return images[0]
+    return None
+
+
+def _add_box_pixels(answers: Dict[str, Dict[str, Any]], result: Any,
+                    questions: Dict[str, DecisionQuestion],
+                    images: List[ResolvedImage]) -> None:
+    """Put ``image`` and ``box_px`` beside each ``box`` answer that has one."""
+    for qid, answer in result.answers.items():
+        if not isinstance(answer.value, DecisionBox):
+            continue
+        source = _box_image(questions[qid], images)
+        if source is None:
+            continue
+        answers[qid]["image"] = source.image.name
+        answers[qid]["box_px"] = answer.value.to_pixels(
+            source.width, source.height)
 
 
 def _usage_dict(usage: Any) -> Optional[Dict[str, Any]]:
@@ -207,6 +338,7 @@ class DecisionPlugin:
 
     def __init__(self) -> None:
         self._agent_name: Optional[str] = None
+        self._registry: Any = None
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         self._agent_name = (config or {}).get("agent_name")
@@ -216,6 +348,7 @@ class DecisionPlugin:
 
     def set_plugin_registry(self, registry: Any) -> None:
         """Called during ``expose_tool()``.  Registers the decision category."""
+        self._registry = registry
         registry.register_category(
             "decision",
             "Typed judgements from a decision model: classify, score, yes/no")
@@ -268,15 +401,31 @@ class DecisionPlugin:
         return names is None or bool(names)
 
     def narrow_tool_schema(self, schema: ToolSchema) -> ToolSchema:
-        """Restrict ``model`` to the calling session's entry names."""
+        """Shape ``decide`` for the calling session.
+
+        ``model`` becomes an enum of its entry names.  When one of them can
+        carry images, ``images`` and the ``box`` question type are added
+        and the description says which entries take images.
+        """
         if getattr(schema, "name", None) != TOOL_NAME:
             return schema
-        names = _bound_names(_current_session())
+        session = _current_session()
+        names = _bound_names(session)
         if not names:
             return schema
         params = copy.deepcopy(schema.parameters)
         params["properties"]["model"]["enum"] = sorted(names)
-        return dataclasses.replace(schema, parameters=params)
+        description = schema.description
+        with_images = _image_names(session)
+        if with_images:
+            params["properties"]["images"] = images_parameter_schema()
+            qtype = params["properties"]["questions"]["items"]["properties"]["type"]
+            qtype["enum"] = ["noul", "choice", "score", "box"]
+            qtype["description"] += _BOX_TYPE_TEXT
+            description += _IMAGES_TOOL_TEXT + (
+                "  Models that take images: " + ", ".join(with_images) + ".")
+        return dataclasses.replace(
+            schema, parameters=params, description=description)
 
     def get_executors(self) -> Dict[str, Callable[..., Any]]:
         return {TOOL_NAME: self._execute_decide}
@@ -302,21 +451,40 @@ class DecisionPlugin:
             return False, {"error": "`state` must be non-empty text or JSON"}
         try:
             questions = build_questions(args.get("questions"))
+            images = self._resolve_images(session, name, args.get("images"))
             # The entry's provider is its own instance, connected to the
             # entry's model, so decide() needs no model= of its own.
             provider = session.decision_provider(str(name))
             from ...ai_tool_runner import get_current_cancel_token
+            extra = {"images": [r.image for r in images]} if images else {}
             result = provider.decide(
-                state, questions, cancel_token=get_current_cancel_token())
+                state, questions, cancel_token=get_current_cancel_token(),
+                **extra)
         except (ValueError, LookupError, DecisionError, RuntimeError) as exc:
             _trace(f"decide: model={name!r} refused: {exc}")
             return False, {"error": str(exc), "model": name}
         payload, usage = _result_payload(name, result)
-        _record_in_ledger(session, name, result, usage)
+        _add_box_pixels(payload["answers"], result, questions, images)
+        _record_in_ledger(session, name, result, usage, images)
         _trace(
             f"decide: model={name!r} answered_by={result.model!r} "
-            f"questions={len(questions)} usage={usage}")
+            f"questions={len(questions)} images={len(images)} usage={usage}")
         return payload
+
+    def _resolve_images(self, session: Any, name: Any,
+                        raw: Any) -> List[ResolvedImage]:
+        """The call's ``images``, refused before reading for a text-only entry."""
+        if raw in (None, []):
+            return []
+        if str(name) not in _image_names(session):
+            raise ImageReferenceError(
+                f"decision model {name!r} does not take images; models that "
+                f"do: {', '.join(_image_names(session)) or 'none'}")
+        from ...session_context import get_workspace_root
+        history = session.get_history() if callable(
+            getattr(session, "get_history", None)) else []
+        return resolve_images(raw, get_workspace_root(), list(history),
+                              self._registry)
 
 
 def _result_payload(name: Any, result: Any) -> Tuple[Dict[str, Any], Any]:
@@ -332,7 +500,8 @@ def _result_payload(name: Any, result: Any) -> Tuple[Dict[str, Any], Any]:
     return payload, usage
 
 
-def _record_in_ledger(session: Any, name: Any, result: Any, usage: Any) -> None:
+def _record_in_ledger(session: Any, name: Any, result: Any, usage: Any,
+                      images: Optional[List[ResolvedImage]] = None) -> None:
     """A ``decision`` record in the session's token ledger, best effort.
 
     The ledger is where a deployment reads what a session spent; a decision
@@ -343,13 +512,16 @@ def _record_in_ledger(session: Any, name: Any, result: Any, usage: Any) -> None:
     record = getattr(ledger, "_record", None)
     if not callable(record):
         return
+    entry: Dict[str, Any] = {
+        "entry": name,
+        "model": result.model,
+        "questions": len(result.answers),
+        "usage": usage,
+    }
+    if images:
+        entry["images"] = [image_record(r) for r in images]
     try:
-        record("decision", {
-            "entry": name,
-            "model": result.model,
-            "questions": len(result.answers),
-            "usage": usage,
-        })
+        record("decision", entry)
     except Exception as exc:  # noqa: BLE001
         _trace(f"decide: ledger record failed: {exc}")
 

@@ -587,12 +587,18 @@ without a gate (the default decides, as before).
    - The stand-in answers `box` with TypeSafe's documented example and answers `400`, as TypeSafe does, to a request with images or `box` and no header, or with an asset referenced nowhere. `png_bytes` / `jpeg_bytes` build fixtures.
    - `examples/provider_smoke_decisions.py --typesafe --image PATH` (stand-in) and `--live-typesafe --image PATH` (one more request, to `jev-1.14.0` unless `--image-model` names another) ask a `noul` and a `box` question and print the box in pixels.
    - Not run against the live API here. Guards: `jaato_server/shared/tests/test_decision_images_and_box.py`, seven reversions; in `test_provider_capability_conformance.py`, a provider declaring `decision_images` must put the image in `assets` and read the `box`, and a decision provider that does not must refuse `images=` with nothing sent.
-9. **The `decide` tool's `images`** (§12.5): workspace paths and attachment ids, `box` answers with pixel coordinates, the ledger's image digests.
+9. **The `decide` tool's `images`** (§12.5). **Shipped**:
+   - `shared/plugins/decision/images.py` resolves each entry of `images` (`{name, path}` or `{name, attachment_id}`, exactly one). A `path` is joined onto the workspace root, checked with `check_path_with_jaato_containment` and read through `path_safety` (no check-then-open race); `.env` at any depth and `.jaato/*_auth.json` are refused, and the format is read from the bytes. An `attachment_id` (`att_<16 hex>`, the ingest digest `media_identity` mints) is looked up in the session's history, user-message parts and tool-result attachments alike, newest first; an id that an eviction marker names is refused as evicted. Every refusal names the image.
+   - `JaatoSession.decision_image_model_names()` lists the entries whose provider declares `decision_images`, read from the provider package's `PROVIDER_CAPABILITIES` (`model_provider/_decision_capability.py`) so no provider is built to answer. `narrow_tool_schema` adds `images` and the `box` question type only when it is non-empty, and the description names those entries. An entry-point provider answers no.
+   - A call with `images` on an entry not in that list is refused before any file is read.
+   - A `box` answer's `value` is the four edge fractions; beside it, `image` and `box_px` (`DecisionBox.to_pixels` on that image's own dimensions). The image is the one the question's instructions name with `{{image:NAME}}` when they name exactly one, else the call's only image; otherwise `box_px` is omitted rather than computed against a guess.
+   - The ledger's `decision` record gains `images`: name, source, ref, sha256, bytes, format, width, height. Never the bytes.
+   - Not checked here: whether a client host tool's screenshot result reaches history as an attachment (the computer-use controller's case). Guard: `jaato_server/shared/tests/test_the_decide_tool_takes_images.py`, seven reversions, against the real plugin, session and `TypeSafeProvider` with the decision stand-in.
 10. **OpenRouter, optional and last** (§12.6): a live check that `/api/alpha/decisions` carries `assets` and the header (`--live-openrouter --image PATH`). `openrouter` declares `decision_images` only if it does; until then images go through `typesafe` and nothing waits on this step. Needs an OpenRouter key.
 
 ## 12. Images and `box` (Jev 1.14)
 
-Step 8 (the contract, on `typesafe`) is shipped; steps 9 (the `decide` tool) and 10 (OpenRouter) are not built.
+Steps 8 (the contract, on `typesafe`) and 9 (the `decide` tool) are shipped; step 10 (OpenRouter) is not built.
 
 ### 12.1 What TypeSafe shipped
 
@@ -741,7 +747,7 @@ moves. A `box` question to Jev 1.13 is the vendor's `422`, which is already
 ```
 decide(model="triage",
        images=[{"name": "door", "path": "captures/door.jpg"},
-               {"name": "shot", "attachment_id": "sha256:…"}],
+               {"name": "shot", "attachment_id": "att_3f2a9c1b7d4e5a60"}],
        state={"photo": "{{image:door}}"},
        questions=[{"id": "person", "type": "noul",
                    "instructions": "Is there a person in `photo`?"},
