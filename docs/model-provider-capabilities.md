@@ -28,6 +28,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `ovhcloud` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — |
 | `tensorrt_llm` | ✅ | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — | — |
 | `triton` | ✅ | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — | — |
+| `typesafe` | — | — | — | — | — | — | — | — | — | ✅ | — | — | ✅ |
 | `vllm` | ✅ | ✅ | ✅ | — | — | ✅ | — | — | ✅ | ✅ | — | — | — |
 | `zhipuai` | ✅ | ✅ | ✅ | — | — | — | ✅ | — | ✅ | ✅ | — | — | — |
 | `zhipuai_openai` | ✅ | ✅ | ✅ | — | — | — | ✅ | — | ✅ | ✅ | ✅ | — | — |

@@ -801,6 +801,13 @@ CATALOG: Dict[str, EnvClass] = {
         "manual context-window override; ovhcloud exposes the knob"),
     "JAATO_OVHCLOUD_MODEL": EnvClass(SESSION, "model",
         "the profile's own `model` field selects the model"),
+    "JAATO_TYPESAFE_API_KEY": EnvClass(SESSION, "plugin_configs.typesafe.api_key",
+        "credential; typesafe reads the knob first, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_TYPESAFE_BASE_URL": EnvClass(SESSION, "plugin_configs.typesafe.base_url",
+        "TypeSafe API root; typesafe reads the knob first"),
+    "JAATO_TYPESAFE_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.typesafe.context_length",
+        "window the pre-send estimate checks; typesafe reads the knob first"),
     "JAATO_ZHIPUAI_API_KEY": EnvClass(SESSION, None,
         "zhipuai exposes no api_key knob (see the credential "
         "policy)"),
@@ -833,6 +840,8 @@ CATALOG: Dict[str, EnvClass] = {
     "OVH_AI_ENDPOINTS_ACCESS_TOKEN": EnvClass(SESSION, "plugin_configs.ovhcloud.api_key",
         "credential; ovhcloud exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),
+    "TYPESAFE_API_KEY": EnvClass(SESSION, "plugin_configs.typesafe.api_key",
+        "credential; TypeSafe's own variable (its SDKs read it), honoured beneath JAATO_TYPESAFE_API_KEY"),
     "TENSORRT_LLM_API_TOKEN": EnvClass(SESSION, "plugin_configs.tensorrt_llm.api_token",
         "credential; tensorrt_llm exposes the knob, so a profile can "
         "carry a pass:// URI instead of the env var"),

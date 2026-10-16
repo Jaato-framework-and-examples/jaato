@@ -1,10 +1,10 @@
 # Decision Models (System One): `decisions` as an Output Modality
 
-Status: steps 1-6 of §11 are **shipped**: the modality, `decide()` on
-`openrouter`, `decision_models:`, the `decide` tool, the permission gate
-and the `laya` adapter. §8.3 lists the consumers still to come. §6.2 (a
-direct `typesafe` adapter) and §12 (images and the `box` question, Jev
-1.14) are **proposed**, nothing built; they are steps 7-10 of §11.
+Status: steps 1-7 of §11 are **shipped**: the modality, `decide()` on
+`openrouter`, `decision_models:`, the `decide` tool, the permission gate,
+the `laya` adapter and the text-only `typesafe` adapter (§6.2). §8.3 lists
+the consumers still to come. §12 (images and the `box` question, Jev
+1.14) is **proposed**, nothing built; it is steps 8-10 of §11.
 
 ## 1. What a decision model is
 
@@ -225,10 +225,10 @@ class DecisionCapable(Protocol):
 | Adapter | Wire | Notes |
 |---|---|---|
 | `openrouter` | `POST /api/alpha/decisions` | Reuses the provider's key resolution, attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`), deadlines and `cost` parsing. **`/api/alpha/` is not a stable route**, so the parser is defensive and the guard fixtures are the vendor's documented examples |
-| `typesafe` (proposed, §6.2) | `POST https://api.typesafe.ai/v1/systemone` | The vendor's own API, the same body. The route TypeSafe documents images and `box` on, so the first adapter to declare `decision_images` (§12.6). Also serves text-only decisions to a deployment with a TypeSafe key and no OpenRouter account |
+| `typesafe` (§6.2) | `POST https://api.typesafe.ai/v1/systemone` | The vendor's own API, the same body. The route TypeSafe documents images and `box` on, so the first adapter to declare `decision_images` (§12.6). Also serves text-only decisions to a deployment with a TypeSafe key and no OpenRouter account |
 | `laya` | `POST {host}/v1/systemone` on `laya-serve` (`mode: http`, the default), or `laya.load(...).predict()` in the runner (`mode: local`) | `laya-serve` speaks Jev's request and response, so the HTTP transport is shared with `openrouter`. See §9 for the in-process cost |
 
-### 6.2 The `typesafe` adapter (proposed)
+### 6.2 The `typesafe` adapter
 
 `model_provider/typesafe/`, a decisions-only provider like `laya`
 (`chat=False`, so `jaato-scaffold new` refuses it as `--provider` and
@@ -261,14 +261,14 @@ command to exist. A key from 2-4 is announced the way the other providers'
 `auth_info` names its source, so an operator can tell a profile key from
 an inherited one.
 
-Other knobs, all under `plugin_configs.typesafe`, each with an env
-fallback beneath it:
+Other knobs, under `plugin_configs.typesafe`, each with any env fallback
+beneath it:
 
 | Knob | Env fallback | Meaning |
 |---|---|---|
 | `base_url` | `JAATO_TYPESAFE_BASE_URL` | `https://api.typesafe.ai` by default; a proxy or a regional endpoint |
 | `context_length` | `JAATO_TYPESAFE_CONTEXT_LENGTH` | the window the pre-send estimate checks against. TypeSafe publishes 32K tokens of state for 1.13 and no catalog, so with neither set the window is not checked (as `laya` does for an unknown model), never guessed |
-| `connect_timeout`, `request_timeout` | none | the deadlines `decide()` runs under (§6) |
+| `framework_overrides.connect_timeout`, `framework_overrides.request_timeout` | none | the deadlines `decide()` runs under (§6); 10 s and 60 s, `0` = none |
 
 No `danger_zone` knob: the images header is sent when, and only when, the
 request carries an image or a `box` question (§12.2), so it cannot be left
@@ -571,7 +571,13 @@ without a gate (the default decides, as before).
    - `complete()` and history serialisation raise `DecisionModelOnlyError`; the output set is `{decisions}`.
    - Not run against a live `laya-serve` or the real package (torch and the weights were not installed here); the wire was read from the package source. `examples/provider_smoke_decisions.py --live-laya HOST` is that check.
    - Guard: `jaato_server/shared/tests/test_decide_on_laya.py`, seven reversions, against the decision stand-in (which now also serves `/v1/systemone`) and a stand-in `laya` module.
-7. **The `typesafe` adapter, text only** (§6.2): the provider, its key order (knob, `JAATO_TYPESAFE_API_KEY`, `TYPESAFE_API_KEY`, `typesafe-auth`), the other knobs, the stand-in serving `/v1/systemone` with a bearer check, and `examples/provider_smoke_decisions.py --live-typesafe` sending the vendor's documented example. Useful on its own and needs nothing from §12.
+7. **The `typesafe` adapter, text only** (§6.2). **Shipped**: `model_provider/typesafe/` and the `typesafe_auth` plugin.
+   - The key resolves knob first (`plugin_configs.typesafe.api_key` or `ProviderConfig.api_key`), then `JAATO_TYPESAFE_API_KEY`, `TYPESAFE_API_KEY`, then `typesafe_auth.json`; `get_auth_info()` and a `401` name the source. With none, `initialize()` raises `CredentialsNotFoundError` listing all four.
+   - `base_url` and `context_length` read the knob, then `JAATO_TYPESAFE_BASE_URL` / `JAATO_TYPESAFE_CONTEXT_LENGTH`. With no window configured the size check is skipped.
+   - `typesafe-auth key` validates with one `noul` question to `/v1/systemone` (TypeSafe has no cheaper authenticated endpoint) and stores the key at mode 600.
+   - The transport is `_decisions_http.py`; `429` / `5xx` are retried, `401` / `404` / `4xx` are not. No images header is sent (§12).
+   - `examples/provider_smoke_decisions.py --typesafe` (stand-in) and `--live-typesafe` (the real API, key from the environment or the store).
+   - Not run against the live API here (no key). Guard: `jaato_server/shared/tests/test_decide_on_typesafe.py`, six reversions, against the decision stand-in.
 8. **The contract** (§12.2-§12.4): `DecisionImage`, the `images=` parameter, `{{image:NAME}}` substitution, the local image checks (stdlib header parsing, no Pillow), `box` in `QUESTION_TYPES` with `DecisionBox`, the `decision_images` capability column, and the stand-in answering `box`, checking `assets` and the header. `typesafe` declares `decision_images` and sends images; every other adapter refuses `images=` with `DecisionImagesUnsupportedError`. `laya` declares `decision_images=False`. `--live-typesafe --image PATH` sends one image and one `box` question.
 9. **The `decide` tool's `images`** (§12.5): workspace paths and attachment ids, `box` answers with pixel coordinates, the ledger's image digests.
 10. **OpenRouter, optional and last** (§12.6): a live check that `/api/alpha/decisions` carries `assets` and the header (`--live-openrouter --image PATH`). `openrouter` declares `decision_images` only if it does; until then images go through `typesafe` and nothing waits on this step. Needs an OpenRouter key.
