@@ -492,6 +492,7 @@ CAPABILITY_FIELDS = (
     "output_media",
     "reasoning_replay",
     "decisions",
+    "decision_images",
 )
 
 
@@ -527,6 +528,7 @@ class ProviderCapabilities:
     output_media: bool = False          # model-generated media -> MediaDelta on on_chunk
     reasoning_replay: bool = False      # an assistant turn's reasoning goes back on the next request
     decisions: bool = False             # decide() serves decision models on their own endpoint
+    decision_images: bool = False       # decide(images=...) sends still images (and box questions)
 
     def as_dict(self) -> Dict[str, bool]:
         return {f: bool(getattr(self, f)) for f in CAPABILITY_FIELDS}

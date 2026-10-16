@@ -46,6 +46,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
 #   ToolOutputEvent media chunks and plays.
     reasoning_replay=False,
     decisions=True,   # decide() -> POST /api/alpha/decisions (decision-models.md)
+    decision_images=False,   # unverified that the endpoint carries assets (§12.6)
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

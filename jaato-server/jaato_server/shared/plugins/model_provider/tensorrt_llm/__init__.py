@@ -70,6 +70,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     output_media=False,
     reasoning_replay=False,
     decisions=False,
+    decision_images=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

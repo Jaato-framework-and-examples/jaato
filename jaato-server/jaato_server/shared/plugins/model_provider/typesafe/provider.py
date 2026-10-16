@@ -7,7 +7,8 @@ against ``POST {base_url}/v1/systemone`` and refuses
 :meth:`TypeSafeProvider.complete` (docs/design/decision-models.md §6.2).
 The same model is reachable through OpenRouter (``openrouter``'s
 ``decide()``); this adapter is the vendor's own route, and the one TypeSafe
-documents images and ``box`` on (§12, not built yet).
+documents images and ``box`` on (§12): ``decide(images=...)`` sends still
+images as ``assets`` with the ``TypeSafe-Danger-Zone-Images`` header.
 
 Binding (a ``decision_models:`` entry, never a tier)::
 
@@ -30,14 +31,16 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from jaato_sdk.plugins.model_provider.decisions import (
+    DecisionImage,
     DecisionModelOnlyError,
     DecisionQuestion,
     DecisionQuestionError,
     DecisionResult,
     build_decision_request,
+    needs_image_header,
     parse_decision_response,
 )
 from jaato_sdk.plugins.model_provider.types import CancelToken, TokenUsage
@@ -45,6 +48,7 @@ from jaato_sdk.plugins.model_provider.types import CancelToken, TokenUsage
 from .. import _decisions_http as _http
 from ..base import (
     MODALITY_DECISIONS,
+    MODALITY_IMAGE,
     MODALITY_TEXT,
     ModalityCapabilityMixin,
     ProviderConfig,
@@ -73,6 +77,10 @@ DEFAULT_MODEL = "jev-latest"
 #: Model ids the quick start and the Jev 1.14 post name.  Any other id is
 #: passed through as written; this list only feeds ``list_models``.
 KNOWN_MODELS = ("jev-latest", "jev-preview", "jev-1.13.0", "jev-1.14.0")
+
+#: The opt-in header TypeSafe requires on a request with an image or a
+#: ``box`` question ("Dreamer-ready": the format may still change).
+IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
 
 DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_REQUEST_TIMEOUT = 60.0
@@ -233,8 +241,8 @@ class TypeSafeProvider(ModalityCapabilityMixin):
     # ---------------------------------------------------------- modalities
 
     def modalities(self, model: Optional[str] = None) -> Set[str]:
-        """Text only until images are built (design §12)."""
-        return {MODALITY_TEXT}
+        """Text, and still images through ``decide(images=...)`` (§12)."""
+        return {MODALITY_TEXT, MODALITY_IMAGE}
 
     def output_modalities(self, model: Optional[str] = None) -> Set[str]:
         """Jev answers decisions and writes nothing else."""
@@ -312,6 +320,7 @@ class TypeSafeProvider(ModalityCapabilityMixin):
         state: Any,
         questions: Mapping[str, DecisionQuestion],
         *,
+        images: Sequence[DecisionImage] = (),
         model: Optional[str] = None,
         cancel_token: Optional[CancelToken] = None,
     ) -> DecisionResult:
@@ -319,7 +328,13 @@ class TypeSafeProvider(ModalityCapabilityMixin):
 
         Args:
             state: The text, object or array the questions are about.
+                ``{{image:NAME}}`` stands for an image, here or in a
+                question's instructions or criteria.
             questions: ``{id: DecisionQuestion}``; ids come back as keys.
+                A ``box`` question needs an image and a model that answers
+                ``box`` (Jev 1.14); another model's refusal is a ``422``.
+            images: Still PNG or JPEG images, checked locally against the
+                vendor's limits before sending (``decision_images``).
             model: The Jev release; defaults to the connected model.
             cancel_token: Stops the request in flight.
 
@@ -333,9 +348,10 @@ class TypeSafeProvider(ModalityCapabilityMixin):
         if not self._initialized:
             raise RuntimeError("Provider not initialized. Call initialize() first.")
         model = model or self._model_name or DEFAULT_MODEL
-        body = build_decision_request(state, questions, model)
+        body = build_decision_request(state, questions, model, images)
         self._check_fits(body, model)
-        self._trace(f"DECIDE model={model} questions={list(questions)}")
+        self._trace(f"DECIDE model={model} questions={list(questions)} "
+                    f"images={[i.name for i in images]}")
         raw = self._post(body, model, cancel_token)
         result = parse_decision_response(raw, questions, model)
         self._last_usage = result.usage
@@ -369,6 +385,8 @@ class TypeSafeProvider(ModalityCapabilityMixin):
 
         url = self._base_url + SYSTEMONE_PATH
         headers = {"Authorization": f"Bearer {self._api_key}"}
+        if needs_image_header(body):
+            headers[IMAGES_HEADER] = "true"
 
         def send() -> Dict[str, Any]:
             return _http.post_decision(

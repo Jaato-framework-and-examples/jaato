@@ -54,7 +54,7 @@ import json
 import logging
 import re
 from functools import partial
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,8 @@ from .errors import (
 from .stall import StreamStallGuard
 from .decisions import decisions_url as _decisions_url, post_decision
 from jaato_sdk.plugins.model_provider.decisions import (
+    DecisionImage,
+    DecisionImagesUnsupportedError,
     DecisionModelOnlyError,
     DecisionQuestion,
     DecisionQuestionError,
@@ -1682,10 +1684,15 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         state: Any,
         questions: Mapping[str, DecisionQuestion],
         *,
+        images: Sequence[DecisionImage] = (),
         model: Optional[str] = None,
         cancel_token: Optional[CancelToken] = None,
     ) -> DecisionResult:
         """Ask a decision model typed questions about ``state``.
+
+        Text only: ``images`` is refused with
+        :class:`DecisionImagesUnsupportedError` until the endpoint is
+        verified to carry them (design §12.6).
 
         Posts to OpenRouter's decision endpoint (``/api/alpha/decisions``,
         derived from ``base_url`` or set by
@@ -1716,6 +1723,8 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         model = model or self._model_name
         if not model:
             raise RuntimeError("decide() needs a model: pass model= or connect() first.")
+        if images:
+            raise DecisionImagesUnsupportedError(self.name, model)
         body = build_decision_request(state, questions, model)
         self._check_decision_fits(body, model)
         url = _decisions_url(self._base_url, self._decisions_url)
