@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_server.shared.ui_utils import ellipsize_path
+from ..path_locks import locked_paths
 from .line_endings import LineEndingPolicy, detect_line_ending, normalize, restore
 
 # Default maximum width for file paths in find/replace previews
@@ -289,6 +290,23 @@ class FindReplaceExecutor:
         files = self._find_files(paths, include_ignored)
         self._trace(f"find_and_replace: found {len(files)} files to search")
 
+        # Hold every candidate file's lock from the match through the write,
+        # so a parallel file_edit call on one of them cannot interleave (#1718).
+        with locked_paths(*files):
+            return self._execute_locked(
+                files, compiled_pattern, pattern, replacement, paths, dry_run
+            )
+
+    def _execute_locked(
+        self,
+        files: List[Path],
+        compiled_pattern: "re.Pattern[str]",
+        pattern: str,
+        replacement: str,
+        paths: str,
+        dry_run: bool,
+    ) -> FindReplaceResult:
+        """Match and apply; called with every candidate file's lock held."""
         # Find matches in each file
         file_matches: List[FileMatch] = []
         for file_path in files:

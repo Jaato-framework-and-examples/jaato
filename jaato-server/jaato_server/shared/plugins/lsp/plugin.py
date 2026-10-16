@@ -28,6 +28,7 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 from ..subagent.config import expand_variables
 from ..registry import is_runner_hosted_mirror
+from ..path_locks import locked_paths
 from .lsp_client import (
     LSPClient, ServerConfig, Location, Diagnostic, Hover,
     TextEdit, WorkspaceEdit, CodeAction, Range, Position
@@ -294,6 +295,26 @@ def _apply_text_edits_to_content(content: str, edits: List[TextEdit]) -> str:
     return '\n'.join(lines)
 
 
+def _apply_edits_to_file(file_path: str, edits: List[Any], dry_run: bool) -> Dict[str, Any]:
+    """Read one file, apply LSP text edits, write it back unless ``dry_run``.
+
+    Called with the file's ``path_locks`` lock held.  Returns the change
+    description ``apply_workspace_edit`` reports for the file.
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        original_content = f.read()
+    new_content = _apply_text_edits_to_content(original_content, edits)
+    if not dry_run:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+    return {
+        "file": file_path,
+        "edits_applied": len(edits),
+        "lines_before": len(original_content.split('\n')),
+        "lines_after": len(new_content.split('\n')),
+    }
+
+
 def apply_workspace_edit(
     workspace_edit: WorkspaceEdit,
     dry_run: bool = False
@@ -331,27 +352,15 @@ def apply_workspace_edit(
                 result["success"] = False
                 continue
 
-            with open(file_path, 'r', encoding='utf-8') as f:
-                original_content = f.read()
-
-            # Apply edits
-            new_content = _apply_text_edits_to_content(original_content, edits)
-
-            # Count changes for reporting
-            change_info = {
-                "file": file_path,
-                "edits_applied": len(edits),
-                "lines_before": len(original_content.split('\n')),
-                "lines_after": len(new_content.split('\n'))
-            }
-
+            # Hold the file's lock (the one file_edit takes) from the read
+            # through the write, so a parallel updateFile on this file
+            # cannot be overwritten by an edit computed before it (#1718).
+            with locked_paths(file_path):
+                change_info = _apply_edits_to_file(file_path, edits, dry_run)
             if not dry_run:
-                # Write the modified content back
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(new_content)
                 result["files_modified"].append(file_path)
-
             result["changes"].append(change_info)
+
 
         except IOError as e:
             result["errors"].append({
