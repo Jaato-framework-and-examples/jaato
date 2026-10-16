@@ -594,11 +594,16 @@ without a gate (the default decides, as before).
    - A `box` answer's `value` is the four edge fractions; beside it, `image` and `box_px` (`DecisionBox.to_pixels` on that image's own dimensions). The image is the one the question's instructions name with `{{image:NAME}}` when they name exactly one, else the call's only image; otherwise `box_px` is omitted rather than computed against a guess.
    - The ledger's `decision` record gains `images`: name, source, ref, sha256, bytes, format, width, height. Never the bytes.
    - Not checked here: whether a client host tool's screenshot result reaches history as an attachment (the computer-use controller's case). Guard: `jaato_server/shared/tests/test_the_decide_tool_takes_images.py`, seven reversions, against the real plugin, session and `TypeSafeProvider` with the decision stand-in.
-10. **OpenRouter, optional and last** (§12.6): a live check that `/api/alpha/decisions` carries `assets` and the header (`--live-openrouter --image PATH`). `openrouter` declares `decision_images` only if it does; until then images go through `typesafe` and nothing waits on this step. Needs an OpenRouter key.
+10. **OpenRouter** (§12.6). Shipped. OpenRouter's Multimodal Decisions guide (2026-10) settled the open questions: an image is an `image_url` part with a base64 `data:` URL inside the text (`state`, and for Jev `instructions` and `criteria`), never `assets` (undocumented) nor a top-level `images` (a `400`); `box` is answered by `typesafe/jev-1.14` and `~typesafe/jev-latest`, and Jev 1.13 answers `400`.
+   - One implementation for both routes: `build_decision_request(..., image_layout=)` takes `assets` (TypeSafe's API, unchanged) or `parts` (OpenRouter), both from the one substitution walk, so every check in step 8 holds for both. With `parts` a string holding `{{image:NAME}}` becomes its non-empty text pieces and an `image_url` part per token; inside a list the pieces are spliced in, so a state array stays flat. The request-size check measures the body as built (the bytes are already in it).
+   - `openrouter` declares `decision_images` and sends images to TypeSafe Jev only (`openrouter/decisions.takes_images`): OpenRouter's other image decision models (Clef, Mercury Decide, Liquid d1, ...) have their own limits, and the local checks are Jev's. Another model is refused before sending with `DecisionImagesUnsupportedError` naming it. A `box` question for a model that does not answer it (`answers_box`: Jev 1.14 and later, or a version-less alias) is a local `DecisionQuestionError` naming the question. No TypeSafe header is sent: OpenRouter documents none.
+   - The capability is per model: a package may define `decision_images_for_model(model)` beside `PROVIDER_CAPABILITIES`, and `_decision_capability.model_declares_decision_images(provider, model)` asks it once `decision_images` is declared. `openrouter` defines it as `takes_images`, so `JaatoSession.decision_image_model_names()` offers `images` only to an entry bound to a Jev model. A rule that raises answers no.
+   - The window check counts each `image_url` part as its marker, not its base64.
+   - Not run against the live endpoint here: `examples/provider_smoke_decisions.py --live-openrouter --image PATH` is that check. Guard: `jaato_server/shared/tests/test_decide_on_openrouter_takes_images.py`, five reversions; the decision stand-in holds an OpenRouter request to the guide's rules.
 
 ## 12. Images and `box` (Jev 1.14)
 
-Steps 8 (the contract, on `typesafe`) and 9 (the `decide` tool) are shipped; step 10 (OpenRouter) is not built.
+Steps 8 (the contract, on `typesafe`), 9 (the `decide` tool) and 10 (OpenRouter, Jev only) are shipped.
 
 ### 12.1 What TypeSafe shipped
 
@@ -773,17 +778,17 @@ which has no image to send.
 | Route | Images and `box` | Why |
 |---|---|---|
 | `typesafe` (§6.2) | **yes**, from step 8 | the route TypeSafe documents them on; every example in §12.1 is this endpoint |
-| `openrouter` | **no**, until step 10 checks it | not documented; unverified questions below |
+| `openrouter` | **yes, for TypeSafe Jev**, from step 10; `box` on Jev 1.14 and later | OpenRouter's Multimodal Decisions guide: `image_url` parts in the text, not `assets`. Other image decision models there are refused (their limits are not the ones checked) |
 | `laya` | no | text only |
 
-What step 10 must answer before `openrouter` declares `decision_images`:
+The questions step 10 was waiting on, as the guide answers them (2026-10):
 
-| Question | Why it matters |
+| Question | Answer |
 |---|---|
-| does `POST /api/alpha/decisions` accept `assets` and pass them to TypeSafe? | if it strips the field, the model answers about a reference string as text, with a plausible probability: the worst outcome §5 names |
-| does OpenRouter forward `TypeSafe-Danger-Zone-Images`, or does it need its own spelling? | without the header the vendor refuses the request |
-| does the catalog report `image` in `input_modalities` for `typesafe/jev-1.13` (it said `["text"]` on 2026-10-06)? | if it does, `supports_modality("image")` answers per model with no knob; if not, `plugin_configs.openrouter.framework_overrides.modalities` asserts it |
-| is `jev-1.14` listed on OpenRouter? | `box` is reachable only through a listed model |
+| does `POST /api/alpha/decisions` accept `assets`? | not documented; an image is an `image_url` part with a base64 `data:` URL, read by Jev at any depth of `state`, `instructions` and `criteria`. A top-level `images` is a `400`; remote URLs are not fetched |
+| does OpenRouter need TypeSafe's header? | it documents none, and none is sent |
+| is `box` reachable? | on `typesafe/jev-1.14` and `~typesafe/jev-latest`; Jev 1.13 answers `400`, and no other decision model answers it |
+| limits | Jev's own (§12.3): PNG or JPEG, 256 to 1,568 px a side, 16 MiB a file, 32 MiB a request. jaato keeps TypeSafe's 280 px minimum, the stricter of the two figures |
 
 A profile wanting images and an OpenRouter-billed text path binds two
 entries in `decision_models:` (one per provider); nothing picks a route
@@ -792,7 +797,7 @@ for it.
 ### 12.7 Costs and limits
 
 - **Weaker answers.** TypeSafe says multimodal decisions are less accurate than text ones; the calibration caveat in §9 applies more strongly. The `decide` tool's description says to ask simple questions, one target per `box`.
-- **Bytes leave the host.** An image is workspace content sent to TypeSafe (and through OpenRouter, if step 10 enables that route). Same rule as §9; `routing.zdr` applies on OpenRouter.
+- **Bytes leave the host.** An image is workspace content sent to TypeSafe (and, through OpenRouter, to OpenRouter as well). Same rule as §9; `routing.zdr` applies on OpenRouter.
 - **The format may change.** "Dreamer-ready" means the parser must stay strict and the fixtures dated: an answer in a shape it does not know is an error naming the question, never a guess.
 - **No preprocessing.** A screenshot over 1,568 px, a WebP, a phone photo with EXIF rotation: each is refused or answered wrong. The refusal names the limit so the caller can fix it; the rotation cannot be detected (§12.3).
 

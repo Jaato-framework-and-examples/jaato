@@ -188,7 +188,9 @@ def test_images_and_box_are_offered_where_an_entry_takes_images(standin):
 
 
 def test_a_text_only_session_is_offered_neither(standin):
-    _session({"triage": {"provider": "openrouter", "model": "typesafe/jev-1.13"}},
+    # Through openrouter only TypeSafe Jev is sent images; another
+    # decision model there is text-only.
+    _session({"triage": {"provider": "openrouter", "model": "acme/decide-1"}},
              openrouter_against(standin), provider_name="openrouter")
     schema = _schema()
     assert "images" not in schema.parameters["properties"]
@@ -316,7 +318,9 @@ def test_the_ledger_records_digests_not_bytes(standin, workspace):
 
 
 def test_a_text_only_entry_refuses_images_before_reading(standin, workspace):
-    _session({"triage": {"provider": "openrouter", "model": "typesafe/jev-1.13"}},
+    # Through openrouter only TypeSafe Jev is sent images; another
+    # decision model there is text-only.
+    _session({"triage": {"provider": "openrouter", "model": "acme/decide-1"}},
              openrouter_against(standin), provider_name="openrouter")
     ok, payload = _decide([{"name": "door", "path": "missing.png"}],
                           questions=[Q_HERE], model="triage")
@@ -335,5 +339,5 @@ def test_explain_states_how_images_reach_a_session():
     assert "images and box" in text
     for rule in IMAGE_RULES:
         assert rule in text
-    assert data["images"]["providers"] == ["typesafe"]
+    assert data["images"]["providers"] == ["openrouter", "typesafe"]
     assert data["images"]["parameter"]["items"]["required"] == ["name"]

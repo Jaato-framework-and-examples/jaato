@@ -26,9 +26,11 @@ Six modes, the same checks in each:
     JAATO_TYPESAFE_API_KEY=... python examples/provider_smoke_decisions.py --live-typesafe
     # (or TYPESAFE_API_KEY, or a key stored with 'typesafe-auth key')
 
-    # (7) an image and a box question, on either typesafe mode: one more
-    #     request, to jev-1.14.0 unless --image-model names another
+    # (7) an image and a box question, on an openrouter or typesafe mode:
+    #     one more request, to typesafe/jev-1.14 (openrouter) or jev-1.14.0
+    #     (typesafe) unless --image-model names another
     python examples/provider_smoke_decisions.py --live-typesafe --image photo.jpg
+    python examples/provider_smoke_decisions.py --live-openrouter --image photo.jpg
 
 ``--image PATH`` takes a still PNG or JPEG, 280-1568 px a side (it is
 checked before sending and never resized).  It asks whether the image shows
@@ -87,6 +89,8 @@ LAYA_MODEL = "convaiinnovations/laya"
 TYPESAFE_MODEL = "jev-latest"
 #: ``box`` is Jev 1.14 only.
 IMAGE_MODEL = "jev-1.14.0"
+#: The same Jev release under OpenRouter's id.
+OPENROUTER_IMAGE_MODEL = "typesafe/jev-1.14"
 
 IMAGE_STATE = {"photo": "{{image:photo}}"}
 IMAGE_QUESTIONS: Dict[str, DecisionQuestion] = {
@@ -271,7 +275,8 @@ def run_mock(model: str, laya: bool = False, typesafe: bool = False,
         return failures
 
 
-def run_live(model: str) -> List[str]:
+def run_live(model: str, image: Optional[str] = None,
+             image_model: str = OPENROUTER_IMAGE_MODEL) -> List[str]:
     provider = OpenRouterProvider()
     try:
         provider.initialize(ProviderConfig())   # env key, then stored credentials
@@ -279,7 +284,7 @@ def run_live(model: str) -> List[str]:
         print(f"cannot initialize the provider: {exc}")
         return ["initialize() failed"]
     provider.connect(model)
-    return run(provider, model)
+    return run(provider, model, image, image_model)
 
 
 def run_live_laya(host: str, model: str) -> List[str]:
@@ -325,28 +330,29 @@ def main() -> int:
                         help=f"decision model (default {DEFAULT_MODEL}; "
                              f"{LAYA_MODEL} for laya, {TYPESAFE_MODEL} for typesafe)")
     parser.add_argument("--image", metavar="PATH",
-                        help="also ask about this PNG/JPEG (typesafe modes only)")
-    parser.add_argument("--image-model", default=IMAGE_MODEL,
-                        help=f"model for the image request (default {IMAGE_MODEL})")
+                        help="also ask about this PNG/JPEG (openrouter and typesafe modes)")
+    parser.add_argument("--image-model", default=None,
+                        help=f"model for the image request (default "
+                             f"{OPENROUTER_IMAGE_MODEL} on openrouter, {IMAGE_MODEL} "
+                             "on typesafe)")
     args = parser.parse_args()
-    if args.image and not (args.typesafe or args.live_typesafe):
-        parser.error("--image needs --typesafe or --live-typesafe: only the "
-                     "typesafe provider sends images")
-
     laya = bool(args.laya or args.live_laya)
+    if args.image and laya:
+        parser.error("--image does not apply to laya: it answers about text only")
     typesafe = bool(args.typesafe or args.live_typesafe)
+    image_model = args.image_model or (IMAGE_MODEL if typesafe else OPENROUTER_IMAGE_MODEL)
     model = args.model or (LAYA_MODEL if laya else
                            TYPESAFE_MODEL if typesafe else DEFAULT_MODEL)
     live = bool(args.live_openrouter or args.live_laya or args.live_typesafe)
     if args.live_laya:
         failures = run_live_laya(args.live_laya, model)
     elif args.live_typesafe:
-        failures = run_live_typesafe(model, args.image, args.image_model)
+        failures = run_live_typesafe(model, args.image, image_model)
     elif args.live_openrouter:
-        failures = run_live(model)
+        failures = run_live(model, args.image, image_model)
     else:
         failures = run_mock(model, laya=laya, typesafe=typesafe,
-                            image=args.image, image_model=args.image_model)
+                            image=args.image, image_model=image_model)
     _section("result")
     if failures:
         for failure in failures:

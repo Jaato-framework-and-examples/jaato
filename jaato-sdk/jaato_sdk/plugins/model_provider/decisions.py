@@ -41,6 +41,13 @@ the top-level ``assets`` map.  A ``box`` question answers one
 :class:`DecisionBox`.  The adapter decides the extra header a vendor wants
 (:func:`needs_image_header`); an adapter that cannot send images refuses
 them with :class:`DecisionImagesUnsupportedError`.
+
+The same Jev is reached two ways, which lay the image out differently
+(``image_layout``, :data:`IMAGE_LAYOUTS`): TypeSafe's own API takes the
+``assets`` map above; OpenRouter takes the image as a part inside the
+text, ``{"type": "image_url", "image_url": {"url": "data:...;base64,..."}}``,
+with a string that held a token split around it.  Every check is the
+same for both, because both are built by one substitution walk.
 """
 
 from __future__ import annotations
@@ -74,6 +81,13 @@ IMAGE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 #: The vendor reference jaato mints per image.  Fixed length, so the
 #: vendor's 1,024-byte per-reference limit always holds.
 IMAGE_REFERENCE_PREFIX = "jaato-image-"
+#: How an image is laid out in the body.  ``assets``: a minted reference
+#: in the text and the bytes in a top-level ``assets`` map (TypeSafe's own
+#: API).  ``parts``: the text split around an ``image_url`` part carrying
+#: a ``data:`` URL (OpenRouter's decision endpoint).
+IMAGE_LAYOUTS = ("assets", "parts")
+#: The mime type each format is sent as in a ``parts`` data URL.
+FORMAT_MIMES = {"png": "image/png", "jpeg": "image/jpeg"}
 #: Images in one request: the vendor's 65,536-byte budget for every
 #: reference, divided by its 1,024-byte limit for one.
 MAX_IMAGES = 64
@@ -128,9 +142,15 @@ class DecisionImagesUnsupportedError(DecisionError):
     outcome a decision can have.
     """
 
-    def __init__(self, provider: str, model: str = "") -> None:
+    def __init__(self, provider: str, model: str = "",
+                 reason: Optional[str] = None) -> None:
         self.provider = provider
         self.model = model
+        self.reason = reason
+        if reason:
+            super().__init__(
+                f"Provider {provider!r} does not send images to {model!r}: {reason}")
+            return
         super().__init__(
             f"Provider {provider!r} does not send images to decision models "
             "(it does not declare decision_images).  Bind the model through "
@@ -393,30 +413,58 @@ def _check_images(images: Sequence[DecisionImage]) -> Dict[str, ImageInfo]:
 
 
 class _Substitution:
-    """Replaces ``{{image:NAME}}`` with the minted reference, counting uses."""
+    """Replaces ``{{image:NAME}}`` with what the layout puts there,
+    counting uses.
 
-    def __init__(self, references: Dict[str, str]) -> None:
+    ``assets``: the minted reference string, in place.  ``parts``: a
+    string holding a token becomes the list of its non-empty text pieces
+    and an ``image_url`` part per token; inside a list those pieces are
+    spliced into it, so a state array stays one flat array.
+    """
+
+    def __init__(self, references: Dict[str, Any], *, parts: bool = False) -> None:
         self.references = references
+        self.parts = parts
         self.uses: Dict[str, int] = {name: 0 for name in references}
 
+    def _lookup(self, qid: Optional[str], name: str) -> Any:
+        if name not in self.references:
+            raise DecisionQuestionError(
+                qid, f"{{{{image:{name}}}}} names no image in this request")
+        self.uses[name] += 1
+        return self.references[name]
+
     def _replace(self, qid: Optional[str], text: str) -> str:
-        def one(match: "re.Match[str]") -> str:
-            name = match.group(1)
-            if name not in self.references:
-                raise DecisionQuestionError(
-                    qid, f"{{{{image:{name}}}}} names no image in this request")
-            self.uses[name] += 1
-            return self.references[name]
-        return IMAGE_TOKEN_RE.sub(one, text)
+        return IMAGE_TOKEN_RE.sub(lambda m: self._lookup(qid, m.group(1)), text)
+
+    def _split(self, qid: Optional[str], text: str) -> list:
+        pieces: list = []
+        start = 0
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if text[start:match.start()]:
+                pieces.append(text[start:match.start()])
+            pieces.append(self._lookup(qid, match.group(1)))
+            start = match.end()
+        if text[start:]:
+            pieces.append(text[start:])
+        return pieces
 
     def apply(self, qid: Optional[str], value: Any) -> Any:
         """``value`` with every token substituted.  A token in an object
         key is refused: the vendor never replaces keys, so it would reach
         the model as literal text."""
         if isinstance(value, str):
+            if self.parts and IMAGE_TOKEN_RE.search(value):
+                return self._split(qid, value)
             return self._replace(qid, value)
         if isinstance(value, list):
-            return [self.apply(qid, item) for item in value]
+            out: list = []
+            for item in value:
+                if self.parts and isinstance(item, str) and IMAGE_TOKEN_RE.search(item):
+                    out.extend(self._split(qid, item))
+                else:
+                    out.append(self.apply(qid, item))
+            return out
         if isinstance(value, dict):
             out = {}
             for key, item in value.items():
@@ -438,13 +486,16 @@ def build_decision_request(
     questions: Mapping[str, DecisionQuestion],
     model: str,
     images: Sequence[DecisionImage] = (),
+    *,
+    image_layout: str = "assets",
 ) -> Dict[str, Any]:
     """Validate and build the request body.  Ids are kept as given: they
     are the caller's own and come back as the keys of ``answers``.
 
     With ``images``, every ``{{image:NAME}}`` in the state, the
-    instructions and the criteria is replaced by a minted reference and
-    the body gains ``assets``.  Refused before sending, naming the
+    instructions and the criteria is replaced as ``image_layout`` says
+    (:data:`IMAGE_LAYOUTS`): by a minted reference, the body gaining
+    ``assets``; or by ``image_url`` parts.  Refused before sending, naming the
     question where one is to blame: a token naming no image, an image no
     token names, a token in an object key, a ``box`` question with no
     image, an image that breaks a limit (:mod:`.decision_images`), and a
@@ -458,6 +509,8 @@ def build_decision_request(
         raise DecisionQuestionError(None, "no model named")
     for qid, question in questions.items():
         validate_question(qid, question)
+    if image_layout not in IMAGE_LAYOUTS:
+        raise ValueError(f"image_layout must be one of {IMAGE_LAYOUTS}, got {image_layout!r}")
     infos = _check_images(images)
     if not infos:
         for qid, question in questions.items():
@@ -469,7 +522,14 @@ def build_decision_request(
             "model": model,
             "questions": {qid: q.to_wire() for qid, q in questions.items()},
         }
-    return _image_request(state, questions, model, images, infos)
+    return _image_request(state, questions, model, images, infos, image_layout)
+
+
+def _image_part(image: DecisionImage, info: ImageInfo) -> Dict[str, Any]:
+    """An OpenRouter ``image_url`` part carrying ``image`` as a data URL."""
+    data = base64.b64encode(image.data).decode("ascii")
+    return {"type": "image_url",
+            "image_url": {"url": f"data:{FORMAT_MIMES[info.format]};base64,{data}"}}
 
 
 def _image_request(
@@ -478,11 +538,18 @@ def _image_request(
     model: str,
     images: Sequence[DecisionImage],
     infos: Dict[str, ImageInfo],
+    image_layout: str = "assets",
 ) -> Dict[str, Any]:
     """The body of a request with checked ``images``: tokens substituted,
-    every image referenced, sizes within the request limits, ``assets``."""
-    references = {name: f"{IMAGE_REFERENCE_PREFIX}{uuid.uuid4()}" for name in infos}
-    sub = _Substitution(references)
+    every image referenced, sizes within the request limits, and the
+    bytes where ``image_layout`` puts them."""
+    parts = image_layout == "parts"
+    if parts:
+        references: Dict[str, Any] = {
+            image.name: _image_part(image, infos[image.name]) for image in images}
+    else:
+        references = {name: f"{IMAGE_REFERENCE_PREFIX}{uuid.uuid4()}" for name in infos}
+    sub = _Substitution(references, parts=parts)
     wire_state = sub.apply(None, state)
     wire_questions = {}
     for qid, question in questions.items():
@@ -498,7 +565,9 @@ def _image_request(
             f"{{{{image:{unused[0]}}}}} where it belongs")
     body: Dict[str, Any] = {"state": wire_state, "model": model,
                             "questions": wire_questions}
-    _check_request_size(body, images, sub.uses)
+    _check_request_size(body, images, sub.uses, inline=parts)
+    if parts:
+        return body
     body["assets"] = {
         references[image.name]: {
             "type": "image",
@@ -511,9 +580,11 @@ def _image_request(
 
 
 def _check_request_size(body: Dict[str, Any], images: Sequence[DecisionImage],
-                        uses: Dict[str, int]) -> None:
+                        uses: Dict[str, int], *, inline: bool = False) -> None:
     """Refuse a body over the request limit, or images over the expanded
-    limit (every use of an image counted)."""
+    limit (every use of an image counted).  ``inline``: the body already
+    carries every image's bytes (the ``parts`` layout), so it is measured
+    as it is."""
     by_name = {image.name: image for image in images}
     expanded = sum(len(by_name[n].data) * count for n, count in uses.items())
     if expanded > MAX_EXPANDED_IMAGE_BYTES:
@@ -521,7 +592,7 @@ def _check_request_size(body: Dict[str, Any], images: Sequence[DecisionImage],
             None, f"images count {expanded} bytes with every use counted, over "
             f"{MAX_EXPANDED_IMAGE_BYTES}")
     text = len(json.dumps(body, ensure_ascii=False, default=str).encode())
-    estimate = text + sum(_b64_size(len(i.data)) + 200 for i in images)
+    estimate = text if inline else text + sum(_b64_size(len(i.data)) + 200 for i in images)
     if estimate > MAX_REQUEST_BYTES:
         raise DecisionQuestionError(
             None, f"the request is ~{estimate} bytes with its images, over "
@@ -533,6 +604,7 @@ def needs_image_header(body: Mapping[str, Any]) -> bool:
 
     The vendor's opt-in header is the adapter's to add (TypeSafe's is
     ``TypeSafe-Danger-Zone-Images: true``); this says when one is due.
+    Read for the ``assets`` layout only.
     """
     if body.get("assets"):
         return True
@@ -724,6 +796,7 @@ __all__ = [
     "needs_image_header",
     "IMAGE_TOKEN_RE",
     "MAX_IMAGES",
+    "IMAGE_LAYOUTS",
     "parse_decision_response",
     "parse_decision_usage",
 ]

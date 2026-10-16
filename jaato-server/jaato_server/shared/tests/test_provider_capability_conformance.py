@@ -599,6 +599,10 @@ _DECISION_SETUP = {
     "openrouter": _openrouter_at_standin,
 }
 
+#: The model a provider is asked about images on, where its connected one
+#: does not answer ``box`` (OpenRouter's stand-in connects Jev 1.13).
+_DECISION_IMAGE_MODEL = {"openrouter": "typesafe/jev-1.14"}
+
 
 @pytest.mark.parametrize("provider", sorted(_provider_dirs()))
 def test_declared_decisions_are_answered_on_the_wire(provider):
@@ -628,7 +632,9 @@ def test_declared_decisions_are_answered_on_the_wire(provider):
 @pytest.mark.parametrize("provider", sorted(_provider_dirs()))
 def test_declared_decision_images_reach_the_wire(provider):
     """``decision_images`` says ``decide(images=...)`` sends the image: the
-    stand-in sees ``assets`` the body refers to and answers ``box``."""
+    stand-in sees the image's bytes in the body, laid out as the provider
+    lays it out (``assets`` the state refers to, or an ``image_url`` part
+    in the state), and answers ``box``."""
     if not _read_declaration(provider).get("decision_images"):
         pytest.skip(f"{provider} does not declare decision_images")
     from jaato_sdk.plugins.model_provider.decisions import (
@@ -642,14 +648,24 @@ def test_declared_decision_images_reach_the_wire(provider):
         "here": DecisionQuestion("noul", "Is there a door in `photo`?"),
         "where": DecisionQuestion("box", "the door in `photo`"),
     }
-    image = DecisionImage("image/png", png_bytes(), "door")
+    data = png_bytes()
+    image = DecisionImage("image/png", data, "door")
     with DecisionStandIn() as server:
         result = _DECISION_SETUP[provider](server).decide(
-            {"photo": "{{image:door}}"}, questions, images=[image])
+            {"photo": "{{image:door}}"}, questions, images=[image],
+            model=_DECISION_IMAGE_MODEL.get(provider))
         posts = server.posts()
     body = posts[0][2]
-    assert len(body["assets"]) == 1 and next(iter(body["assets"])) == body["state"]["photo"], (
-        f"{provider}: decide(images=...) did not put the image in assets")
+    encoded = base64.b64encode(data).decode("ascii")
+    photo = body["state"]["photo"]
+    if "assets" in body:
+        (reference, asset), = body["assets"].items()
+        assert reference == photo and asset["data_base64"] == encoded, (
+            f"{provider}: the image in assets is not the one the state names")
+    else:
+        assert photo == [{"type": "image_url", "image_url": {
+            "url": f"data:image/png;base64,{encoded}"}}], (
+            f"{provider}: decide(images=...) did not put the image in the state")
     assert isinstance(result.answers["where"].value, DecisionBox)
 
 

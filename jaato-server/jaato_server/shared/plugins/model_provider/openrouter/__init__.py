@@ -46,8 +46,12 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
 #   ToolOutputEvent media chunks and plays.
     reasoning_replay=False,
     decisions=True,   # decide() -> POST /api/alpha/decisions (decision-models.md)
-    decision_images=False,   # unverified that the endpoint carries assets (§12.6)
+    decision_images=True,   # image_url parts, to TypeSafe Jev only (§12, step 10)
 )
+
+#: Which decision models this provider sends images to (read by
+#: ``_decision_capability.model_declares_decision_images``): TypeSafe Jev.
+from .decisions import takes_images as decision_images_for_model  # noqa: E402
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
 PROVIDER_KNOBS = ProviderKnobs(layers=(

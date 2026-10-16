@@ -22,11 +22,21 @@ other   ``DecisionRequestRejectedError`` (``422``)   no
 
 ``/api/alpha/`` is not a stable route.  Nothing here assumes more of the
 response than the parser in the SDK module checks.
+
+Images and ``box`` (decision-models.md §12, step 10) are sent to TypeSafe
+Jev only, the one decision family whose limits the shared local checks
+(``decision_images``) are: an image is an ``image_url`` part inside the
+text (``image_layout="parts"``), and ``box`` is answered by Jev 1.14 and
+later (``~typesafe/jev-latest``), never by 1.13.  :func:`takes_images`
+and :func:`answers_box` are those two rules, read by the provider before
+sending and by the ``decide`` tool's schema gate through the package's
+``decision_images_for_model``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.types import CancelToken
 
@@ -43,6 +53,42 @@ from .errors import (
 
 #: Path of the decision endpoint relative to OpenRouter's ``/api`` root.
 DECISIONS_PATH = "/alpha/decisions"
+
+
+#: A TypeSafe Jev id on OpenRouter: ``typesafe/jev-1.14``,
+#: ``~typesafe/jev-latest`` (the ``~`` is OpenRouter's alias marker).
+_JEV_RE = re.compile(r"~?typesafe/jev-(?P<release>[A-Za-z0-9._-]+)", re.IGNORECASE)
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)")
+#: The first Jev release that answers ``box``.
+BOX_MIN_VERSION: Tuple[int, int] = (1, 14)
+
+
+def jev_release(model: Optional[str]) -> Optional[str]:
+    """The Jev release a model id names (``1.14``, ``latest``), or ``None``
+    when the id is not TypeSafe Jev."""
+    match = _JEV_RE.fullmatch((model or "").strip())
+    return match.group("release").lower() if match else None
+
+
+def takes_images(model: Optional[str]) -> bool:
+    """Whether jaato sends images to ``model`` through OpenRouter: Jev only.
+
+    Other decision models on OpenRouter read images too, each with its
+    own limits; the local checks are Jev's, so they are not sent there.
+    """
+    return jev_release(model) is not None
+
+
+def answers_box(model: Optional[str]) -> bool:
+    """Whether ``model`` answers a ``box`` question: Jev 1.14 or later,
+    or an alias with no version (``latest``).  Jev 1.13 answers ``400``."""
+    release = jev_release(model)
+    if release is None:
+        return False
+    version = _VERSION_RE.match(release)
+    if version is None:
+        return True
+    return (int(version.group(1)), int(version.group(2))) >= BOX_MIN_VERSION
 
 
 def decisions_url(base_url: str, override: Optional[str] = None) -> str:

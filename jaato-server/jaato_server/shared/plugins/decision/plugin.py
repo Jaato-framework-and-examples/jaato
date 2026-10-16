@@ -103,7 +103,8 @@ _QUESTION_SCHEMA: Dict[str, Any] = {
 
 
 #: The ``images`` parameter, offered only to a session with an entry whose
-#: provider declares ``decision_images`` (see ``narrow_tool_schema``).
+#: provider declares ``decision_images`` for its model (see
+#: ``narrow_tool_schema``).
 _IMAGES_SCHEMA: Dict[str, Any] = {
     "type": "array",
     "description": (
@@ -135,8 +136,11 @@ _IMAGES_SCHEMA: Dict[str, Any] = {
 #: (text-only) schema, so the shaped parts are stated here, once.
 IMAGE_RULES = (
     "offered only to a session binding a decision_models: entry whose "
-    "provider declares decision_images; otherwise neither `images` nor the "
-    "`box` question type exists for it",
+    "provider declares decision_images for its model (typesafe: every "
+    "model; openrouter: TypeSafe Jev only); otherwise neither `images` nor "
+    "the `box` question type exists for it",
+    "box is answered by Jev 1.14 and later (jev-latest); an earlier model "
+    "is refused before sending on openrouter and answers 422 on typesafe",
     "each image is {name, path} or {name, attachment_id}, exactly one; the "
     "model writes {{image:NAME}} in the state, an instruction or an option "
     "description; bytes never appear in the call",
