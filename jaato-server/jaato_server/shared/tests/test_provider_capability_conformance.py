@@ -583,6 +583,11 @@ def _openrouter_at_standin(server):
     return openrouter_against(server)
 
 
+def _typesafe_at_standin(server):
+    from jaato_server.shared.tests.decision_standin import typesafe_against
+    return typesafe_against(server)
+
+
 def _laya_at_standin(server):
     from jaato_server.shared.tests.decision_standin import laya_against
     return laya_against(server)
@@ -590,6 +595,7 @@ def _laya_at_standin(server):
 
 _DECISION_SETUP = {
     "laya": _laya_at_standin,
+    "typesafe": _typesafe_at_standin,
     "openrouter": _openrouter_at_standin,
 }
 

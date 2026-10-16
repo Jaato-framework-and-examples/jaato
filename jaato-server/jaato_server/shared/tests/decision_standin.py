@@ -3,7 +3,7 @@
 Serves, on ``127.0.0.1`` and an ephemeral port:
 
 * ``POST /api/alpha/decisions`` (OpenRouter) and ``POST /v1/systemone``
-  (``laya-serve``, TypeSafe's path): answers every question it is asked, in
+  (``laya-serve`` and TypeSafe's own API): answers every question it is asked, in
   the vendor's documented shape (``noul`` 0.95; ``choice`` the first
   option; ``score`` 1.0), unless a scripted reply is queued;
 * ``GET /api/v1/models``: a listing with ``openai/gpt-4o`` only;
@@ -189,6 +189,25 @@ def openrouter_against(server: DecisionStandIn, model: str = JEV, **extra: Any):
         api_key="sk-or-test",
         extra={"framework_overrides": {"base_url": server.base_url}, **extra},
     ))
+    provider.connect(model)
+    return provider
+
+
+def typesafe_against(server: DecisionStandIn, model: str = "jev-latest",
+                     **extra: Any):
+    """An initialized, connected ``TypeSafeProvider`` aimed at ``server``.
+
+    The key is ``ts-test`` unless ``extra`` names one (or ``api_key=None``
+    to leave the knob unset and fall back to the environment).
+    """
+    from jaato_server.shared.plugins.model_provider.base import ProviderConfig
+    from jaato_server.shared.plugins.model_provider.typesafe import TypeSafeProvider
+
+    extra.setdefault("api_key", "ts-test")
+    if extra["api_key"] is None:
+        del extra["api_key"]
+    provider = TypeSafeProvider()
+    provider.initialize(ProviderConfig(extra={"base_url": server.host, **extra}))
     provider.connect(model)
     return provider
 

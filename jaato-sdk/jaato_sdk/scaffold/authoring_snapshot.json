@@ -472,6 +472,18 @@
    "category": "plugin:notebook",
    "default": "true"
   },
+  "JAATO_TYPESAFE_API_KEY": {
+   "category": "provider:typesafe",
+   "default": null
+  },
+  "JAATO_TYPESAFE_BASE_URL": {
+   "category": "provider:typesafe",
+   "default": null
+  },
+  "JAATO_TYPESAFE_CONTEXT_LENGTH": {
+   "category": "provider:typesafe",
+   "default": null
+  },
   "JAATO_ZHIPUAI_API_KEY": {
    "category": "provider:zhipuai",
    "default": null
@@ -594,6 +606,10 @@
   },
   "TRITON_OPENAI_URL": {
    "category": "provider:triton",
+   "default": null
+  },
+  "TYPESAFE_API_KEY": {
+   "category": "provider:typesafe",
    "default": null
   },
   "VLLM_API_TOKEN": {
@@ -1786,6 +1802,48 @@
       "control_url",
       "host",
       "openai_url"
+     ],
+     "opaque": false
+    }
+   }
+  },
+  "typesafe": {
+   "auth": [
+    [
+     "api_key_param",
+     "api_key",
+     "plugin_configs.typesafe.api_key (pass:// ok)"
+    ],
+    [
+     "env",
+     "JAATO_TYPESAFE_API_KEY",
+     ""
+    ],
+    [
+     "env",
+     "TYPESAFE_API_KEY",
+     "vendor SDK var"
+    ],
+    [
+     "stored",
+     "typesafe-auth",
+     "typesafe_auth.json (config_root → workspace → ~/.jaato)"
+    ]
+   ],
+   "chat": false,
+   "knobs": {
+    "framework_overrides": {
+     "keys": [
+      "connect_timeout",
+      "request_timeout"
+     ],
+     "opaque": false
+    },
+    "top_level": {
+     "keys": [
+      "api_key",
+      "base_url",
+      "context_length"
      ],
      "opaque": false
     }
