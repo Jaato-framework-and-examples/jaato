@@ -2,9 +2,9 @@
 
 Status: steps 1-6 of §11 are **shipped**: the modality, `decide()` on
 `openrouter`, `decision_models:`, the `decide` tool, the permission gate
-and the `laya` adapter. §8.3 lists the consumers still to come. §12
-(images and the `box` question, Jev 1.14) is **proposed**, nothing built;
-it is steps 7-10 of §11.
+and the `laya` adapter. §8.3 lists the consumers still to come. §6.2 (a
+direct `typesafe` adapter) and §12 (images and the `box` question, Jev
+1.14) are **proposed**, nothing built; they are steps 7-10 of §11.
 
 ## 1. What a decision model is
 
@@ -225,8 +225,58 @@ class DecisionCapable(Protocol):
 | Adapter | Wire | Notes |
 |---|---|---|
 | `openrouter` | `POST /api/alpha/decisions` | Reuses the provider's key resolution, attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`), deadlines and `cost` parsing. **`/api/alpha/` is not a stable route**, so the parser is defensive and the guard fixtures are the vendor's documented examples |
-| `typesafe` (optional) | `POST https://api.typesafe.ai/v1/systemone` | The same body. Only worth adding if a deployment needs the vendor directly (its own rate limits, no gateway), or if OpenRouter does not carry images (§12.6) |
+| `typesafe` (proposed, §6.2) | `POST https://api.typesafe.ai/v1/systemone` | The vendor's own API, the same body. The route TypeSafe documents images and `box` on, so the first adapter to declare `decision_images` (§12.6). Also serves text-only decisions to a deployment with a TypeSafe key and no OpenRouter account |
 | `laya` | `POST {host}/v1/systemone` on `laya-serve` (`mode: http`, the default), or `laya.load(...).predict()` in the runner (`mode: local`) | `laya-serve` speaks Jev's request and response, so the HTTP transport is shared with `openrouter`. See §9 for the in-process cost |
+
+### 6.2 The `typesafe` adapter (proposed)
+
+`model_provider/typesafe/`, a decisions-only provider like `laya`
+(`chat=False`, so `jaato-scaffold new` refuses it as `--provider` and
+`validate` reports `decision_only_provider` where a profile or tier names
+it). It is bound in `decision_models:`, never in a tier.
+
+| | Value (TypeSafe quick start, read 2026-10-16) |
+|---|---|
+| endpoint | `POST https://api.typesafe.ai/v1/systemone` |
+| auth | `Authorization: Bearer <key>`; keys from `console.typesafe.ai/keys` |
+| model ids | `jev-latest` (the alias), `jev-1.13.0`, `jev-1.14.0` / `jev-preview` (§12.1). Passed through as written; no table of ids |
+| transport | the shared `model_provider/_decisions_http.py` (`openrouter` and `laya` already bind it) |
+
+**The key: the profile knob first, environment variables as fallback.**
+The same order every provider here uses (#863's posture: a session's own
+configuration outranks the daemon's environment):
+
+1. `plugin_configs.typesafe.api_key` (may carry a `pass://` / `vault://`
+   URI, resolved daemon-side like any other knob, #1605);
+2. `JAATO_TYPESAFE_API_KEY`;
+3. `TYPESAFE_API_KEY`, the vendor's own variable (its SDKs read it), so a
+   host already set up for `typesafe-sdk` works with no extra config;
+4. the stored `typesafe_auth.json` written by `typesafe-auth key <key>`
+   (validated with one `noul` request, stored like the other `*_auth.json`
+   files), so an IPC deployment can configure a key from the prompt.
+
+`PROVIDER_AUTH_RESOLUTION` declares the four in that order, and
+`test_a_named_auth_command_exists.py` then requires the `typesafe-auth`
+command to exist. A key from 2-4 is announced the way the other providers'
+`auth_info` names its source, so an operator can tell a profile key from
+an inherited one.
+
+Other knobs, all under `plugin_configs.typesafe`, each with an env
+fallback beneath it:
+
+| Knob | Env fallback | Meaning |
+|---|---|---|
+| `base_url` | `JAATO_TYPESAFE_BASE_URL` | `https://api.typesafe.ai` by default; a proxy or a regional endpoint |
+| `context_length` | `JAATO_TYPESAFE_CONTEXT_LENGTH` | the window the pre-send estimate checks against. TypeSafe publishes 32K tokens of state for 1.13 and no catalog, so with neither set the window is not checked (as `laya` does for an unknown model), never guessed |
+| `connect_timeout`, `request_timeout` | none | the deadlines `decide()` runs under (§6) |
+
+No `danger_zone` knob: the images header is sent when, and only when, the
+request carries an image or a `box` question (§12.2), so it cannot be left
+on by a profile that forgot it, nor off on a request that needs it.
+
+Errors and retries follow §6: `429` / `529` / `5xx` and an unreachable host
+are retried by `with_retry`; `400` (an unreferenced asset), `401`, `404`
+and `422` are not, and a `400` or `422` carries the body.
 
 `decide()` on a chat model with structured outputs (a JSON-schema
 `response_format` plus logprobs) is a possible fallback for providers with
@@ -521,10 +571,10 @@ without a gate (the default decides, as before).
    - `complete()` and history serialisation raise `DecisionModelOnlyError`; the output set is `{decisions}`.
    - Not run against a live `laya-serve` or the real package (torch and the weights were not installed here); the wire was read from the package source. `examples/provider_smoke_decisions.py --live-laya HOST` is that check.
    - Guard: `jaato_server/shared/tests/test_decide_on_laya.py`, seven reversions, against the decision stand-in (which now also serves `/v1/systemone`) and a stand-in `laya` module.
-7. **A live check through OpenRouter, before any code** (§12.6). One request to `typesafe/jev-1.13` with one `assets` image and the `TypeSafe-Danger-Zone-Images` header, one with a `box` question on `jev-1.14` (whatever id OpenRouter lists, if any), and `GET …/models/typesafe/jev-1.13/endpoints` for `input_modalities`. The three answers decide step 9's adapter and become fixtures. Needs a key; `examples/provider_smoke_decisions.py` gains a `--live-openrouter --image PATH` mode for it.
-8. **The contract** (§12.2-§12.4): `DecisionImage`, the `images=` parameter, `{{image:NAME}}` substitution, the local image checks (stdlib header parsing, no Pillow), `box` in `QUESTION_TYPES` with `DecisionBox`, the `decision_images` capability column, and the stand-in answering `box` and checking `assets`. No adapter sends an image yet; every adapter refuses `images=` with `DecisionImagesUnsupportedError`.
-9. **The adapter** (§12.6): `openrouter` if step 7 says the route carries images, else a new `typesafe` provider for `api.typesafe.ai/v1/systemone` (key `JAATO_TYPESAFE_API_KEY` / `TYPESAFE_API_KEY`, the shared `_decisions_http.py` transport). `laya` declares `decision_images=False`.
-10. **The `decide` tool's `images`** (§12.5): workspace paths and attachment ids, `box` answers with pixel coordinates, the ledger's image digests.
+7. **The `typesafe` adapter, text only** (§6.2): the provider, its key order (knob, `JAATO_TYPESAFE_API_KEY`, `TYPESAFE_API_KEY`, `typesafe-auth`), the other knobs, the stand-in serving `/v1/systemone` with a bearer check, and `examples/provider_smoke_decisions.py --live-typesafe` sending the vendor's documented example. Useful on its own and needs nothing from §12.
+8. **The contract** (§12.2-§12.4): `DecisionImage`, the `images=` parameter, `{{image:NAME}}` substitution, the local image checks (stdlib header parsing, no Pillow), `box` in `QUESTION_TYPES` with `DecisionBox`, the `decision_images` capability column, and the stand-in answering `box`, checking `assets` and the header. `typesafe` declares `decision_images` and sends images; every other adapter refuses `images=` with `DecisionImagesUnsupportedError`. `laya` declares `decision_images=False`. `--live-typesafe --image PATH` sends one image and one `box` question.
+9. **The `decide` tool's `images`** (§12.5): workspace paths and attachment ids, `box` answers with pixel coordinates, the ledger's image digests.
+10. **OpenRouter, optional and last** (§12.6): a live check that `/api/alpha/decisions` carries `assets` and the header (`--live-openrouter --image PATH`). `openrouter` declares `decision_images` only if it does; until then images go through `typesafe` and nothing waits on this step. Needs an OpenRouter key.
 
 ## 12. Images and `box` (Jev 1.14)
 
@@ -700,7 +750,13 @@ which has no image to send.
 
 ### 12.6 Which route carries images
 
-Unknown, and the first thing to find out (§11 step 7):
+| Route | Images and `box` | Why |
+|---|---|---|
+| `typesafe` (§6.2) | **yes**, from step 8 | the route TypeSafe documents them on; every example in §12.1 is this endpoint |
+| `openrouter` | **no**, until step 10 checks it | not documented; unverified questions below |
+| `laya` | no | text only |
+
+What step 10 must answer before `openrouter` declares `decision_images`:
 
 | Question | Why it matters |
 |---|---|
@@ -709,15 +765,14 @@ Unknown, and the first thing to find out (§11 step 7):
 | does the catalog report `image` in `input_modalities` for `typesafe/jev-1.13` (it said `["text"]` on 2026-10-06)? | if it does, `supports_modality("image")` answers per model with no knob; if not, `plugin_configs.openrouter.framework_overrides.modalities` asserts it |
 | is `jev-1.14` listed on OpenRouter? | `box` is reachable only through a listed model |
 
-Until step 7 answers yes to the first two, `openrouter` keeps
-`decision_images=False`, and images reach Jev only through a direct
-`typesafe` adapter (§6.1). `laya` declares `decision_images=False`: Laya is
-text-only.
+A profile wanting images and an OpenRouter-billed text path binds two
+entries in `decision_models:` (one per provider); nothing picks a route
+for it.
 
 ### 12.7 Costs and limits
 
 - **Weaker answers.** TypeSafe says multimodal decisions are less accurate than text ones; the calibration caveat in §9 applies more strongly. The `decide` tool's description says to ask simple questions, one target per `box`.
-- **Bytes leave the host.** An image is workspace content sent to TypeSafe (and to OpenRouter, if that route works). Same rule as §9; `routing.zdr` applies on OpenRouter.
+- **Bytes leave the host.** An image is workspace content sent to TypeSafe (and through OpenRouter, if step 10 enables that route). Same rule as §9; `routing.zdr` applies on OpenRouter.
 - **The format may change.** "Dreamer-ready" means the parser must stay strict and the fixtures dated: an answer in a shape it does not know is an error naming the question, never a guess.
 - **No preprocessing.** A screenshot over 1,568 px, a WebP, a phone photo with EXIF rotation: each is refused or answered wrong. The refusal names the limit so the caller can fix it; the rotation cannot be detected (§12.3).
 
