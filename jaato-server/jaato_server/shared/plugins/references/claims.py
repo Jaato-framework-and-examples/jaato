@@ -325,7 +325,8 @@ def build_proposed_reference(
     if not isinstance(ref_id, str) or not _ID_RE.match(ref_id):
         return None, ["'id' must be one token: letters, digits, '.', '_' or '-'."]
     if ref_id in set(catalog_ids):
-        return None, [already_in_catalog(ref_id)]
+        read_only = read_only_reason(workspace, ref_id)
+        return None, [read_only or already_in_catalog(ref_id)]
     return _entry_from_args(args, ref_id, workspace)
 
 
@@ -409,6 +410,63 @@ def _files_declaring(
     return found
 
 
+def linked_bundles(workspace: str) -> List[str]:
+    """The sub-bundles of the workspace catalog that are LINKS: a name in
+    ``.jaato/references`` that is a symlink to a directory carrying
+    ``bundle.json``.  The reference loader reads them; :func:`catalog_dirs`,
+    and so every file a curator of this workspace may write, does not.
+    Decided without reading anything through the link."""
+    root = os.path.realpath(workspace)
+    base = os.path.join(root, ".jaato", "references")
+    real = os.path.realpath(base)
+    if not os.path.isdir(base) or (real != root and not real.startswith(root + os.sep)):
+        return []
+    try:
+        names = sorted(os.listdir(real))
+    except OSError:
+        return []
+    return [name for name in names
+            if os.path.islink(os.path.join(real, name))
+            and os.path.isdir(os.path.join(real, name))
+            and os.path.isfile(os.path.join(real, name, BUNDLE_MANIFEST_FILENAME))]
+
+
+def read_only_reason(workspace: str, ref_id: str) -> Optional[str]:
+    """Why ``ref_id``, which the loaded catalog holds, cannot be changed from
+    this workspace; ``None`` when it can be revised here (#1722).  Ask it only
+    about an id the catalog holds: an id in no file at all is otherwise
+    reported as read-only.
+
+    A reference is revisable when it is in exactly one file the workspace
+    catalog holds directly (:func:`revision_target`).  One the loader reads
+    from elsewhere -- a linked sub-bundle, the user tier, a
+    ``references.json`` source -- is in no such file: promotion never writes
+    through a link (``write_contained``) and never into another tier.  Both
+    ``proposeReference(id)`` and ``proposeReference(revises)`` answer with
+    this one reason, so neither sends the model to the other.
+    """
+    _target, category, _error = revision_target(workspace, ref_id)
+    if category != "not_found":
+        return None
+    return _read_only_message(ref_id, linked_bundles(workspace))
+
+
+def _read_only_message(ref_id: str, linked: List[str]) -> str:
+    if linked:
+        where = (f"through the linked bundle{'s' if len(linked) > 1 else ''} "
+                 f"{', '.join(repr(n) for n in linked)} (or another tier)")
+        owner = "the workspace that holds that bundle's folder"
+    else:
+        where = "from another tier (the user tier, a references.json source or the session's own sources)"
+        owner = "whoever maintains that source"
+    return (f"'{ref_id}' is already in the catalog and is read-only in this "
+            f"workspace: the catalog reads it {where}, not from a file this "
+            "workspace's catalog holds, so it can be neither proposed under this id "
+            "nor revised from here (a revision is promoted into the file the "
+            "reference lives in, and promotion never writes through a link or into "
+            f"another tier). Leave it as it is and report the change it needs, for {owner}.")
+
+
 def revision_target(
     workspace: str, ref_id: str,
 ) -> Tuple[Optional[Dict[str, Any]], str, str]:
@@ -424,7 +482,9 @@ def revision_target(
     workspace writes.  Refusals: ``not_found``, ``ambiguous`` (the id is in
     two files, and which one the loader keeps is not this function's to
     guess), ``not_revisable`` (a ``url`` / ``mcp`` reference, whose
-    document is not a path or inline text).  Called by ``proposeReference``
+    document is not a path or inline text).  For an id the loaded catalog
+    holds, ``not_found`` means read-only here (:func:`read_only_reason`,
+    #1722).  Called by ``proposeReference``
     to record the digest and by the daemon to check it at promotion.
     """
     root = os.path.realpath(workspace)
