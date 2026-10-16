@@ -126,7 +126,8 @@ def test_resolve_session_env_no_env_file(tmp_path):
     """env_file=None path: ``_session_env`` carries only framework-
     managed keys (no profile.env, no env_overrides).  Pre-Family-IV
     this was {} exactly; post-Family-IV (PR-217) the framework
-    populates ``JAATO_JDTLS_STATE_DIR`` whenever workspace_path is set.
+    populates ``JAATO_JDTLS_STATE_DIR`` when the session's LSP
+    configuration names ``${jdtlsStateRoot}`` (#1710).
     The contract here is "no operator/profile-supplied values when
     env_file=None", not "literally empty dict".
     """
@@ -200,6 +201,18 @@ def test_initialize_step1_treats_pre_resolved_env_as_authoritative(
 # ----------------------------------------------------------------------
 
 
+def _configure_jdtls(workspace) -> None:
+    """A ``.lsp.json`` whose server names ``${jdtlsStateRoot}``.
+
+    Since #1710 the sibling is provisioned only for a session that can
+    start such a server.
+    """
+    import json
+    (workspace / ".lsp.json").write_text(json.dumps({"languageServers": {
+        "java": {"command": "jdtls",
+                 "args": ["-data", "${jdtlsStateRoot}"]}}}))
+
+
 class TestFamilyIVJdtlsStateProvisioning:
     """Pins the Family IV contract: _resolve_session_env provisions
     the sibling jdtls state directory + exports JAATO_JDTLS_STATE_DIR
@@ -219,6 +232,7 @@ class TestFamilyIVJdtlsStateProvisioning:
         """After _resolve_session_env, the sibling dir exists on disk."""
         workspace = tmp_path / "cascade_smoke"
         workspace.mkdir()
+        _configure_jdtls(workspace)
         sibling_expected = tmp_path / ".cascade_smoke-jdtls-state"
         assert not sibling_expected.exists()
 
@@ -236,6 +250,7 @@ class TestFamilyIVJdtlsStateProvisioning:
         to the runner via envelope.session_env."""
         workspace = tmp_path / "cascade_smoke"
         workspace.mkdir()
+        _configure_jdtls(workspace)
 
         server = JaatoServer(
             env_file=None, workspace_path=str(workspace),
@@ -254,6 +269,7 @@ class TestFamilyIVJdtlsStateProvisioning:
         race)."""
         workspace = tmp_path / "cascade_smoke"
         workspace.mkdir()
+        _configure_jdtls(workspace)
         sibling = tmp_path / ".cascade_smoke-jdtls-state"
         sibling.mkdir()  # pre-existing
 
@@ -285,6 +301,7 @@ class TestFamilyIVJdtlsStateProvisioning:
         drop publishDiagnostics — the failure mode Family IV closes."""
         workspace = tmp_path / "cascade_smoke"
         workspace.mkdir()
+        _configure_jdtls(workspace)
 
         server = JaatoServer(
             env_file=None, workspace_path=str(workspace),

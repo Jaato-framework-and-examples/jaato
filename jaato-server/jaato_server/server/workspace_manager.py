@@ -798,7 +798,9 @@ class WorkspaceManager:
           removes a conversation and leaves the record, which is the verb
           for this case.
 
-        The deleting client's own selection of it is cleared.
+        The deleting client's own selection of it is cleared, and the
+        workspace's jdtls state sibling (``.<name>-jdtls-state`` beside it,
+        #1710) is removed with it.
 
         Args:
             name: Workspace name (relative path from root).
@@ -814,6 +816,10 @@ class WorkspaceManager:
             name, user=user, in_use_by=in_use_by, client_id=client_id)
 
         shutil.rmtree(path)
+        # The jdtls state sibling (#1710) is the one thing the framework
+        # puts beside a workspace rather than in it; it goes with it.
+        from jaato_server.shared.jdtls_state import remove_jdtls_state_root
+        remove_jdtls_state_root(str(path))
         self._workspaces.pop(name, None)
         if client_id is not None and self._client_workspaces.get(client_id) == name:
             self._client_workspaces.pop(client_id, None)

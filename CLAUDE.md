@@ -12553,6 +12553,28 @@ profile like any other path. Guard:
 `jaato_server/shared/tests/test_a_nested_jaato_is_a_workspace_path_1679.py`,
 three reversions.
 
+### A Folder Beside the Workspace, Made for Nobody (#1710)
+
+`${jdtlsStateRoot}` is `<workspace.parent>/.<basename>-jdtls-state`, jdtls's
+`-data` (Eclipse refuses it inside the project). The daemon created it for
+every session with a workspace, whatever the profile could run, and nothing
+removed it, so an application that owns the workspace's parent (kbwiki keeps
+one folder per pipeline there) found entries it never made, and they outlived
+the workspace. `shared/jdtls_state.py` holds the rules:
+
+| When | Who |
+|---|---|
+| made only when the session's LSP configuration names `${jdtlsStateRoot}` (`plugin_configs.lsp.languageServers`, else `config_path` / `.lsp.json` / `~/.lsp.json`, the search the lsp AppArmor composer reads) | `JaatoServer._provision_jdtls_state_root`, from `_resolve_session_env` |
+| made again when such a server starts and it is missing (a `.lsp.json` written mid-session) | `LSPToolPlugin._ensure_jdtls_state_root`, best effort |
+| removed with the workspace; a link at that name is left alone | `WorkspaceManager.delete_workspace` → `remove_jdtls_state_root` |
+
+An application that deletes a workspace itself calls
+`remove_jdtls_state_root(path)` (or removes `jdtls_state_root_of(path)`).
+`explain paths` renders `JDTLS_STATE_RULES`. Existing siblings are not
+swept. Guard:
+`jaato_server/shared/tests/test_no_jdtls_state_without_a_server_1710.py`,
+three reversions.
+
 ### Coreutils a Confined Session Could Not Run (#1342)
 
 On an Ubuntu 26.04 host, every confined session's `cli` failed `ls`, `head`,

@@ -1064,6 +1064,32 @@ class LSPToolPlugin(RunnerForwardingMixin):
                 continue
         return None
 
+    def _ensure_jdtls_state_root(self, raw_args: Any) -> None:
+        """Create the ``${jdtlsStateRoot}`` sibling if *raw_args* name it (#1710).
+
+        The daemon creates it at session start only when the configuration
+        it read names the variable; this covers a ``.lsp.json`` written
+        afterwards.  A failure is logged and the server is started anyway.
+        """
+        from jaato_server.shared.jdtls_state import (
+            JDTLS_STATE_VAR, ensure_jdtls_state_root, jdtls_state_root_of,
+        )
+        try:
+            text = json.dumps(raw_args, default=str)
+        except (TypeError, ValueError):
+            return
+        if "${" + JDTLS_STATE_VAR + "}" not in text:
+            return
+        root = jdtls_state_root_of(self._workspace_path)
+        if not root or os.path.isdir(root):
+            return
+        error = ensure_jdtls_state_root(root)
+        if error:
+            self._log_event(LOG_WARN, "Could not create jdtls state root",
+                            details=f"{root}: {error}")
+        else:
+            self._trace(f"created jdtls state root {root} (#1710)")
+
     @classmethod
     def _compose_lsp_server_exec_rules(
         cls,
@@ -3340,6 +3366,12 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                         raw_args,
                         workspace_root_override=self._workspace_path,
                     )
+                    # #1710: the daemon provisions ${jdtlsStateRoot} only
+                    # for a configuration it saw at session start; a
+                    # server configured later (or a sibling removed since)
+                    # gets it here.  Best effort -- jdtls reports its own
+                    # failure if it still cannot write -data.
+                    self._ensure_jdtls_state_root(raw_args)
                     # Use workspace-based root_uri when config doesn't specify one
                     root_uri = spec.get('rootUri')
                     if not root_uri and self._workspace_path:

@@ -3151,6 +3151,12 @@ def _user_tier_snapshot_lines() -> List[str]:
     ]
 
 
+def _jdtls_state_rules() -> Tuple[str, ...]:
+    """The jdtls state sibling's rules, read from their module (#1710)."""
+    from jaato_server.shared.jdtls_state import JDTLS_STATE_RULES
+    return JDTLS_STATE_RULES
+
+
 def paths() -> Rendered:
     """The path & isolation model — daemon-global ``~/.jaato`` vs per-session
     workspace + ``config_root``.
@@ -3191,6 +3197,12 @@ def paths() -> Rendered:
                      + [p for p, _ in _authored_workspace_paths("reactors.json")],
             "workspace_root_env": "JAATO_WORKSPACE_ROOT",
             "scope": "the isolation boundary — one per session",
+        },
+        "outside_the_workspace": {
+            "path": "<workspace.parent>/.<workspace.basename>-jdtls-state/",
+            "template_var": "${jdtlsStateRoot}",
+            "holds": "jdtls -data (Eclipse refuses it inside the project)",
+            "rules": list(_jdtls_state_rules()),
         },
         "config_root_ownership": {
             "owner": "framework",
@@ -3249,6 +3261,15 @@ def paths() -> Rendered:
         "       new gitignore --workspace DIR` writes the .gitignore block that",
         "       keeps profiles/agents/schemas/scripts committable and sessions/,",
         "       logs/, memories/ and <provider>_auth.json out; `validate` checks it.",
+        "",
+        "  <workspace.parent>/.<workspace.basename>-jdtls-state/   — written",
+        "    BESIDE the workspace, not in it: ${jdtlsStateRoot}, jdtls's -data",
+        "    (Eclipse refuses it inside the project).  It sits in the",
+        "    workspace's PARENT, a directory your application may own:",
+    ] + [
+        line for rule in _jdtls_state_rules()
+        for line in _wrap_bullet(rule, indent=4)
+    ] + [
         "",
         "  config_root   = <workspace>/.jaato by default — the resolution root for",
         "    profiles / instructions / agents.  It is a CLIENT knob, not a profile",
