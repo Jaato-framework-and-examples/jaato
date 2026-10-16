@@ -25,6 +25,11 @@ here therefore puts back the exact prior behaviour, and each names the one
 test that must notice it.
 """
 
+import json
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from jaato_server.shared.plugins.notebook.backends.subprocess_kernel import (
@@ -124,6 +129,44 @@ def test_the_dlopen_refusal_denies_the_over_generalisation(policy):
     assert "numpy" in message
     assert "import normally" in message
     assert "`cli`" in message
+
+
+_IMPORT_PROBE = textwrap.dedent("""
+    import json, sys
+    from jaato_server.shared.plugins.notebook import kernel_sandbox
+    kernel_sandbox.install(kernel_sandbox.ContainmentPolicy(sys.argv[1]))
+    out = {}
+    for mod in ("ctypes", "_ctypes"):
+        try:
+            __import__(mod)
+            out[mod] = "imported"
+        except kernel_sandbox.NotebookContainmentError as exc:
+            out[mod] = str(exc)
+    print(json.dumps(out))
+""")
+
+
+def test_an_audit_tier_cell_cannot_import_ctypes_on_this_interpreter(tmp_path):
+    """The refusal must hold on the interpreter the packages declare.
+
+    Python 3.13 wrapped ``ctypes``' own ``pythonapi = PyDLL(None)`` in
+    ``except OSError``.  The ``dlopen(None)`` refusal is an ``OSError``, so
+    from 3.13 on it was swallowed and ``import ctypes`` succeeded, handing a
+    cell ``memmove`` / ``string_at`` / ``CFUNCTYPE``.  ``import _ctypes``
+    gave the same primitives on every version.  Run in a fresh interpreter,
+    because the hook cannot be removed once installed.
+    """
+    res = subprocess.run(
+        [sys.executable, "-c", _IMPORT_PROBE, str(tmp_path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip().splitlines()[-1])
+    for mod in ("ctypes", "_ctypes"):
+        assert out[mod] != "imported", f"`import {mod}` succeeded on the audit tier"
+        assert "audit tier" in out[mod]
+        assert "NOT a missing package" in out[mod]
+        assert "`cli`" in out[mod]
 
 
 def test_the_active_tier_reaches_the_system_prompt(plugin):
@@ -235,5 +278,16 @@ REVERSIONS = [
         replace="        return kernel.info.boundary_kind",
         because="an announcement that repeats is per-cell noise",
         test="test_the_announcement_is_spent_once_per_kernel",
+    ),
+    Reversion(
+        target=f"{_NB}/kernel_sandbox.py",
+        find='    elif event == "import":\n        _check_import(policy, args)\n',
+        replace="",
+        because=(
+            "since Python 3.13 the dlopen(None) refusal alone is swallowed by "
+            "ctypes' own `except OSError`, so without the import check an "
+            "audit-tier cell imports ctypes and gets raw memory access"
+        ),
+        test="test_an_audit_tier_cell_cannot_import_ctypes_on_this_interpreter",
     ),
 ]

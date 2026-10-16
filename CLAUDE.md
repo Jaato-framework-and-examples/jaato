@@ -12222,6 +12222,20 @@ read/write with no library load at all — the `_POLICY`-rebinding limit the
 module docstring already names. Under the audit tier you genuinely cannot have
 both `import ctypes` and this boundary.
 
+**The refusal is now the `import` itself (#1076).** From Python 3.13,
+`ctypes/__init__.py` wraps `pythonapi = PyDLL(None)` in `except OSError:
+pythonapi = None`, and the `dlopen(None)` refusal is an `OSError`, so it was
+swallowed: on 3.13 and 3.14 an audit-tier cell's `import ctypes` SUCCEEDED,
+with `pythonapi = None` but `memmove`, `string_at` and `CFUNCTYPE` in hand.
+`import _ctypes` gave the same primitives on every version (on 3.12 it was
+even left in `sys.modules` by the failed `ctypes` import). The hook now also
+audits the `import` event and refuses `ctypes` and `_ctypes` before either
+runs (`kernel_sandbox._check_import`), so the boundary no longer depends on
+how a CPython release initialises `ctypes`; the `dlopen(None)` check stays as
+the second layer. Verified with the same probe on 3.12, 3.13 and 3.14: both
+imports refused. Guard: `test_an_audit_tier_cell_cannot_import_ctypes_on_this_interpreter`
+in `test_notebook_boundary_is_stated_1011_1012.py`.
+
 **The AppArmor and SELinux tiers have no such restriction**, because
 `establish_containment` installs no hook at all when the kernel is in an
 enforced `//child` profile or `jaato_child_t` domain (#1323, #1519) — there, `import ctypes` and numpy work normally. Neither does a

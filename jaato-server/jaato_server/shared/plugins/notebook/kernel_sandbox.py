@@ -62,12 +62,15 @@ What tier 2 costs: no ``ctypes``, and so no numpy (#1011)
 =========================================================
 
 On the audit tier ``import ctypes`` **fails**, and it takes the scientific
-stack down with it.  CPython's ``ctypes/__init__.py`` runs ``pythonapi =
-PyDLL(None)`` at module import, which raises ``ctypes.dlopen`` with ``None``;
-:func:`_check_dlopen` refuses it.  ``numpy/_core/_internal.py`` does ``import
-ctypes`` guarded by ``except ImportError``, and
-:class:`NotebookContainmentError` is a :class:`PermissionError`, so the guard
-does not catch it and the whole numpy import dies.  Anything above numpy —
+stack down with it.  :func:`_check_import` refuses the ``import`` event for
+``ctypes`` and ``_ctypes``.  (Until 3.13 the ``dlopen(None)`` refusal below
+did this by itself, because ``ctypes/__init__.py`` ran ``pythonapi =
+PyDLL(None)`` unguarded; since 3.13 that line catches ``OSError`` and the
+refusal, an ``OSError``, was swallowed -- see :func:`_check_import`.)
+``numpy/_core/_internal.py`` does ``import ctypes`` guarded by ``except
+ImportError``, and :class:`NotebookContainmentError` is a
+:class:`PermissionError`, so the guard does not catch it and the whole numpy
+import dies.  Anything above numpy —
 pandas, scipy, scikit-learn, matplotlib, shapely-via-geopandas, osmnx, torch —
 goes with it.
 
@@ -769,6 +772,50 @@ def _check_dlopen(policy: ContainmentPolicy, args: Sequence[Any]) -> None:
             "is not audited).")
 
 
+#: The modules an audit-tier cell may not import: the stdlib's ctypes and the
+#: C module under it.  Refused at the ``import`` event, before either runs.
+_REFUSED_IMPORTS = frozenset({"ctypes", "_ctypes"})
+
+
+def _check_import(policy: ContainmentPolicy, args: Sequence[Any]) -> None:
+    """Refuse importing ``ctypes`` (or ``_ctypes``) on the audit tier.
+
+    Until Python 3.13 the :func:`_check_dlopen` refusal of ``dlopen(None)``
+    was enough on its own: ``ctypes/__init__.py`` ran ``pythonapi =
+    PyDLL(None)`` unguarded, so the refusal failed the whole import.  Since
+    3.13 that line is wrapped in ``except OSError: pythonapi = None``, and
+    :class:`NotebookContainmentError` is an ``OSError``, so the refusal was
+    swallowed: ``import ctypes`` SUCCEEDED, with ``pythonapi`` set to ``None``
+    and ``memmove`` / ``string_at`` / ``CFUNCTYPE`` -- in-process memory
+    read/write and calls to raw addresses -- in the cell's hands.  Importing
+    ``_ctypes`` directly gave the same primitives on every version.
+
+    Refusing the import itself states the boundary in the one place that does
+    not depend on how a CPython release initialises ``ctypes``: neither module
+    runs, on any version.  The ``import`` event fires only for a module not
+    already in :data:`sys.modules`, which is why the kernel imports no
+    ``ctypes`` before the hook is installed (``lsm_label`` imports it lazily).
+    ``policy`` is unused: no grant re-admits these modules on this tier.
+    """
+    del policy
+    name = args[0] if args else None
+    if name not in _REFUSED_IMPORTS:
+        return
+    raise NotebookContainmentError(
+        f"{REFUSAL_PREFIX}: `import {name}` is refused. ctypes gives a cell "
+        "raw memory access and calls into native code beneath the notebook's "
+        "filesystem boundary, so on this tier ctypes — and numpy, pandas, "
+        "scipy, matplotlib and anything built on them — cannot be imported "
+        "IN A CELL. This is NOT a missing package and NOT a limit on native "
+        "code in general: compiled extension modules inside the interpreter "
+        "installation import normally. The same code works elsewhere — run "
+        "it through the `cli` tool or `!python` (a subprocess is not "
+        "audited, which is also why `!pip install X` works), or run the "
+        "session under an enforced AppArmor profile, where no audit hook is "
+        "installed. An operator can also set plugin_configs.notebook."
+        "allow_uncontained_exec.")
+
+
 def _dispatch(policy: ContainmentPolicy, event: str, args: Sequence[Any]) -> None:
     """Route one audited event to its check.  Raises on refusal."""
     if event == "open":
@@ -783,6 +830,8 @@ def _dispatch(policy: ContainmentPolicy, event: str, args: Sequence[Any]) -> Non
         _check_system(policy, args)
     elif event == "ctypes.dlopen":
         _check_dlopen(policy, args)
+    elif event == "import":
+        _check_import(policy, args)
 
 
 def _audit_hook(event: str, args: Sequence[Any]) -> None:
@@ -817,7 +866,7 @@ def _audit_hook(event: str, args: Sequence[Any]) -> None:
 
 
 _AUDITED_EVENTS = frozenset(
-    {"open", "os.system", "ctypes.dlopen"}
+    {"open", "os.system", "ctypes.dlopen", "import"}
     | set(_WRITE_PATH_EVENTS) | set(_READ_PATH_EVENTS) | set(_SPAWN_EVENTS)
 )
 
