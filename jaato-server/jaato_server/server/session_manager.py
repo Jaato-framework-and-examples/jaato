@@ -6198,6 +6198,73 @@ class SessionManager:
         with self._cancelled_cids_lock:
             return cascade_driver_id in self._cancelled_cids
 
+    def is_cid_known(self, cascade_driver_id: str) -> bool:
+        """Whether the daemon has seen *cascade_driver_id* before.
+
+        Lets a reactor tell a cascade it is **creating** from one it is
+        **joining** (#1701): register as ``owner`` when the cid is new,
+        as ``observer`` when it is known — a driver created that
+        cascade and may already own it (``cascade-as-client.md``
+        Decision 5: one owner per cid, its creator).
+
+        A cid is known when any of these holds:
+
+        - a cascade client, owner or observer, is registered for it;
+        - a loaded session is stamped with it;
+        - a session was created with it, including one that has since
+          unloaded (``_cid_last_session_ts``).  This is the source the
+          reactor needs: its action runs on the triggering stage's
+          ``agent.completed``, when the default policy may already be
+          unloading that stage;
+        - it was cancelled (:meth:`cancel_cascade`).
+
+        Read-only.  Callers (reactor action scripts on the reactor's
+        worker thread among them) must not hold ``_lock`` or
+        ``_cascade_clients_lock`` when calling; the cascade-client
+        callback, which runs under ``_lock``, must not call it.
+
+        Limits:
+
+        - **The cid is forgotten** once the cascade-client sweep has
+          reaped its registrations and dropped its
+          ``_cid_last_session_ts`` entry, and no session carries it.
+          A reactor reusing that cid would then create a new cascade;
+          in practice that cascade was already idle past
+          ``cascade_client_idle_timeout_seconds``.
+        - **The answer can go stale** between this call and a
+          registration: a driver registering the same freshly minted
+          cid in that window.  With a UUID per cascade this needs an id
+          collision.
+        - **Membership is in memory only.**  After a daemon restart, a
+          cascade whose sessions are all unloaded is unknown until one
+          of them loads again.
+
+        Args:
+            cascade_driver_id: The cid to check.  Empty / None returns
+                False, as in :meth:`is_cid_cancelled`.
+
+        Returns:
+            True if the daemon has seen the cid in any of the ways
+            above; False otherwise.
+        """
+        if not cascade_driver_id:
+            return False
+        if self.is_cid_cancelled(cascade_driver_id):
+            return True
+        with self._cascade_clients_lock:
+            if self._cascade_clients.get(cascade_driver_id):
+                return True
+        # ``_cid_last_session_ts`` is stamped under ``_lock`` (session
+        # registration) and popped under ``_cascade_clients_lock`` (the
+        # sweep); a membership test under either is consistent.
+        with self._lock:
+            if cascade_driver_id in self._cid_last_session_ts:
+                return True
+            return any(
+                getattr(s, "cascade_driver_id", None) == cascade_driver_id
+                for s in self._sessions.values()
+            )
+
     def cancel_cascade(self, cascade_driver_id: str) -> Dict[str, Any]:
         """Cancel every loaded session belonging to *cascade_driver_id*.
 
