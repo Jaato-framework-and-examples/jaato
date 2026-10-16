@@ -82,12 +82,17 @@ def image_rule_problem(headers: Dict[str, str], body: Any) -> Optional[str]:
     sent = {k.lower(): v for k, v in headers.items()}
     if sent.get(IMAGES_HEADER.lower()) != "true":
         return f"{IMAGES_HEADER}: true is required for images and box"
+    return _asset_problem(body, assets)
+
+
+def _asset_problem(body: Dict[str, Any], assets: Dict[str, Any]) -> Optional[str]:
+    """An asset referenced nowhere, or a ``box`` with no image."""
+    if not assets:
+        return "box needs an image"
     rest = json.dumps({k: v for k, v in body.items() if k != "assets"})
     for reference in assets:
         if reference not in rest:
             return f"asset {reference!r} is not referenced"
-    if has_box and not assets:
-        return "box needs an image"
     return None
 
 

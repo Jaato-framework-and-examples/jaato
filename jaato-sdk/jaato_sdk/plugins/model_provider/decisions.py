@@ -469,6 +469,18 @@ def build_decision_request(
             "model": model,
             "questions": {qid: q.to_wire() for qid, q in questions.items()},
         }
+    return _image_request(state, questions, model, images, infos)
+
+
+def _image_request(
+    state: State,
+    questions: Mapping[str, DecisionQuestion],
+    model: str,
+    images: Sequence[DecisionImage],
+    infos: Dict[str, ImageInfo],
+) -> Dict[str, Any]:
+    """The body of a request with checked ``images``: tokens substituted,
+    every image referenced, sizes within the request limits, ``assets``."""
     references = {name: f"{IMAGE_REFERENCE_PREFIX}{uuid.uuid4()}" for name in infos}
     sub = _Substitution(references)
     wire_state = sub.apply(None, state)
@@ -484,20 +496,9 @@ def build_decision_request(
         raise DecisionQuestionError(
             None, f"image {unused[0]!r} is not referenced; write "
             f"{{{{image:{unused[0]}}}}} where it belongs")
-    by_name = {image.name: image for image in images}
-    expanded = sum(len(by_name[n].data) * count for n, count in sub.uses.items())
-    if expanded > MAX_EXPANDED_IMAGE_BYTES:
-        raise DecisionQuestionError(
-            None, f"images count {expanded} bytes with every use counted, over "
-            f"{MAX_EXPANDED_IMAGE_BYTES}")
     body: Dict[str, Any] = {"state": wire_state, "model": model,
                             "questions": wire_questions}
-    text = len(json.dumps(body, ensure_ascii=False, default=str).encode())
-    estimate = text + sum(_b64_size(len(i.data)) + 200 for i in images)
-    if estimate > MAX_REQUEST_BYTES:
-        raise DecisionQuestionError(
-            None, f"the request is ~{estimate} bytes with its images, over "
-            f"{MAX_REQUEST_BYTES}; send fewer or smaller images")
+    _check_request_size(body, images, sub.uses)
     body["assets"] = {
         references[image.name]: {
             "type": "image",
@@ -507,6 +508,24 @@ def build_decision_request(
         for image in images
     }
     return body
+
+
+def _check_request_size(body: Dict[str, Any], images: Sequence[DecisionImage],
+                        uses: Dict[str, int]) -> None:
+    """Refuse a body over the request limit, or images over the expanded
+    limit (every use of an image counted)."""
+    by_name = {image.name: image for image in images}
+    expanded = sum(len(by_name[n].data) * count for n, count in uses.items())
+    if expanded > MAX_EXPANDED_IMAGE_BYTES:
+        raise DecisionQuestionError(
+            None, f"images count {expanded} bytes with every use counted, over "
+            f"{MAX_EXPANDED_IMAGE_BYTES}")
+    text = len(json.dumps(body, ensure_ascii=False, default=str).encode())
+    estimate = text + sum(_b64_size(len(i.data)) + 200 for i in images)
+    if estimate > MAX_REQUEST_BYTES:
+        raise DecisionQuestionError(
+            None, f"the request is ~{estimate} bytes with its images, over "
+            f"{MAX_REQUEST_BYTES}; send fewer or smaller images")
 
 
 def needs_image_header(body: Mapping[str, Any]) -> bool:
