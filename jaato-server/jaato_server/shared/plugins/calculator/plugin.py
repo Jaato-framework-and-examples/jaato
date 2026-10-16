@@ -367,13 +367,13 @@ class CalculatorPlugin:
 
         def _eval_node(node):
             """Recursively evaluate an AST node."""
-            if isinstance(node, ast.Constant):  # Python 3.8+
+            # ast.Constant is the only literal node: ast.Num was removed in
+            # Python 3.14, and an isinstance check against it raised
+            # AttributeError for every expression that reached it.
+            if isinstance(node, ast.Constant):
                 if isinstance(node.value, (int, float)):
                     return node.value
                 raise ValueError(f"Unsupported constant type: {type(node.value).__name__}")
-
-            elif isinstance(node, ast.Num):  # Python 3.7 compatibility
-                return node.n
 
             elif isinstance(node, ast.BinOp):
                 op_type = type(node.op)

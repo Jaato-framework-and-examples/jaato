@@ -43,7 +43,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       # This job runs `shared/tests/`, which is what ci-tests' `shared/tests`
       # leg runs — and that leg installs `.[all]`. Anything narrower here is a
@@ -92,7 +92,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install build
         run: pip install build

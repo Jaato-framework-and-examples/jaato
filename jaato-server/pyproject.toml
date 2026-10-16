@@ -7,7 +7,7 @@ name = "jaato-server"
 version = "1.3.0"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14,<3.15"
 license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
@@ -17,7 +17,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     # --- Core (always installed) ---

@@ -20,7 +20,7 @@ readme = "PKG_README.md"
 # install that can never resolve.  The number is what CI runs, not a
 # guess about what would work -- see #1076 and
 # shared/tests/test_declared_python_floor_is_tested.py.
-requires-python = ">=3.12"
+requires-python = ">=3.14,<3.15"
 license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
@@ -30,7 +30,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "PyYAML>=6.0",

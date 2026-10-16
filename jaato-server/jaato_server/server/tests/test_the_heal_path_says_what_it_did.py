@@ -105,8 +105,6 @@ def caplog_warnings(caplog):
 
 def _wait_for(caplog, token, timeout=2.0):
     """The fill is off-band, so poll rather than assert immediately."""
-    deadline = asyncio.get_event_loop_policy().new_event_loop()
-    deadline.close()
     import time
     end = time.monotonic() + timeout
     while time.monotonic() < end:

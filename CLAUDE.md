@@ -12,15 +12,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ### Environment Setup
+The packages declare and are tested on exactly one interpreter, **Python 3.14**
+(`requires-python = ">=3.14,<3.15"`; see
+[The Declared Python Range Is the One CI Runs](#the-declared-python-range-is-the-one-ci-runs-1076)).
 ```bash
-python3 -m venv .venv
+python3.14 -m venv .venv
 .venv/bin/pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ```
 
 Or with [uv](https://docs.astral.sh/uv/) — `uv venv` creates `.venv` and
 `uv pip` resolves it, so the `.venv/bin/` prefix is not needed:
 ```bash
-uv venv
+uv venv --python 3.14        # uv python install 3.14, if it is not present
 uv pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ```
 
@@ -12220,6 +12223,20 @@ read/write with no library load at all — the `_POLICY`-rebinding limit the
 module docstring already names. Under the audit tier you genuinely cannot have
 both `import ctypes` and this boundary.
 
+**The refusal is now the `import` itself (#1076).** From Python 3.13,
+`ctypes/__init__.py` wraps `pythonapi = PyDLL(None)` in `except OSError:
+pythonapi = None`, and the `dlopen(None)` refusal is an `OSError`, so it was
+swallowed: on 3.13 and 3.14 an audit-tier cell's `import ctypes` SUCCEEDED,
+with `pythonapi = None` but `memmove`, `string_at` and `CFUNCTYPE` in hand.
+`import _ctypes` gave the same primitives on every version (on 3.12 it was
+even left in `sys.modules` by the failed `ctypes` import). The hook now also
+audits the `import` event and refuses `ctypes` and `_ctypes` before either
+runs (`kernel_sandbox._check_import`), so the boundary no longer depends on
+how a CPython release initialises `ctypes`; the `dlopen(None)` check stays as
+the second layer. Verified with the same probe on 3.12, 3.13 and 3.14: both
+imports refused. Guard: `test_an_audit_tier_cell_cannot_import_ctypes_on_this_interpreter`
+in `test_notebook_boundary_is_stated_1011_1012.py`.
+
 **The AppArmor and SELinux tiers have no such restriction**, because
 `establish_containment` installs no hook at all when the kernel is in an
 enforced `//child` profile or `jaato_child_t` domain (#1323, #1519) — there, `import ctypes` and numpy work normally. Neither does a
@@ -15463,7 +15480,7 @@ hands pytest, with `<pkg>/tests/` widened to `<pkg>/` so a source change
 selects the leg that tests it (not widened to a distribution root holding
 another leg's scope, e.g. `jaato-server/`). That selection is a heuristic;
 `--all` is the claim the guard backs, and CI is the authority over both
-(CI installs `[all]`, has AppArmor, runs Linux on 3.12).
+(CI installs `[all]`, has AppArmor, runs Linux on 3.14).
 
 The pre-flight fetches the base (`--no-fetch` to skip) and WARNS when HEAD is
 behind it or when `git merge-tree --write-tree` finds a conflict.
@@ -15520,9 +15537,9 @@ required `contract-guards` job:
   row's capability, so adding `pdf_input` to a provider means updating that
   row.
 
-### The Declared Python Floor Is One CI Runs (#1076)
+### The Declared Python Range Is the One CI Runs (#1076)
 
-Every workflow here pins a single interpreter — `python-version: "3.12"`,
+Every workflow here pinned a single interpreter — `python-version: "3.12"`,
 no matrix — while the four published distributions declared
 `requires-python = ">=3.10"`. So pip installed them on 3.10, 3.11, 3.13 and
 3.14 and **nothing in CI had ever run a test on any of them**. The dev venv
@@ -15531,33 +15548,47 @@ promise the build did not check, and the class of defect it hides is the one
 whose only trigger is a version nobody runs.
 
 #1076 offers two honest resolutions — test the declared range, or declare
-the tested range. This tree takes the second. The floor is **`>=3.12`** in
-all four published `pyproject.toml` files, the 3.10 / 3.11 classifiers are
-gone, and `jaato-server/jaato_server/shared/tests/test_declared_python_floor_is_tested.py`
+the tested range. This tree takes the second, at both ends. The floor was
+raised to `>=3.12` first, leaving the ceiling open; then CI moved to the
+interpreter production runs, and the range was closed: every workflow
+installs **3.14**, and `jaato-sdk`, `jaato-server`, `jaato-tui` and
+`jaato-eval` declare **`requires-python = ">=3.14,<3.15"`**, with
+`Programming Language :: Python :: 3.14` as their only version classifier.
+The declared range is the one interpreter that is tested.
+`jaato-server/jaato_server/shared/tests/test_declared_python_floor_is_tested.py`
 (in the required `contract-guards` job) is what stops the two drifting apart
-again. It asserts four things and nothing more:
+again:
 
 | Property | Why it is separate |
 |---|---|
 | the four distributions declare **one** floor | they install into one interpreter, so a disagreement is not a range — it is the highest of them, silently |
 | that floor is installed by a **commit-triggered** job that runs `pytest` | `workflow_dispatch`-only publish workflows do not count: a version only a manual run touches is in practice never run (#736) |
-| every version **any** workflow installs satisfies the floor | the reverse drift, and the worse one — a floor above the CI pin makes pip refuse the repo's own editable installs |
-| no classifier names a version below the floor, and the floor's own is named | pip does not read classifiers, so that is where a stale claim outlives a corrected `requires-python`, on the PyPI project page |
+| the four declare an upper bound, and **one** ceiling | an open ceiling promises every future interpreter, which no CI can keep |
+| every minor version **inside** each declared range is installed by such a job | with one pinned interpreter, floor == the CI version and ceiling == the next minor; a matrix would let the range widen by exactly the versions it adds |
+| every version **any** workflow installs lies inside the range | the reverse drift, and the worse one — a pin outside the range makes pip refuse the repo's own editable installs |
+| the classifiers name **exactly** the versions in the range | pip does not read classifiers, so that is where a stale claim outlives a corrected `requires-python`, on the PyPI project page |
 
-**The ceiling is still a promise nobody checks, and that is said out loud
-rather than implied.** `>=3.12` has no upper bound, so it still claims 3.13
-and 3.14 and CI runs neither. Closing that needs a test matrix or an upper
-bound; asserting an upper bound the project has not chosen would be a test
-file inventing policy. So #1076's floor half is closed here and its ceiling
-half is not.
+The `selinux-policy` job runs Fedora's own `python3` on purpose: it tests the
+policy module, installs no distribution and pins no version through
+`setup-python`, so the scan does not see it. The web coder's toolchains
+plugin (`jaato-web-coder-server/plugin`) is installed into the daemon's
+interpreter and declares the same range.
 
-**A consequence for contributors: the dev venv must be 3.12 or newer.** On
-3.11 `pip install -e jaato-server/` is now refused by pip, which is the
-point — the refusal is the promise being kept.
+**Moving to the next interpreter is one change**: bump every
+`python-version`, both bounds and the classifier together, regenerate the
+two scaffold snapshots (`authoring_snapshot.json`, `explain_snapshot.json`
+— they render type annotations, whose `repr` is interpreter-dependent:
+3.14 prints `str | None` where 3.12 printed `Optional[str]`), and run the
+suite on it. The guard fails on any half-done version of that.
+
+**A consequence for contributors: the dev venv must be 3.14.** On 3.12 or
+3.13 `pip install -e jaato-server/` is refused by pip, which is the point —
+the refusal is the promise being kept. A uv-managed interpreter is fine:
+`uv python install 3.14` then `uv venv --python 3.14`.
 
 `out-of-tree-plugins/moon-phase` is deliberately outside the check. It is an
 example of a third party's package, it is never published from here, and its
-floor is its author's to choose.
+range is its author's to choose.
 
 ### The Reversion Meta-Guard Never Writes to Your Checkout (#995)
 
