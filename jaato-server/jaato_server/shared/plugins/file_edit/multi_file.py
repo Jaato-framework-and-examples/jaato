@@ -35,6 +35,7 @@ from .edit_core import (
     AmbiguousEditError,
     MalformedEditError,
 )
+from ..path_locks import locked_paths
 from .line_endings import LineEndingPolicy, detect_line_ending, normalize, restore
 
 # Default maximum width for file paths in multi-file previews
@@ -416,6 +417,21 @@ class MultiFileExecutor:
                 failed_operation=0
             )
 
+        # Hold every named file's lock from validation (which reads the
+        # files to dry-run the edits) through the last write, so a parallel
+        # updateFile / multiFileEdit on one of them cannot interleave (#1718).
+        named: List[str] = []
+        for op in parsed_ops:
+            for value in (op.path, op.source_path, op.dest_path):
+                if value:
+                    named.append(str(self._resolve_path(value)))
+        with locked_paths(*named):
+            return self._execute_locked(parsed_ops, operations)
+
+    def _execute_locked(
+        self, parsed_ops: List["FileOperation"], operations: List[Dict[str, Any]]
+    ) -> MultiFileResult:
+        """Validate and run a parsed batch; called with every file's lock held."""
         # Validate all operations
         valid, error, failed_idx = self.validate_operations(parsed_ops)
         if not valid:

@@ -597,6 +597,7 @@ of bug.
 11. **File-writing tools:** Declare `traits=frozenset({TRAIT_FILE_WRITER})` and include `path`/`files_modified` in result
 12. **Model-supplied paths:** Read/write via `path_safety` helpers, never `check()` then `open()`; search tools re-check every result, not just the root
 13. **Credentials:** read them with `get_session_env(...)`, never `os.environ.get(...)` — see below
+14. **Read-modify-write of a file:** hold `path_locks.locked_paths(path)` from the read through the write. Tool calls run in parallel; without it the last write silently discards the others (#1718)
 
 ## Critical: read credentials with `get_session_env`, not `os.environ`
 

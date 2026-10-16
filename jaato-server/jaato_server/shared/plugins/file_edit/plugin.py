@@ -28,6 +28,7 @@ from ..path_safety import (
     write_text_verified,
 )
 from .backup import BackupManager
+from ..path_locks import FileFingerprint, assert_unchanged, locked_paths
 from .diff_utils import (
     generate_unified_diff,
     generate_new_file_diff,
@@ -94,6 +95,31 @@ def _detect_config_root() -> Optional[str]:
         return os.path.realpath(os.path.abspath(config_root))
     return None
 
+
+
+def _holds_path_locks(*arg_names: str) -> Callable:
+    """Run an executor with the per-file locks of its path arguments held.
+
+    ``arg_names`` are the argument keys naming files (``path``,
+    ``source_path``, ...).  Each present, non-empty one is resolved the way
+    the executor resolves it and its lock (``path_locks.locked_paths``) is
+    held for the whole call, so the executor's read and write of that file
+    cannot interleave with another file_edit call on it (#1718).
+    """
+    def decorate(fn: Callable) -> Callable:
+        def wrapper(self, args: Dict[str, Any]) -> Any:
+            paths = []
+            for name in arg_names:
+                value = args.get(name) if isinstance(args, dict) else None
+                if isinstance(value, str) and value:
+                    paths.append(self._resolve_path(value))
+            with locked_paths(*paths):
+                return fn(self, args)
+        wrapper.__name__ = fn.__name__
+        wrapper.__doc__ = fn.__doc__
+        wrapper.__wrapped__ = fn
+        return wrapper
+    return decorate
 
 class FileEditPlugin(RunnerForwardingMixin):
     """Plugin for file reading and editing operations.
@@ -1869,7 +1895,6 @@ Backups are automatically created for file modifications."""
           the entire file content.
         """
         path = args.get("path", "")
-        old_text = args.get("old")
 
         if not path:
             return False, {"error": "path is required"}
@@ -1879,6 +1904,24 @@ Backups are automatically created for file modifications."""
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
             return False, {"error": f"Path denied by sandbox (write): {path}"}
+
+        # One updateFile at a time per file (#1718): parallel calls in one
+        # response, or an in-process subagent, would otherwise read the same
+        # content and the last write would discard the others' edits while
+        # every call reported success.
+        with locked_paths(file_path):
+            return self._update_file_locked(args, path, file_path)
+
+    def _update_file_locked(self, args: Dict[str, Any], path: str, file_path: Path) -> Any:
+        """Body of ``updateFile``; called with ``file_path``'s lock held.
+
+        The lock (``path_locks.locked_paths``) spans the read the edit is
+        computed from through the write, so a second call on the same file
+        reads what the first wrote.  A write by another PROCESS between the
+        read and the write is caught by the fingerprint check before the
+        write and reported as a failure, never as a success.
+        """
+        old_text = args.get("old")
 
         if not file_path.exists():
             return False, {"error": f"File not found: {path}. Use writeNewFile for new files."}
@@ -1893,6 +1936,7 @@ Backups are automatically created for file modifications."""
         existing_eol: Optional[str] = None
         content_loaded = False
         current_content: Optional[str] = None
+        read_fingerprint: Optional[FileFingerprint] = None
         if old_text is not None:
             # Targeted mode
             new_text = args.get("new")
@@ -1913,6 +1957,7 @@ Backups are automatically created for file modifications."""
                 )
                 return False, {"error": span_error}
 
+            read_fingerprint = FileFingerprint.of(file_path)
             try:
                 # LF-normalised for matching, with the file's own ending
                 # handed back so the write can put it back (#805).
@@ -1975,6 +2020,11 @@ Backups are automatically created for file modifications."""
             )
 
         try:
+            if read_fingerprint is not None:
+                # A targeted edit was computed from ``current_content``;
+                # if another process rewrote the file since, writing it
+                # would discard that write.
+                assert_unchanged(file_path, read_fingerprint)
             write_text_verified(
                 file_path,
                 new_content,
@@ -2010,6 +2060,7 @@ Backups are automatically created for file modifications."""
         except OSError as e:
             return False, {"error": f"Failed to write file: {e}"}
 
+    @_holds_path_locks("path")
     def _execute_write_new_file(self, args: Dict[str, Any]) -> Any:
         """Execute writeNewFile tool."""
         path = args.get("path", "")
@@ -2073,6 +2124,7 @@ Backups are automatically created for file modifications."""
         except OSError as e:
             return False, {"error": f"Failed to create file: {e}"}
 
+    @_holds_path_locks("path")
     def _execute_remove_file(self, args: Dict[str, Any]) -> Any:
         """Execute removeFile tool."""
         path = args.get("path", "")
@@ -2118,6 +2170,7 @@ Backups are automatically created for file modifications."""
         except OSError as e:
             return False, {"error": f"Failed to delete file: {e}"}
 
+    @_holds_path_locks("source_path", "destination_path")
     def _execute_move_file(self, args: Dict[str, Any]) -> Any:
         """Execute moveFile/renameFile tool."""
         source_path = args.get("source_path", "")
@@ -2203,6 +2256,7 @@ Backups are automatically created for file modifications."""
                 "destination": normalize_result_path(destination_path)
             }
 
+    @_holds_path_locks("path")
     def _execute_undo_file_change(self, args: Dict[str, Any]) -> Any:
         """Execute undoFileChange tool."""
         path = args.get("path", "")
@@ -2335,6 +2389,7 @@ Backups are automatically created for file modifications."""
             return False, result_dict
         return result_dict
 
+    @_holds_path_locks("path")
     def _execute_restore_file(self, args: Dict[str, Any]) -> Any:
         """Execute restoreFile tool to restore from a specific backup."""
         path = args.get("path", "")

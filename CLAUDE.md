@@ -12521,6 +12521,47 @@ The digest, not the tail, identifies the file. Guard:
 `jaato_server/shared/tests/test_a_backup_name_fits_any_path_1485.py`, five
 reversions.
 
+### Parallel Edits of One File Kept Every Edit (#1718)
+
+Tool calls in one response run in parallel, and `updateFile` read the
+file, computed the edit and wrote it with nothing held: three targeted
+edits of one file in one response all read the original, the last write
+discarded the other two, and every call reported success.
+
+`shared/plugins/path_locks.py` is the one rule. `locked_paths(*paths)`
+holds a per-file `RLock`, keyed by `realpath` + `normcase` (so `a/../x`
+and `x` share one), taken in sorted order (overlapping batches cannot
+deadlock), reference-counted (no key outlives its last user).
+
+| Holder | Held from / to |
+|---|---|
+| `updateFile` | the read through the write (`_update_file_locked`) |
+| `writeNewFile`, `removeFile`, `moveFile`/`renameFile` (both ends), `undoFileChange`, `restoreFile` | the whole call (`_holds_path_locks`) |
+| `multiFileEdit` | every named file, validation (which reads them) through the last write |
+| `findAndReplace` | every candidate file, the match through the write |
+| `lsp` `apply_workspace_edit` (`lsp_rename_symbol`, `lsp_apply_code_action`) | each file's read through its write |
+
+The locks are **per process**: they cover the session, its in-process
+subagents and every parallel call, not another runner, a `cli` command or
+an editor. A targeted `updateFile` therefore also fingerprints the file
+(inode, size, mtime) at the read and refuses the write when it changed
+(`FileChangedError`, "modified by another process ... nothing was
+written"). Not covered: the window between that check and the write, and
+an LSP edit whose ranges the server computed before a concurrent edit
+(the lock serialises the writes, not the server's view).
+
+Same-shaped races found elsewhere and not fixed here (shared state rather
+than a workspace file): `update_memory` (reads outside `MemoryStore._lock`;
+racing `delete_memory` brings a memory back), `sandbox_manager.add_path_programmatic`
+(reached by `selectReferences`), `service_connector` (`configure_service_auth`
+vs `call_service` saving `_service.yaml`), `waypoint` id allocation and its
+shared temp name, `artifact_tracker` registry, and the check-then-create of
+`renderTemplateToFile` / `savePrompt` (no `O_EXCL`).
+
+Guard: `jaato_server/shared/tests/test_parallel_file_edits_keep_every_edit_1718.py`,
+six reversions; a gate on `restore` holds the first writer until a second
+has read, so the race is forced rather than hoped for.
+
 ### A Report Written Between Fork and Exec (#1673)
 
 A `cli_based_tool` child hung for good in `futex_wait`, after `fork()` and
