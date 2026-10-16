@@ -189,7 +189,11 @@ class TokenLedger:
     def _enrich(ev: Dict[str, Any], idx: int) -> Dict[str, Any]:
         """The on-disk form of one event: ISO timestamp, index, derived tokens."""
         enriched = dict(ev)
-        enriched["iso_ts"] = datetime.datetime.utcfromtimestamp(ev.get("ts", time.time())).isoformat() + "Z"
+        # fromtimestamp(..., UTC) without the tzinfo renders the same
+        # string utcfromtimestamp() did (deprecated since 3.12).
+        enriched["iso_ts"] = datetime.datetime.fromtimestamp(
+            ev.get("ts", time.time()), datetime.UTC
+        ).replace(tzinfo=None).isoformat() + "Z"
         enriched["event_index"] = idx
         if "prompt_tokens" in ev and "output_tokens" in ev and "total_tokens" in ev:
             pt = ev.get("prompt_tokens") or 0

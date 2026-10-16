@@ -589,7 +589,7 @@ These write JSONL records to per-agent files under the configured trace director
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.14 (the one interpreter the packages declare and are tested on)
 - A reachable jaato server (auto-started by default)
 - `python-dotenv` (the only runtime dependency)
 

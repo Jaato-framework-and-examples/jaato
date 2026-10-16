@@ -33,7 +33,7 @@ The base install carries the daemon, the session runtime and the plugins that ne
 pip install 'jaato-server[all]'
 ```
 
-Anthropic's SDK, `mcp`, `websockets` and `jaato-sdk` are base dependencies — Claude, MCP servers and the WebSocket transport work out of the box. Requires Python 3.12+.
+Anthropic's SDK, `mcp`, `websockets` and `jaato-sdk` are base dependencies — Claude, MCP servers and the WebSocket transport work out of the box. Requires Python 3.14 (`requires-python = ">=3.14,<3.15"`: the one interpreter CI tests).
 
 ## Quick start
 
