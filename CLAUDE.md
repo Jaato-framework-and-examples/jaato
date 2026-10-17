@@ -14616,8 +14616,11 @@ API. Models use the `vendor/model` form, e.g. `anthropic/claude-3.5-sonnet`,
 `openai/gpt-4o`, `meta-llama/llama-3.3-70b-instruct`. Use `openrouter/auto` to let
 OpenRouter pick the best model per request.
 
-`list_models()` queries `GET /api/v1/models` (no auth required) and `connect()`
-caches per-model `context_length` from that catalog. The OpenAI SDK's
+`list_models()` queries `GET /api/v1/models?output_modalities=all` (no auth
+required; the default listing omits non-text models, decision models among
+them) and `connect()` caches per-model `context_length` from that catalog. A
+decisions-only model needs no window: one the catalog reports as 0 connects,
+and `decide()` skips its pre-send size check. The OpenAI SDK's
 `default_headers` carry the optional `HTTP-Referer` and `X-OpenRouter-Title`
 attribution headers automatically.
 
