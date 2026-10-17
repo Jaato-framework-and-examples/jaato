@@ -36,6 +36,7 @@ of the key alone.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import os
@@ -47,8 +48,10 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
 
 from . import catalog_watch
 from .bundle import (
+    BUNDLE_MANIFEST_FILENAME,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
+    REFERENCE_NON_SOURCE_FILENAMES,
     ROOT_BUNDLE_NAME,
     ReferenceBundle,
     discover_bundles,
@@ -57,8 +60,11 @@ from .bundle import (
 from .config_loader import (
     ReferencesConfig,
     config_path_candidates,
-    discover_references,
+    discover_reference_files,
+    is_reference_file,
     load_config,
+    parse_reference_file,
+    reference_project_root,
 )
 from .links import LinkIndex
 from .models import ReferenceSource, SourceType
@@ -136,6 +142,35 @@ def resolve_for_context(source: ReferenceSource, project_root: Optional[str]) ->
     return None
 
 
+@dataclass(frozen=True)
+class SourceUnit:
+    """The references one directory contributed to a load.
+
+    Attributes:
+        directory: The directory, normalized (``os.path.normpath`` of its
+            absolute form), the key a changed path is placed by.
+        bundle_name: ``bundle_name`` its references carry (``""`` for the
+            root directory ``load_config`` auto-discovers).
+        project_root: The root its LOCAL paths are made relative to
+            (:func:`reference_project_root`), so a re-parse matches the load.
+        resolve: Whether the load resolves its paths with
+            :func:`resolve_for_context` against the key's project root (the
+            root directory does, bundles do not).
+        files: ``(path, source)`` per file that parsed, in file-name
+            order; each path normalized like ``directory``.
+    """
+
+    directory: str
+    bundle_name: str
+    project_root: str
+    resolve: bool
+    files: Tuple[Tuple[str, ReferenceSource], ...]
+
+
+def _norm(path: str) -> str:
+    return os.path.normpath(os.path.abspath(path))
+
+
 class CatalogSnapshot:
     """One load of the catalog, immutable once built.
 
@@ -149,6 +184,12 @@ class CatalogSnapshot:
         bundles: The bundles discovery found. Shared: a session that
             attaches state (a matcher) works on its own copies.
         roots: The tier roots bundle discovery walked.
+        units: The directories the references came from, root first, then
+            each bundle in discovery order (:class:`SourceUnit`); the
+            store derives the next generation from them.
+        layout: Per tier root (normalized), the sub-bundle directories on
+            disk when it was read, shadowed ones included; a change to it
+            is a full load.
         watch: The settled stamps of every path this load read
             (:func:`catalog_watch.settle`); :meth:`is_stale` compares them.
     """
@@ -162,6 +203,8 @@ class CatalogSnapshot:
         sources: Sequence[ReferenceSource],
         bundles: Sequence[ReferenceBundle],
         roots: Sequence[str],
+        units: Sequence[SourceUnit] = (),
+        layout: Optional[Dict[str, frozenset]] = None,
         watch: Dict[str, Any],
     ) -> None:
         self.key = key
@@ -170,6 +213,8 @@ class CatalogSnapshot:
         self.sources: Tuple[ReferenceSource, ...] = tuple(sources)
         self.bundles: Tuple[ReferenceBundle, ...] = tuple(bundles)
         self.roots: Tuple[str, ...] = tuple(roots)
+        self.units: Tuple[SourceUnit, ...] = tuple(units)
+        self.layout: Dict[str, frozenset] = dict(layout or {})
         self.watch = dict(watch)
         self.by_id: Dict[str, ReferenceSource] = {}
         for source in self.sources:
@@ -213,14 +258,17 @@ class ReferenceStore:
     def current(self, *, refresh: bool = True) -> CatalogSnapshot:
         """The snapshot to read from now.
 
-        Loads when no holder keeps a snapshot alive, and, with
-        ``refresh``, when a path the current one read has moved. Callers
-        noticing the same change at once share one load (the lock).
+        Loads when no holder keeps a snapshot alive. With ``refresh``,
+        when a path the current one read has moved, the next generation is
+        derived from it (only what moved is read again). Callers noticing
+        the same change at once share one load (the lock).
         """
         with self._lock:
             snap = self._current() if self._current else None
-            if snap is None or (refresh and snap.is_stale()):
-                snap = self._load(snap)
+            if snap is None:
+                return self._load(None)
+            if refresh and snap.is_stale():
+                return self._derive(snap)
             return snap
 
     def reload(self) -> CatalogSnapshot:
@@ -230,19 +278,78 @@ class ReferenceStore:
             return self._load(snap)
 
     def _load(self, previous: Optional[CatalogSnapshot]) -> CatalogSnapshot:
+        """Read the whole catalog from disk."""
         pre = catalog_watch.stat_paths(_watch_paths(self.key, previous))
         config = _load_config(self.key)
         project_root = self.key.project_root
         # Freshly parsed, held by nothing else yet: resolved in place, so
-        # ``config.sources`` and ``sources`` hold the same objects.
+        # ``config.sources`` and the root unit hold the same objects.
         for source in config.sources:
             resolved = resolve_for_context(source, project_root)
             if resolved is not None:
                 source.resolved_path = resolved
-        sources = list(config.sources)
         roots = _bundle_roots(self.key, config)
+        layout = {_norm(str(path)): _sub_bundles(_norm(str(path))) for path, _tier in roots}
         bundles = discover_bundles(roots)
-        _append_bundle_sources(sources, bundles, project_root)
+        units = _root_units(self.key, config) + [
+            _bundle_unit(bundle, project_root) for bundle in _loaded_bundles(bundles)
+        ]
+        return self._publish(config, _explicit_sources(config), units, bundles,
+                             [str(path) for path, _tier in roots], layout, pre)
+
+    def _derive(self, previous: CatalogSnapshot) -> CatalogSnapshot:
+        """Generation G+1 from G: re-read what moved, share everything else.
+
+        The paths whose stamp moved are placed by directory: a reference
+        file is parsed again (or dropped when gone), a directory whose
+        listing changed is listed again. Anything else that moved (a
+        ``references.json``, a bundle manifest or embedding config, a
+        sub-bundle added or removed, a path no unit holds) changes more than
+        a file's own references, so it is a full load. Both paths assemble
+        the snapshot in :meth:`_publish`, so a derived snapshot equals the
+        one a full load of the same disk would build.
+        """
+        pre = catalog_watch.stat_paths(_watch_paths(self.key, previous))
+        moved = {p for p in set(pre) | set(previous.watch)
+                 if pre.get(p) != previous.watch.get(p)}
+        units = _rederive_units(previous, moved)
+        if units is None:
+            return self._load(previous)
+        root = units[0] if units and units[0].resolve else None
+        explicit = _explicit_sources(previous.config)
+        config = dataclasses.replace(
+            previous.config,
+            sources=_root_sources(explicit, root),
+            discovered=list(root.files) if root else [],
+        )
+        return self._publish(config, explicit, units, previous.bundles,
+                             previous.roots, previous.layout, pre)
+
+    def _publish(
+        self,
+        config: ReferencesConfig,
+        explicit: List[ReferenceSource],
+        units: List[SourceUnit],
+        bundles: Sequence[ReferenceBundle],
+        roots: Sequence[str],
+        layout: Dict[str, frozenset],
+        pre: Dict[str, Any],
+    ) -> CatalogSnapshot:
+        """Assemble, stamp and hold one generation (the one assembly)."""
+        has_root = bool(units) and units[0].resolve
+        root = units[0] if has_root else None
+        sources = _root_sources(explicit, root)
+        existing: Set[str] = {s.id for s in sources}
+        for unit in units[1:] if has_root else units:
+            for _path, source in unit.files:
+                if source.id in existing:
+                    logger.debug(
+                        "references store: skipping duplicate id '%s' from bundle '%s'",
+                        source.id, unit.bundle_name,
+                    )
+                    continue
+                sources.append(source)
+                existing.add(source.id)
         self._generation += 1
         snap = CatalogSnapshot(
             key=self.key,
@@ -250,14 +357,16 @@ class ReferenceStore:
             config=config,
             sources=sources,
             bundles=bundles,
-            roots=[str(path) for path, _tier in roots],
+            roots=roots,
+            units=units,
+            layout=layout,
             watch={},
         )
         post = catalog_watch.stat_paths(_watch_paths(self.key, snap))
         snap.watch = catalog_watch.settle(pre, post)
         self._current = weakref.ref(snap)
         logger.debug(
-            "references store: loaded generation %d (%d sources, %d bundles) for %s",
+            "references store: generation %d (%d sources, %d bundles) for %s",
             snap.generation, len(snap.sources), len(snap.bundles), self.key.workspace,
         )
         return snap
@@ -326,34 +435,173 @@ def _bundle_roots(key: CatalogKey, config: ReferencesConfig) -> List[Tuple[Path,
     return roots
 
 
-def _append_bundle_sources(
-    sources: List[ReferenceSource],
-    bundles: Iterable[ReferenceBundle],
-    project_root: Optional[str],
-) -> None:
-    """Load every bundle's references after the root's, first id wins.
+def _loaded_bundles(bundles: Iterable[ReferenceBundle]) -> List[ReferenceBundle]:
+    """The bundles whose references a load reads, in discovery order.
 
     The workspace tier's root bundle is skipped: ``load_config`` already
     read it.
     """
-    existing: Set[str] = {s.id for s in sources}
-    for bundle in bundles:
-        if bundle.name == ROOT_BUNDLE_NAME and bundle.tier == BUNDLE_TIER_WORKSPACE:
+    return [b for b in bundles
+            if not (b.name == ROOT_BUNDLE_NAME and b.tier == BUNDLE_TIER_WORKSPACE)]
+
+
+def _root_dir(key: CatalogKey, config: ReferencesConfig) -> Optional[Path]:
+    """The directory ``load_config`` auto-discovered from, or ``None``."""
+    if not config.auto_discover_references or key.workspace is None:
+        return None
+    refs = Path(config.references_dir)
+    return refs if refs.is_absolute() else Path(key.workspace) / refs
+
+
+def _root_units(key: CatalogKey, config: ReferencesConfig) -> List[SourceUnit]:
+    """The root directory as a unit, from what ``load_config`` discovered."""
+    directory = _root_dir(key, config)
+    if directory is None:
+        return []
+    return [SourceUnit(
+        directory=_norm(str(directory)),
+        bundle_name=ROOT_BUNDLE_NAME,
+        project_root=reference_project_root(directory, None),
+        resolve=True,
+        files=tuple((_norm(path), source) for path, source in config.discovered),
+    )]
+
+
+def _bundle_unit(bundle: ReferenceBundle, project_root: Optional[str]) -> SourceUnit:
+    """One bundle's references, each tagged with the bundle's name."""
+    files = discover_reference_files(
+        str(bundle.directory),
+        base_path=str(bundle.directory.parent),
+        project_root=project_root,
+    )
+    for _path, source in files:
+        source.bundle_name = bundle.name
+    return SourceUnit(
+        directory=_norm(str(bundle.directory)),
+        bundle_name=bundle.name,
+        project_root=reference_project_root(Path(bundle.directory), project_root),
+        resolve=False,
+        files=tuple((_norm(path), source) for path, source in files),
+    )
+
+
+def _explicit_sources(config: ReferencesConfig) -> List[ReferenceSource]:
+    """The root references that came from ``references.json``, in order."""
+    discovered = {id(source) for _path, source in config.discovered}
+    return [s for s in config.sources if id(s) not in discovered]
+
+
+def _root_sources(explicit: List[ReferenceSource],
+                  root: Optional[SourceUnit]) -> List[ReferenceSource]:
+    """``config.sources`` as ``load_config`` builds it.
+
+    The explicit sources, then every discovered one whose id no explicit
+    source has (a duplicate among the discovered stays, as in
+    ``load_config``; the snapshot's ``by_id`` keeps the first).
+    """
+    sources = list(explicit)
+    if root is not None:
+        explicit_ids = {s.id for s in explicit}
+        sources.extend(s for _path, s in root.files if s.id not in explicit_ids)
+    return sources
+
+
+def _rederive_units(previous: CatalogSnapshot,
+                    moved: Set[str]) -> Optional[List[SourceUnit]]:
+    """The units with ``moved`` applied, or ``None`` when a full load is needed.
+
+    A moved reference file is parsed again with its unit's project root
+    (and resolved when the unit is the root directory); a moved unit
+    directory is listed again for files added or removed. A moved tier
+    root is fine while its sub-bundles are the ones it had. Anything else
+    returns ``None``.
+    """
+    by_dir = {unit.directory: unit for unit in previous.units}
+    relist: Set[str] = set()
+    reparse: Dict[str, Set[str]] = {}
+    for path in moved:
+        normal = _norm(path)
+        if normal in previous.layout:
+            if _sub_bundles(normal) != previous.layout[normal]:
+                return None
+            if normal in by_dir:
+                relist.add(normal)
             continue
-        for source in discover_references(
-            str(bundle.directory),
-            base_path=str(bundle.directory.parent),
-            project_root=project_root,
-        ):
-            if source.id in existing:
-                logger.debug(
-                    "references store: skipping duplicate id '%s' from bundle '%s'",
-                    source.id, bundle.qualified_ref,
-                )
-                continue
-            source.bundle_name = bundle.name
-            sources.append(source)
-            existing.add(source.id)
+        if normal in by_dir:
+            relist.add(normal)
+            continue
+        parent = os.path.dirname(normal)
+        if parent in by_dir and _is_reference_name(os.path.basename(normal)):
+            reparse.setdefault(parent, set()).add(normal)
+            continue
+        return None
+    return [
+        _reread_unit(unit, unit.directory in relist, reparse.get(unit.directory, set()),
+                     previous.key.project_root)
+        if unit.directory in relist or unit.directory in reparse else unit
+        for unit in previous.units
+    ]
+
+
+def _is_reference_name(name: str) -> bool:
+    """Whether a file named ``name`` would be read as a reference definition."""
+    return name.endswith(".json") and name not in REFERENCE_NON_SOURCE_FILENAMES
+
+
+def _sub_bundles(root: str) -> frozenset:
+    """The directories directly under a tier root that hold a ``bundle.json``."""
+    found: Set[str] = set()
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if (entry.is_dir(follow_symlinks=True)
+                        and os.path.isfile(os.path.join(entry.path, BUNDLE_MANIFEST_FILENAME))):
+                    found.add(_norm(entry.path))
+    except OSError:
+        pass
+    return frozenset(found)
+
+
+def _reread_unit(unit: SourceUnit, relist: bool, changed: Set[str],
+                 resolve_root: Optional[str]) -> SourceUnit:
+    """``unit`` with its listing re-read and ``changed`` files parsed again.
+
+    A root-directory reference is resolved against ``resolve_root`` (the
+    key's project root), as the full load resolves it.
+
+    Paths are normalized. A file that no longer parses (or is gone) drops
+    out; the order is file-name order, as a full load lists them.
+    """
+    files: Dict[str, ReferenceSource] = dict(unit.files)
+    if relist:
+        present: Set[str] = set()
+        try:
+            with os.scandir(unit.directory) as entries:
+                for entry in entries:
+                    if is_reference_file(Path(entry.path)):
+                        present.add(_norm(entry.path))
+        except OSError:
+            pass
+        for gone in set(files) - present:
+            del files[gone]
+        changed = changed | (present - set(files))
+    for path in changed:
+        files.pop(path, None)
+        file_path = Path(path)
+        if not is_reference_file(file_path):
+            continue
+        source = parse_reference_file(file_path, unit.project_root)
+        if source is None:
+            continue
+        if unit.resolve:
+            resolved = resolve_for_context(source, resolve_root)
+            if resolved is not None:
+                source.resolved_path = resolved
+        else:
+            source.bundle_name = unit.bundle_name
+        files[path] = source
+    ordered = sorted(files.items(), key=lambda item: os.path.basename(item[0]))
+    return dataclasses.replace(unit, files=tuple(ordered))
 
 
 def _watch_paths(key: CatalogKey, snap: Optional[CatalogSnapshot]) -> List[str]:

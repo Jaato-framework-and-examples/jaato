@@ -34,7 +34,10 @@ Part ``derive`` (step 2, the next generation built from the previous one):
 - ``full_reload_<case>_s``: the plugin's ``_reload_from_disk`` on the same
   change, for comparison;
 - ``derive_<case>_equal``: G+1 has the same ids, and the same parsed
-  entries, as a full reload of the same disk.
+  entries, as a full reload of the same disk;
+- ``store_derive_<case>_ms`` / ``store_derive_<case>_equal``: the same, for
+  the store's own derivation (``ReferenceStore._derive``, median of 5 from
+  the same G), once it was built.
 
 The prototype's per-file parse mirrors the body of the loop in
 ``config_loader.discover_references`` (``ReferenceSource.from_dict`` and the
@@ -254,6 +257,7 @@ def measure(ws: Path) -> Dict[str, Any]:
     dirs = _bundle_dirs(ws)
     selected = sorted(snap.by_id)[:: max(1, len(snap.by_id) // 25)][:25]
     for step, (case, count) in enumerate(CASES):
+        g = plugin._store.current(refresh=False)
         watched = list(plugin._snapshot.watch)
         before = catalog_watch.stat_paths(watched)
         _apply(ws, case, count, step)
@@ -268,10 +272,16 @@ def measure(ws: Path) -> Dict[str, Any]:
         out[f"derive_{case}_mem_kb"] = round(tracemalloc.get_traced_memory()[0] / 1024)
         tracemalloc.stop()
         del again
+        store_runs = [_timed(plugin._store._derive, g) for _ in range(5)]
+        stored = store_runs[-1][0]
+        out[f"store_derive_{case}_ms"] = round(statistics.median(r[1] for r in store_runs) * 1000, 1)
+        del store_runs
         _, dt = _timed(plugin._reload_from_disk)
         out[f"full_reload_{case}_s"] = round(dt, 2)
         full = {s.id: s.to_dict() for s in plugin._sources}
         out[f"derive_{case}_equal"] = full == {i: s.to_dict() for i, s in nxt.by_id.items()}
+        out[f"store_derive_{case}_equal"] = full == {i: s.to_dict() for i, s in stored.by_id.items()}
+        del stored
         snap = nxt
     return out
 

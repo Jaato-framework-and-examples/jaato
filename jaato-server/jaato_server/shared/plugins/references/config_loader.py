@@ -46,23 +46,54 @@ def discover_references(
     Returns:
         List of ReferenceSource instances discovered from the directory.
     """
+    return [source for _path, source in
+            discover_reference_files(references_dir, base_path, project_root)]
+
+
+def reference_project_root(refs_path: Path, project_root: Optional[str]) -> str:
+    """The root a directory's LOCAL paths are made relative to.
+
+    ``project_root`` when given; otherwise the parent of ``.jaato`` when
+    ``refs_path`` is under one, else the directory's parent.
+    """
+    if project_root is not None:
+        return project_root
+    resolved_refs = refs_path.resolve()
+    if '.jaato' in resolved_refs.parts:
+        jaato_idx = resolved_refs.parts.index('.jaato')
+        return str(Path(*resolved_refs.parts[:jaato_idx]))
+    return str(resolved_refs.parent)
+
+
+def is_reference_file(file_path: Path) -> bool:
+    """Whether ``file_path`` is read as a reference definition.
+
+    A regular ``*.json`` file that is not one of the bundle's own manifests
+    (:data:`REFERENCE_NON_SOURCE_FILENAMES`): both of those sit beside the
+    definitions and carry no ``id``.
+    """
+    return (file_path.suffix == '.json'
+            and file_path.name not in REFERENCE_NON_SOURCE_FILENAMES
+            and file_path.is_file())
+
+
+def discover_reference_files(
+    references_dir: str,
+    base_path: Optional[str] = None,
+    project_root: Optional[str] = None,
+) -> List[Tuple[str, ReferenceSource]]:
+    """:func:`discover_references` with the file each reference came from.
+
+    In file-name order, one ``(path, source)`` per file that parsed.  The
+    catalog store keeps the paths so a later change re-parses only the
+    files that moved (:mod:`.store`).
+    """
     if base_path is None:
         return []  # No base path — cannot discover references
 
-    # Resolve the references directory path
     refs_path = Path(references_dir)
     if not refs_path.is_absolute():
         refs_path = Path(base_path) / refs_path
-
-    # Determine project root for relative path computation
-    if project_root is None:
-        # If refs_path is under .jaato/, project root is parent of .jaato
-        resolved_refs = refs_path.resolve()
-        if '.jaato' in resolved_refs.parts:
-            jaato_idx = resolved_refs.parts.index('.jaato')
-            project_root = str(Path(*resolved_refs.parts[:jaato_idx]))
-        else:
-            project_root = str(resolved_refs.parent)
 
     try:
         if not refs_path.exists():
@@ -77,93 +108,92 @@ def discover_references(
         # (e.g. ~/.jaato/references under AppArmor — exists() raises
         # PermissionError, which pathlib does NOT ignore for EACCES).  This is
         # an OPTIONAL tier: treat as "no references here" rather than aborting
-        # the load, so the workspace tier (resolved by set_workspace_path ->
-        # _reload_catalog) still loads.
+        # the load, so the workspace tier still loads.
         logger.debug(
             "References directory %s not scannable (%s); skipping", refs_path, exc)
         return []
 
-    sources: List[ReferenceSource] = []
-
-    # Scan for reference files
+    root = reference_project_root(refs_path, project_root)
+    found: List[Tuple[str, ReferenceSource]] = []
     for file_path in entries:
-        if not file_path.is_file():
+        if not is_reference_file(file_path):
             continue
+        source = parse_reference_file(file_path, root)
+        if source is not None:
+            found.append((str(file_path), source))
 
-        if file_path.suffix != '.json':
-            continue
-
-        # Skip the bundle's own manifests — they are metadata, not
-        # references.  Every marker, not just the embedding config: a
-        # Both files here are ``*.json`` sitting beside the reference
-        # definitions and neither carries an ``id``, so leaving them in
-        # would log "missing required fields (id, name)" once per
-        # bundle on every catalog load.
-        if file_path.name in REFERENCE_NON_SOURCE_FILENAMES:
-            continue
-
-        try:
-            content = file_path.read_text(encoding='utf-8')
-            data = json.loads(content)
-
-            if not isinstance(data, dict):
-                logger.warning("Reference file must contain a dict: %s", file_path)
-                continue
-
-            # Validate required fields
-            if not data.get("id") or not data.get("name"):
-                logger.warning(
-                    "Reference file missing required fields (id, name): %s",
-                    file_path
-                )
-                continue
-
-            source = ReferenceSource.from_dict(data)
-
-            # Resolve relative paths for LOCAL sources
-            # Make paths relative to project root (where agent operates)
-            if source.type == SourceType.LOCAL and source.path:
-                source_path = Path(source.path)
-                if source_path.is_absolute():
-                    absolute_path = source_path.resolve()
-                else:
-                    # Check if path is project-relative (starts with .jaato/)
-                    # These should be resolved against project_root, not file_path.parent
-                    # Use original string to avoid Windows path normalization issues
-                    # (Path() on Windows converts ./.jaato/foo to .jaato\foo, breaking prefix check)
-                    original_path = source.path
-                    if original_path.startswith('.jaato/') or original_path.startswith('./.jaato/'):
-                        # Strip leading ./ if present for clean join
-                        clean_path = original_path[2:] if original_path.startswith('./') else original_path
-                        absolute_path = (Path(project_root) / clean_path).resolve()
-                    else:
-                        # Regular relative path - resolve against reference file's directory
-                        absolute_path = (file_path.parent / source_path).resolve()
-                # Convert to project-root-relative path
-                # Normalize separators for MSYS2 compatibility (forward slashes)
-                try:
-                    source.resolved_path = normalize_path(os.path.relpath(absolute_path, project_root))
-                except ValueError:
-                    # On Windows, relpath fails for paths on different drives
-                    source.resolved_path = normalize_path(str(absolute_path))
-
-            sources.append(source)
-            logger.debug("Discovered reference '%s' from %s", source.id, file_path)
-
-        except json.JSONDecodeError as e:
-            logger.warning("Invalid JSON in reference file %s: %s", file_path, e)
-        except Exception as e:
-            logger.warning("Error reading reference file %s: %s", file_path, e)
-
-    if sources:
+    if found:
         logger.info(
             "Discovered %d reference(s) from %s: %s",
-            len(sources),
+            len(found),
             refs_path,
-            ", ".join(s.id for s in sources)
+            ", ".join(source.id for _path, source in found)
         )
+    return found
 
-    return sources
+
+def parse_reference_file(file_path: Path, project_root: str) -> Optional[ReferenceSource]:
+    """One reference definition file, or ``None`` when it does not parse.
+
+    The one parser for a reference file: a full catalog load and the
+    store's re-parse of a single changed file both call it, so the two
+    cannot read a file differently.  A LOCAL ``path`` is resolved against
+    ``project_root`` when it starts with ``.jaato/``, else against the
+    file's directory, and stored relative to ``project_root``.
+    """
+    try:
+        content = file_path.read_text(encoding='utf-8')
+        data = json.loads(content)
+
+        if not isinstance(data, dict):
+            logger.warning("Reference file must contain a dict: %s", file_path)
+            return None
+
+        # Validate required fields
+        if not data.get("id") or not data.get("name"):
+            logger.warning(
+                "Reference file missing required fields (id, name): %s",
+                file_path
+            )
+            return None
+
+        source = ReferenceSource.from_dict(data)
+
+        # Resolve relative paths for LOCAL sources
+        # Make paths relative to project root (where agent operates)
+        if source.type == SourceType.LOCAL and source.path:
+            source_path = Path(source.path)
+            if source_path.is_absolute():
+                absolute_path = source_path.resolve()
+            else:
+                # Check if path is project-relative (starts with .jaato/)
+                # These should be resolved against project_root, not file_path.parent
+                # Use original string to avoid Windows path normalization issues
+                # (Path() on Windows converts ./.jaato/foo to .jaato\foo, breaking prefix check)
+                original_path = source.path
+                if original_path.startswith('.jaato/') or original_path.startswith('./.jaato/'):
+                    # Strip leading ./ if present for clean join
+                    clean_path = original_path[2:] if original_path.startswith('./') else original_path
+                    absolute_path = (Path(project_root) / clean_path).resolve()
+                else:
+                    # Regular relative path - resolve against reference file's directory
+                    absolute_path = (file_path.parent / source_path).resolve()
+            # Convert to project-root-relative path
+            # Normalize separators for MSYS2 compatibility (forward slashes)
+            try:
+                source.resolved_path = normalize_path(os.path.relpath(absolute_path, project_root))
+            except ValueError:
+                # On Windows, relpath fails for paths on different drives
+                source.resolved_path = normalize_path(str(absolute_path))
+
+        logger.debug("Discovered reference '%s' from %s", source.id, file_path)
+        return source
+
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid JSON in reference file %s: %s", file_path, e)
+    except Exception as e:
+        logger.warning("Error reading reference file %s: %s", file_path, e)
+    return None
 
 
 @dataclass
@@ -209,6 +239,12 @@ class ReferencesConfig:
     embedding_dimensions: Optional[int] = None
     embedding_sidecar: Optional[str] = None
     embedding_rows: Optional[List[str]] = None
+
+    # The auto-discovered root references with the file each came from, in
+    # file-name order, every one that parsed (a duplicate id included;
+    # ``sources`` keeps the first).  The store keeps them so a change
+    # re-parses only the files that moved.
+    discovered: List[Tuple[str, ReferenceSource]] = field(default_factory=list)
 
 
 class ConfigValidationError(Exception):
@@ -718,12 +754,13 @@ def load_config(
 
     # Auto-discover references if enabled
     if config.auto_discover_references:
-        discovered = discover_references(config.references_dir, base_path=workspace_path)
-        if discovered:
+        config.discovered = discover_reference_files(
+            config.references_dir, base_path=workspace_path)
+        if config.discovered:
             # Build set of existing IDs to avoid duplicates
             existing_ids = {s.id for s in config.sources}
             # Merge discovered sources, explicit sources take precedence
-            for source in discovered:
+            for _path, source in config.discovered:
                 if source.id not in existing_ids:
                     config.sources.append(source)
                 else:

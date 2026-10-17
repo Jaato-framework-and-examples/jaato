@@ -60,8 +60,10 @@ REVERSIONS = [
     ),
     Reversion(
         target=_STORE,
-        find="        _append_bundle_sources(sources, bundles, project_root)\n",
-        replace="",
+        find=(
+            "            _bundle_unit(bundle, project_root) for bundle in _loaded_bundles(bundles)\n"
+        ),
+        replace="            _bundle_unit(bundle, project_root) for bundle in ()\n",
         because=(
             "a load would read only the workspace root, dropping every "
             "sub-bundle and user-tier reference from a session that had them"

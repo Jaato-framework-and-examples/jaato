@@ -24,6 +24,9 @@ session whose profile does not list ``references``. Pinned here:
 8. A session whose profile does not list ``references`` neither counts its
    instructions in the budget nor loads its catalog for them: the budget
    reads the plugin set the prompt reads.
+9. A change on disk is applied by deriving the next generation from the
+   current one: only the files that moved are parsed again, and the result
+   equals a full load of the same disk.
 """
 
 from __future__ import annotations
@@ -132,6 +135,26 @@ REVERSIONS = [
             "exposed plugin, including ones the session's prompt never carries"
         ),
         test="TestTheBudgetCountsWhatIsSent::test_an_unlisted_plugin_is_not_counted",
+    ),
+    Reversion(
+        target=_STORE,
+        find="        units = _rederive_units(previous, moved)\n",
+        replace="        units = None\n",
+        because=(
+            "every change would re-read the whole catalog, 23 s at 100k "
+            "references where deriving costs 0.4 s"
+        ),
+        test="TestTheNextGenerationIsDerived::test_only_the_moved_file_is_parsed",
+    ),
+    Reversion(
+        target=_STORE,
+        find="            resolved = resolve_for_context(source, resolve_root)\n",
+        replace="            resolved = None\n",
+        because=(
+            "a root reference parsed again would keep the path relative to "
+            "the reference file, where a full load resolves it"
+        ),
+        test="TestTheNextGenerationIsDerived::test_it_equals_a_full_load[edit-root-local]",
     ),
 ]
 
@@ -337,3 +360,105 @@ class TestTheBudgetCountsWhatIsSent:
 
         assert "references" not in counted
         assert plugin._catalog_loaded is False
+
+
+def _derive_fixture(tmp_path: Path) -> Path:
+    """A root directory and one sub-bundle, aged out of the unsettled window."""
+    ws = tmp_path / "ws"
+    for i in range(4):
+        _write_ref(ws, f"root-{i}")
+    doc = ws / "docs" / "guide.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# guide", encoding="utf-8")
+    _write_ref(ws, "root-local", type="local", path="../../docs/guide.md")
+    team = ws / ".jaato" / "references" / "team"
+    team.mkdir(parents=True)
+    write_bundle_manifest(team, name="team")
+    for i in range(3):
+        (team / f"team-{i}.json").write_text(json.dumps({
+            "id": f"team-{i}", "name": f"team-{i}", "description": "d",
+            "type": "inline", "mode": "selectable", "content": "x"}), encoding="utf-8")
+    _age(ws)
+    return ws
+
+
+def _edit(path: Path, **changes: Any) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(changes)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _change(ws: Path, case: str) -> None:
+    refs = ws / ".jaato" / "references"
+    team = refs / "team"
+    if case == "edit-root":
+        _edit(refs / "root-1.json", description="changed")
+    elif case == "edit-root-local":
+        _edit(refs / "root-local.json", description="changed")
+    elif case == "edit-bundle":
+        _edit(team / "team-1.json", tags=["new"])
+    elif case == "add-bundle":
+        (team / "team-9.json").write_text(json.dumps({
+            "id": "team-9", "name": "n", "description": "d", "type": "inline",
+            "mode": "selectable", "content": "x"}), encoding="utf-8")
+    elif case == "add-root-duplicate":
+        _write_ref(ws, "team-0")
+    elif case == "delete-root":
+        (refs / "root-2.json").unlink()
+    elif case == "rename-id":
+        _edit(team / "team-2.json", id="team-renamed")
+    elif case == "broken-json":
+        (refs / "root-3.json").write_text("{", encoding="utf-8")
+    elif case == "new-sub-bundle":
+        other = refs / "other"
+        other.mkdir()
+        write_bundle_manifest(other, name="other")
+        (other / "o.json").write_text(json.dumps({
+            "id": "o", "name": "o", "description": "d", "type": "inline",
+            "mode": "selectable", "content": "x"}), encoding="utf-8")
+
+
+def _shape(snap) -> Any:
+    return ([(s.bundle_name, s.to_dict(), s.resolved_path) for s in snap.sources],
+            [s.id for s in snap.config.sources],
+            sorted(snap.watch))
+
+
+class TestTheNextGenerationIsDerived:
+    CASES = ["edit-root", "edit-root-local", "edit-bundle", "add-bundle",
+             "add-root-duplicate", "delete-root", "rename-id", "broken-json",
+             "new-sub-bundle"]
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_it_equals_a_full_load(self, tmp_path, case):
+        ws = _derive_fixture(tmp_path)
+        plugin = _session(ws)
+        before = plugin._snapshot
+        _change(ws, case)
+
+        derived = plugin._store.current()
+        full = store_mod.ReferenceStore(plugin._store.key)._load(None)
+
+        assert derived is not before
+        assert _shape(derived) == _shape(full)
+
+    def test_only_the_moved_file_is_parsed(self, tmp_path, monkeypatch):
+        ws = _derive_fixture(tmp_path)
+        plugin = _session(ws)
+        before = plugin._snapshot
+        parsed = []
+        real = store_mod.parse_reference_file
+        monkeypatch.setattr(store_mod, "parse_reference_file",
+                            lambda path, root: parsed.append(path.name) or real(path, root))
+        loads = []
+        real_load = store_mod.ReferenceStore._load
+        monkeypatch.setattr(store_mod.ReferenceStore, "_load",
+                            lambda self, prev: loads.append(1) or real_load(self, prev))
+        _change(ws, "edit-bundle")
+
+        derived = plugin._store.current()
+
+        assert parsed == ["team-1.json"] and loads == []
+        unchanged = before.get("team-0")
+        assert derived.get("team-0") is unchanged
+        assert derived.get("team-1").tags == ["new"]
