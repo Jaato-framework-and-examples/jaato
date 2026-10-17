@@ -24,7 +24,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `nim` | ✅ | ✅ | ✅ | — | — | — | ✅ | — | ✅ | ✅ | ✅ | — | — | — |
 | `ollama` | ✅ | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — | — | — |
 | `openai` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — | — |
-| `openrouter` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | — |
+| `openrouter` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | `ovhcloud` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — | — |
 | `tensorrt_llm` | ✅ | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — | — | — |
 | `triton` | ✅ | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — | — | — |

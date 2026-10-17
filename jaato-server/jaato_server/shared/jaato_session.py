@@ -15053,22 +15053,23 @@ NOTES
         )
 
     def decision_image_model_names(self) -> List[str]:
-        """The bound entries whose provider declares ``decision_images``, sorted.
+        """The bound entries that can be sent images, sorted.
 
-        Read from the provider package's ``PROVIDER_CAPABILITIES``, so no
-        provider is built (and no key is needed) to answer.  The ``decide``
-        tool offers its ``images`` parameter and the ``box`` question type
-        only when this is non-empty.  A provider that is not a built-in
-        package (an entry-point provider) answers no.
+        An entry qualifies when its provider declares ``decision_images``
+        and, for a provider that reaches several models, answers yes for
+        the entry's model (OpenRouter: TypeSafe Jev only).  Read from the
+        provider package (built-in or entry point), so no provider is built
+        and no key is needed.  The ``decide`` tool offers its ``images``
+        parameter and the ``box`` question type only when this is non-empty.
         """
         from .plugins.model_provider._decision_capability import (
-            provider_declares_decision_images)
+            model_declares_decision_images)
         with self._decision_lock:
             bindings = dict(self._decision_bindings)
         return sorted(
             name for name, binding in bindings.items()
-            if provider_declares_decision_images(
-                self._decision_provider_name(binding)))
+            if model_declares_decision_images(
+                self._decision_provider_name(binding), binding.model))
 
     def decision_provider(self, name: str) -> Any:
         """The provider serving ``decision_models.<name>``, built on first use.

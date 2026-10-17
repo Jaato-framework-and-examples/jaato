@@ -168,9 +168,9 @@ def test_an_unknown_provider_is_not_offered_images(install):
 def test_a_built_in_provider_wins_a_name_clash(install):
     # The directory scan wins in discover_providers, so it wins here too.
     install("typesafe", "jaato_test_ext_clash_ts", images=False)
-    install("openrouter", "jaato_test_ext_clash_or", images=True)
+    install("laya", "jaato_test_ext_clash_laya", images=True)
     assert provider_declares_decision_images("typesafe") is True
-    assert provider_declares_decision_images("openrouter") is False
+    assert provider_declares_decision_images("laya") is False
 
 
 # ============================================================ end to end

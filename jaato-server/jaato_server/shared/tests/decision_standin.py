@@ -6,10 +6,14 @@ Serves, on ``127.0.0.1`` and an ephemeral port:
   (``laya-serve`` and TypeSafe's own API): answers every question it is asked, in
   the vendor's documented shape (``noul`` 0.95; ``choice`` the first
   option; ``score`` 1.0; ``box`` TypeSafe's documented example), unless a
-  scripted reply is queued.  A request carrying ``assets`` or a ``box``
-  question is held to TypeSafe's rules first: without
-  ``TypeSafe-Danger-Zone-Images: true`` it is a ``400``, and so is an
-  asset whose reference appears nowhere else in the body;
+  scripted reply is queued.  On ``/v1/systemone`` a request carrying
+  ``assets`` or a ``box`` question is held to TypeSafe's rules first:
+  without ``TypeSafe-Danger-Zone-Images: true`` it is a ``400``, and so is
+  an asset whose reference appears nowhere else in the body.  On
+  ``/api/alpha/decisions`` it is held to OpenRouter's documented rules
+  (``openrouter_image_problem``): a top-level ``images`` or ``assets`` is a
+  ``400``, an image is an ``image_url`` part whose url is a ``data:`` URL,
+  and ``box`` needs one and is refused by ``typesafe/jev-1.13``;
 * ``GET /api/v1/models``: a listing with ``openai/gpt-4o`` only;
 * ``GET /api/v1/models/typesafe/jev-1.13/endpoints``: the document the
   real API returned for Jev on 2026-10-06 (trimmed);
@@ -68,6 +72,39 @@ BOX_ANSWER: Dict[str, Any] = {
     "box": {"top": 0.25, "bottom": 0.82, "left": 0.44, "right": 0.84},
     "confidence": 0.9,
 }
+
+
+def _image_parts(value: Any) -> List[Dict[str, Any]]:
+    """Every ``image_url`` part at any depth of ``value``."""
+    if isinstance(value, dict):
+        if value.get("type") == "image_url":
+            return [value]
+        return [p for v in value.values() for p in _image_parts(v)]
+    if isinstance(value, list):
+        return [p for v in value for p in _image_parts(v)]
+    return []
+
+
+def openrouter_image_problem(body: Any) -> Optional[str]:
+    """Why OpenRouter's decision endpoint would ``400`` this body's images
+    (its Multimodal Decisions guide, 2026-10), or ``None``."""
+    if not isinstance(body, dict):
+        return None
+    for field in ("images", "assets"):
+        if field in body:
+            return f"top-level {field!r} is not an image input"
+    parts = _image_parts(body)
+    for part in parts:
+        url = (part.get("image_url") or {}).get("url")
+        if not isinstance(url, str) or not url.startswith("data:image/"):
+            return "an image_url must be a base64 data: URL"
+    has_box = any(isinstance(q, dict) and q.get("type") == "box"
+                  for q in (body.get("questions") or {}).values())
+    if has_box and not parts:
+        return "box needs an image"
+    if has_box and str(body.get("model", "")).endswith("jev-1.13"):
+        return "Jev 1.13 does not answer box"
+    return None
 
 
 def image_rule_problem(headers: Dict[str, str], body: Any) -> Optional[str]:
@@ -162,7 +199,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path not in DECISION_PATHS:
             self._reply(404, {"error": "not found"})
             return
-        problem = image_rule_problem(dict(self.headers), body)
+        if self.path == DECISION_PATHS[0]:
+            problem = openrouter_image_problem(body)
+        else:
+            problem = image_rule_problem(dict(self.headers), body)
         if problem:
             self._reply(400, {"error": problem})
             return

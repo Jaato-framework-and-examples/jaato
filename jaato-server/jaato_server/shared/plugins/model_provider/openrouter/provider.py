@@ -167,7 +167,9 @@ from .errors import (
     UpstreamFinishError,
 )
 from .stall import StreamStallGuard
-from .decisions import decisions_url as _decisions_url, post_decision
+from .decisions import (
+    answers_box, decisions_url as _decisions_url, post_decision, takes_images,
+)
 from jaato_sdk.plugins.model_provider.decisions import (
     DecisionImage,
     DecisionImagesUnsupportedError,
@@ -474,6 +476,17 @@ def _retry_after_from_body(exc: Exception) -> Optional[float]:
             continue
         return value if value > 0 else None
     return None
+
+
+def _without_image_data(value: Any) -> Any:
+    """``value`` with every ``image_url`` part reduced to its type."""
+    if isinstance(value, dict):
+        if value.get("type") == "image_url" and "image_url" in value:
+            return {"type": "image_url"}
+        return {k: _without_image_data(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_without_image_data(v) for v in value]
+    return value
 
 
 class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
@@ -1690,9 +1703,12 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     ) -> DecisionResult:
         """Ask a decision model typed questions about ``state``.
 
-        Text only: ``images`` is refused with
-        :class:`DecisionImagesUnsupportedError` until the endpoint is
-        verified to carry them (design §12.6).
+        Images go to TypeSafe Jev only (``decisions.takes_images``), as
+        ``image_url`` parts inside the text (``image_layout="parts"``),
+        checked locally against Jev's limits first; another model is
+        refused with :class:`DecisionImagesUnsupportedError`.  A ``box``
+        question is refused locally for a model that does not answer it
+        (``decisions.answers_box``: Jev 1.14 and later).  Design §12.
 
         Posts to OpenRouter's decision endpoint (``/api/alpha/decisions``,
         derived from ``base_url`` or set by
@@ -1704,8 +1720,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         Args:
             state: The text, object or array the questions are about.
+                ``{{image:NAME}}`` stands for an image, here or in a
+                question's instructions or criteria.
             questions: ``{id: DecisionQuestion}``.  Ids are the caller's
                 and come back as the keys of ``answers``.
+            images: Still PNG or JPEG images, for a Jev model.
             model: The decision model; defaults to the connected model.
             cancel_token: Stops waiting and aborts the request.
 
@@ -1723,14 +1742,24 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         model = model or self._model_name
         if not model:
             raise RuntimeError("decide() needs a model: pass model= or connect() first.")
-        if images:
-            raise DecisionImagesUnsupportedError(self.name, model)
-        body = build_decision_request(state, questions, model)
+        if images and not takes_images(model):
+            raise DecisionImagesUnsupportedError(
+                self.name, model,
+                "jaato sends images through OpenRouter to TypeSafe Jev only, "
+                "whose limits it checks before sending")
+        for qid, question in questions.items():
+            if question.type == "box" and not answers_box(model):
+                raise DecisionQuestionError(
+                    qid, f"{model!r} does not answer box questions "
+                    "(TypeSafe Jev 1.14 and later do)")
+        body = build_decision_request(state, questions, model, images,
+                                      image_layout="parts")
         self._check_decision_fits(body, model)
         url = _decisions_url(self._base_url, self._decisions_url)
         headers = {**self._attribution_headers(),
                    "Authorization": f"Bearer {self._api_key}"}
-        self._trace(f"DECIDE model={model} questions={list(questions)} url={url}")
+        self._trace(f"DECIDE model={model} questions={list(questions)} "
+                    f"images={[i.name for i in images]} url={url}")
 
         def send() -> Dict[str, Any]:
             return post_decision(
@@ -1755,8 +1784,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     def _check_decision_fits(self, body: Dict[str, Any], model: str) -> None:
         """Refuse a request larger than the model's window, before sending.
 
-        The estimate is the whole JSON body at ~4 characters a token.  A
-        model whose window is unknown is not checked: the endpoint's own
+        The estimate is the whole JSON body at ~4 characters a token, with
+        each image part counted as its marker rather than its base64 (an
+        image is not text, and its bytes are bounded by the image checks).
+        A model whose window is unknown is not checked: the endpoint's own
         refusal is then the answer.  Nothing is ever truncated.
         """
         if model == self._model_name and self._context_length:
@@ -1765,7 +1796,8 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             limit = self._lookup_context_length(model) or 0
         if not limit:
             return
-        estimate = self.count_tokens(json.dumps(body, ensure_ascii=False, default=str))
+        text = json.dumps(_without_image_data(body), ensure_ascii=False, default=str)
+        estimate = self.count_tokens(text)
         if estimate > limit:
             raise DecisionQuestionError(
                 None,
