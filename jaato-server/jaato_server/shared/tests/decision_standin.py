@@ -14,7 +14,10 @@ Serves, on ``127.0.0.1`` and an ephemeral port:
   (``openrouter_image_problem``): a top-level ``images`` or ``assets`` is a
   ``400``, an image is an ``image_url`` part whose url is a ``data:`` URL,
   and ``box`` needs one and is refused by ``typesafe/jev-1.13``;
-* ``GET /api/v1/models``: a listing with ``openai/gpt-4o`` only;
+* ``GET /api/v1/models``: a listing with ``openai/gpt-4o`` only, as
+  OpenRouter's default listing omits decision models; with
+  ``?output_modalities=all`` it adds ``typesafe/jev-1.13`` and
+  ``respan/span-01-lite`` (context length 0);
 * ``GET /api/v1/models/typesafe/jev-1.13/endpoints``: the document the
   real API returned for Jev on 2026-10-06 (trimmed);
 * anything else: ``404``.
@@ -61,6 +64,27 @@ LISTING: Dict[str, Any] = {
                          "output_modalities": ["text"]},
     }],
 }
+
+#: A decision model whose catalog entry reports a context length of 0,
+#: as OpenRouter's does for Respan's Span-01 Lite.
+NO_WINDOW = "respan/span-01-lite"
+
+#: What ``GET /api/v1/models?output_modalities=all`` adds to the default
+#: listing: the decision models, which the default omits.
+ALL_MODALITIES_EXTRA: List[Dict[str, Any]] = [
+    {
+        "id": JEV,
+        "context_length": 32000,
+        "architecture": {"input_modalities": ["text", "image"],
+                         "output_modalities": ["decisions"]},
+    },
+    {
+        "id": NO_WINDOW,
+        "context_length": 0,
+        "architecture": {"input_modalities": ["text"],
+                         "output_modalities": ["decisions"]},
+    },
+]
 
 
 #: TypeSafe's header for a request with an image or a ``box`` question.
@@ -180,9 +204,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.seen.append(("GET", self.path, dict(self.headers), None))
-        if self.path == "/api/v1/models":
-            self._reply(200, LISTING)
-        elif self.path == f"/api/v1/models/{JEV}/endpoints":
+        path, _, query = self.path.partition("?")
+        if path == "/api/v1/models":
+            # OpenRouter's default listing omits models whose output is not
+            # text; ``output_modalities=all`` lists them too.
+            if "output_modalities=all" in query.split("&"):
+                self._reply(200, {"data": LISTING["data"] + ALL_MODALITIES_EXTRA})
+            else:
+                self._reply(200, LISTING)
+        elif path == f"/api/v1/models/{JEV}/endpoints":
             self._reply(200, JEV_ENDPOINTS_DOC)
         else:
             self._reply(404, {"error": "not found"})

@@ -489,6 +489,12 @@ def _without_image_data(value: Any) -> Any:
     return value
 
 
+# Query for ``GET /models``: without it the listing carries only models
+# whose output includes text, so decision models (``text->decisions``),
+# image generators and the like are missing from it.
+CATALOG_PARAMS = {"output_modalities": "all"}
+
+
 class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     """OpenRouter model provider.
 
@@ -1433,6 +1439,12 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         neither resolves (no hardcoded default).  Real model validation
         happens on the first chat-completion call.
 
+        A decisions-only model (served by :meth:`decide`, never by
+        ``complete()``) connects without a window: the window is used only
+        by the pre-send size check, which is skipped when none is known,
+        as on the ``typesafe`` provider.  Some catalog entries report a
+        context length of 0 (``respan/span-01-lite``).
+
         Args:
             model: Model ID (e.g. ``anthropic/claude-3.5-sonnet``,
                 ``openai/gpt-4o``, ``openrouter/auto``).
@@ -1454,19 +1466,21 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             detect_capacity=lambda: self._lookup_context_length(model),
             profile_value=self._context_length_knob,
         ) or 0
-        if not self._context_length:
+        self._decisions_only = self.is_decisions_only(model)
+        if not self._context_length and not self._decisions_only:
             raise ValueError(
                 "OpenRouter provider: context_length could not be resolved.  "
-                "The model is absent from GET /api/v1/models (so no per-model "
-                "context_length was found), and no manual override is set.  "
+                "The catalog reports none for this model (it is absent from "
+                "GET /api/v1/models and its /endpoints document, or reports "
+                "0), and no manual override is set.  "
                 "Set plugin_configs.openrouter.framework_overrides."
                 "context_length in the profile, or "
                 "JAATO_OPENROUTER_CONTEXT_LENGTH in the environment.  No "
                 "hardcoded fallback exists per the project's no-fallback rule."
             )
-        self._decisions_only = self.is_decisions_only(model)
         self._trace(
-            f"[CONNECT] model={model} context_length={self._context_length}"
+            f"[CONNECT] model={model} "
+            f"context_length={self._context_length or 'unchecked'}"
             + (" decisions_only" if self._decisions_only else "")
         )
 
@@ -1505,6 +1519,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     def _fetch_catalog(self) -> List[Dict[str, Any]]:
         """Fetch and cache the OpenRouter model catalog.
 
+        Asks for every output modality (``CATALOG_PARAMS``): the default
+        listing omits non-text models, decision models among them, which
+        would then cost a per-model ``/endpoints`` request each.
+
         Returns the cached list on subsequent calls so per-connect
         lookups don't re-hit the network.  An empty list is returned
         and *not* cached on failure, so the next call will retry.
@@ -1516,7 +1534,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         url = f"{self._base_url.rstrip('/')}/models"
         try:
-            response = httpx.get(url, timeout=15)
+            response = httpx.get(url, params=CATALOG_PARAMS, timeout=15)
             response.raise_for_status()
         except Exception as exc:
             self._trace(f"[CATALOG] fetch failed: {type(exc).__name__}: {exc}")
