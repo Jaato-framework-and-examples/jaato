@@ -11138,6 +11138,45 @@ with the wrong profile keeps it, and recovers only as a new session.
 Guard: `jaato_server/server/tests/test_a_qualified_profile_binds_that_file_1588.py`,
 seven reversions.
 
+### A Subagent's Profile Key: the Right File, and a Loud Empty Answer (#1731)
+
+Reported as an in-process subagent's provider getting an empty `api_key`
+although its profile declared `plugin_configs.openrouter.api_key: pass://...`
+and the runner held a value for it (#1605); the provider said
+`plugin_configs.openrouter.api_key (profile): not set`. Two defects on that
+path are fixed. Which one the reporter hit is NOT settled: on their host the
+set's file was the one discovered, so the first does not explain their
+report, and the second is what makes the next run name the cause.
+
+**The wrong file.** A session created from a qualified `<set>/<name>` ref
+runs with no `JAATO_PROFILE_SET`, so the runner's subagent plugin discovered
+profiles outside the set, and a same-named flat profile (no provider, no
+`plugin_configs.<provider>`) could bind instead.
+
+| Piece | Where |
+|---|---|
+| the set of a qualified ref, on creation and on a revive (the revive envelope now carries `profile_ref`) | `SessionManager._construct_and_initialize_server` → `server._profile_set` |
+| carried to the runner as `plugin_configs.subagent.profile_set` (a value the profile sets itself is kept) | `runner_spawn._inject_subagent_profile_set` |
+| both discoveries scan that set first (`force_profile_set`) | `SubagentPlugin.initialize`, `set_config_root`; `SubagentConfig.profile_set` |
+| a later discovery REPLACES names the first found (it only added them); explicitly configured profiles still win | `SubagentPlugin._merge_discovered_profiles` |
+
+**An empty answer passed on as a key.** `create_provider` promotes the
+profile's `api_key` only when it is truthy, so a resolver (or the inherited
+map) answering `""` / `None` produced an empty key, skipped silently, and
+the provider's "not set" was indistinguishable from a profile that declared
+none.
+
+| Piece | Where |
+|---|---|
+| an empty answer from a resolver or from the inherited map, for a value a profile or `.env` declares, is a `SecretResolutionError` naming the URI and who answered. A direct caller of `_resolve_secret_uri` still gets the empty answer (`service_connector` turns it into its #1188 hint) | `subagent/config.py::_refuse_empty_answer`, applied by `_expand_string` |
+| a profile `api_key` that is declared but empty when the provider is created is refused by name | `jaato_runtime._refuse_empty_profile_api_key` |
+| one INFO line per in-process spawn: the file the profile was read from, the set, the provider, and each key of its `plugin_configs` section (never a value), marked `<empty>`, and for a secret URI `inherited` (the daemon's map answered it) or `resolved-here` (the runner asked a resolver itself) | `SubagentPlugin._log_spawn_binding`, `_describe_section` |
+
+Not covered: a child profile that declares its own `plugin_configs.subagent`
+re-initializes the shared plugin without the set. Guard:
+`jaato_server/shared/tests/test_a_subagent_binds_its_sessions_profile_set_1731.py`,
+ten reversions.
+
 ### A Policy File Read and Thrown Away (#1474)
 
 `PermissionPlugin.initialize` loaded `permissions.json` and then let an

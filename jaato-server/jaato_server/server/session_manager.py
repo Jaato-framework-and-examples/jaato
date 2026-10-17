@@ -5335,6 +5335,13 @@ class SessionManager:
         # session -- ``build_session_envelope`` carries it to the runner.
         server._plugin_host = plugin_host
 
+        # #1731: the profile set of a session created from a qualified
+        # ``<set>/<name>`` ref.  Such a session has no JAATO_PROFILE_SET, so
+        # ``build_session_envelope`` hands the set to the runner's subagent
+        # plugin; without it a subagent resolved its name outside the set.
+        server._profile_set = _split_profile_ref(
+            getattr(envelope, "profile_ref", None) or "")[0]
+
         # Phase 4 §D: stash agent_params transiently on the per-session
         # JaatoServer so build_session_envelope can pick them up and
         # forward them on the SessionInitEnvelope.  The JaatoServer is
@@ -13446,6 +13453,9 @@ class SessionManager:
             # complain or permissive does not inherit that posture.
             apparmor=revive_arms_confinement(state, trust.trusted),
             profile=restored_profile,
+            # #1731: the set of a qualified ref reaches the runner's subagent
+            # discovery on a revive as it does at creation.
+            profile_ref=getattr(state, "profile_ref", None),
             # Re-apply the profile's ``suppress_base_instructions`` on restore.
             # Unlike plugins / plugin_configs / system_instructions / gc (which
             # flow through ``server._profile`` → ``build_session_envelope``),

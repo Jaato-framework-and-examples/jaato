@@ -432,6 +432,11 @@ def _resolve_secret_uri(
 ) -> str:
     """If *value* is a ``scheme://path[#key]`` URI with a registered resolver, resolve it.
 
+    An empty answer is returned as it is: a direct caller interprets it
+    itself (``service_connector`` turns it into the #1188 "returned an
+    empty value" hint).  :func:`expand_variables` refuses it instead, see
+    :func:`_refuse_empty_answer` (#1731).
+
     Returns the original string unchanged if:
     - It doesn't match the URI pattern.
     - The scheme is a standard network protocol (http/https/ws/wss/ftp/ftps) —
@@ -524,6 +529,34 @@ def _resolve_secret_uri(
         raise SecretResolutionError(value, str(exc)) from exc
     _note_captured_secret(value, resolved)
     return resolved
+
+
+def _refuse_empty_answer(uri: str, resolved: Any) -> Any:
+    """*resolved*, refused when a secret URI resolved to nothing (#1731).
+
+    An empty answer is never a credential.  Passed on, it became an empty
+    ``api_key`` that ``create_provider`` does not promote, and the provider
+    then reported the profile's key as "not set" -- the same words it uses
+    for a profile that declared none, so a resolver that answered ``""``
+    (or ``None``) for a URI it could not read looked like a pointer that
+    never arrived.  Refusing names the URI and who answered: the inherited
+    map (#1605) or the scheme's resolver.
+
+    Applied by :func:`_expand_string` (a profile's ``env:`` /
+    ``plugin_configs``, the ``.env`` overlay), never inside
+    :func:`_resolve_secret_uri`, whose direct callers read an empty answer
+    themselves.  A value that passed through unresolved (not a URI, no
+    resolver, a deferred scheme) is returned unchanged.
+    """
+    if resolved == uri or (isinstance(resolved, str) and resolved):
+        return resolved
+    if inherited_secret(uri) is not None:
+        source = "the value the daemon resolved for this session (#1605)"
+    else:
+        source = f"resolver '{uri.split('://', 1)[0]}'"
+    raise SecretResolutionError(
+        uri, f"{source} answered with an empty value "
+             f"({type(resolved).__name__}); refusing to use it as a secret")
 
 
 def _call_resolver(
@@ -1115,8 +1148,8 @@ def _expand_string(
     # ``_call_resolver`` takes for premium resolvers that never added the
     # ``context`` keyword.
     if resolve_context is None:
-        return _resolve_secret_uri(s)
-    return _resolve_secret_uri(s, resolve_context)
+        return _refuse_empty_answer(s, _resolve_secret_uri(s))
+    return _refuse_empty_answer(s, _resolve_secret_uri(s, resolve_context))
 
 
 def _resolve_workspace_path(path: str) -> str:
@@ -6202,6 +6235,15 @@ class SubagentConfig:
             the inherit-the-parent's-set default (#944).
         auto_discover_profiles: Whether to auto-discover profiles from profiles_dir.
         profiles_dir: Directory to scan for profile files (default: .jaato/profiles).
+        profile_set: The profile set ``spawn_subagent`` resolves names in
+            (``<config_root>/profiles/<set>/``), scanned before the regular
+            tier.  ``None`` = the session's ``JAATO_PROFILE_SET``.  The
+            daemon sets it to the set of a session created from a
+            qualified ``<set>/<name>`` profile (#1731): such a session has
+            no ``JAATO_PROFILE_SET``, and without it a subagent named
+            ``documentalista`` bound the flat ``profiles/documentalista``
+            instead of the set's file, losing the set's provider and
+            ``plugin_configs`` (its credential among them).
     """
     project: str
     location: str
@@ -6212,6 +6254,7 @@ class SubagentConfig:
     inline_allowed_plugins: List[str] = field(default_factory=list)
     auto_discover_profiles: bool = True
     profiles_dir: str = ".jaato/profiles"
+    profile_set: Optional[str] = None
 
     def add_profile(self, profile: SubagentProfile) -> None:
         """Add a subagent profile."""
@@ -6334,6 +6377,7 @@ class SubagentConfig:
             inline_allowed_plugins=data.get('inline_allowed_plugins', []),
             auto_discover_profiles=data.get('auto_discover_profiles', True),
             profiles_dir=data.get('profiles_dir', '.jaato/profiles'),
+            profile_set=data.get('profile_set') or None,
         )
 
 

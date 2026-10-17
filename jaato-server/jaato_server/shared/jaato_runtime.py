@@ -335,6 +335,35 @@ def resolve_provider_extra(
     return extra, promoted_api_key
 
 
+def _refuse_empty_profile_api_key(
+    plugin_configs: Optional[Dict[str, Dict[str, Any]]],
+    provider_name: Optional[str],
+) -> None:
+    """Refuse a profile ``api_key`` that is declared but empty (#1731).
+
+    ``create_provider`` promotes ``plugin_configs.<provider>.api_key`` only
+    when it is truthy, so an empty value was silently skipped and the
+    provider reported ``plugin_configs.<provider>.api_key (profile): not
+    set`` -- the words it uses for a profile that declares no key at all.
+    A declared key that arrives empty means resolution went wrong upstream
+    (a secret resolver that answered nothing, a ``${VAR}`` that expanded to
+    ""), and saying so is what turns a long diagnosis into one log line.
+    """
+    section = (plugin_configs or {}).get(provider_name or "")
+    if not isinstance(section, dict) or "api_key" not in section:
+        return
+    if section["api_key"]:
+        return
+    from .plugins.subagent.config import SecretResolutionError
+    raise SecretResolutionError(
+        f"plugin_configs.{provider_name}.api_key",
+        f"the profile declares an api_key for provider '{provider_name}' "
+        f"but its value is empty ({type(section['api_key']).__name__}) by "
+        f"the time the provider is created; the profile's pointer arrived, "
+        f"its resolution produced nothing",
+    )
+
+
 def _layer_onto(base: Dict[str, Any], top: Dict[str, Any]) -> Dict[str, Any]:
     """Merge ``top`` onto ``base``, descending ONE level into sub-dicts.
 
@@ -1623,6 +1652,7 @@ class JaatoRuntime:
         # per-session while ``_provider_configs`` is runtime-wide, so writing
         # back would leak this session's knobs into every other session on
         # this provider.  See the function's docstring.
+        _refuse_empty_profile_api_key(plugin_configs, effective_provider)
         if plugin_configs:
             merged_extra, promoted_api_key = resolve_provider_extra(
                 config.extra, plugin_configs, effective_provider)
