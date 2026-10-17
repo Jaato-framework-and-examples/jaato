@@ -1,9 +1,10 @@
 # Scaling the References Store (the wikiLLM's base)
 
-**Status: proposed. Nothing here is built. Phase 0 is partly done: the
-in-process and daemon-level measurements are in §4 ("Phase 0 results");
-confinement is not measured. Phase 1's design is agreed and prototyped, with
-its measurements in §4 ("Phase 1 measurements").** Every later phase starts
+**Status: phase 1 built (`references/store.py`); phases 2-4 proposed.
+Phase 0 is partly done: the in-process and daemon-level measurements are in
+§4 ("Phase 0 results"); confinement is not measured. Phase 1's prototype
+measurements and the measurements of the built store are in §4 ("Phase 1
+measurements", "Phase 1 as built").** Every later phase starts
 only when a number crosses an agreed limit.
 
 The references catalog that the wikiLLM rests on is a set of JSON files under
@@ -467,6 +468,43 @@ Read off the tables:
    D, 0.5 s at 100k on every read path); confinement; and memory in a
    runner when a snapshot is shared rather than copied (a runner holds one
    session, so nothing is shared there).
+
+#### Phase 1 as built (measured)
+
+Built as designed, with two consumers fixed on the way that defeated the
+deferral (they asked every plugin for its system instructions, and the
+references plugin builds them from its catalog): the runtime's
+configure-time instruction cache, which nothing read, and the instruction
+budget, which walked every exposed plugin instead of the session's list.
+
+Same host, 10,000 references, private daemon, three sessions per profile:
+
+| | Before phase 1 | Built |
+|---|---|---|
+| daemon growth per session, profile without `references` | ~25 MB | ~5 MB |
+| daemon growth per session, profile with `references` | 25-35 MB | 7-14 MB |
+| `session.new`, profile without `references` | 9-25 s | 3.2-5.0 s |
+| `session.new`, profile with `references` | 9-25 s | 22.6 s first, then 8-9 s |
+| catalog loads for a profile without `references` | daemon and runner | none |
+
+The store's derivation (`ReferenceStore._derive`, median of 5) against a
+full reload of the same change, equal in every case:
+
+| Change | 1k derive | 1k full | 10k derive | 10k full |
+|---|---|---|---|---|
+| 1 file edited | 12.8 ms | 0.24 s | 146 ms | 2.30 s |
+| 10 files edited | 15.6 ms | 0.21 s | 150 ms | 2.29 s |
+| 100 files edited | 37.2 ms | 0.22 s | 170 ms | 2.30 s |
+| 1 file added | 63.0 ms | 0.23 s | 168 ms | 2.29 s |
+| 1 file deleted | 66.0 ms | 0.23 s | 178 ms | 2.27 s |
+
+The prototype measured 30-48 ms at 10k because it was handed the stamps;
+the store stamps every watched path before and after (47 ms each at 10k),
+so a write made while it derives is not lost. Phase 2's generation counter
+is what removes that. 100k was not re-measured. Not built: the daemon's own
+readers (`reference_catalog.py`, `reference_curation.py`, `claims.py`) still
+read the files themselves. What makes up the ~5 MB per session the daemon
+still grows is not measured.
 
 ### Phase 2: fix the algorithms, storage unchanged
 
