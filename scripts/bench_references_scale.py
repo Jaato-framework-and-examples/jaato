@@ -146,7 +146,7 @@ def measure(ws: Path) -> Dict[str, Any]:
         _, dt = _timed(plugin._refresh_catalog_if_changed)
         noop.append(dt)
     out["refresh_noop_ms"] = round(statistics.median(noop) * 1000, 2)
-    out["watched_paths"] = len(plugin._catalog_watch)
+    out["watched_paths"] = len(plugin._snapshot.watch)
 
     execs = plugin.get_executors()
     with isolated_current_session():

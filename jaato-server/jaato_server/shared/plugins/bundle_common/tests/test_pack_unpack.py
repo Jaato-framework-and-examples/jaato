@@ -102,6 +102,10 @@ class _StubReferencesPlugin:
         self._project_root = str(bundle.directory.parent.parent)
         self._embedding_provider = None
 
+    def _source(self, ref_id):
+        """The visible reference with ``ref_id``, as ``ReferencesPlugin._source``."""
+        return next((s for s in self._sources if s.id == ref_id), None)
+
     def _locate_ref_file(self, source):
         """Find the JSON file backing this source by id."""
         bundle = next(

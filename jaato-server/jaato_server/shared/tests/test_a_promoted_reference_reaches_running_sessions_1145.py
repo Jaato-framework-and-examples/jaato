@@ -21,8 +21,8 @@ The fix, pinned here:
    the next references result, and said at the turn boundary.
 4. A write landing during or just after a load is not lost
    (``catalog_watch.settle``).
-5. A session configured with inline ``sources`` is not refreshed from
-   disk, which would replace them.
+5. A session configured with inline ``sources`` keeps them when the
+   catalog changes on disk: the new snapshot is bound around them.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from jaato_server.shared.tests.reversion import Reversion
 
 _PLUGIN = "jaato-server/jaato_server/shared/plugins/references/plugin.py"
 _WATCH = "jaato-server/jaato_server/shared/plugins/references/catalog_watch.py"
+_STORE = "jaato-server/jaato_server/shared/plugins/references/store.py"
 
 REVERSIONS = [
     Reversion(
@@ -58,11 +59,11 @@ REVERSIONS = [
         test="TestAPromotionReachesARunningSession::test_the_promoted_page_is_listed",
     ),
     Reversion(
-        target=_PLUGIN,
-        find="        self._reload_catalog(workspace)\n        self._discover_and_load_bundles()\n",
-        replace="        self._reload_catalog(workspace)\n",
+        target=_STORE,
+        find="        _append_bundle_sources(sources, bundles, project_root)\n",
+        replace="",
         because=(
-            "a reload would read only the workspace root, dropping every "
+            "a load would read only the workspace root, dropping every "
             "sub-bundle and user-tier reference from a session that had them"
         ),
         test="TestTheReloadIsWhole::test_a_sub_bundle_reference_arrives_and_stays",
@@ -91,8 +92,8 @@ REVERSIONS = [
     ),
     Reversion(
         target=_PLUGIN,
-        find='config.get("refresh_catalog") is not False and "sources" not in config',
-        replace='config.get("refresh_catalog") is not False',
+        find="        keep_inline = self._inline_sources is not None\n",
+        replace="        keep_inline = False\n",
         because=(
             "a session configured with inline sources would have them "
             "replaced by the disk catalog at the first changed file"

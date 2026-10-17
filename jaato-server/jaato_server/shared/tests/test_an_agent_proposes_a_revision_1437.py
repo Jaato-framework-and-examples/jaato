@@ -68,9 +68,8 @@ REVERSIONS = [
         test="TestTheListing::test_a_revision_is_listed_as_one",
     ),
     Reversion(
-        target=_PLUGIN,
-        find="        paths.update(catalog_watch.json_files(\n"
-             "            [p for p in paths if os.path.isdir(p)]))\n",
+        target="jaato-server/jaato_server/shared/plugins/references/store.py",
+        find="    paths.update(catalog_watch.json_files([p for p in paths if os.path.isdir(p)]))\n",
         replace="",
         because="an in-place edit of a reference would never reach a running session",
         test="TestARunningSession::test_an_in_place_edit_is_seen",

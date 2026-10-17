@@ -316,7 +316,7 @@ class TestRegistryShutdownCleanup:
         registry.unexpose_tool("references")
 
         # After shutdown, sources should be cleared
-        assert plugin._sources == []
+        assert list(plugin._sources) == []
 
     def test_selections_cleared_on_shutdown(self):
         """Test that selections are cleared on shutdown."""

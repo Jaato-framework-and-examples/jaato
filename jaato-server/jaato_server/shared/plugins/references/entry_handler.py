@@ -114,9 +114,9 @@ class ReferencesEntryHandler(BundleEntryHandler):
     def list_bundles(self) -> List[ReferenceBundle]:
         """Return every references bundle (workspace + user tiers).
 
-        Mirrors ``self._plugin._bundles``, which is already maintained
-        in workspace-then-user discovery order by
-        :meth:`ReferencesPlugin._discover_and_load_bundles`.
+        Mirrors ``self._plugin._bundles``: the session's copies of the
+        bundles its catalog snapshot found, in workspace-then-user
+        discovery order.
         """
         return list(self._plugin._bundles)
 
@@ -124,12 +124,10 @@ class ReferencesEntryHandler(BundleEntryHandler):
         """Resolve ``entry_id`` to a :class:`BundleEntry` or ``None``.
 
         Optimized vs. ``next(... in list_entries())`` because the
-        plugin already keeps an id-indexed source list — only one
+        plugin keeps an id-indexed working set — only one
         ``_locate_ref_file`` call is needed.
         """
-        source = next(
-            (s for s in self._plugin._sources if s.id == entry_id), None,
-        )
+        source = self._plugin._source(entry_id)
         if source is None:
             return None
         file_path = self._plugin._locate_ref_file(source)
@@ -210,9 +208,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
         without the additional reconcile work — the bundle subsystem
         calls :meth:`reconcile_bundle` separately when needed.
         """
-        if self._plugin._workspace_path:
-            self._plugin._reload_catalog(self._plugin._workspace_path)
-        self._plugin._discover_and_load_bundles()
+        self._plugin._reload_from_disk()
 
     def reconcile_bundle(self, bundle: ReferenceBundle):
         """Run the references-specific reconcile pass for ``bundle``.
@@ -255,14 +251,9 @@ class ReferencesEntryHandler(BundleEntryHandler):
         """Remove a references bundle's directory (or root contents).
 
         Honours the same non-empty-without-force contract documented
-        on the protocol. After deletion the in-memory catalog is
-        scrubbed of the bundle's sources so the very next handler
-        call doesn't return stale entries — the dispatcher's follow-up
-        :meth:`reload_catalog` is still safe but lets us minimize the
-        window where state is inconsistent.
+        on the protocol. The catalog is not reloaded here: the
+        dispatcher's follow-up :meth:`reload_catalog` does that once.
         """
-        from ..bundle_common.bundle import ROOT_BUNDLE_NAME as _ROOT
-
         _MARKERS = REFERENCE_NON_SOURCE_FILENAMES
 
         # Non-emptiness check: any rows OR any *.json reference files
@@ -279,29 +270,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
                 f"to delete anyway"
             )
 
-        # Drop the bundle's sources from the live catalog before we
-        # mutate disk — keeps state consistent if the rmtree raises.
-        self._plugin._sources = [
-            s for s in self._plugin._sources if s.bundle_name != bundle.name
-        ]
-
-        if bundle.name == _ROOT:
-            # Root bundle: remove only the bundle artefacts so other
-            # sub-bundles living alongside the root manifest survive.
-            for p in bundle.directory.glob("*.json"):
-                p.unlink()
-            for p in bundle.directory.glob("*.npy"):
-                p.unlink()
-            for p in bundle.directory.glob("*.npy.lock"):
-                try:
-                    p.unlink()
-                except FileNotFoundError:
-                    pass
-            payload = bundle.directory / "payload"
-            if payload.is_dir():
-                shutil.rmtree(payload)
-        else:
-            shutil.rmtree(bundle.directory)
+        self._plugin._remove_bundle_files(bundle)
 
     def create_empty_bundle(
         self,
@@ -391,9 +360,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
         its own slot logic in Phase 8 until pack itself is rewired
         through the registry.
         """
-        source = next(
-            (s for s in self._plugin._sources if s.id == entry.id), None,
-        )
+        source = self._plugin._source(entry.id)
         if source is None or source.type != SourceType.LOCAL:
             return []
         raw_path = source.resolved_path or source.path
