@@ -2,7 +2,8 @@
 
 **Status: proposed. Nothing here is built. Phase 0 is partly done: the
 in-process and daemon-level measurements are in §4 ("Phase 0 results");
-confinement is not measured.** Every later phase starts
+confinement is not measured. Phase 1's design is agreed and prototyped, with
+its measurements in §4 ("Phase 1 measurements").** Every later phase starts
 only when a number crosses an agreed limit.
 
 The references catalog that the wikiLLM rests on is a set of JSON files under
@@ -348,23 +349,124 @@ means; (6) limits users instead of the cost.
 
 ### Phase 1: one store interface
 
-Route every read the references plugin makes through a `ReferenceStore`:
+**Why there is a seam to add.** The plugin's catalog is one list,
+`self._sources`, read at 94 sites and mutated at about 12. It mixes two
+things: the catalog loaded from disk, and the session's working set (an
+inline `sources:` narrowing, plus preselected and transitive references
+appended from the master catalog). By-id lookups are linear scans
+(`next(s for s in self._sources if s.id == x)`, about 20 sites).
+`_resolve_source_for_context` rewrites paths on the shared objects. The
+daemon side does not use the list at all: `reference_catalog.py`,
+`reference_curation.py` and `claims.py` each walk and parse the files
+themselves.
 
-```python
-class ReferenceStore(Protocol):
-    def generation(self) -> str: ...                      # changes when anything does
-    def get(self, ref_id: str) -> Optional[ReferenceSource]: ...
-    def list(self, *, tags=None, bundle=None, query=None,
-             offset: int = 0, limit: int = 50) -> Page: ...
-    def links_from(self, ref_id: str) -> List[ReferenceLink]: ...
-    def links_to(self, ref_id: str) -> List[Dict[str, str]]: ...
-    def nearest(self, vector, *, k: int, bundles=None) -> List[Tuple[str, float]]: ...
-```
+**The design (agreed, not built).** Three parts, and only the first stores
+anything:
 
-The first implementation is today's file code, so behaviour does not change.
-The point is a single seam: every later phase replaces an implementation,
-not the plugin's call sites. Writes stay where they are (daemon-side
-curation, `reconcile`); the store is read-only to the runner.
+| Part | What it is | Who holds it |
+|---|---|---|
+| `ReferenceStore` | the source of references: today the files, later possibly a database or a server. `load()`, `generation()` | one per catalog per process |
+| `CatalogSnapshot` | the immutable result of one load at one generation: entries by id, files by path, per-bundle index, `LinkIndex`, all built once | the store holds the current one per catalog, by weak reference; each plugin keeps the one it is working from |
+| `WorkingSet` | one session's ids into the current snapshot | the plugin, per session |
+
+Rules that follow from it:
+
+- **Indexes cannot go stale.** A snapshot never changes, so an index built
+  on it stays right for its lifetime. A change on disk produces a new
+  snapshot; a tool call keeps the snapshot it started with.
+- **The next generation is derived, not mutated.** On a change, the store
+  re-parses only the files whose stamp moved and the directories whose
+  listing changed, and builds G+1 sharing every unchanged entry with G.
+  Writes from other processes (daemon curation, `git pull`, hand edits) are
+  found by the existing `catalog_watch` stamps, not by events.
+- **Sharing within a process, never across processes.** Every holder in one
+  process (the daemon's per-session mirrors, its three readers) gets the
+  same snapshot object. The cache key is everything a load depends on:
+  workspace, `config_root`, and the user-tier home, which differs for a
+  runner dropped to another uid (#1168).
+- **No eviction policy.** A snapshot is freed when its last holder lets go:
+  in the daemon when the last mirror for that catalog unloads, in a runner
+  at `reset_for_next_session` / `shutdown`. An unconfined pool slot can
+  move between workspaces (`accepts_unaffined` compares only the profile
+  name), so a runner must not keep a snapshot across sessions by default.
+  Keeping one strongly across sessions of the same confined boundary is a
+  later, measured step.
+- **Paths are resolved when read**, per session, against the session's
+  workspace (`WorkingSet`), never written into the shared snapshot.
+- **Writes stay where they are** (daemon-side curation, `reconcile`); the
+  store is read-only to the runner.
+
+The query interface sketched in earlier drafts (`get`, paged `list`,
+`links_from`, `nearest`) is phase 4's shape: it is what the store becomes
+when a backend cannot hand over a whole snapshot.
+
+#### Phase 1 measurements (prototype, measured)
+
+`scripts/bench_references_snapshot.py`, run 2026-10-17 on the phase 0 host
+and catalogs. The design is prototyped in the script; the plugin is
+unchanged. Each derived snapshot is compared with a full plugin reload of the
+same disk, and was equal (same ids, same parsed entries) in every case below.
+
+Step 1, the seam with a full reload:
+
+| Measurement | 1k | 10k | 100k |
+|---|---|---|---|
+| full reload (`_reload_from_disk`) | 0.21 s | 2.3 s | 22.9 s |
+| of which the parse (`_reload_catalog` + bundles) | 0.21 s | 2.4 s | 22.7 s |
+| snapshot indexes (by id, by bundle, `LinkIndex`): build | 1.6 ms | 65 ms | 0.77 s |
+| snapshot indexes: memory beyond the entries | 0.6 MB | 6.2 MB | 64 MB |
+| one by-id lookup, linear scan as today | 16 µs | 192 µs | **7.2 ms** |
+| one by-id lookup, dict | 0.14 µs | 0.15 µs | 0.16 µs |
+
+Step 2, generation G+1 derived from G (median of 5) against a full reload of
+the same change:
+
+| Change | 1k | 10k | 100k derive | 100k full reload |
+|---|---|---|---|---|
+| detect (stat every watched path, unchanged) | 4.6 ms | 48 ms | 0.50 s | same |
+| 1 file edited in place | 1.9 ms | 30 ms | **0.41 s** | 23.1 s |
+| 10 files edited | 3.7 ms | 32 ms | 0.40 s | 23.4 s |
+| 100 files edited | 21 ms | 60 ms | 0.42 s | 23.5 s |
+| 1 file added | 7.4 ms | 39 ms | 0.43 s | 23.2 s |
+| 1 file deleted | 7.2 ms | 36 ms | 0.42 s | 24.2 s |
+| memory G+1 allocates beyond G | 0.7 MB | 6.7 MB | 73 MB | |
+
+Who holds the snapshot, through a private daemon (`daemon` part), daemon
+process RSS after each `session.new`, 3 sessions with a profile that does
+not list `references` then 3 that do:
+
+| Catalog | idle | +1 | +2 | +3 | +4 | +5 | +6 | `session.new` |
+|---|---|---|---|---|---|---|---|---|
+| 10 references | 91 MB | 135 | 137 | 138 | 139 | 140 | 142 | 2.4-3.8 s |
+| 10,000 references | 91 MB | 160 | 186 | 211 | 236 | 262 | 297 | 9.4-25.5 s |
+
+Read off the tables:
+
+1. **Deriving makes a change cost what the indexes cost, not what the
+   catalog costs**: 0.4 s at 100k whatever the number of edited files, about 56x
+   less than the full reload. What remains is fixed: copying the three
+   dicts and rebuilding the whole `LinkIndex`. Incremental `LinkIndex`
+   maintenance would remove most of it, if a measurement ever asks.
+2. **The full reload is all parse.** `_reload_from_disk`'s own work
+   (selections, authorizations, matchers) is noise beside it, so deriving
+   is the whole fix for finding E.
+3. **Linear by-id lookups cost 7 ms each at 100k**, across about 20 sites,
+   several inside loops. The snapshot's dict removes that.
+4. **The daemon pays a catalog per session, even for sessions that do not
+   use references.** Each session costs the daemon about 25 MB at 10k
+   references against 1-2 MB at 10, with or without `references` in the
+   profile: the daemon's mirror registry initializes every discovered
+   plugin (#1566), and the references plugin loads its catalog in
+   `initialize()` even when `session_enables_plugin` is false (only the
+   embedder is deferred, #1563). `session.new` goes from ~2.5 s to 9-25 s
+   for the same reason, on the daemon side, the runner side, or both; the
+   split is not measured. A store shared within the daemon process makes
+   that one copy; deferring the load when the session does not enable the
+   plugin removes it for those sessions entirely.
+5. **Not measured:** the `detect` cost is unchanged by this design (finding
+   D, 0.5 s at 100k on every read path); confinement; and memory in a
+   runner when a snapshot is shared rather than copied (a runner holds one
+   session, so nothing is shared there).
 
 ### Phase 2: fix the algorithms, storage unchanged
 
