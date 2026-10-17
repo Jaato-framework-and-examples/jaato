@@ -120,6 +120,7 @@ def collect_instruction_texts(
     suppress_constants: bool = False,
     pinned_references: Optional[Dict[str, Any]] = None,
     preloaded_plugins: Optional[Set[str]] = None,
+    plugin_names: Optional[List[str]] = None,
 ) -> Tuple[List[TokenCountRequest], Set[str]]:
     """Collect all instruction texts that need token counting.
 
@@ -155,6 +156,10 @@ def collect_instruction_texts(
             ``content`` / ``ref_name`` attributes), promoted to SYSTEM.
         preloaded_plugins: Plugin names whose instructions are always
             included even under deferred tool loading.
+        plugin_names: The session's ``plugins:`` list, ``None`` when it has
+            none.  Resolved by ``jaato_runtime.instruction_plugin_names``,
+            the definition the prompt uses, so a plugin the profile does
+            not list is neither counted nor asked for its instructions.
 
     Returns:
         A tuple of ``(requests, deferred_plugin_names)`` — the texts to
@@ -256,11 +261,11 @@ def collect_instruction_texts(
     # Instructions for discoverable-only plugins are deferred until
     # the model activates one of their tools via get_tool_schemas.
 
-    from .jaato_runtime import _is_deferred_tools_enabled
+    from .jaato_runtime import _is_deferred_tools_enabled, instruction_plugin_names
     deferred_enabled = _is_deferred_tools_enabled()
 
     if runtime.registry:
-        for plugin_name in runtime.registry._exposed:
+        for plugin_name in instruction_plugin_names(runtime.registry, plugin_names):
             if deferred_enabled and plugin_name not in preloaded_plugins and not runtime.registry.plugin_has_core_tools(plugin_name):
                 # Remember this plugin's instructions are deferred so we
                 # can inject them when the model discovers its tools.

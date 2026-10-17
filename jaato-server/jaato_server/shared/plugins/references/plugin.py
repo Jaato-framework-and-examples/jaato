@@ -15,6 +15,7 @@ Enrichment Support:
 - Tool result enrichment: Detects @reference-id mentions in tool outputs
 """
 
+import copy
 import dataclasses
 import gc
 import json
@@ -28,7 +29,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 
@@ -47,10 +48,7 @@ from .links import (
 )
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import (
-    config_path_candidates,
-    load_config,
     ReferencesConfig,
-    discover_references,
     resolve_source_paths,
     validate_reference_file,
 )
@@ -69,10 +67,8 @@ from .bundle import (
     write_bundle_manifest,
     new_index_config,
     detect_drift,
-    discover_bundles,
     find_bundle,
     parse_bundle_ref,
-    resolve_bundle_roots,
 )
 from ..bundle_common.handler import registry as _bundle_registry
 from ..bundle_common.pack import PackResult, pack_bundle
@@ -93,7 +89,14 @@ from .merge import (
     parse_merge_args,
 )
 from .reconcile import ReconcileResult, ReconcileStatus, reconcile_bundle
-from . import catalog_watch
+from .store import (
+    CatalogKey,
+    CatalogSnapshot,
+    ReferenceStore,
+    WorkingSet,
+    resolve_for_context,
+    store_for,
+)
 from .claims import (
     CLAIMS_DIRNAME,
     REVISES_KEY,
@@ -292,7 +295,28 @@ class ReferencesPlugin(RunnerForwardingMixin):
     def __init__(self):
         self._name = "references"
         self._config: Optional[ReferencesConfig] = None
-        self._sources: List[ReferenceSource] = []
+        # The catalog (docs/design/references-storage-scaling.md, phase 1):
+        # ``_store`` is where it comes from (shared by every holder of the
+        # same key in this process), ``_snapshot`` the immutable load this
+        # session reads from, ``_working`` what this session can see over
+        # it.  ``_sources`` and ``_bundles`` are views of the last two.
+        self._store: Optional[ReferenceStore] = None
+        self._snapshot: Optional[CatalogSnapshot] = None
+        self._working: Optional[WorkingSet] = None
+        # The session's own copies of the snapshot's bundles: a matcher is
+        # attached per session, and the snapshot's objects are shared.
+        self._bundle_copies: List[ReferenceBundle] = []
+        # Whether this session has bound a catalog.  ``False`` after an
+        # ``initialize()`` whose session does not enable the plugin: the
+        # load is deferred to the first read (``_ensure_catalog``).
+        self._catalog_loaded: bool = False
+        # What the deferred part of ``initialize()`` needs: the directory
+        # the root catalog is resolved against, and the config.
+        self._catalog_base: Optional[str] = None
+        self._deferred_config: Optional[Dict[str, Any]] = None
+        # Inline ``sources`` from the config, resolved, or ``None`` when the
+        # session sees the whole catalog.
+        self._inline_sources: Optional[List[ReferenceSource]] = None
         self._channel: Optional[SelectionChannel] = None
         self._selected_source_ids: List[str] = []  # User-selected during session
         self._exclude_tools: List[str] = []  # Tools to exclude from schema
@@ -371,7 +395,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # Initialized during initialize() when embedding config is present
         # and sentence-transformers is installed.
         self._embedding_provider: Optional[EmbeddingProviderProtocol] = None
-        self._bundles: List[ReferenceBundle] = []
         # Cached initialize() config for lazy embedding provider load.
         # When ``_init_embedding_provider`` is skipped at initialize() time
         # (no bundles in the workspace), ``_execute_compute_embedding``
@@ -418,18 +441,13 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._surfaced_semantic_ids: Set[str] = set()
         # Catalog refresh (#1145).  A session loads its catalog once, and
         # other sessions (a promotion, a link edit) or other tools write
-        # the files afterwards.  ``_catalog_watch`` holds the stamps of the
-        # directories and config files this session loaded from
-        # (``catalog_watch``); every read path asks whether one moved and
-        # reloads through ``_reload_from_disk`` when it did.  Off when the
+        # the files afterwards.  The snapshot holds the stamps of the
+        # directories and files its load read (``catalog_watch``); every
+        # read path asks the store whether one moved and moves the session
+        # onto the new snapshot when it did.  Off when the
         # catalog did not come from disk alone (inline ``sources``) or when
         # ``plugin_configs.references.refresh_catalog`` is false.
         self._refresh_catalog: bool = True
-        self._catalog_watch: Dict[str, Any] = {}
-        # Stamps taken as a load BEGAN, settled against the ones taken as
-        # it ended (``catalog_watch.settle``), so a write that raced the
-        # load forces the next check to reload.
-        self._catalog_watch_pre: Dict[str, Any] = {}
         self._catalog_lock = threading.RLock()
         # What the refreshes since the model last called listReferences /
         # selectReferences changed: added / removed ids and the selections
@@ -440,13 +458,41 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # re-attaches the same matchers.
         self._config_path: Optional[str] = None
         self._matcher_config: Dict[str, Any] = {}
-        # The tier roots the last bundle discovery walked; watched with
-        # every bundle directory it found.
-        self._catalog_roots: List[str] = []
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def _sources(self) -> Sequence[ReferenceSource]:
+        """The references this session can see, in catalog order.
+
+        Reading it loads a deferred catalog first (``_ensure_catalog``),
+        so no read path can find the catalog missing. Assigning a list
+        narrows the session to exactly those references.
+        """
+        self._ensure_catalog()
+        return self._working.sources if self._working is not None else ()
+
+    @_sources.setter
+    def _sources(self, sources: Iterable[ReferenceSource]) -> None:
+        self._working = WorkingSet(self._snapshot, narrowed=list(sources))
+        self._catalog_loaded = True
+
+    @property
+    def _bundles(self) -> List[ReferenceBundle]:
+        """This session's copies of the loaded bundles (a deferred catalog loads first)."""
+        self._ensure_catalog()
+        return self._bundle_copies
+
+    @_bundles.setter
+    def _bundles(self, bundles: Iterable[ReferenceBundle]) -> None:
+        self._bundle_copies = list(bundles)
+
+    def _source(self, ref_id: str) -> Optional[ReferenceSource]:
+        """The visible reference with ``ref_id``, or ``None`` (a dict lookup)."""
+        self._ensure_catalog()
+        return self._working.get(ref_id) if self._working is not None else None
 
     @classmethod
     def get_apparmor_rules(
@@ -543,12 +589,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         """Update the workspace path for resolving reference source paths.
 
         Called by PluginRegistry.set_workspace_path() when a session binds
-        to a specific workspace.  Re-derives _project_root and reloads the
-        master catalog so sources resolve against the workspace.
-
-        If the plugin initialized before the workspace was known (sources=0),
-        this triggers a full catalog reload so that .jaato/references/ files
-        are discovered.
+        to a specific workspace.  Re-derives _project_root, and when that
+        changes which catalog a load would read (the store key), binds the
+        catalog of the new workspace.  A deferred catalog stays deferred.
         """
         self._workspace_path = path
         # Re-derive project root from workspace
@@ -560,10 +603,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
             self._project_root = str(base_path_obj)
         self._trace(f"set_workspace_path: workspace={path}, project_root={self._project_root}")
 
-        # Reload catalog if sources weren't loaded during initialize()
-        # (happens when workspace wasn't available at init time)
-        if not self._sources:
-            self._reload_catalog(path)
+        if self._catalog_loaded and self._store is not None \
+                and self._store.key != self._catalog_key(path):
+            self._catalog_base = path
+            with self._catalog_lock:
+                self._store = store_for(self._catalog_key(path))
+                self._rebind_session(self._store.current())
 
     def set_config_root(self, path: Optional[str]) -> None:
         """Adopt the registry-broadcast config_root override.
@@ -579,29 +624,57 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._config_root = path
         self._trace(f"set_config_root: {path}")
 
-    def _reload_catalog(self, workspace_path: str) -> None:
-        """Reload the master catalog from .jaato/references/ using the given workspace.
-
-        Called by set_workspace_path() when sources weren't loaded during
-        initialize() because the workspace wasn't available yet.
-
-        Args:
-            workspace_path: The workspace root path to scan for references.
-        """
-        self._begin_catalog_load(workspace_path)
-        try:
-            self._config = load_config(self._config_path, workspace_path=workspace_path)
-        except FileNotFoundError:
-            self._config = ReferencesConfig()
-
-        self._sources = self._config.sources
-        for source in self._sources:
-            self._resolve_source_for_context(source)
-
-        self._trace(
-            f"_reload_catalog: reloaded {len(self._sources)} sources "
-            f"from workspace={workspace_path}"
+    def _catalog_key(self, workspace: Optional[str]) -> CatalogKey:
+        """The store key for loading this session's catalog from ``workspace``."""
+        return CatalogKey.for_context(
+            config_path=self._config_path,
+            workspace=workspace,
+            bundle_workspace=self._workspace_path,
+            project_root=self._project_root,
+            config_root=self._config_root,
         )
+
+    def _bind_snapshot(self, snapshot: CatalogSnapshot) -> None:
+        """Read from ``snapshot`` from now on.
+
+        The working set is rebuilt over it: the whole snapshot, or, for a
+        session with inline ``sources``, those plus every bundle's
+        references (the root catalog is what inline ``sources`` replace)
+        plus the selected references the snapshot still has. Bundles are
+        copied, so a matcher attached here stays this session's.
+        """
+        self._snapshot = snapshot
+        self._config = snapshot.config
+        self._bundle_copies = [copy.copy(b) for b in snapshot.bundles]
+        keep_inline = self._inline_sources is not None
+        if not keep_inline:
+            self._working = WorkingSet(snapshot)
+        else:
+            working = WorkingSet(snapshot, narrowed=list(self._inline_sources))
+            for source in snapshot.sources[len(snapshot.config.sources):]:
+                working.add(source)
+            for sid in self._selected_source_ids:
+                found = snapshot.get(sid)
+                if found is not None:
+                    working.add(self._resolved_for_session(found))
+            self._working = working
+
+    def _ensure_catalog(self) -> None:
+        """Run the deferred catalog half of ``initialize()``, once.
+
+        A session that does not enable the plugin (#1563's stamp) skips the
+        load at bootstrap; the first read of the catalog loads it here, so a
+        deferred load is never a refused one (an in-process subagent that
+        does enable the plugin, a typed ``references`` command).
+        """
+        if self._catalog_loaded or self._deferred_config is None:
+            return
+        with self._catalog_lock:
+            if self._catalog_loaded or self._deferred_config is None:
+                return
+            config, self._deferred_config = self._deferred_config, None
+            self._trace("catalog: loading the deferred catalog on first use")
+            self._load_session_catalog(config, attach_matching=True)
 
     # ----- Catalog refresh (#1145) -----
 
@@ -609,15 +682,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
     def _refresh_allowed(config: Dict[str, Any]) -> bool:
         """Whether this session refreshes its catalog from disk (#1145).
 
-        Off when the profile says ``refresh_catalog: false``, and off for a
-        config carrying inline ``sources``: a refresh reloads from disk,
-        which would replace that list with the disk catalog.
+        Off only when the profile says ``refresh_catalog: false``. A session
+        with inline ``sources`` refreshes too: a new snapshot is bound
+        through :meth:`_bind_snapshot`, which keeps the inline list and
+        refreshes only the bundle references beside it.
         """
-        return config.get("refresh_catalog") is not False and "sources" not in config
-
-    def _remember_catalog_roots(self, roots) -> None:
-        """Record the bundle tier roots, so a new sub-bundle is a change (#1145)."""
-        self._catalog_roots = [str(path) for path, _tier in roots]
+        return config.get("refresh_catalog") is not False
 
     def _reattach_matchers(self) -> None:
         """Rebuild the bundles' similarity matchers after a reload.
@@ -637,46 +707,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if self._embedding_provider is not None:
             self._init_bundle_matchers(self._matcher_config)
 
-    def _catalog_watch_paths(self, workspace: Optional[str] = None) -> List[str]:
-        """Every path whose change means the loaded catalog may be stale.
-
-        The directory ``load_config`` auto-discovers from, the tier roots
-        and every bundle directory the last discovery walked (a new
-        sub-bundle is a new directory in a root, so the root covers it),
-        every ``*.json`` file directly in those directories, and each
-        ``references.json`` the loader could pick. Directory stamps catch
-        a created, deleted or replaced reference file; the file stamps an
-        in-place edit (#1437).
-        """
-        workspace = workspace or self._workspace_path or self._project_root
-        paths: Set[str] = set(self._catalog_roots)
-        paths.update(str(b.directory) for b in self._bundles)
-        refs_dir = Path(
-            self._config.references_dir if self._config else ".jaato/references"
-        )
-        if not refs_dir.is_absolute() and workspace:
-            refs_dir = Path(workspace) / refs_dir
-        if refs_dir.is_absolute():
-            paths.add(str(refs_dir))
-        # Each reference file too: an in-place edit (a hand edit, a
-        # revision written over the file) moves no directory mtime (#1437).
-        paths.update(catalog_watch.json_files(
-            [p for p in paths if os.path.isdir(p)]))
-        paths.update(config_path_candidates(self._config_path, workspace))
-        return sorted(paths)
-
-    def _begin_catalog_load(self, workspace: Optional[str] = None) -> None:
-        """Stamp the watched paths as a load begins (see ``catalog_watch.settle``)."""
-        self._catalog_watch_pre = catalog_watch.stat_paths(
-            self._catalog_watch_paths(workspace)
-        )
-
-    def _end_catalog_load(self) -> None:
-        """Record what the load that just ended read from."""
-        post = catalog_watch.stat_paths(self._catalog_watch_paths())
-        self._catalog_watch = catalog_watch.settle(self._catalog_watch_pre, post)
-        self._catalog_watch_pre = {}
-
     def _refresh_catalog_if_changed(self) -> Optional[Dict[str, Any]]:
         """Reload the catalog when a file it came from changed on disk.
 
@@ -687,23 +717,26 @@ class ReferencesPlugin(RunnerForwardingMixin):
         lookup that needs it. Not on a miss: the model finds references by
         tag and similarity, so it cannot ask for an id it does not know.
 
-        The check is one ``stat`` per watched path. A reload goes through
-        :meth:`_reload_from_disk`, the path ``references reload`` takes,
-        so authorizations and selections are handled the same way. What
-        changed is added to ``_pending_catalog_change`` for the next
-        listReferences / selectReferences result.
+        The store answers whether the files moved (one ``stat`` per watched
+        path) and loads once for every holder that asks. A new snapshot is
+        bound through :meth:`_reload_from_disk`'s session half, so
+        authorizations and selections are handled the way ``references
+        reload`` handles them. What changed is added to
+        ``_pending_catalog_change`` for the next listReferences /
+        selectReferences result.
 
         Returns:
             The reload's result when one ran, else ``None``.
         """
-        if not self._refresh_catalog or not self._catalog_watch:
+        if not self._refresh_catalog or not self._catalog_loaded or self._store is None:
             return None
         if not (self._workspace_path or self._project_root):
             return None
         with self._catalog_lock:
-            if not catalog_watch.has_changed(self._catalog_watch):
+            snapshot = self._store.current()
+            if snapshot is self._snapshot:
                 return None
-            result = self._reload_from_disk()
+            result = self._rebind_session(snapshot)
             if "error" in result:
                 return None
             for key in ("added", "removed", "dropped_selected"):
@@ -889,42 +922,22 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         return True
 
-    def _resolve_source_for_context(self, source: ReferenceSource) -> None:
-        """Resolve a catalog source's path for the current project context.
+    def _resolved_for_session(self, source: ReferenceSource) -> ReferenceSource:
+        """``source`` with its path resolved against this session's project root.
 
-        When a source from the master catalog is added to the active sources,
-        its original relative path needs to be resolved against the current
-        project root to create an absolute path that will work from any CWD.
-
-        Args:
-            source: The reference source to resolve (modified in-place).
+        Returns ``source`` itself when nothing changes, else a copy: a
+        catalog reference may be shared by every session reading the same
+        snapshot, so it is never edited (store.resolve_for_context).
         """
-        if source.type != SourceType.LOCAL or not source.path:
-            return
-
-        # If already has a resolved_path that exists, nothing to do
-        if source.resolved_path:
-            resolved_obj = Path(source.resolved_path)
-            if resolved_obj.is_absolute() and resolved_obj.exists():
-                return
-            # Also check resolved path relative to project root
-            if self._project_root:
-                from_root = Path(self._project_root) / source.resolved_path
-                if from_root.exists():
-                    source.resolved_path = str(from_root.resolve())
-                    return
-
-        # Try to resolve the original path against the project root
-        if self._project_root:
-            original_path = Path(source.path)
-            if not original_path.is_absolute():
-                from_root = Path(self._project_root) / source.path
-                if from_root.exists():
-                    source.resolved_path = str(from_root.resolve())
-                    self._trace(f"resolved catalog source '{source.id}': {source.path} -> {source.resolved_path}")
-                    return
-
-        self._trace(f"could not resolve catalog source '{source.id}': {source.path}")
+        resolved = resolve_for_context(source, self._project_root)
+        if resolved is None:
+            if source.type == SourceType.LOCAL and source.path and not source.resolved_path:
+                self._trace(f"could not resolve catalog source '{source.id}': {source.path}")
+            return source
+        fresh = copy.copy(source)
+        fresh.resolved_path = resolved
+        self._trace(f"resolved catalog source '{source.id}': {source.path} -> {resolved}")
+        return fresh
 
     def _resolve_path_for_access(self, source: ReferenceSource) -> Optional[Path]:
         """Resolve a source's path to an accessible filesystem location.
@@ -1631,7 +1644,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # Filter to only truly new IDs (not already selected)
         already_selected = set(self._selected_source_ids)
         transitive_sources: List[ReferenceSource] = []
-        current_source_ids = {s.id for s in self._sources}
 
         for ref_id in all_resolved:
             if ref_id in already_selected:
@@ -1641,14 +1653,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
             self._selected_source_ids.append(ref_id)
             already_selected.add(ref_id)
 
-            # Ensure source is in self._sources
-            if ref_id not in current_source_ids and ref_id in catalog_by_id:
-                source = catalog_by_id[ref_id]
-                self._resolve_source_for_context(source)
-                self._sources.append(source)
-                current_source_ids.add(ref_id)
+            # Make it visible to a narrowed session (a whole one sees it)
+            if ref_id not in self._working and ref_id in catalog_by_id:
+                self._working.add(self._resolved_for_session(catalog_by_id[ref_id]))
 
-            source = next((s for s in self._sources if s.id == ref_id), None)
+            source = self._source(ref_id)
             if source:
                 self._authorize_source_path(source)
                 transitive_sources.append(source)
@@ -1711,61 +1720,187 @@ class ReferencesPlugin(RunnerForwardingMixin):
             else:
                 self._project_root = str(base_path_obj)
 
-        # Try to load from file first (master catalog).  load_config skips a
-        # denied ~/.jaato/references (discover_references) and reads
-        # ~/.config/jaato from the daemon's user-tier snapshot on a runner,
-        # so it won't raise here under confinement; the workspace-tier
-        # catalog is loaded by set_workspace_path() -> _reload_catalog().
         config_path = config.get("config_path")
         self._config_path = config_path
-        self._begin_catalog_load(inline_base_path)
-        try:
-            self._config = load_config(config_path, workspace_path=inline_base_path)
-        except FileNotFoundError:
-            # Use defaults
-            self._config = ReferencesConfig()
+        self._catalog_base = inline_base_path
+        # The registry puts the session's workspace and config_root in the
+        # config and hands the same values to set_workspace_path() /
+        # set_config_root() right after; taking them now makes the store
+        # key final at the first load, so those calls find it unchanged
+        # instead of loading the catalog a second time.
+        if config.get("workspace_path"):
+            self._workspace_path = config["workspace_path"]
+        if config.get("config_root"):
+            self._config_root = config["config_root"]
 
-        # Build ID -> source lookup from master catalog
-        catalog_by_id = {s.id: s for s in self._config.sources}
+        # Settings: everything ``initialize()`` reads that is not the catalog.
+        self._transitive_enabled = config.get("transitive_injection", True)
+        self._max_transitive_references = self._coerce_max_transitive(
+            config.get("max_transitive_references")
+        )
+        self._require_curation = config.get("require_curation") is True
+        self._refresh_catalog = self._refresh_allowed(config)
+        self._matcher_config = config
+        self._witness_proposals = config.get("witness_proposals") is True
+        self._allow_inline_content = config.get("allow_inline_content") is not False
+        self._exclude_tools = config.get("exclude_tools", [])
+        self._lookup_strategy = config.get("lookup_strategy", "hybrid")
+        self._similarity_threshold = config.get("similarity_threshold", 0.75)
+        self._tag_similarity_threshold = config.get("tag_similarity_threshold", 0.4)
+        self._max_matches_per_piece = config.get("max_matches_per_piece", 3)
+        self._cached_init_config = config
+        self._embedding_load_failed = False
+        self._session_enables_plugin = config.get(SESSION_ENABLES_PLUGIN_KEY)
+        self._runner_hosted_mirror = is_runner_hosted_mirror(config)
 
-        # Allow inline sources override
-        if "sources" in config:
-            resolved_sources = []
-            for s in config["sources"]:
-                if isinstance(s, dict):
-                    resolved_sources.append(ReferenceSource.from_dict(s))
-                elif isinstance(s, str):
-                    # Look up by ID from master catalog
-                    if s in catalog_by_id:
-                        resolved_sources.append(catalog_by_id[s])
-                    else:
-                        print(f"Warning: Source ID '{s}' not found in master catalog")
-                else:
-                    resolved_sources.append(s)
+        # A re-initialize starts from no catalog.
+        self._store = None
+        self._snapshot = None
+        self._working = None
+        self._bundle_copies = []
+        self._catalog_loaded = False
+        self._inline_sources = None
+        self._selected_source_ids = []
+        self._preselected_paths = {}
+        self._transitive_parent_map = {}
+        self._initialized = True
 
-            # Resolve relative paths for inline sources against workspace
-            if inline_base_path:
-                resolve_source_paths(resolved_sources, inline_base_path, relative_to=self._project_root)
-            self._sources = resolved_sources
+        # Register the handler that exposes this plugin's bundle-relevant
+        # operations to the shared bundle subsystem. Idempotent within
+        # a process: re-initializing replaces the prior handler with one
+        # bound to the new state.
+        from ..bundle_common.handler import registry as _bundle_registry
+        from .entry_handler import ReferencesEntryHandler
+        _bundle_registry.register(ReferencesEntryHandler(self))
+
+        # A session whose profile does not list this plugin never reads its
+        # catalog (#1590 gates its enrichment, #1513 its tools), so the load
+        # waits for a first use that may never come: on the daemon's mirror
+        # registry that was a whole catalog per session (phase 1
+        # measurements). ``_ensure_catalog`` runs it on the first read.
+        defer_catalog = self._session_enables_plugin is False
+        if defer_catalog:
+            self._deferred_config = config
+            self._trace("initialize: catalog deferred (plugin not enabled by the session)")
         else:
-            # Use sources from master catalog - resolve paths for current context
-            self._sources = self._config.sources
-            for source in self._sources:
-                self._resolve_source_for_context(source)
+            self._deferred_config = None
+            self._load_session_catalog(config, attach_matching=False)
 
-        # Handle preselected - look up from catalog and add to sources if needed
+        # Load the embedding provider at bootstrap only when it can be
+        # USED (#1482): a semantic strategy AND at least one bundle with a
+        # vector index to match against.  An unindexed bundle (#1478) or
+        # ``tags_only`` has nothing to match, and the model load (~13 s of
+        # imports, hundreds of MB per runner) pushed bootstraps past their
+        # deadline.  Two more conditions since then: the index must have
+        # been built with the model the provider would load (#1562), and
+        # the session must enable this plugin (#1563).  Otherwise the load
+        # is deferred to the first caller that needs it -- see
+        # ``_ensure_embedding_provider`` and ``_embedder_verdict``.
+        verdict = self._embedder_verdict(config)
+        if verdict.eager:
+            self._init_embedding_provider(config)
+        self._log_embedder_decision(verdict)
+
+        if self._catalog_loaded:
+            self._attach_semantic_matching(config)
+
+    def _attach_semantic_matching(self, config: Dict[str, Any]) -> None:
+        """Reconcile eager bundles and attach one matcher per compatible bundle."""
+        # Reconcile drift (new/edited/removed references) against each
+        # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
+        # deferred to the first semantic query; "off" disables the pass.
+        if self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._reconcile_eager_bundles()
+
+        # Attach one matcher per compatible bundle. Bundles whose
+        # embedding_model does not match the provider (or whose sidecar
+        # fails to load) are left without a matcher and skipped at query
+        # time; tag matching continues to work for their references.
+        if self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._init_bundle_matchers(config)
+        else:
+            self._trace(
+                f"initialize: semantic matching not configured "
+                f"(strategy={self._lookup_strategy}, bundles={len(self._bundle_copies)})"
+            )
+
+    def _load_session_catalog(self, config: Dict[str, Any], *, attach_matching: bool) -> None:
+        """The catalog half of ``initialize()``: bind, select, authorize.
+
+        Binds the store's current snapshot for this session's key (the
+        load is shared with every holder of the key in this process), then
+        applies inline ``sources``, ``preselected`` and the transitive
+        walk, opens the selection channel and authorizes the selected
+        paths. Run by ``initialize()``, or on first use when deferred.
+
+        Args:
+            config: The ``initialize()`` config.
+            attach_matching: Reconcile and attach matchers at the end. A
+                deferred load does; ``initialize()`` does it itself, after
+                it has decided whether to load the embedder.
+        """
+        self._store = store_for(self._catalog_key(self._catalog_base))
+        snapshot = self._store.current()
+
+        # Build ID -> source lookup from the master catalog (the root)
+        catalog_by_id = {s.id: s for s in snapshot.config.sources}
         preselected = config.get("preselected", [])
-        if preselected:
-            current_ids = {s.id for s in self._sources}
-            for sid in preselected:
-                if sid not in current_ids and sid in catalog_by_id:
-                    # Add from master catalog - need to resolve paths for current context
-                    source = catalog_by_id[sid]
-                    self._resolve_source_for_context(source)
-                    self._sources.append(source)
-                    current_ids.add(sid)
+        self._inline_sources = None
+        if "sources" in config:
+            self._narrow_to_inline(config["sources"], catalog_by_id, preselected)
+        self._bind_snapshot(snapshot)
+        self._catalog_loaded = True
 
-        # Initialize channel
+        channel_type = self._open_selection_channel(config)
+        valid_preselected = self._select_preselected(preselected, catalog_by_id)
+        if self._transitive_enabled and self._selected_source_ids:
+            self._inject_initial_transitive(catalog_by_id, valid_preselected)
+
+        self._trace(
+            f"initialize: sources={len(self._working)}, channel={channel_type}, "
+            f"generation={snapshot.generation}"
+        )
+        self._authorize_initial_selection()
+        if attach_matching:
+            self._attach_semantic_matching(config)
+
+    def _narrow_to_inline(self, inline: List[Any], catalog_by_id: Dict[str, ReferenceSource],
+                          preselected: List[str]) -> None:
+        """Record inline ``sources`` as the session's narrowed set.
+
+        An entry is a source dict, an id looked up in the master catalog
+        (copied: the catalog's object is shared), or a source object.
+        Preselected root references join right after the inline ones, as
+        they always did.
+        """
+        resolved_sources = []
+        for s in inline:
+            if isinstance(s, dict):
+                resolved_sources.append(ReferenceSource.from_dict(s))
+            elif isinstance(s, str):
+                # Look up by ID from master catalog
+                if s in catalog_by_id:
+                    resolved_sources.append(copy.copy(catalog_by_id[s]))
+                else:
+                    print(f"Warning: Source ID '{s}' not found in master catalog")
+            else:
+                resolved_sources.append(s)
+
+        # Resolve relative paths for inline sources against workspace
+        if self._catalog_base:
+            resolve_source_paths(resolved_sources, self._catalog_base, relative_to=self._project_root)
+        self._inline_sources = resolved_sources
+        inline_ids = {s.id for s in resolved_sources}
+        self._selected_source_ids = [
+            sid for sid in preselected if sid not in inline_ids and sid in catalog_by_id
+        ]
+
+    def _open_selection_channel(self, config: Dict[str, Any]) -> str:
+        """Create the selection channel from the config and ``references.json``.
+
+        Returns:
+            The channel type asked for.
+        """
         channel_type = config.get("channel_type") or self._config.channel_type
         channel_config = config.get("channel_config", {})
 
@@ -1790,76 +1925,65 @@ class ReferencesPlugin(RunnerForwardingMixin):
             print("Falling back to console channel")
             self._channel = ConsoleSelectionChannel()
             self._channel.initialize({})
+        return channel_type
 
-        # Initialize selected sources from preselected config
-        # (sources were already added above, now just validate and track IDs)
-        if preselected:
-            available_ids = {s.id for s in self._sources}
-            valid_preselected = [sid for sid in preselected if sid in available_ids]
-            invalid = set(preselected) - available_ids - set(catalog_by_id.keys())
-            if invalid:
-                print(f"Warning: Preselected reference IDs not found: {invalid}")
-            self._selected_source_ids = valid_preselected
-        else:
+    def _select_preselected(self, preselected: List[str],
+                            catalog_by_id: Dict[str, ReferenceSource]) -> List[str]:
+        """Select the ``preselected`` ids this session can see; return them."""
+        if not preselected:
             self._selected_source_ids = []
+            return []
+        available_ids = self._working.ids()
+        valid_preselected = [sid for sid in preselected if sid in available_ids]
+        invalid = set(preselected) - available_ids - set(catalog_by_id.keys())
+        if invalid:
+            print(f"Warning: Preselected reference IDs not found: {invalid}")
+        self._selected_source_ids = valid_preselected
+        return valid_preselected
 
-        # Resolve transitive references if enabled (default: True)
-        # This scans pre-selected references for mentions of other catalog references
-        # and automatically adds them to the selected set
-        self._transitive_enabled = config.get("transitive_injection", True)
-        self._max_transitive_references = self._coerce_max_transitive(
-            config.get("max_transitive_references")
+    def _inject_initial_transitive(self, catalog_by_id: Dict[str, ReferenceSource],
+                                   valid_preselected: List[str]) -> None:
+        """Select what the preselected references mention, transitively.
+
+        Scans the preselected references for mentions of other catalog
+        references and adds them to the selection (and to a narrowed
+        working set).
+        """
+        # Build complete catalog including inline sources
+        full_catalog = dict(catalog_by_id)
+        for source in self._working:
+            if source.id not in full_catalog:
+                full_catalog[source.id] = source
+
+        all_resolved, transitive_parent_map = self._resolve_transitive_references(
+            self._selected_source_ids,
+            full_catalog
         )
-        self._require_curation = config.get("require_curation") is True
-        self._refresh_catalog = self._refresh_allowed(config)
-        self._matcher_config = config
-        self._witness_proposals = config.get("witness_proposals") is True
-        self._allow_inline_content = config.get("allow_inline_content") is not False
-        if self._transitive_enabled and self._selected_source_ids:
-            # Build complete catalog including inline sources
-            full_catalog = dict(catalog_by_id)
-            for source in self._sources:
-                if source.id not in full_catalog:
-                    full_catalog[source.id] = source
+        self._transitive_parent_map = transitive_parent_map
+        if transitive_parent_map:
+            self._transitive_notification_pending = True
 
-            # Resolve transitive references
-            all_resolved, transitive_parent_map = self._resolve_transitive_references(
-                self._selected_source_ids,
-                full_catalog
-            )
-            self._transitive_parent_map = transitive_parent_map
-            if transitive_parent_map:
-                self._transitive_notification_pending = True
+        for ref_id in all_resolved:
+            if ref_id not in self._selected_source_ids:
+                self._selected_source_ids.append(ref_id)
+            if ref_id not in self._working and ref_id in full_catalog:
+                self._working.add(self._resolved_for_session(full_catalog[ref_id]))
 
-            # Add newly discovered sources to self._sources and self._selected_source_ids
-            current_source_ids = {s.id for s in self._sources}
-            for ref_id in all_resolved:
-                if ref_id not in self._selected_source_ids:
-                    self._selected_source_ids.append(ref_id)
-                # Ensure source is in self._sources
-                if ref_id not in current_source_ids and ref_id in full_catalog:
-                    source = full_catalog[ref_id]
-                    # Resolve paths for catalog sources added during transitive resolution
-                    self._resolve_source_for_context(source)
-                    self._sources.append(source)
-                    current_source_ids.add(ref_id)
+        transitive_ids = [rid for rid in all_resolved if rid not in valid_preselected]
+        if transitive_ids:
+            self._trace(f"transitive: injected {len(transitive_ids)} additional: {transitive_ids}")
 
-            # Log transitive injection results
-            transitive_count = len(all_resolved) - len(valid_preselected) if preselected else 0
-            if transitive_count > 0:
-                transitive_ids = [rid for rid in all_resolved if rid not in valid_preselected]
-                self._trace(f"transitive: injected {transitive_count} additional: {transitive_ids}")
+    def _authorize_initial_selection(self) -> None:
+        """Authorize the selected paths and index the preselected ones.
 
-        # Capture excluded tools
-        self._exclude_tools = config.get("exclude_tools", [])
-        self._initialized = True
-
-        # Trace logging for debugging
-        channel_type = config.get("channel_type") or self._config.channel_type
-        self._trace(f"initialize: sources={len(self._sources)}, channel={channel_type}")
-
+        ``_preselected_paths`` maps a normalized resolved_path to
+        ``(ref_id, ref_name)`` for every selected LOCAL reference
+        (transitive ones included); for a directory reference only the
+        directory is stored, and ``_detect_preselected_read`` matches files
+        inside it by prefix.
+        """
         # Log resolved paths for LOCAL sources (indicate if directory)
-        for source in self._sources:
+        for source in self._working:
             if source.type == SourceType.LOCAL and source.resolved_path:
                 path_obj = Path(source.resolved_path)
                 is_dir = path_obj.is_dir() if path_obj.exists() else False
@@ -1871,105 +1995,31 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if self._exclude_tools:
             self._trace(f"initialize: exclude_tools={self._exclude_tools}")
 
-        # Authorize paths for pre-selected sources so readFile can access them
-        if self._selected_source_ids:
-            for sid in self._selected_source_ids:
-                source = next((s for s in self._sources if s.id == sid), None)
-                if source:
-                    self._authorize_source_path(source)
-
-        # Build preselected paths index for reference-read detection.
-        # Maps normalized resolved_path → (ref_id, ref_name) for all
-        # preselected LOCAL sources (including transitively resolved ones).
-        # For directory references, only the directory path is stored;
-        # _detect_preselected_read uses startswith + "/" to match files
-        # inside the directory without needing per-file entries.
         self._preselected_paths = {}
         for sid in self._selected_source_ids:
-            source = next((s for s in self._sources if s.id == sid), None)
-            if source and source.type == SourceType.LOCAL and source.resolved_path:
+            source = self._working.get(sid)
+            if not source:
+                continue
+            # Authorize paths for pre-selected sources so readFile can access them
+            self._authorize_source_path(source)
+            if source.type == SourceType.LOCAL and source.resolved_path:
                 norm = normalize_for_comparison(os.path.normpath(source.resolved_path))
                 self._preselected_paths[norm] = (source.id, source.name)
-                self._trace(
-                    f"initialize: preselected_path '{source.id}': {norm}"
-                )
-
-        # --- Semantic matching initialization ---
-        # Read semantic config from plugin config (passed via initialize(config))
-        self._lookup_strategy = config.get("lookup_strategy", "hybrid")
-        self._similarity_threshold = config.get("similarity_threshold", 0.75)
-        self._tag_similarity_threshold = config.get("tag_similarity_threshold", 0.4)
-        self._max_matches_per_piece = config.get("max_matches_per_piece", 3)
-
-        # Discover bundles (root + subdirectories with their own manifests)
-        # and load sub-bundle references into the flat catalog. Safe to
-        # call unconditionally — a workspace with no manifest anywhere
-        # yields an empty bundle list and becomes a no-op.
-        #
-        # Reordered before ``_init_embedding_provider`` (server 0.6.111+,
-        # 2026-05-16): bundle presence gates whether we incur the
-        # premium SentenceTransformer module import cost (measured
-        # 6.7-31.7s cold; BOOTSTRAP_TIMING reports in /tmp/jaato.log
-        # 0.6.110).  No coupling — ``_discover_and_load_bundles`` only
-        # reads ``_config`` / ``_workspace_path`` / ``_project_root``.
-        self._discover_and_load_bundles()
-
-        # Register the handler that exposes this plugin's bundle-relevant
-        # operations to the shared bundle subsystem. Idempotent within
-        # a process: re-initializing replaces the prior handler with one
-        # bound to the new state. The handler itself doesn't drive any
-        # behaviour today — Phase 8 rewires bundle CRUD/pack/unpack to
-        # call through the registry.
-        from ..bundle_common.handler import registry as _bundle_registry
-        from .entry_handler import ReferencesEntryHandler
-        _bundle_registry.register(ReferencesEntryHandler(self))
-
-        # Load the embedding provider at bootstrap only when it can be
-        # USED (#1482): a semantic strategy AND at least one bundle with a
-        # vector index to match against.  An unindexed bundle (#1478) or
-        # ``tags_only`` has nothing to match, and the model load (~13 s of
-        # imports, hundreds of MB per runner) pushed bootstraps past their
-        # deadline.  Two more conditions since then: the index must have
-        # been built with the model the provider would load (#1562), and
-        # the session must enable this plugin (#1563).  Otherwise the load
-        # is deferred to the first caller that needs it -- see
-        # ``_ensure_embedding_provider`` and ``_embedder_verdict``.
-        self._cached_init_config = config
-        self._embedding_load_failed = False
-        self._session_enables_plugin = config.get(SESSION_ENABLES_PLUGIN_KEY)
-        self._runner_hosted_mirror = is_runner_hosted_mirror(config)
-        verdict = self._embedder_verdict(config)
-        if verdict.eager:
-            self._init_embedding_provider(config)
-        self._log_embedder_decision(verdict)
-
-        # Reconcile drift (new/edited/removed references) against each
-        # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
-        # deferred to the first semantic query; "off" disables the pass.
-        if self._lookup_strategy in ("hybrid", "semantic_only"):
-            self._reconcile_eager_bundles()
-
-        # Attach one matcher per compatible bundle. Bundles whose
-        # embedding_model does not match the provider (or whose sidecar
-        # fails to load) are left without a matcher and skipped at query
-        # time; tag matching continues to work for their references.
-        if self._lookup_strategy in ("hybrid", "semantic_only"):
-            self._init_bundle_matchers(config)
-        else:
-            self._trace(
-                f"initialize: semantic matching not configured "
-                f"(strategy={self._lookup_strategy}, bundles={len(self._bundles)})"
-            )
+                self._trace(f"initialize: preselected_path '{source.id}': {norm}")
 
     def _indexed_bundle_count(self) -> int:
-        """How many loaded bundles (root included) carry a vector index."""
-        return sum(1 for b in self._bundles if b.has_index)
+        """How many loaded bundles (root included) carry a vector index.
+
+        Reads what is loaded: a deferred catalog has none, and counting
+        must not be what loads it.
+        """
+        return sum(1 for b in self._bundle_copies if b.has_index)
 
     def _compatible_indexed_bundle_count(self, model: Optional[str]) -> int:
         """How many indexed bundles were built with ``model`` (#1562)."""
         if not model:
             return 0
-        return sum(1 for b in self._bundles
+        return sum(1 for b in self._bundle_copies
                    if b.has_index and b.embedding_model == model)
 
     def _expected_provider_model(
@@ -2014,7 +2064,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         load, with the reason in the log line.
         """
         verdict = _EmbedderVerdict(indexed=self._indexed_bundle_count(),
-                                   total=len(self._bundles))
+                                   total=len(self._bundle_copies))
         if self._runner_hosted_mirror:
             verdict.reason = "daemon mirror of a runner-served session (#1566)"
             return verdict
@@ -2174,130 +2224,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # Cache the discovered matcher for _init_semantic_matching()
         if matcher is not None:
             self._semantic_matcher = matcher
-
-    def _discover_and_load_bundles(self) -> None:
-        """Populate ``self._bundles``, merge bundle refs, and stamp the load.
-
-        Every load of the catalog ends here, so this is where the session
-        records what it loaded from (:meth:`_end_catalog_load`): the stamps
-        a later :meth:`_refresh_catalog_if_changed` compares against.
-        """
-        try:
-            self._load_bundles()
-        finally:
-            self._end_catalog_load()
-
-    def _load_bundles(self) -> None:
-        """Populate ``self._bundles`` and merge bundle refs into the catalog.
-
-        Walks both tier roots (workspace then user) via
-        :func:`resolve_bundle_roots`. Within each root the root bundle is
-        discovered from ``<root>/embedding_config.json`` and sub-bundles
-        from each immediate subdirectory containing its own manifest.
-        Each bundle's reference JSONs are loaded via
-        :func:`discover_references` and tagged with ``bundle_name`` so the
-        flat catalog can still reason about membership.
-
-        **Tier shadowing:** :func:`discover_bundles` walks workspace first
-        and a workspace bundle hides any user bundle of the same name —
-        the shadowed user bundle never appears in ``self._bundles`` and
-        its references are not loaded into the catalog.
-
-        Sources already loaded by :func:`load_config` (the workspace-tier
-        root bundle) have their ``bundle_name`` left as the default empty
-        string. Sources from the user-tier root bundle are loaded here
-        and likewise carry ``bundle_name = ""`` (the empty name is the
-        root-bundle sentinel; tier disambiguation lives on the
-        :class:`ReferenceBundle` itself, not on individual references).
-        """
-        self._bundles = []
-
-        if not self._config:
-            return
-
-        # Resolve the workspace tier root from the config (which may have
-        # an absolute or relative ``references_dir``). The user tier always
-        # lives under ``~/.jaato/references`` — :func:`resolve_bundle_roots`
-        # handles that — but we splice in the user pair manually so that a
-        # custom workspace ``references_dir`` (set in references.json) is
-        # still honored.
-        #
-        # ``config_root`` overrides the workspace tier when set: a
-        # custom ``references_dir`` of ``".jaato/references"`` becomes
-        # ``<config_root>/references`` (the leading ``.jaato/`` is
-        # stripped because ``config_root`` already plays that role).
-        workspace_refs_dir: Optional[Path] = None
-        cfg_refs = Path(self._config.references_dir)
-        if cfg_refs.is_absolute():
-            workspace_refs_dir = cfg_refs
-        elif self._config_root:
-            cr = Path(self._config_root).expanduser().resolve()
-            parts = cfg_refs.parts
-            if parts and parts[0] == ".jaato":
-                inner = Path(*parts[1:]) if len(parts) > 1 else Path()
-            else:
-                inner = cfg_refs
-            workspace_refs_dir = cr / inner
-        elif self._workspace_path:
-            workspace_refs_dir = Path(self._workspace_path) / cfg_refs
-        elif self._project_root:
-            workspace_refs_dir = Path(self._project_root) / cfg_refs
-
-        roots: List[Tuple[Path, str]] = []
-        if workspace_refs_dir is not None:
-            roots.append((workspace_refs_dir.resolve(), BUNDLE_TIER_WORKSPACE))
-        else:
-            self._trace(
-                "_discover_and_load_bundles: workspace references_dir "
-                "unresolved (no workspace_path); workspace tier skipped"
-            )
-        # User tier — always available.
-        for path, tier in resolve_bundle_roots(workspace_path=None):
-            if tier == BUNDLE_TIER_USER:
-                roots.append((path, tier))
-                break
-
-        self._remember_catalog_roots(roots)
-        self._bundles = discover_bundles(roots)
-
-        if not self._bundles:
-            self._trace("_discover_and_load_bundles: no bundles found")
-            return
-
-        # Load bundle references into the flat catalog. The workspace-tier
-        # root bundle's refs are already in self._sources from the initial
-        # load_config() call; everything else (workspace sub-bundles, plus
-        # all user-tier bundles that survived shadowing) is loaded here.
-        existing_ids = {s.id for s in self._sources}
-        project_root = self._project_root
-        for bundle in self._bundles:
-            # Skip the workspace-tier root — already loaded by load_config().
-            if (
-                bundle.name == ROOT_BUNDLE_NAME
-                and bundle.tier == BUNDLE_TIER_WORKSPACE
-            ):
-                continue
-            bundle_sources = discover_references(
-                str(bundle.directory),
-                base_path=str(bundle.directory.parent),
-                project_root=project_root,
-            )
-            for source in bundle_sources:
-                source.bundle_name = bundle.name
-                if source.id in existing_ids:
-                    self._trace(
-                        f"_discover_and_load_bundles: skipping duplicate id "
-                        f"'{source.id}' from bundle '{bundle.qualified_ref}'"
-                    )
-                    continue
-                self._sources.append(source)
-                existing_ids.add(source.id)
-
-        self._trace(
-            f"_discover_and_load_bundles: bundles="
-            f"{[b.qualified_ref for b in self._bundles]}, "
-            f"total_sources={len(self._sources)}"
-        )
 
     def _reconcile_eager_bundles(self) -> None:
         """Run :func:`reconcile_bundle` for every eager-mode bundle with drift.
@@ -2527,11 +2453,18 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if self._channel:
             self._channel.shutdown()
         self._channel = None
-        self._sources = []
         self._selected_source_ids = []
         self._release_embedder("shutdown")
         self._cached_init_config = None
-        self._bundles = []
+        # Let go of the snapshot: the store holds it weakly, so the last
+        # holder releasing it frees the catalog.
+        self._store = None
+        self._snapshot = None
+        self._working = None
+        self._bundle_copies = []
+        self._catalog_loaded = False
+        self._deferred_config = None
+        self._inline_sources = None
         self._preselected_paths = {}
         self._transitive_parent_map = {}
         self._transitive_notification_pending = False
@@ -2580,7 +2513,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             provider = self._embedding_provider
             self._embedding_provider = None
             self._semantic_matcher = None
-            for bundle in self._bundles:
+            for bundle in self._bundle_copies:
                 bundle.matcher = None
             self._embedding_load_failed = False
         if provider is None:
@@ -3985,8 +3918,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # bundle this command just built would not be discovered at all.
         write_bundle_manifest(bundle_dir, name=name, description="references bundle")
 
-        # Re-discover so the new bundle is visible to subsequent ops.
-        self._discover_and_load_bundles()
+        # Reload so the new bundle is visible to subsequent ops.
+        self._reload_from_disk()
         new_bundle = next(
             (b for b in self._bundles if b.name == name and b.tier == scope), None)
         qualified = (new_bundle.qualified_ref if new_bundle is not None
@@ -4047,9 +3980,34 @@ class ReferencesPlugin(RunnerForwardingMixin):
             json.dumps(index_config, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        self._discover_and_load_bundles()
+        self._reload_from_disk()
         self._trace(f"bundle index: {hit.qualified_ref} model={index_config['embedding_model']}")
         return self._cmd_bundle_reconcile(hit.qualified_ref)
+
+    @staticmethod
+    def _remove_bundle_files(bundle: ReferenceBundle) -> None:
+        """Delete ``bundle`` from disk.
+
+        The root bundle loses only its own artefacts: the tier root
+        directory still holds the other sub-bundles.
+        """
+        if bundle.name == ROOT_BUNDLE_NAME:
+            # Root bundle: remove only the bundle artefacts, leaving the
+            # tier root dir for the other sub-bundles that live there.
+            for p in bundle.directory.glob("*.json"):
+                p.unlink()
+            for p in bundle.directory.glob("*.npy"):
+                p.unlink()
+            for p in bundle.directory.glob("*.npy.lock"):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+            payload = bundle.directory / "payload"
+            if payload.is_dir():
+                shutil.rmtree(payload)
+        else:
+            shutil.rmtree(bundle.directory)
 
     def _cmd_bundle_delete(self, raw_args: str) -> Dict[str, Any]:
         """Execute 'bundle delete <bundle-ref> [--force]'.
@@ -4118,33 +4076,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 )
             }
 
-        # Drop the bundle's sources from the live catalog before we
-        # mutate the disk — keeps the in-memory state consistent if
-        # the rmtree raises mid-flight.
-        self._sources = [
-            s for s in self._sources if s.bundle_name != bundle.name
-        ]
-
-        if bundle.name == ROOT_BUNDLE_NAME:
-            # Root bundle: remove only the bundle artefacts, leaving the
-            # tier root dir for the other sub-bundles that live there.
-            for p in bundle.directory.glob("*.json"):
-                p.unlink()
-            for p in bundle.directory.glob("*.npy"):
-                p.unlink()
-            for p in bundle.directory.glob("*.npy.lock"):
-                try:
-                    p.unlink()
-                except FileNotFoundError:
-                    pass
-            payload = bundle.directory / "payload"
-            if payload.is_dir():
-                shutil.rmtree(payload)
-        else:
-            shutil.rmtree(bundle.directory)
-
-        # Re-discover so self._bundles reflects the deletion.
-        self._discover_and_load_bundles()
+        # Whatever the removal leaves on disk, the catalog is reloaded from
+        # it, also when the rmtree raises mid-flight.
+        try:
+            self._remove_bundle_files(bundle)
+        finally:
+            self._reload_from_disk()
 
         self._trace(f"bundle delete: removed {bundle.qualified_ref}")
         return {
@@ -4209,9 +4146,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return {"error": "Usage: references bundle add <ref-id> --to <bundle-ref>"}
 
         # Resolve the source reference by id from the live catalog.
-        source = next(
-            (s for s in self._sources if s.id == ref_id_token), None,
-        )
+        source = self._source(ref_id_token)
         if source is None:
             return {
                 "error": (
@@ -4281,10 +4216,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
         target.directory.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source_file), str(dest_file))
 
-        # Update the in-memory source's bundle_name. The actual
-        # ReferenceSource list will be refreshed on the catalog reload.
-        source.bundle_name = target.name
-
         return self._post_membership_change(
             verb="add",
             ref_id=ref_id_token,
@@ -4316,7 +4247,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return {"error": "Usage: references bundle eject <ref-id>"}
         ref_id = tokens[0]
 
-        source = next((s for s in self._sources if s.id == ref_id), None)
+        source = self._source(ref_id)
         if source is None:
             return {"error": f"Unknown reference id {ref_id!r}"}
         if not source.bundle_name:
@@ -4379,7 +4310,6 @@ class ReferencesPlugin(RunnerForwardingMixin):
             }
         tier_root.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source_file), str(dest_file))
-        source.bundle_name = ""
 
         return self._post_membership_change(
             verb="eject",
@@ -4410,7 +4340,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return {"error": "Usage: references bundle remove <ref-id>"}
         ref_id = tokens[0]
 
-        source = next((s for s in self._sources if s.id == ref_id), None)
+        source = self._source(ref_id)
         if source is None:
             return {"error": f"Unknown reference id {ref_id!r}"}
 
@@ -4451,10 +4381,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
     ) -> Dict[str, Any]:
         """Reconcile + reload after add / eject / remove.
 
-        Refreshes the live catalog so the moved/deleted reference is
-        reflected in ``self._sources`` (this includes free references
-        living at the workspace tier root, which are not picked up by
-        :meth:`_discover_and_load_bundles` alone), then reconciles the
+        Reloads the catalog (:meth:`_reload_from_disk`) so the moved or
+        deleted reference is reflected in ``self._sources``, then reconciles the
         source bundle (if any) and target bundle (if any) so their
         sidecars match the new membership. Re-attaches matchers.
 
@@ -4471,14 +4399,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         Returns:
             The user-facing result dict (status / message / help_lines).
         """
-        # Rebuild the master catalog from disk so a deleted JSON in the
-        # tier root (free reference) actually disappears from
-        # ``self._sources``. ``_reload_catalog`` walks the workspace
-        # tier root via ``load_config``; ``_discover_and_load_bundles``
-        # then re-attaches sub-bundle and user-tier sources on top.
-        if self._workspace_path:
-            self._reload_catalog(self._workspace_path)
-        self._discover_and_load_bundles()
+        # Reload the whole catalog from disk, so the moved or deleted
+        # reference is where the files now say it is.
+        self._reload_from_disk()
 
         reconciled_summaries: List[str] = []
         if self._lookup_strategy in ("hybrid", "semantic_only"):
@@ -4992,65 +4915,14 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         self._trace(f"bundle merge: {result.summary()}")
 
-        # On a real (non-dry-run) success, update the in-memory catalog
-        # so the next prompt/tool call sees the merged sources without
-        # waiting for a reload. When the source was a loaded bundle, we
-        # remove its stale entries from the catalog first — those refs
-        # have been physically copied into the target, so the target's
-        # copy is authoritative from here on. (The source directory's
-        # JSON files remain in place; the operator can rm them.)
+        # On a real (non-dry-run) success, reload: the catalog is what the
+        # files now say, and the reload re-attaches every matcher so the
+        # new rows are queryable. (The source directory's JSON files
+        # remain in place; the operator can rm them. Where an id is in
+        # both bundles, the first bundle discovered keeps it, as on any
+        # load.)
         if result.status == MergeStatus.OK and result.added:
-            rename_lookup = dict(result.renamed)  # old_id → new_id
-            merged_source_ids = {s.id for s in source_sources}
-            source_bundle_name = source_bundle.name if source_lookup else None
-
-            if source_bundle_name is not None:
-                # Drop the source-bundle copies of merged ids from the
-                # live catalog. Ids left behind (e.g., skipped by --newer)
-                # stay attached to the source bundle until reload.
-                self._sources = [
-                    s for s in self._sources
-                    if not (
-                        s.bundle_name == source_bundle_name
-                        and s.id in merged_source_ids
-                        and rename_lookup.get(s.id, s.id) in result.added
-                    )
-                ]
-
-            existing_ids = {s.id for s in self._sources}
-            for s in source_sources:
-                new_id = rename_lookup.get(s.id, s.id)
-                if new_id not in result.added or new_id in existing_ids:
-                    continue
-                # Reload the fresh JSON the merge just wrote — it is the
-                # source of truth now (has the right id + source_hash).
-                fresh_path = target_bundle.directory / f"{new_id}.json"
-                if fresh_path.is_file():
-                    try:
-                        raw = json.loads(fresh_path.read_text(encoding="utf-8"))
-                    except (json.JSONDecodeError, OSError):
-                        continue
-                    fresh = ReferenceSource.from_dict(raw)
-                    fresh.bundle_name = target_bundle.name
-                    self._resolve_source_for_context(fresh)
-                    self._sources.append(fresh)
-                    existing_ids.add(new_id)
-
-            # Re-attach target's matcher so the new rows become queryable.
-            if self._lookup_strategy in ("hybrid", "semantic_only") \
-                    and self._embedding_provider is not None:
-                target_bundle.matcher = self._attach_matcher(
-                    target_bundle, self._embedding_provider.model_name,
-                )
-                # Keep the legacy ``self._semantic_matcher`` shim in sync
-                # only when the target is the *workspace*-tier root —
-                # that's the bundle the legacy field has always tracked.
-                # A user-tier root merge never updates the shim.
-                if (
-                    target_bundle.name == ROOT_BUNDLE_NAME
-                    and target_bundle.tier == BUNDLE_TIER_WORKSPACE
-                ):
-                    self._semantic_matcher = target_bundle.matcher
+            self._reload_from_disk()
 
         # Build the HelpLines block for display.
         lines: List[Tuple[str, str]] = [("MERGE", "bold"), ("", "")]
@@ -5355,11 +5227,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
         except FileNotFoundError as e:
             return {"error": f"unpack: {e}"}
 
-        # Re-discover bundles so the new arrival shows up in the live
-        # catalog. Then optionally reconcile the new bundle to self-heal
-        # any sidecar drift caused by an embedding-model mismatch
-        # between packer and recipient.
-        self._discover_and_load_bundles()
+        # Reload so the new arrival shows up in the live catalog. Then
+        # optionally reconcile the new bundle to self-heal any sidecar
+        # drift caused by an embedding-model mismatch between packer and
+        # recipient.
+        self._reload_from_disk()
         reconciled = False
         if do_reconcile and self._lookup_strategy in ("hybrid", "semantic_only"):
             self._ensure_embedding_provider()  # deferred at bootstrap (#1482)
@@ -5495,7 +5367,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         ref_id = ref_id.strip()
 
         # Look up the source
-        source = next((s for s in self._sources if s.id == ref_id), None)
+        source = self._source(ref_id)
         if not source:
             return {"error": f"Reference '{ref_id}' not found."}
 
@@ -5552,7 +5424,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._selected_source_ids.remove(ref_id)
 
         # Deauthorize the path so the model can no longer access it
-        source = next((s for s in self._sources if s.id == ref_id), None)
+        source = self._source(ref_id)
         if source:
             self._deauthorize_source_path(source)
 
@@ -5572,41 +5444,55 @@ class ReferencesPlugin(RunnerForwardingMixin):
     def _reload_from_disk(self) -> Dict[str, Any]:
         """Reload the whole catalog from disk, keeping what still exists.
 
-        The one reload path: ``references reload``, the refresh a changed
-        file triggers (:meth:`_refresh_catalog_if_changed`) and the bundle
-        subsystem's ``reload_catalog`` all come here.
+        The one reload path: ``references reload``, every bundle command
+        that wrote the catalog, and the bundle subsystem's
+        ``reload_catalog`` come here. The store loads again (shared with
+        every holder of the key in this process) and
+        :meth:`_rebind_session` moves this session onto the result. A
+        refresh that finds the files moved (:meth:`_refresh_catalog_if_changed`)
+        goes straight to ``_rebind_session`` with the store's current
+        snapshot.
 
-        1. Every selected reference's path is deauthorized, and the
-           plugin's authorized paths cleared.
-        2. The catalog is reloaded: the workspace root through
-           ``load_config``, then every bundle and the user tier
-           (:meth:`_discover_and_load_bundles`). The bundle half used to
-           be skipped, so ``references reload`` dropped every sub-bundle
-           and user-tier reference.
-        3. Selections still in the catalog are re-authorized; those that
-           are gone are dropped (``dropped_selected``). Their files are no
-           longer readable through the sandbox, and nothing else is done
-           about content the model already read.
-        4. Transitive resolution is re-applied to the surviving selections.
-        5. Bundle matchers are re-attached: the reload built new bundle
-           objects, and a matcher on the old ones would search a stale
-           sidecar or none. Nothing is reconciled here; a bundle whose
-           index lacks a new reference is matched by tags until the next
-           ``reconcile``.
-
-        The caller holds ``_catalog_lock``.
+        The caller holds ``_catalog_lock`` (an ``RLock``; taking it here is
+        harmless).
         """
         workspace = self._workspace_path or self._project_root
         if not workspace:
             return {"error": "Cannot reload: no workspace path available."}
+        with self._catalog_lock:
+            self._ensure_catalog()
+            key = self._catalog_key(workspace)
+            if self._store is None or self._store.key != key:
+                self._store = store_for(key)
+            self._catalog_base = workspace
+            return self._rebind_session(self._store.reload())
 
-        # Snapshot previous state
-        prev_ids = set(s.id for s in self._sources)
+    def _rebind_session(self, snapshot: CatalogSnapshot) -> Dict[str, Any]:
+        """Move this session onto ``snapshot``, keeping what still exists.
+
+        1. Every selected reference's path is deauthorized, and the
+           plugin's authorized paths cleared.
+        2. The snapshot is bound (:meth:`_bind_snapshot`): the root, every
+           bundle and the user tier, as one load. The working set is rebuilt
+           over it; a session with inline ``sources`` keeps them.
+        3. Selections still visible are re-authorized; those that are gone
+           are dropped (``dropped_selected``). Their files are no longer
+           readable through the sandbox, and nothing else is done about
+           content the model already read.
+        4. Transitive resolution is re-applied to the surviving selections.
+        5. Bundle matchers are re-attached: the snapshot's bundles are new
+           objects, and a matcher on the old ones would search a stale
+           sidecar or none. Nothing is reconciled here; a bundle whose
+           index lacks a new reference is matched by tags until the next
+           ``reconcile``.
+        """
+        # Previous state
+        prev_ids = self._working.ids() if self._working is not None else set()
         prev_selected = list(self._selected_source_ids)
 
-        # Deauthorize all currently-selected paths before reloading
+        # Deauthorize all currently-selected paths before rebinding
         for sid in self._selected_source_ids:
-            source = next((s for s in self._sources if s.id == sid), None)
+            source = self._working.get(sid) if self._working is not None else None
             if source:
                 self._deauthorize_source_path(source)
 
@@ -5614,65 +5500,65 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if self._plugin_registry:
             self._plugin_registry.clear_authorized_paths(self._name)
 
-        # Reload catalog from disk: the workspace root, then bundles and
-        # the user tier.
-        self._reload_catalog(workspace)
-        self._discover_and_load_bundles()
+        self._bind_snapshot(snapshot)
+        self._catalog_loaded = True
 
-        new_ids = set(s.id for s in self._sources)
+        new_ids = self._working.ids()
         added = new_ids - prev_ids
         removed = prev_ids - new_ids
 
-        # Restore selections that still exist in the reloaded catalog
+        # Restore selections that still exist in the new snapshot
         surviving_selected = [sid for sid in prev_selected if sid in new_ids]
         dropped_selected = [sid for sid in prev_selected if sid not in new_ids]
         self._selected_source_ids = surviving_selected
 
         # Re-authorize paths for surviving selections
         for sid in surviving_selected:
-            source = next((s for s in self._sources if s.id == sid), None)
+            source = self._working.get(sid)
             if source:
                 self._authorize_source_path(source)
 
         # Re-apply transitive resolution for surviving selections
-        self._transitive_parent_map = {}
-        self._transitive_notification_pending = False
-        if self._transitive_enabled and surviving_selected:
-            full_catalog = {s.id: s for s in self._sources}
-            all_resolved, transitive_parent_map = self._resolve_transitive_references(
-                surviving_selected, full_catalog
-            )
-            self._transitive_parent_map = transitive_parent_map
-            if transitive_parent_map:
-                self._transitive_notification_pending = True
-
-            current_source_ids = {s.id for s in self._sources}
-            for ref_id in all_resolved:
-                if ref_id not in self._selected_source_ids:
-                    self._selected_source_ids.append(ref_id)
-                if ref_id not in current_source_ids and ref_id in full_catalog:
-                    source = full_catalog[ref_id]
-                    self._resolve_source_for_context(source)
-                    self._sources.append(source)
-                    current_source_ids.add(ref_id)
-                # Authorize transitively added sources
-                src = next((s for s in self._sources if s.id == ref_id), None)
-                if src and ref_id not in surviving_selected:
-                    self._authorize_source_path(src)
-
+        self._reapply_transitive(surviving_selected)
         self._reattach_matchers()
 
         self._trace(
-            f"references reload: sources={len(self._sources)}, "
+            f"references reload: sources={len(self._working)}, "
             f"added={len(added)}, removed={len(removed)}, "
             f"selected={len(self._selected_source_ids)} "
             f"(dropped {len(dropped_selected)} stale selections)"
         )
+        return self._reload_result(added, removed, dropped_selected)
 
+    def _reapply_transitive(self, surviving_selected: List[str]) -> None:
+        """Walk the surviving selections again over the new snapshot."""
+        self._transitive_parent_map = {}
+        self._transitive_notification_pending = False
+        if not (self._transitive_enabled and surviving_selected):
+            return
+        full_catalog = {s.id: s for s in self._working}
+        all_resolved, transitive_parent_map = self._resolve_transitive_references(
+            surviving_selected, full_catalog
+        )
+        self._transitive_parent_map = transitive_parent_map
+        if transitive_parent_map:
+            self._transitive_notification_pending = True
+
+        for ref_id in all_resolved:
+            if ref_id not in self._selected_source_ids:
+                self._selected_source_ids.append(ref_id)
+            # Authorize transitively added sources
+            src = self._working.get(ref_id)
+            if src and ref_id not in surviving_selected:
+                self._authorize_source_path(src)
+
+    def _reload_result(self, added: Set[str], removed: Set[str],
+                       dropped_selected: List[str]) -> Dict[str, Any]:
+        """The ``references reload`` answer: totals and what changed."""
         result: Dict[str, Any] = {
             "status": "reloaded",
-            "total_sources": len(self._sources),
-            "message": f"Reloaded {len(self._sources)} reference(s) from disk.",
+            "total_sources": len(self._working),
+            "message": f"Reloaded {len(self._working)} reference(s) from disk.",
         }
         if added:
             result["added"] = sorted(added)
@@ -6596,7 +6482,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         Returns:
             The ``ReferenceSource`` if found, ``None`` otherwise.
         """
-        return next((s for s in self._sources if s.id == ref_id), None)
+        return self._source(ref_id)
 
     def file_belongs_to_reference_with_templates(
         self, file_path: str
@@ -6835,7 +6721,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     # triggered the match for each source.
                     hint_lines = []
                     for source_id, tags in matched_sources.items():
-                        source = next(s for s in self._sources if s.id == source_id)
+                        source = self._source(source_id)
                         hint_lines.append(
                             f"- @{source_id}: {source.name} (matched: {', '.join(tags)})"
                         )
@@ -6902,9 +6788,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
                 hint_lines = []
                 for match in semantic_matches:
-                    source = next(
-                        (s for s in self._sources if s.id == match.source_id), None
-                    )
+                    source = self._source(match.source_id)
                     if source:
                         hint_lines.append(
                             f"- @{match.source_id}: {source.name} "
@@ -6941,7 +6825,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             hint_lines = []
             for tid, parents in self._transitive_parent_map.items():
                 parent_refs = ", ".join(f"@{p}" for p in sorted(parents))
-                source = next((s for s in self._sources if s.id == tid), None)
+                source = self._source(tid)
                 name = source.name if source else tid
                 hint_lines.append(f"- @{tid}: {name} (from {parent_refs})")
 
@@ -6983,8 +6867,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
     # Public API for programmatic access
 
     def get_sources(self) -> List[ReferenceSource]:
-        """Get all configured reference sources."""
-        return self._sources.copy()
+        """Get all configured reference sources, as a new list the caller owns."""
+        return list(self._sources)
 
     def get_selected_ids(self) -> List[str]:
         """Get IDs of selected sources (includes pre-selected and user-selected)."""

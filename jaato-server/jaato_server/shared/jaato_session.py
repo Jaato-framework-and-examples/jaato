@@ -4479,6 +4479,7 @@ class JaatoSession:
             suppress_constants=suppress_constants,
             pinned_references=getattr(self, '_pinned_references', {}),
             preloaded_plugins=getattr(self, '_preloaded_plugins', set()),
+            plugin_names=getattr(self, '_tool_plugins', None),
         )
         # Record deferred-plugin names only when there are any — matches
         # the original, which touched this attr solely inside the

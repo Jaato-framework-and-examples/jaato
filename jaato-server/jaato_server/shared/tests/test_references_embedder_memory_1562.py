@@ -214,6 +214,11 @@ class TestSessionEnables:
                          **{SESSION_ENABLES_PLUGIN_KEY: False})
         assert factory["built"] == []
         assert plugin._embedding_provider is None
+        # The catalog is deferred too; a first read loads it, and the
+        # matchers re-attached after it still do not load the model.
+        assert plugin._bundles
+        plugin._reattach_matchers()
+        assert factory["built"] == []
         # Deferral, not refusal: a caller that needs vectors still gets them.
         assert plugin.embed_texts(["x"])["ok"]
         assert _loads(factory) == 1

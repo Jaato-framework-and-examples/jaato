@@ -11,9 +11,9 @@ plugin.
 Part ``snapshot`` (step 1, the seam with a full reload), per size, in a fresh
 process:
 
-- ``load_*``: the real plugin's full load, split into the parse
-  (``_reload_catalog`` + ``_discover_and_load_bundles``) and the rest of
-  ``_reload_from_disk`` (selections, authorizations, matchers);
+- ``load_*``: the real plugin's full load, split into the parse (the
+  store's ``reload()``; ``_reload_catalog`` + ``_discover_and_load_bundles``
+  before the store existed) and the whole ``_reload_from_disk``;
 - ``index_*``: building a snapshot's indexes over the loaded list (by-id
   dict, per-bundle index, ``LinkIndex``), and the memory they add
   (``tracemalloc``, over objects the list already holds);
@@ -34,7 +34,10 @@ Part ``derive`` (step 2, the next generation built from the previous one):
 - ``full_reload_<case>_s``: the plugin's ``_reload_from_disk`` on the same
   change, for comparison;
 - ``derive_<case>_equal``: G+1 has the same ids, and the same parsed
-  entries, as a full reload of the same disk.
+  entries, as a full reload of the same disk;
+- ``store_derive_<case>_ms`` / ``store_derive_<case>_equal``: the same, for
+  the store's own derivation (``ReferenceStore._derive``, median of 5 from
+  the same G), once it was built.
 
 The prototype's per-file parse mirrors the body of the loop in
 ``config_loader.discover_references`` (``ReferenceSource.from_dict`` and the
@@ -109,8 +112,8 @@ class Snapshot:
 def _parse_one(plugin, path: Path, bundle_name: str, project_root: str):
     """The loop body of ``discover_references`` for one bundle file.
 
-    ``_discover_and_load_bundles`` does not pass bundle references through
-    ``_resolve_source_for_context`` (only the root bundle's do), so neither
+    A bundle reference's path is not resolved for the session at load
+    (only the root's are: ``store._append_bundle_sources``), so neither
     does this.
     """
     from jaato_server.shared.path_utils import normalize_path
@@ -219,8 +222,7 @@ def measure(ws: Path) -> Dict[str, Any]:
     out["loaded_sources"] = n
 
     def parse_half():
-        plugin._reload_catalog(str(ws))
-        plugin._discover_and_load_bundles()
+        plugin._store.reload()
     _, dt = _timed(parse_half)
     out["load_parse_s"] = round(dt, 2)
     _, dt = _timed(plugin._reload_from_disk)
@@ -255,7 +257,8 @@ def measure(ws: Path) -> Dict[str, Any]:
     dirs = _bundle_dirs(ws)
     selected = sorted(snap.by_id)[:: max(1, len(snap.by_id) // 25)][:25]
     for step, (case, count) in enumerate(CASES):
-        watched = list(plugin._catalog_watch)
+        g = plugin._store.current(refresh=False)
+        watched = list(plugin._snapshot.watch)
         before = catalog_watch.stat_paths(watched)
         _apply(ws, case, count, step)
         now, dt = _timed(catalog_watch.stat_paths, watched)
@@ -269,10 +272,16 @@ def measure(ws: Path) -> Dict[str, Any]:
         out[f"derive_{case}_mem_kb"] = round(tracemalloc.get_traced_memory()[0] / 1024)
         tracemalloc.stop()
         del again
+        store_runs = [_timed(plugin._store._derive, g) for _ in range(5)]
+        stored = store_runs[-1][0]
+        out[f"store_derive_{case}_ms"] = round(statistics.median(r[1] for r in store_runs) * 1000, 1)
+        del store_runs
         _, dt = _timed(plugin._reload_from_disk)
         out[f"full_reload_{case}_s"] = round(dt, 2)
         full = {s.id: s.to_dict() for s in plugin._sources}
         out[f"derive_{case}_equal"] = full == {i: s.to_dict() for i, s in nxt.by_id.items()}
+        out[f"store_derive_{case}_equal"] = full == {i: s.to_dict() for i, s in stored.by_id.items()}
+        del stored
         snap = nxt
     return out
 

@@ -5790,8 +5790,9 @@ claim, and then had it nowhere.
 Every read path the model reaches now refreshes first:
 `listReferences`, `selectReferences`, `proposeReference` (its collision
 check) and `enrich_prompt` (the turn boundary). The check is one `stat` per
-watched path, and a reload runs only when one moved
-(`references/catalog_watch.py`, stdlib only).
+watched path, and only when one moved is the next generation built, from
+the current one (`references/catalog_watch.py`, stdlib only; see [One
+Catalog per Process](#one-catalog-per-process-references-scaling-phase-1)).
 
 | Watched | Why it is enough |
 |---|---|
@@ -5804,7 +5805,7 @@ watched path, and a reload runs only when one moved
 | **one reload path** (`_reload_from_disk`, shared with `references reload`) | it now includes the bundle half: `references reload` used to reload the workspace root alone, dropping every sub-bundle and user-tier reference, and did not re-attach similarity matchers |
 | **a write racing the load is not lost** | `settle` stores a path as `UNSETTLED` (equal to no stamp, so the next check reloads) when it moved between the snapshots taken before and after the load, or its mtime is within 2 s of the snapshot. The second is git's "racily clean" rule: a kernel stamps mtimes from a coarse clock, so a write in the same tick leaves the mtime unchanged |
 | **a dropped selection is said, not hidden** | a selected reference that left the catalog is deauthorized and reported once, as `catalog_changed: {added, removed, dropped_selected, note}` on the next references result, and at the turn boundary as a `⟦JAATO⟧` note naming it |
-| **inline `sources` are never refreshed** | a reload reads disk, which would replace them |
+| **inline `sources` refresh too** | a rebind keeps the session's narrowing (inline sources, plus the catalog references it selected), so reading disk no longer replaces them |
 | **opt-out** | `plugin_configs.references.refresh_catalog: false` keeps the load-once snapshot |
 
 No daemon push: every read path checks, so no write can be missed by a
@@ -5951,6 +5952,44 @@ of them first-use imports. Not done: the directory scan
 constructs every plugin.
 
 Guard: `jaato_server/shared/tests/test_daemon_registry_is_a_mirror_1566.py`,
+ten reversions.
+
+### One Catalog per Process (references scaling, phase 1)
+
+Every holder of the references catalog loaded and kept its own copy: the
+daemon's mirror registry builds one plugin per session, so at 10,000
+references each `session.new` grew the daemon by about 25 MB, for profiles
+that do not list `references` too, and took 9-25 s.
+`references/store.py` replaces the plugin's private list with three parts
+([Scaling the References Store](docs/design/references-storage-scaling.md),
+phase 1):
+
+| Part | What it is | Held by |
+|---|---|---|
+| `ReferenceStore` | the catalog for one `CatalogKey` (workspace, project root, `config_root`, `references.json` candidates, user home), via `store_for` | one per key per process (`WeakValueDictionary`) |
+| `CatalogSnapshot` | one load, immutable: `sources`, `by_id`, `by_bundle` and `links` (built on first use), `units`, `watch` | the store by `weakref`; each plugin keeps the one it reads |
+| `WorkingSet` | what one session sees: the whole snapshot (no copy), or a narrowed list (inline `sources` plus what it selected) | the plugin, per session |
+
+| Rule | Why |
+|---|---|
+| **a snapshot is never edited** | it is shared by every session of the key; a path resolved for one session is set on a copy (`_resolved_for_session`) |
+| **no eviction policy** | the last holder letting go frees it: a session unloading in the daemon, `reset_for_next_session` / `shutdown` in a runner |
+| **the next generation is derived** | a stale snapshot is followed by one built from it: files whose stamp moved are parsed again, a directory whose listing changed is listed again, the rest is shared. A `references.json`, a bundle manifest or embedding config, a sub-bundle added or removed, or a path no unit holds is a full load. Both go through `ReferenceStore._publish`, and the parse is the loader's own (`parse_reference_file`), so a derived snapshot equals a full load of the same disk |
+| **a session that does not enable the plugin loads nothing** | with `SESSION_ENABLES_PLUGIN_KEY` false the load is deferred to the first read (`_ensure_catalog`), which is a load, never a refusal |
+| **the prompt and the budget read one plugin set** | `jaato_runtime.instruction_plugin_names()`. The budget used to walk every exposed plugin, which counted instructions the request never carries and loaded the catalog to produce them; and the runtime built every plugin's instructions at `configure_plugins` for a cache nothing read |
+| **a lookup is a dict lookup** | `plugin._source(id)` / `WorkingSet.get`; a linear scan cost 7 ms per lookup at 100k |
+
+Measured at 10,000 references (`scripts/bench_references_snapshot.py`):
+daemon growth per session 25 MB -> about 5 MB without `references` and 7-13
+MB with it; `session.new` 9-25 s -> 3.2-5.0 s without it (one load per
+runner remains with it). A change on disk: 146-178 ms derived against 2.3 s
+for a full reload, most of it stamping every watched path before and after,
+which phase 2's generation counter removes. What makes up the remaining
+~5 MB per session in the daemon is not yet measured.
+
+Not done: the daemon's readers (`reference_catalog.py`,
+`reference_curation.py`, `claims.py`) still walk the files themselves.
+Guard: `shared/tests/test_a_catalog_snapshot_is_shared_and_never_edited.py`,
 ten reversions.
 
 ### Three Startup Costs Paid for Nothing (#1690, #1691, #1689)
@@ -15749,7 +15788,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Jaato vs. Pi Durable](docs/design/compare-jaato-pi-durable.md) - What Earendil's durable agent harness (per-step checkpoints, crash resume, per-tool `replay` semantics, conversation forks, hot extension updates) has that jaato lacks: nothing worth adopting. Crash recovery is the interrupted-turn record plus `_recover_interrupted_turn`; continuing after a crash is a cascade driver's `session.wake`; forking is `create_headless_session(initial_history=, initial_session_state=)`; residency and isolation are ahead. Records why the `replay` trait and hot plugin swapping were considered and rejected.
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
-- [Scaling the References Store](docs/design/references-storage-scaling.md) - Proposed, unmeasured: keep the reference files as the source of truth (confinement grants, curation, provenance and review all assume them) and add a derived, rebuildable index only where measurement shows the files are the bottleneck. Phase 0 benchmarks 1k/10k/100k catalogs on a real host; phase 1 routes reads through one `ReferenceStore` seam; phase 2 fixes the per-call costs (a catalog generation counter instead of a stat per file, link/tag indexes cached per generation, a paged `listReferences`); phase 3 is a daemon-built, runner-read SQLite index (FTS5, links, vectors) under `.jaato/.cache/`; phase 4, a server-backed store, only for multi-host or many-curator wikis.
+- [Scaling the References Store](docs/design/references-storage-scaling.md) - Phase 0 measured, phase 1 built (see [One Catalog per Process](#one-catalog-per-process-references-scaling-phase-1)), later phases proposed: keep the reference files as the source of truth (confinement grants, curation, provenance and review all assume them) and add a derived, rebuildable index only where measurement shows the files are the bottleneck. Phase 0 benchmarks 1k/10k/100k catalogs on a real host; phase 1 routes reads through one `ReferenceStore` seam; phase 2 fixes the per-call costs (a catalog generation counter instead of a stat per file, link/tag indexes cached per generation, a paged `listReferences`); phase 3 is a daemon-built, runner-read SQLite index (FTS5, links, vectors) under `.jaato/.cache/`; phase 4, a server-backed store, only for multi-host or many-curator wikis.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [Decision Models (System One)](docs/design/decision-models.md) - Rollout steps 1-10 shipped (the `decisions` output modality, `OpenRouterProvider.decide()`, the `decision_models:` profile block with `JaatoSession.decision_provider(name)` and the startup refusal of a tier bound to a decision model, the `decision` plugin's `decide` tool, the permission gate `plugin_configs.permission.decision_gate` with `PolicyDecision.ASK`, the `laya` provider over `laya-serve` or in-process, and the `typesafe` provider on TypeSafe's own API, knob-first key, and on it still images in `assets` behind `{{image:NAME}}` plus the `box` question, checked locally and declared by the `decision_images` capability, and the `decide` tool's `images` naming a workspace path or a history attachment id, with `box_px` on a `box` answer, and images and `box` through OpenRouter for Jev models as `image_url` parts, offered per model): support for non-conversational decision models (TypeSafe Jev, Laya) that take a state and typed questions (`noul` / `choice` / `score`) and return calibrated probabilities. `decisions` becomes an OUTPUT modality (OpenRouter's catalog already reports `text->decisions` for `typesafe/jev-1.13`), detected per model; a decisions-only model is served by a separate `provider.decide()` call to the decision endpoint (`/api/alpha/decisions` on OpenRouter), never by `complete()`, and is bound in a `decision_models:` block outside the tier ladder. First consumers: a `decide` tool and a permission gate that maps the probability onto ALLOW / ASK / DENY.

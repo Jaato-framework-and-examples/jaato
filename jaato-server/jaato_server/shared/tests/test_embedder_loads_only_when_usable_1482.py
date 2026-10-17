@@ -221,8 +221,7 @@ class TestDeferredLoad:
         plugin = _plugin(ws, "hybrid")
         assert factory["built"] == []
         _add_index(ws / ".jaato" / "references")
-        plugin._discover_and_load_bundles()
-        plugin._reattach_matchers()
+        plugin._reload_from_disk()
         assert len(factory["built"]) == 1
         assert plugin._embedding_provider is not None
 
