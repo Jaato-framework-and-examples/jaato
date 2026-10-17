@@ -162,7 +162,6 @@ class TestRuntimeAssemblyGating:
         from jaato_server.shared.jaato_runtime import JaatoRuntime
         rt = JaatoRuntime.__new__(JaatoRuntime)
         rt._registry = None
-        rt._system_instructions = None
         rt._permission_plugin = None
         rt._formatter_pipeline = None
         rt.get_base_system_instructions = lambda: "BASE DISK LAYER"

@@ -17,6 +17,13 @@ session whose profile does not list ``references``. Pinned here:
    refused one).
 5. A write made through one holder reaches another on its next read.
 6. A by-id lookup is a dict lookup, not a scan of the catalog.
+7. Configuring a runtime does not load a deferred catalog: the runtime
+   used to build every exposed plugin's system instructions at
+   ``configure_plugins`` and cache a value only a registry-less runtime
+   could read, so the deferral never held.
+8. A session whose profile does not list ``references`` neither counts its
+   instructions in the budget nor loads its catalog for them: the budget
+   reads the plugin set the prompt reads.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from jaato_server.shared.tests.reversion import Reversion
 
 _PLUGIN = "jaato-server/jaato_server/shared/plugins/references/plugin.py"
 _STORE = "jaato-server/jaato_server/shared/plugins/references/store.py"
+_RUNTIME = "jaato-server/jaato_server/shared/jaato_runtime.py"
 
 REVERSIONS = [
     Reversion(
@@ -100,6 +108,30 @@ REVERSIONS = [
             "reference another session wrote never reaches it"
         ),
         test="TestAWriteReachesTheOtherHolder::test_the_other_session_sees_it",
+    ),
+    Reversion(
+        target=_RUNTIME,
+        find="        # Get auto-approved tools from plugins\n",
+        replace=(
+            "        self._registry.get_system_instructions()\n"
+            "        # Get auto-approved tools from plugins\n"
+        ),
+        because=(
+            "configuring the runtime would ask every exposed plugin for its "
+            "instructions, and the references plugin builds them from its "
+            "catalog, so a deferred catalog loads at every session start"
+        ),
+        test="TestConfiguringARuntime::test_it_loads_no_deferred_catalog",
+    ),
+    Reversion(
+        target="jaato-server/jaato_server/shared/instruction_budget_builder.py",
+        find="        for plugin_name in instruction_plugin_names(runtime.registry, plugin_names):\n",
+        replace="        for plugin_name in runtime.registry._exposed:\n",
+        because=(
+            "the budget would count, and so load, the instructions of every "
+            "exposed plugin, including ones the session's prompt never carries"
+        ),
+        test="TestTheBudgetCountsWhatIsSent::test_an_unlisted_plugin_is_not_counted",
     ),
 ]
 
@@ -260,3 +292,48 @@ class TestALookupIsADictLookup:
 
         plugin._snapshot.sources = NoIteration(plugin._snapshot.sources)
         assert plugin._source("ref-2").id == "ref-2"
+
+
+class TestConfiguringARuntime:
+    def test_it_loads_no_deferred_catalog(self, tmp_path):
+        from jaato_server.shared.jaato_runtime import JaatoRuntime
+        from jaato_server.shared.plugins.references.plugin import ReferencesPlugin
+        from jaato_server.shared.plugins.registry import PluginRegistry
+
+        ws = _catalog(3, tmp_path)
+        registry = PluginRegistry()
+        registry.set_workspace_path(str(ws))
+        registry.set_session_plugins(["cli"])
+        plugin = ReferencesPlugin()
+        registry.register_plugin(plugin, expose=True, config={
+            "workspace_path": str(ws), "lookup_strategy": "tags_only"})
+        assert plugin._catalog_loaded is False
+
+        JaatoRuntime(provider_name="echo", workspace_path=ws).configure_plugins(registry)
+
+        assert plugin._catalog_loaded is False
+
+
+class TestTheBudgetCountsWhatIsSent:
+    def test_an_unlisted_plugin_is_not_counted(self, tmp_path):
+        from jaato_server.shared.jaato_runtime import JaatoRuntime
+        from jaato_server.shared.jaato_session import JaatoSession
+        from jaato_server.shared.plugins.references.plugin import ReferencesPlugin
+        from jaato_server.shared.plugins.registry import PluginRegistry
+
+        ws = _catalog(3, tmp_path)
+        registry = PluginRegistry()
+        registry.set_workspace_path(str(ws))
+        registry.set_session_plugins(["cli"])
+        plugin = ReferencesPlugin()
+        registry.register_plugin(plugin, expose=True, config={
+            "workspace_path": str(ws), "lookup_strategy": "tags_only"})
+        runtime = JaatoRuntime(provider_name="echo", workspace_path=ws)
+        runtime.configure_plugins(registry)
+
+        session = JaatoSession(runtime, "test-model", agent_id="main")
+        session.configure(skip_provider=True, plugins=["cli"])
+        counted = {r.child_key for r in session._collect_instruction_texts(None)}
+
+        assert "references" not in counted
+        assert plugin._catalog_loaded is False

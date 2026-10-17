@@ -207,7 +207,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/completion_processors.py::invoke_processors": 18,
     "jaato-server/jaato_server/shared/event_bus_tools.py::_format_event_notification": 18,
     "jaato-server/jaato_server/shared/instruction_budget_builder.py::collect_instruction_texts": 28,
-    "jaato-server/jaato_server/shared/jaato_runtime.py::JaatoRuntime._cache_tool_configuration": 26,
+    "jaato-server/jaato_server/shared/jaato_runtime.py::JaatoRuntime._cache_tool_configuration": 19,
     "jaato-server/jaato_server/shared/jaato_runtime.py::JaatoRuntime.get_system_instructions": 27,
     "jaato-server/jaato_server/shared/jaato_runtime.py::JaatoRuntime.get_tool_schemas": 16,
     "jaato-server/jaato_server/shared/jaato_session.py::JaatoSession._execute_function_calls_parallel": 20,

@@ -157,24 +157,41 @@ from .premium_content import (  # noqa: E402,F401
 )
 
 
-def _get_sandbox_guidance() -> Optional[str]:
-    """Get sandbox guidance if workspace is configured.
+#: Plugins every session gets whatever its profile lists.  Only
+#: ``introspection`` (``list_tools`` / ``get_tool_schemas``, which deferred
+#: tool loading depends on); every other plugin comes from the profile's
+#: list, which is authoritative.
+ESSENTIAL_PLUGINS = ("introspection",)
 
-    Returns sandbox awareness instructions if a workspace root is set,
-    informing the model about path restrictions.
+
+def instruction_plugin_names(
+    registry: Optional['PluginRegistry'],
+    plugin_names: Optional[List[str]],
+) -> List[str]:
+    """The plugins whose system instructions a session receives.
+
+    The one definition read by both the prompt
+    (:meth:`JaatoRuntime.get_system_instructions`) and the instruction
+    budget (:func:`instruction_budget_builder.collect_instruction_texts`),
+    so the budget counts the plugin text the request carries and no other.
+    Before they shared it, the budget walked every exposed plugin, so it
+    counted the instructions of plugins the profile does not list, and
+    asking them loaded their state (the references catalog) for sessions
+    that never use it.
+
+    ``plugin_names`` is the session's ``plugins:`` list.  ``None`` means the
+    session has no list (embedded, profile-less) and gets every exposed
+    plugin, which is what the registry's own combined instructions walk.
+    Otherwise the list plus :data:`ESSENTIAL_PLUGINS`.  Deferral (a plugin
+    with no core tools) and preloading are each caller's filter on top.
     """
-    from jaato_server.shared.session_context import get_workspace_root
-    workspace = get_workspace_root() or os.environ.get('workspaceRoot')  # env: workspace root hint (VS Code-style) fallback when session context has none
-    if not workspace:
-        return None
-
-    return (
-        f"SANDBOX ENVIRONMENT: You are operating in a sandboxed workspace. "
-        f"File operations (read, write, glob, grep, cli) are restricted to: {workspace}\n"
-        f"- Paths outside the workspace will be rejected\n"
-        f"- Use relative paths or absolute paths within the workspace\n"
-        f"- The .jaato/ directory may reference external configuration"
-    )
+    if plugin_names is None:
+        return list(registry._exposed) if registry else []
+    names = list(plugin_names)
+    for name in ESSENTIAL_PLUGINS:
+        if name not in names:
+            names.append(name)
+    return names
 
 
 #: How the common ``cache:`` profile field reaches each provider's own
@@ -550,7 +567,6 @@ class JaatoRuntime:
         # Tool configuration cache (built from registry)
         self._all_tool_schemas: Optional[List[ToolSchema]] = None
         self._all_executors: Optional[Dict[str, Callable]] = None
-        self._system_instructions: Optional[str] = None
         self._auto_approved_tools: List[str] = []
 
         # AppArmor confine-context factory (server 0.6.50+).  Set by
@@ -1145,27 +1161,6 @@ class JaatoRuntime:
             for name, fn in self._reliability_plugin.get_executors().items():
                 self._all_executors[name] = fn
 
-        # Build system instructions
-        parts = []
-
-        # Core framework instructions (sandbox, parallel tools)
-        sandbox_guidance = _get_sandbox_guidance()
-        if sandbox_guidance:
-            parts.append(sandbox_guidance)
-
-        registry_instructions = self._registry.get_system_instructions()
-        if registry_instructions:
-            parts.append(registry_instructions)
-        if self._permission_plugin:
-            perm_instructions = self._permission_plugin.get_system_instructions()
-            if perm_instructions:
-                parts.append(perm_instructions)
-        if self._reliability_plugin:
-            reliability_instructions = self._reliability_plugin.get_system_instructions()
-            if reliability_instructions:
-                parts.append(reliability_instructions)
-        self._system_instructions = "\n\n".join(parts) if parts else None
-
         # Get auto-approved tools from plugins
         self._auto_approved_tools = self._registry.get_auto_approved_tools()
 
@@ -1743,15 +1738,9 @@ class JaatoRuntime:
         Returns:
             Plugin list with ``introspection`` added (if not already present).
         """
-        result = list(plugin_names)
+        result = instruction_plugin_names(self._registry, plugin_names)
 
-        # Only introspection is unconditionally essential (needed for deferred
-        # tool discovery).  Other core plugins are NOT auto-added — the
-        # profile's plugin list takes precedence.
-        essential = ["introspection"]
-        for name in essential:
-            if name not in result:
-                result.append(name)
+        for name in ESSENTIAL_PLUGINS:
             # Ensure the essential plugin is exposed in the registry
             if self._registry and name not in self._registry._exposed:
                 try:
@@ -1901,7 +1890,12 @@ class JaatoRuntime:
 
         Args:
             plugin_names: Optional list of plugin names to include.
-                         If None, returns full cached system instructions.
+                         If None, returns every exposed plugin's
+                         instructions, built from the registry on this
+                         call (nothing is cached at configure time: a
+                         build there loaded plugin state, such as the
+                         references catalog, for sessions that never
+                         read it).
             additional: Optional additional instructions to prepend.
             presentation_context: Optional client display context.  When
                 provided, a compact display-constraint block is appended so
@@ -1938,7 +1932,7 @@ class JaatoRuntime:
                     skip_discoverable_only=deferred_enabled,
                 )
             else:
-                plugin_instructions = self._system_instructions
+                plugin_instructions = None
         else:
             # Add essential plugins (introspection) when deferred tools is enabled
             effective_plugins = self._get_essential_plugins(plugin_names)
