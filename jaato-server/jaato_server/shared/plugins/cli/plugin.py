@@ -241,7 +241,7 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
             return resolved
 
         # Priority 2: workspaceRoot (from .env)
-        workspace = os.environ.get('workspaceRoot')
+        workspace = os.environ.get('workspaceRoot')  # env: workspace root hint (VS Code-style) fallback when session context has none
         if workspace:
             resolved = os.path.realpath(os.path.abspath(workspace))
             self._trace(f"_detect_workspace_root: using workspaceRoot={resolved}")
