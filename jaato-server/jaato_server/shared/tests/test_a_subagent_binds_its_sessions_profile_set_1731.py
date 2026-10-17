@@ -1,34 +1,29 @@
-"""A subagent resolves its profile in the parent session's profile set (#1731).
+"""A subagent's profile key: the right file, and a loud empty answer (#1731).
 
-Reported as "a subagent's provider gets an empty api_key".  The child
-profile ``openrouter/documentalista`` carried
-``plugin_configs.openrouter.api_key: pass://...``, the runner held the
-daemon-resolved value for that URI (#1605), and the provider still said
-``plugin_configs.openrouter.api_key (profile): not set``.
+Reported as "a subagent's provider gets an empty api_key": the child profile
+carried ``plugin_configs.openrouter.api_key: pass://...``, and the provider
+said ``plugin_configs.openrouter.api_key (profile): not set``.  Two defects
+on that path, guarded here.  Which one the reporter hit is not settled: on
+their host the set's file WAS the one discovered, so the first does not
+explain their report, and the second is what makes the next run say.
 
-The credential was never lost: the PROFILE was the wrong one.  A session
-created from a qualified ``<set>/<name>`` ref (#1588) runs with no
-``JAATO_PROFILE_SET``, so the runner's subagent plugin discovered profiles
-outside the set and ``spawn_subagent(profile="documentalista")`` bound the
-flat ``profiles/documentalista``: no provider (the child took the
-parent's, ``openrouter``) and no ``plugin_configs.openrouter``.  The
-provider then found no key anywhere, which is exactly the end state the
-issue measured.
+1. The wrong FILE.  A session created from a qualified ``<set>/<name>``
+   ref (#1588) runs with no ``JAATO_PROFILE_SET``, so the runner's subagent
+   plugin discovered profiles outside the set and a same-named flat profile
+   (no provider, no ``plugin_configs.<provider>``) bound instead.  The
+   daemon now derives the set from the ref (``server._profile_set``, on
+   creation and on a revive), ships it as
+   ``plugin_configs.subagent.profile_set``, both discoveries scan it, and a
+   later discovery replaces what the first found instead of only adding.
 
-Four pieces, each guarded:
-
-* the daemon derives the set from the session's qualified ref
-  (``server._profile_set``, on creation and on a revive);
-* ``build_session_envelope`` hands it to the runner as
-  ``plugin_configs.subagent.profile_set``;
-* the subagent plugin's discovery scans that set first;
-* a later discovery (``set_config_root``, which knows the config root)
-  REPLACES what the first one found, instead of only adding names, so a
-  profile read before the config root was known cannot shadow the
-  workspace set's file.
-
-Plus the diagnostic the issue asked for: one INFO line per spawn naming
-the file the profile was read from and the KEYS of its provider section.
+2. An EMPTY answer passed on as a key.  A secret resolver (or the
+   inherited map) answering ``""`` / ``None`` became an empty ``api_key``
+   that ``create_provider`` silently did not promote, so the provider's
+   "not set" could not be told from a profile that declared no key.  Both
+   resolution routes and the provider boundary now refuse it by name, and
+   the spawn's INFO line marks each provider key ``<empty>``, and a secret
+   URI ``inherited`` (answered by the daemon's map, #1605) or
+   ``resolved-here`` (the runner asked a resolver itself).
 """
 
 from __future__ import annotations
@@ -54,6 +49,8 @@ from jaato_server.shared.tests.reversion import Reversion
 _PLUGIN = "jaato-server/jaato_server/shared/plugins/subagent/plugin.py"
 _SPAWN = "jaato-server/jaato_server/server/runner_spawn.py"
 _SM = "jaato-server/jaato_server/server/session_manager.py"
+_CFG = "jaato-server/jaato_server/shared/plugins/subagent/config.py"
+_RT = "jaato-server/jaato_server/shared/jaato_runtime.py"
 
 REVERSIONS = [
     Reversion(
@@ -107,6 +104,41 @@ REVERSIONS = [
         replace="",
         test="TestTheDaemon::test_a_revive_carries_the_ref",
         because="a revived session's subagents resolve outside its set again",
+    ),
+    Reversion(
+        target=_CFG,
+        find=(
+            "    resolved = _non_empty_secret(value, resolved, f\"resolver '{scheme}'\")\n"
+        ),
+        replace="",
+        test="TestAnEmptyAnswer::test_an_empty_resolver_answer_is_refused",
+        because="a resolver answering nothing becomes an empty api_key the "
+                "provider reports as 'not set'",
+    ),
+    Reversion(
+        target=_CFG,
+        find=(
+            "        return _non_empty_secret(value, inherited, \"the value the daemon \"\n"
+            "                                 \"resolved for this session (#1605)\")\n"
+        ),
+        replace="        return inherited\n",
+        test="TestAnEmptyAnswer::test_an_empty_inherited_value_is_refused",
+        because="an empty inherited value becomes an empty api_key",
+    ),
+    Reversion(
+        target=_RT,
+        find="        _refuse_empty_profile_api_key(plugin_configs, effective_provider)\n",
+        replace="",
+        test="TestAnEmptyAnswer::test_a_declared_empty_key_is_named_at_the_provider_boundary",
+        because="a declared key that arrived empty reads as 'not set'",
+    ),
+    Reversion(
+        target=_PLUGIN,
+        find='            how = "inherited" if inherited_secret(raw) is not None else "resolved-here"\n',
+        replace='            how = "inherited"\n',
+        test="TestThePlugin::test_a_spawn_says_the_runner_had_to_resolve_it",
+        because="the spawn line cannot tell an inherited URI from one the "
+                "runner resolved itself",
     ),
     Reversion(
         target=_PLUGIN,
@@ -214,7 +246,7 @@ class TestThePlugin:
         plugin.set_config_root(str(ws / ".jaato"))
         assert plugin._config.get_profile("documentalista").description == "EXPLICIT"
 
-    def test_a_spawn_names_the_file_it_bound(self, ws, caplog, monkeypatch):
+    def _spawn_line(self, ws, caplog, monkeypatch) -> str:
         plugin = _plugin({
             "profiles_dir": str(ws / ".jaato" / "profiles"),
             "profile_set": "openrouter",
@@ -230,9 +262,102 @@ class TestThePlugin:
                  if r.getMessage().startswith("spawn_subagent subagent_1")]
         assert lines, "the spawn never logged what it bound"
         line = lines[0]
-        assert "openrouter/documentalista.yaml" in line
-        assert "plugin_configs.openrouter keys=['api_key']" in line
         assert _URI not in line and "api-key" not in line
+        assert _SECRET not in line
+        return line
+
+    def test_a_spawn_names_the_file_it_bound(self, ws, caplog, monkeypatch):
+        line = self._spawn_line(ws, caplog, monkeypatch)
+        assert "openrouter/documentalista.yaml" in line
+        assert "plugin_configs.openrouter keys=" in line
+
+    def test_a_spawn_says_the_daemon_answered_its_uri(
+            self, ws, caplog, monkeypatch, inherited):
+        inherited({_URI: _SECRET})
+        line = self._spawn_line(ws, caplog, monkeypatch)
+        assert "'api_key=pass:// inherited'" in line
+
+    def test_a_spawn_says_the_runner_had_to_resolve_it(
+            self, ws, caplog, monkeypatch, inherited):
+        # The reporter's open question: a URI the inherited map does not
+        # hold goes to the runner's own resolver.  The line must say so.
+        inherited({"pass://some/other/uri": _SECRET})
+        line = self._spawn_line(ws, caplog, monkeypatch)
+        assert "'api_key=pass:// resolved-here'" in line
+
+
+_SECRET = "sk-or-v1-resolved-on-the-daemon-0123456789"
+
+
+@pytest.fixture
+def inherited():
+    """Install an inherited-secrets map for one test, then clear it."""
+    from jaato_server.shared.plugins.subagent import config as cfg
+    yield cfg.set_inherited_secrets
+    cfg.set_inherited_secrets(None)
+
+
+class TestAnEmptyAnswer:
+    """A declared key that comes out empty is refused by name, never
+    reported as "not set" (#1731)."""
+
+    def test_an_empty_inherited_value_is_refused(self, inherited):
+        from jaato_server.shared.plugins.subagent import config as cfg
+        inherited({_URI: ""})
+        with pytest.raises(cfg.SecretResolutionError, match="daemon resolved"):
+            cfg.expand_plugin_configs({"openrouter": {"api_key": _URI}})
+
+    def test_an_empty_resolver_answer_is_refused(self, inherited):
+        from jaato_server.shared.plugins.subagent import config as cfg
+        inherited(None)
+
+        class _Silent:
+            def resolve(self, scheme, path, key):
+                return ""
+
+        with patch.object(cfg, "_discover_secret_resolvers",
+                          lambda: {"pass": _Silent()}):
+            with pytest.raises(cfg.SecretResolutionError,
+                               match="resolver 'pass' answered with an empty"):
+                cfg.expand_plugin_configs({"openrouter": {"api_key": _URI}})
+
+    def test_a_real_answer_still_resolves(self, inherited):
+        from jaato_server.shared.plugins.subagent import config as cfg
+        inherited({_URI: _SECRET})
+        out = cfg.expand_plugin_configs({"openrouter": {"api_key": _URI}})
+        assert out["openrouter"]["api_key"] == _SECRET
+
+    @staticmethod
+    def _runtime() -> Any:
+        from jaato_server.shared.jaato_runtime import JaatoRuntime
+        from jaato_server.shared.plugins.registry import PluginRegistry
+        rt = JaatoRuntime(provider_name="openrouter")
+        rt.connect("", "")
+        rt.configure_plugins(PluginRegistry())
+        return rt
+
+    def test_a_declared_empty_key_is_named_at_the_provider_boundary(self):
+        from jaato_server.shared.plugins.subagent.config import (
+            SecretResolutionError)
+        with pytest.raises(SecretResolutionError,
+                           match="declares an api_key .* empty"):
+            self._runtime().create_provider(
+                "openai/gpt-4o-mini", provider_name="openrouter",
+                plugin_configs={"openrouter": {"api_key": ""}})
+
+    def test_an_undeclared_key_reaches_the_provider_as_before(self):
+        # Control: no api_key in the profile is the provider's own
+        # "not set", not a resolution failure.
+        from jaato_server.shared.plugins.model_provider.openrouter.errors import (
+            APIKeyNotFoundError)
+        with patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("JAATO_OPENROUTER_API_KEY", None)
+            with patch("jaato_server.shared.plugins.model_provider.openrouter"
+                       ".provider.resolve_api_key", lambda: None):
+                with pytest.raises(APIKeyNotFoundError):
+                    self._runtime().create_provider(
+                        "openai/gpt-4o-mini", provider_name="openrouter",
+                        plugin_configs={"openrouter": {"api_params": {}}})
 
 
 def plugin_logger_name() -> str:

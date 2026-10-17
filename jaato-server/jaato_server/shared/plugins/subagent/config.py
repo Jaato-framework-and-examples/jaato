@@ -500,7 +500,8 @@ def _resolve_secret_uri(
     # parent got, not a second resolution attempt.
     inherited = inherited_secret(value)
     if inherited is not None:
-        return inherited
+        return _non_empty_secret(value, inherited, "the value the daemon "
+                                 "resolved for this session (#1605)")
 
     resolvers = _discover_secret_resolvers()
     resolver = resolvers.get(scheme)
@@ -522,8 +523,26 @@ def _resolve_secret_uri(
         raise
     except Exception as exc:
         raise SecretResolutionError(value, str(exc)) from exc
+    resolved = _non_empty_secret(value, resolved, f"resolver '{scheme}'")
     _note_captured_secret(value, resolved)
     return resolved
+
+
+def _non_empty_secret(uri: str, resolved: Any, source: str) -> str:
+    """*resolved*, refused when it is not a non-empty string (#1731).
+
+    An empty answer is never a credential.  Passed on, it became an empty
+    ``api_key`` that ``create_provider`` does not promote, and the provider
+    then reported the profile's key as "not set" -- the same words it uses
+    for a profile that declared none, so a resolver that answered ``""``
+    (or ``None``) for a URI it could not read looked like a pointer that
+    never arrived.  Refusing here names the URI and who answered.
+    """
+    if isinstance(resolved, str) and resolved:
+        return resolved
+    raise SecretResolutionError(
+        uri, f"{source} answered with an empty value "
+             f"({type(resolved).__name__}); refusing to use it as a secret")
 
 
 def _call_resolver(

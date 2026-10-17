@@ -182,6 +182,31 @@ def _apply_trace_env(profile: Any, saved: Dict[str, Optional[str]]) -> None:
         os.environ[key] = value
 
 
+def _describe_section(
+    expanded: Dict[str, Any], declared: Dict[str, Any],
+) -> List[str]:
+    """The keys of a provider section, each marked with what it holds (#1731).
+
+    Never a value.  ``key=<empty>`` when the expanded value is empty; for a
+    key the profile declared as a secret URI, ``key=<scheme>:// inherited``
+    or ``key=<scheme>:// resolved-here``: whether the daemon-resolved map
+    (#1605) answered it, or the runner had to ask a resolver itself.  A
+    "not set" from the provider then names its cause in the spawn's own line.
+    """
+    from .config import inherited_secret, looks_like_unresolved_secret_uri
+    out = []
+    for key in sorted(expanded):
+        label = key
+        raw = declared.get(key)
+        if isinstance(raw, str) and looks_like_unresolved_secret_uri(raw):
+            how = "inherited" if inherited_secret(raw) is not None else "resolved-here"
+            label = f"{key}={raw.split('://', 1)[0]}:// {how}"
+        if expanded[key] in ("", None):
+            label += " <empty>"
+        out.append(label)
+    return out
+
+
 class SubagentPlugin:
     """Plugin for spawning subagents with specialized tool configurations.
 
@@ -1930,12 +1955,13 @@ class SubagentPlugin:
             "(explicit)" if profile.name in self._explicit_profile_names
             else "(inline)")
         section = plugin_configs.get(provider or "") or {}
+        declared = (profile.plugin_configs or {}).get(provider or "") or {}
         logger.info(
             "spawn_subagent %s: profile '%s' from %s (set=%s); provider=%s; "
             "plugin_configs.%s keys=%s",
             agent_id, profile.name, source,
             self._config.profile_set if self._config else None,
-            provider, provider, sorted(section),
+            provider, provider, _describe_section(section, declared),
         )
 
     def _merge_discovered_profiles(self, discovery: Any) -> int:
