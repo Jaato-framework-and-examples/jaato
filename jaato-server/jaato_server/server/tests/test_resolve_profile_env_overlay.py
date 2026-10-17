@@ -186,7 +186,7 @@ class TestEnvFileOverlay:
             model="from-resolved-set",
         )
 
-        def _stub_resolve_secret_uri(value, *_args, **_kwargs):
+        def _stub_resolve_secret_uri(value):
             if isinstance(value, str) and value.startswith("pass://"):
                 return "resolved_set"
             return value

@@ -11168,7 +11168,7 @@ none.
 
 | Piece | Where |
 |---|---|
-| an empty answer from a resolver or from the inherited map, for a value a profile or `.env` declares, is a `SecretResolutionError` naming the URI and who answered. A direct caller of `_resolve_secret_uri` still gets the empty answer (`service_connector` turns it into its #1188 hint) | `subagent/config.py::_non_empty_secret`, `expand_variables` passes `refuse_empty=True` |
+| an empty answer from a resolver or from the inherited map, for a value a profile or `.env` declares, is a `SecretResolutionError` naming the URI and who answered. A direct caller of `_resolve_secret_uri` still gets the empty answer (`service_connector` turns it into its #1188 hint) | `subagent/config.py::_refuse_empty_answer`, applied by `_expand_string` |
 | a profile `api_key` that is declared but empty when the provider is created is refused by name | `jaato_runtime._refuse_empty_profile_api_key` |
 | one INFO line per in-process spawn: the file the profile was read from, the set, the provider, and each key of its `plugin_configs` section (never a value), marked `<empty>`, and for a secret URI `inherited` (the daemon's map answered it) or `resolved-here` (the runner asked a resolver itself) | `SubagentPlugin._log_spawn_binding`, `_describe_section` |
 

@@ -107,23 +107,19 @@ REVERSIONS = [
     ),
     Reversion(
         target=_CFG,
-        find=(
-            "    resolved = _non_empty_secret(value, resolved, f\"resolver '{scheme}'\")\n"
-        ),
-        replace="",
+        find="        return _refuse_empty_answer(s, _resolve_secret_uri(s))\n",
+        replace="        return _resolve_secret_uri(s)\n",
         test="TestAnEmptyAnswer::test_an_empty_resolver_answer_is_refused",
         because="a resolver answering nothing becomes an empty api_key the "
                 "provider reports as 'not set'",
     ),
     Reversion(
         target=_CFG,
-        find=(
-            "        return _non_empty_secret(value, inherited, \"the value the daemon \"\n"
-            "                                 \"resolved for this session (#1605)\")\n"
-        ),
-        replace="        return inherited\n",
+        find="    if inherited_secret(uri) is not None:\n",
+        replace="    if False:\n",
         test="TestAnEmptyAnswer::test_an_empty_inherited_value_is_refused",
-        because="an empty inherited value becomes an empty api_key",
+        because="an empty inherited value is blamed on a resolver the runner "
+                "never asked",
     ),
     Reversion(
         target=_RT,
@@ -320,6 +316,13 @@ class TestAnEmptyAnswer:
             with pytest.raises(cfg.SecretResolutionError,
                                match="resolver 'pass' answered with an empty"):
                 cfg.expand_plugin_configs({"openrouter": {"api_key": _URI}})
+
+    def test_a_direct_caller_still_gets_the_empty_answer(self, inherited):
+        """``service_connector`` reads an empty answer itself (#1188), so
+        only the profile-expansion path refuses it."""
+        from jaato_server.shared.plugins.subagent import config as cfg
+        inherited({_URI: ""})
+        assert cfg._resolve_secret_uri(_URI) == ""
 
     def test_a_real_answer_still_resolves(self, inherited):
         from jaato_server.shared.plugins.subagent import config as cfg
