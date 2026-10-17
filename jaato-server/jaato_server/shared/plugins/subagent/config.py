@@ -429,8 +429,19 @@ def _warn_empty_registry(matches: List[Any], loaded: List[Tuple[Any, List[str]]]
 def _resolve_secret_uri(
     value: str,
     context: Optional[SecretResolveContext] = None,
+    *,
+    refuse_empty: bool = False,
 ) -> str:
     """If *value* is a ``scheme://path[#key]`` URI with a registered resolver, resolve it.
+
+    ``refuse_empty`` (#1731) raises :class:`SecretResolutionError` when the
+    inherited map or the resolver answers with an empty value.  Only
+    :func:`expand_variables` (a profile's ``env:`` / ``plugin_configs`` and
+    the ``.env`` overlay) passes it: there an empty answer would become an
+    empty credential reported as "not set".  Direct callers keep the
+    lenient answer, because they interpret an empty value themselves
+    (``service_connector`` turns it into the #1188 "returned an empty
+    value" hint).
 
     Returns the original string unchanged if:
     - It doesn't match the URI pattern.
@@ -500,6 +511,8 @@ def _resolve_secret_uri(
     # parent got, not a second resolution attempt.
     inherited = inherited_secret(value)
     if inherited is not None:
+        if not refuse_empty:
+            return inherited
         return _non_empty_secret(value, inherited, "the value the daemon "
                                  "resolved for this session (#1605)")
 
@@ -523,7 +536,8 @@ def _resolve_secret_uri(
         raise
     except Exception as exc:
         raise SecretResolutionError(value, str(exc)) from exc
-    resolved = _non_empty_secret(value, resolved, f"resolver '{scheme}'")
+    if refuse_empty:
+        resolved = _non_empty_secret(value, resolved, f"resolver '{scheme}'")
     _note_captured_secret(value, resolved)
     return resolved
 
@@ -1134,8 +1148,8 @@ def _expand_string(
     # ``_call_resolver`` takes for premium resolvers that never added the
     # ``context`` keyword.
     if resolve_context is None:
-        return _resolve_secret_uri(s)
-    return _resolve_secret_uri(s, resolve_context)
+        return _resolve_secret_uri(s, refuse_empty=True)
+    return _resolve_secret_uri(s, resolve_context, refuse_empty=True)
 
 
 def _resolve_workspace_path(path: str) -> str:
