@@ -1325,6 +1325,7 @@ def build_session_envelope(
         # Same channel as cache + quirks above, for the same reason: the
         # plugin_configs dict is what already reaches the runner.
         inject_scrub_secret_env(profile, plugin_configs_dict)
+        _inject_subagent_profile_set(server, plugin_configs_dict)
         profile_tool_scopes = getattr(profile, "tool_scopes", {}) or {}
         for name in names:
             spec = {"name": name, "preload": name in preloaded}
@@ -1604,6 +1605,29 @@ def build_session_envelope(
         # inside the sandbox where the resolver's backend cannot run.
         inherited_secrets=_inherited_secrets_of(server, plugin_config_secrets),
     )
+
+
+def _inject_subagent_profile_set(
+    server: Any, plugin_configs: Dict[str, Any],
+) -> None:
+    """Tell the runner's subagent plugin which profile set to resolve in (#1731).
+
+    A session created from a qualified ``<set>/<name>`` profile runs with
+    no ``JAATO_PROFILE_SET``, so the runner's subagent plugin discovered
+    profiles outside the set: ``spawn_subagent(profile="documentalista")``
+    bound the flat ``profiles/documentalista`` rather than
+    ``profiles/<set>/documentalista``, and the child lost the set file's
+    provider and ``plugin_configs`` (its ``api_key`` among them).  The set
+    rides ``plugin_configs.subagent.profile_set``, the channel already
+    reaching the plugin's ``initialize``; a value the profile declares
+    itself is kept.
+    """
+    profile_set = getattr(server, "_profile_set", None)
+    if not isinstance(profile_set, str) or not profile_set:
+        return
+    section = dict(plugin_configs.get("subagent") or {})
+    section.setdefault("profile_set", profile_set)
+    plugin_configs["subagent"] = section
 
 
 def _inherited_secrets_of(

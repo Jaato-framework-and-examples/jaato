@@ -459,7 +459,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/subagent/plugin.py::SubagentPlugin._dispatch_isolated_spawn": 21,
     "jaato-server/jaato_server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 42,
     "jaato-server/jaato_server/shared/plugins/subagent/plugin.py::SubagentPlugin._run_subagent_async": 75,
-    "jaato-server/jaato_server/shared/plugins/subagent/plugin.py::SubagentPlugin.initialize": 17,
     "jaato-server/jaato_server/shared/plugins/subagent/plugin.py::SubagentPlugin.restore_persistence_state": 29,
     "jaato-server/jaato_server/shared/plugins/template/plugin.py::TemplatePlugin._check_item_against_item_keys": 30,
     "jaato-server/jaato_server/shared/plugins/template/plugin.py::TemplatePlugin._discover_standalone_templates": 16,

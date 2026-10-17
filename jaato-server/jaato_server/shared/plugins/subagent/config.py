@@ -6202,6 +6202,15 @@ class SubagentConfig:
             the inherit-the-parent's-set default (#944).
         auto_discover_profiles: Whether to auto-discover profiles from profiles_dir.
         profiles_dir: Directory to scan for profile files (default: .jaato/profiles).
+        profile_set: The profile set ``spawn_subagent`` resolves names in
+            (``<config_root>/profiles/<set>/``), scanned before the regular
+            tier.  ``None`` = the session's ``JAATO_PROFILE_SET``.  The
+            daemon sets it to the set of a session created from a
+            qualified ``<set>/<name>`` profile (#1731): such a session has
+            no ``JAATO_PROFILE_SET``, and without it a subagent named
+            ``documentalista`` bound the flat ``profiles/documentalista``
+            instead of the set's file, losing the set's provider and
+            ``plugin_configs`` (its credential among them).
     """
     project: str
     location: str
@@ -6212,6 +6221,7 @@ class SubagentConfig:
     inline_allowed_plugins: List[str] = field(default_factory=list)
     auto_discover_profiles: bool = True
     profiles_dir: str = ".jaato/profiles"
+    profile_set: Optional[str] = None
 
     def add_profile(self, profile: SubagentProfile) -> None:
         """Add a subagent profile."""
@@ -6334,6 +6344,7 @@ class SubagentConfig:
             inline_allowed_plugins=data.get('inline_allowed_plugins', []),
             auto_discover_profiles=data.get('auto_discover_profiles', True),
             profiles_dir=data.get('profiles_dir', '.jaato/profiles'),
+            profile_set=data.get('profile_set') or None,
         )
 
 

@@ -236,6 +236,11 @@ class SubagentPlugin:
         self._config: Optional[SubagentConfig] = None
         self._initialized: bool = False
         self._self_profile_name: Optional[str] = None  # Profile this agent was spawned from
+        # Profile names configured explicitly (they win over discovery), and
+        # the file each discovered profile was read from, for the spawn log
+        # line (#1731).
+        self._explicit_profile_names: set = set()
+        self._profile_sources: Dict[str, str] = {}
         self._parent_plugins: List[str] = []
         # Lazy import to avoid circular dependencies
         self._registry_class = None
@@ -396,17 +401,17 @@ class SubagentPlugin:
         # any tier that's missing or inaccessible — so a confined session denied
         # the HOME tier still discovers the workspace tier (set_config_root
         # re-runs this per session).  See _scan_profiles_dir's OSError handling.
+        # Names configured explicitly win over any discovered profile;
+        # every other name is replaced by a later discovery (set_config_root),
+        # see _merge_discovered_profiles.
+        self._explicit_profile_names = set(self._config.profiles)
+        self._profile_sources = {}
         if self._config.auto_discover_profiles:
-            discovery = discover_profiles(self._config.profiles_dir)
-            # Merge discovered profiles, with explicit profiles taking precedence
-            for name, profile in discovery.profiles.items():
-                if name not in self._config.profiles:
-                    self._config.profiles[name] = profile
-                else:
-                    logger.debug(
-                        "Skipping discovered profile '%s' - explicit profile exists",
-                        name
-                    )
+            discovery = discover_profiles(
+                self._config.profiles_dir,
+                force_profile_set=self._config.profile_set,
+            )
+            self._merge_discovered_profiles(discovery)
 
         # Lazy import the classes we need
         from ..registry import PluginRegistry
@@ -582,6 +587,17 @@ class SubagentPlugin:
                     "type": "string",
                     "default": ".jaato/profiles",
                     "description": "Directory for profile discovery",
+                },
+                "profile_set": {
+                    "type": "string",
+                    "description": (
+                        "Profile set spawn_subagent resolves names in "
+                        "(<config_root>/profiles/<set>/, scanned before "
+                        "profiles/). Unset = the session's "
+                        "JAATO_PROFILE_SET. The daemon sets it for a "
+                        "session created from a qualified <set>/<name> "
+                        "profile."
+                    ),
                 },
             },
         }
@@ -1878,22 +1894,80 @@ class SubagentPlugin:
         try:
             discovery = discover_profiles(
                 self._config.profiles_dir, config_root=path,
+                force_profile_set=self._config.profile_set,
             )
         except Exception:
             logger.exception(
                 "SubagentPlugin: re-discovery with config_root=%s failed", path,
             )
             return
-        added = 0
-        for name, profile in discovery.profiles.items():
-            if name not in self._config.profiles:
-                self._config.profiles[name] = profile
-                added += 1
+        changed = self._merge_discovered_profiles(discovery)
         logger.debug(
             "SubagentPlugin: re-discovered profiles with config_root=%s "
-            "(added %d, total %d)",
-            path, added, len(self._config.profiles),
+            "(set=%s, added or replaced %d, total %d)",
+            path, self._config.profile_set, changed, len(self._config.profiles),
         )
+
+    def _log_spawn_binding(
+        self,
+        agent_id: str,
+        profile: SubagentProfile,
+        provider: Optional[str],
+        plugin_configs: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Log which profile file a spawn bound and what its provider gets.
+
+        One INFO line per spawn (#1731): the file the profile was read from
+        (``(inline)`` / ``(explicit)`` when it came from no file), the set
+        discovery scanned, the provider the child will use, and the KEYS of
+        that provider's ``plugin_configs`` section, never its values.  A
+        provider that reports its key "not set" is then told apart from a
+        profile that never declared one: before this line the two read the
+        same, and a spawn bound to the wrong file of the same name looked
+        like a lost credential.
+        """
+        source = self._profile_sources.get(profile.name) or (
+            "(explicit)" if profile.name in self._explicit_profile_names
+            else "(inline)")
+        section = plugin_configs.get(provider or "") or {}
+        logger.info(
+            "spawn_subagent %s: profile '%s' from %s (set=%s); provider=%s; "
+            "plugin_configs.%s keys=%s",
+            agent_id, profile.name, source,
+            self._config.profile_set if self._config else None,
+            provider, provider, sorted(section),
+        )
+
+    def _merge_discovered_profiles(self, discovery: Any) -> int:
+        """Fold one discovery into ``self._config.profiles``.
+
+        An explicitly configured profile (``SubagentConfig.profiles``) is
+        kept; every other name takes the discovery's profile, so the
+        discovery that knows the config root and the profile set decides
+        (#1731).  It used to only ADD names, which left a profile the first
+        discovery found (the flat ``profiles/<name>``, or the user tier,
+        read before the config root was known) in front of the workspace
+        set's file of the same name.
+
+        Returns:
+            How many names were added or replaced.
+        """
+        explicit = self._explicit_profile_names
+        sources = getattr(discovery, "sources", None) or {}
+        changed = 0
+        for name, profile in discovery.profiles.items():
+            if name in explicit:
+                logger.debug(
+                    "Skipping discovered profile '%s' - explicit profile exists",
+                    name,
+                )
+                continue
+            if self._config.profiles.get(name) is not profile:
+                self._config.profiles[name] = profile
+                changed += 1
+            if name in sources:
+                self._profile_sources[name] = sources[name]
+        return changed
 
     def register_remote_handler(self, handler: Any) -> None:
         """Register a handler for remote subagent delegation.
@@ -4031,6 +4105,8 @@ class SubagentPlugin:
             # knobs.  Mirrors the runner-envelope site in
             # ``server/runner_spawn.py``.
             inject_scrub_secret_env(profile, effective_plugin_configs)
+            self._log_spawn_binding(
+                agent_id, profile, provider, effective_plugin_configs)
 
             # Save parent session reference BEFORE create_session, because
             # create_session calls session.configure() which overwrites

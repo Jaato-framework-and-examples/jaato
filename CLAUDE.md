@@ -11138,6 +11138,30 @@ with the wrong profile keeps it, and recovers only as a new session.
 Guard: `jaato_server/server/tests/test_a_qualified_profile_binds_that_file_1588.py`,
 seven reversions.
 
+### A Subagent Resolves Its Profile in the Session's Set (#1731)
+
+Reported as an in-process subagent's provider getting an empty `api_key`
+although its profile declared `plugin_configs.openrouter.api_key: pass://...`
+and the runner held the value (#1605). The credential was never lost; the
+profile was the wrong one. A session created from a qualified `<set>/<name>`
+ref runs with no `JAATO_PROFILE_SET`, so the runner's subagent plugin
+discovered profiles outside the set and `spawn_subagent(profile="documentalista")`
+bound the flat `profiles/documentalista`: no provider (the child took the
+parent's) and no `plugin_configs.openrouter`.
+
+| Piece | Where |
+|---|---|
+| the set of a qualified ref, on creation and on a revive (the revive envelope now carries `profile_ref`) | `SessionManager._construct_and_initialize_server` → `server._profile_set` |
+| carried to the runner as `plugin_configs.subagent.profile_set` (a value the profile sets itself is kept) | `runner_spawn._inject_subagent_profile_set` |
+| both discoveries scan that set first (`force_profile_set`) | `SubagentPlugin.initialize`, `set_config_root`; `SubagentConfig.profile_set` |
+| a later discovery REPLACES names the first found (it only added them), so a profile read before the config root was known cannot shadow the workspace's; explicitly configured profiles still win | `SubagentPlugin._merge_discovered_profiles` |
+| one INFO line per in-process spawn: the file the profile was read from, the set, the provider and the KEYS of its `plugin_configs` section (never values) | `SubagentPlugin._log_spawn_binding` |
+
+Not covered: a child profile that declares its own `plugin_configs.subagent`
+re-initializes the shared plugin without the set. Guard:
+`jaato_server/shared/tests/test_a_subagent_binds_its_sessions_profile_set_1731.py`,
+six reversions.
+
 ### A Policy File Read and Thrown Away (#1474)
 
 `PermissionPlugin.initialize` loaded `permissions.json` and then let an
